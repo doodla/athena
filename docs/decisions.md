@@ -4541,3 +4541,73 @@ should replace those estimates with its figures.
   `crates/athena-cli/tests/mirrors.rs`, D158, D160. Measured: `cargo test -p athena-core mirrors` on the shapes of
   both jobs, joined bullets and a decision inside another, and on prose that must not be found. Not measured: how
   many future edits break structure in a way these rules cannot see.
+
+## D163 · A reading of a speed or delay request needs a measured stage timeline
+
+- **Case:** Three jobs were planned around a timing the request stated and nobody checked against the stages.
+  Job 20261025-110525-8hzb was asked to move a call earlier and misplaced where the delay sits; job
+  20261025-034733-c453 was asked to cut minutes from the checks with no compile-versus-run split; job
+  20261025-190606-eebk set a six-minute target that its candidate did not meet, and its change reached
+  production code in two files outside the request's list. Three introspections traced them to one cause: the
+  reading stage checked a request's own figures only if the reader chose to, so a reading could accept "move the
+  call earlier" or "save 12 minutes" and fix its criteria around the figure, with no timeline from the code of
+  the stages in order, their durations and the stage the delay sits in. Each introspection proposed a measure-first
+  step; none was a mechanism.
+- **Decision:** `reading::check_speed_timeline` is a `step!` in `refusing_check`, right after `check_outcome_state`
+  and before `check_boundary_and_repo_files`, so every reading passes it and the corpus requires a refusing case
+  for it. The reading gate is where the cause originates: it fixes the whole class, not those jobs. A speed
+  request is found by `speed_request`, in this order. A spec request (a line `Spec requirement: `) is one exactly
+  when its priority is high, which `spec_request` in `hestia.rs` sets only for a requirement about speed, so the
+  requirement statement it quotes is never scanned. A Hestia slowdown or throughput request is one by its marker
+  line. Any other request is scanned as the text its author wrote: prevention lines of a root-cause request (a
+  line `Introspection ... ; prevention it proposed:`) and everything from the `## Source` heading of an
+  approved-proposal request are dropped, because other people wrote them. The marker strings are shared
+  constants (`ROOT_CAUSE_MARKER`, `INTROSPECTION_PREFIX`, `PREVENTION_MARK` in `hestia.rs`; `APPROVED_LINE`,
+  `SOURCE_HEADING` in `work_decisions.rs`; `SPEC_LINE` made `pub(crate)`) that the builders format with, so the
+  rendered text is byte for byte the same and cannot drift from the detector. The cues are whole words and
+  phrases: `faster`, `quicker`, `speedup`, `latency`, `speed up`, `head start`, `takes longer`, `takes too long`,
+  `too slow`; a cut verb (cut, save, reduce, shave, trim, lower) with a duration as its object, after `by` or `off`,
+  or as the target after `to` of a time noun; a duration after `under`, `below` or `within` of a time noun; a
+  shorten verb with a time noun. A bare `delay`, `timing` or `slow`, a setting word (timeout, interval, ttl,
+  retention, retry, backoff) between the verb and the figure, and look-alikes (`speedometer`, `slowloris`,
+  `quickstart`) are not cues. A speed request needs an assumption that starts `Timeline:` with a crates/ path
+  read, a `stages:` list of two or more stages in order, a duration for each (a number with s, ms, min or
+  minutes) or the words `no recorded timing`, and after the list a place word (sits, slowest, longest,
+  bottleneck) followed by a stage name. The reader rule line in `READING_RULES` (`briefs.rs`) names the check and
+  the form, and the refusal text gives the form for the one re-read. The fake reader (`fake.rs`) gets one fixed
+  Timeline with an absence phrase, so it passes the reference check in a fixture repository with no `crates/`;
+  `the_fake_readers_timeline_passes_the_speed_gate_and_the_reference_check` pins it. D161 says the six reading
+  rules are fixed; there are now seven, so that remark of D161 is out of date in prose only.
+- **Alternatives:** Prompt-only guidance (a reader brief line or `reader.md`): the reader can ignore it, which is
+  the failure, and the `mechanism` default asks for a check. A planner-stage check (`plan_findings`): the reading is
+  already accepted and its criteria are fixed around the figure. A reading gate check: chosen. A verifier-stage
+  check: it runs after the producer built the wrong thing, and these jobs failed in planning. Athena running the
+  stages at reading time: a build and a test run per reading is unbounded cost. Scanning the whole request: the
+  spec statements in `docs/spec.toml` hold `faster` in passing, which `is_speed` already decided is not speed.
+  A bare-word list: it refuses settings changes, security notes and schedules.
+- **Tradeoff:** More readings are refused; the higher refusal rate is intended. The expected share is 5% of newly
+  refused readings, an estimate. One count over the request records of the evidence snapshot (about 1050 jobs):
+  20 hold one of the strong cues (`faster`, `quicker`, `speedup`, `latency`, `speed up`, `head start`, `takes
+  longer`, `takes too long`, `too slow`), about 2%, before the quoted-text rules remove some and before the
+  figure cues add some; only those whose reading has no Timeline are refused. That is a count of cues, not a run
+  of the replay (`replay`), which needs the base and the candidate build over `records/` and is the named
+  follow-up on the real repository. Limits: the check judges the shape of the timeline, not whether its figures
+  are true, so a reader can write invented numbers; it still forces the crates/ path, the stage order and the
+  stage the delay sits in into the reading before the criteria are fixed, and checking figures against run data
+  is a follow-up. A target repository with no `crates/` directory cannot meet the crates/ path rule, as with
+  `check_code_survey`; Athena's own repository is the target today. Quoted text is skipped only for the three
+  builders named above; the request that applies a defaults proposal (`accept_request`), the blind-spot request and
+  the failed-job titles of a design review are scanned whole, so a stray cue there needs a Timeline. A stored proposed reading of a speed request
+  with no Timeline is left for a person by the steward, as with any reading that fails a check. Four files beyond
+  the listed deliverables changed, all under `crates/`: `crates/athena-agent/src/fake.rs`,
+  `crates/athena-core/src/hestia.rs`, `crates/athena-core/src/work_decisions.rs` and
+  `crates/athena-cli/tests/drain.rs`.
+- **Reversal cost:** Low; delete the step line, the check and its helpers, the reader rule line and the corpus
+  cases. The shared constants and the fake reader's Timeline can stay.
+- **Provenance:** Stated: the failure class and the three introspections (20261025-110857-eqhd, 20261025-183009-xw7y
+  and 20261025-190659-jvd7). Read: `crates/athena-core/src/reading.rs` (`refusing_check`, `check_code_survey`,
+  `request_words`), `crates/athena-core/src/hestia.rs` (`root_cause_request_at`, `spec_request`,
+  `slowdown_request`, `throughput_request`), `crates/athena-core/src/work_decisions.rs` (`approve_request`),
+  `crates/athena-core/tests/refusal_corpus.rs`. Measured: the corpus (`cargo test -p athena-core --test
+  refusal_corpus`) on the refusing and accepting shapes. Counted: 20 of about 1050 request records hold a strong
+  cue. Not measured: the replay share on the real repository.

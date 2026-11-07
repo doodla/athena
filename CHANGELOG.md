@@ -9,6 +9,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A reading check for speed and delay requests, `reading::check_speed_timeline`, run as a `step!` in
+  `refusing_check` right after `check_outcome_state`. Root cause: the reading stage checked a request's own
+  figures only if the reader chose to, so a reading could plan around a stated timing (move the call earlier,
+  save 12 minutes, split compile from run) with no timeline from the code of the stages in order, their durations
+  and the stage the delay sits in. Jobs 20261025-110525-8hzb, 20261025-034733-c453 and 20261025-190606-eebk each
+  failed that way. The gate every speed request passes now refuses the reading unless it has an assumption that
+  starts `Timeline:` with a crates/ path read, a `stages:` list of two or more stages, a duration for each (or the
+  words `no recorded timing`) and the stage the delay sits in. A speed request is found by whole-word cues
+  (`faster`, `speed up`, `head start`, `takes longer`, a cut verb with a duration figure, and similar) and by the
+  marker line of Hestia's slowdown and throughput requests; a bare `delay`, `timing` or `slow`, a setting such as a
+  retry timeout, and the quoted text of other people (the prevention lines of a root-cause request, the
+  requirement statement of a spec request, the copied source of an approved proposal) are not cues. The reader
+  brief gets a seventh rule line in `READING_RULES` that names `check_speed_timeline`. The check judges the shape of
+  the timeline, not whether its figures are true, and it asks for a crates/ path. This check refuses more
+  readings; the higher refusal rate is intended: expected 5% of newly refused readings, an estimate (a count of
+  cues in the recorded requests gives about 2%; the replay on the real repository is the follow-up). Tests: the
+  `speed_timeline_cases` in `crates/athena-core/tests/refusal_corpus.rs`, which fail without the step line, and
+  unit tests in `reading.rs`, `hestia.rs` and `work_decisions.rs` that pass real builder output through the
+  detector. Four files beyond the listed deliverables changed because the change needs them:
+  `crates/athena-agent/src/fake.rs` (one fixed Timeline in the fake reader), `crates/athena-core/src/hestia.rs`
+  and `crates/athena-core/src/work_decisions.rs` (shared marker constants with the text unchanged, and tests) and
+  `crates/athena-cli/tests/drain.rs` (a test that the fake reader's Timeline passes the gate). Recorded as D163;
+  D161's remark that there are six reading rules is out of date in prose only.
 - Two structure rules in the mirror registry (`crates/athena-core/src/mirrors.rs`), so a prompt edit that breaks
   its list structure and a decision inserted inside another are sent back at the producer step, not found at the
   final verdict. Root cause: nothing compared the finished diff with the structure it must keep, before

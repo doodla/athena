@@ -268,6 +268,13 @@ fn render(reference: &Reference, records: &Records, git: &Git, head: &str) -> St
     }
 }
 
+/// The first sentence of the line of an approved-proposal request that says a person approved it. The reading
+/// gate reads it to know that the text from [`SOURCE_HEADING`] on copies cited records.
+pub const APPROVED_LINE: &str = "A person approved this proposal from the steward role.";
+
+/// The heading in an approved-proposal request after which the copied source and evidence follow.
+pub const SOURCE_HEADING: &str = "## Source";
+
 /// The request text of the ordinary job that carries out an approved proposal. It states the work item's
 /// title, rung, source and evidence, and copies the content of each cited record into the text, because the
 /// reader cannot open `records/`.
@@ -284,11 +291,11 @@ pub fn approve_request(
 ) -> Result<String> {
     let mut out = format!(
         "{title}\n\n\
-         A person approved this proposal from the steward role. Carry the work out as an ordinary change.\n\
+         {APPROVED_LINE} Carry the work out as an ordinary change.\n\
          Everything the proposal cites is copied below; nothing here points at a file you cannot open.\n\n\
          Proposal: {id} (key {key}), queued at {at} by the {role} role.\n\
          Rung of the requirements ladder: {rung}.\n\n\
-         ## Source\n\n{source}\n\n## Evidence\n",
+         {SOURCE_HEADING}\n\n{source}\n\n## Evidence\n",
         title = item.title.trim(),
         id = item.id,
         key = item.key,
@@ -584,6 +591,29 @@ mod tests {
                 job: reading.job.clone()
             }
         );
+    }
+
+    #[test]
+    fn the_real_approve_request_text_is_a_speed_request_by_its_title_and_not_by_copied_records() {
+        let note = "Make the checks faster and save 12 minutes.\n";
+        let (_dir, _state, athena) = repo_with(&[("docs/duty.md", note)]);
+        let head = athena.head().unwrap();
+        let known = Records::default();
+        let mut proposal = item(WorkItemKind::Proposal);
+        proposal.title = "Tidy the duty notes".into();
+        proposal.source = Reference::path("docs/duty.md");
+        proposal.evidence = vec![Reference::path("docs/")];
+        let text = approve_request(&proposal, &known, &athena.git, &head).unwrap();
+        assert!(text.lines().any(|l| l.starts_with(APPROVED_LINE)), "{text}");
+        assert!(text.lines().any(|l| l == SOURCE_HEADING), "{text}");
+        assert!(
+            text.contains("save 12 minutes"),
+            "the source is copied: {text}"
+        );
+        assert!(!crate::reading::speed_request(&text), "{text}");
+        proposal.title = "Make the duty notes build faster".into();
+        let text = approve_request(&proposal, &known, &athena.git, &head).unwrap();
+        assert!(crate::reading::speed_request(&text), "{text}");
     }
 
     #[test]

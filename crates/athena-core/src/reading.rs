@@ -3190,7 +3190,8 @@ pub fn check_reading_references(
 /// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
 /// rests on ([`check_code_survey`]), then the governance files the outcome needs
 /// ([`check_governance_coverage`]), then the observable state a delivery request needs
-/// ([`check_outcome_state`]), then the deliverable paths and `content` criteria against the boundary
+/// ([`check_outcome_state`]), then the measured stage timeline a speed or delay request needs
+/// ([`check_speed_timeline`]), then the deliverable paths and `content` criteria against the boundary
 /// words and the deliverables against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
 /// there is no repository to compare with), then the repo paths its text relies on against the same files
 /// ([`check_reading_references`]). It applies to a first attempt as well as a retry. It runs
@@ -3246,6 +3247,7 @@ pub fn refusing_check(
     step!(check_design_existing_code(reading));
     step!(check_governance_coverage(reading, request));
     step!(check_outcome_state(reading, request));
+    step!(check_speed_timeline(reading, request));
     step!(check_boundary_and_repo_files(reading, repo_files));
     step!(check_reading_references(reading, repo_files));
     None
@@ -3947,6 +3949,334 @@ pub fn check_code_survey(reading: &Reading) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Words that make a request a speed request on their own.
+const SPEED_ALONE: [&str; 4] = ["faster", "quicker", "speedup", "latency"];
+
+/// Words that are about speed only after a cut verb ([`CUT_VERBS`]) or right after `too`: on their own they
+/// are common in requests about settings, attacks and schedules.
+const WEAK_SPEED_WORDS: [&str; 10] = [
+    "slow", "slower", "slowest", "slowly", "slowdown", "delay", "delays", "delayed", "timing",
+    "timings",
+];
+
+/// Verbs that cut an amount. A cue only when a duration is their object, follows `by` or `off`, or is the
+/// target after `to` of a time noun.
+const CUT_VERBS: [&str; 18] = [
+    "cut", "cuts", "cutting", "save", "saves", "saving", "reduce", "reduces", "reducing", "shave",
+    "shaves", "shaving", "trim", "trims", "trimming", "lower", "lowers", "lowering",
+];
+
+/// Verbs that make a time noun shorter.
+const SHORTEN_VERBS: [&str; 3] = ["shorten", "shortens", "shortening"];
+
+/// Units of a duration figure.
+const DURATION_UNITS: [&str; 17] = [
+    "s",
+    "sec",
+    "secs",
+    "second",
+    "seconds",
+    "ms",
+    "millisecond",
+    "milliseconds",
+    "min",
+    "mins",
+    "minute",
+    "minutes",
+    "h",
+    "hr",
+    "hrs",
+    "hour",
+    "hours",
+];
+
+/// Words that make a time figure a setting (a timeout, an interval, a retention), not a speed target.
+const SETTING_WORDS: [&str; 12] = [
+    "timeout",
+    "timeouts",
+    "interval",
+    "intervals",
+    "ttl",
+    "expiry",
+    "retention",
+    "lifetime",
+    "retry",
+    "retries",
+    "backoff",
+    "debounce",
+];
+
+/// Time nouns, wide: what a duration target after `under`, `below`, `within` or `to` may be about.
+const WIDE_TIME_NOUNS: [&str; 17] = [
+    "time", "times", "duration", "runtime", "run", "runs", "stage", "stages", "wait", "pipeline",
+    "ci", "check", "checks", "build", "builds", "suite", "compile",
+];
+
+/// Time nouns, narrow: what a shorten verb must be about to be a speed cue.
+const NARROW_TIME_NOUNS: [&str; 9] = [
+    "time", "duration", "runtime", "run", "runs", "stage", "stages", "wait", "pipeline",
+];
+
+/// Words that may sit between a cut verb and its duration figure.
+const FIGURE_FILLERS: [&str; 6] = ["about", "around", "another", "roughly", "nearly", "almost"];
+
+/// Words that place a delay in a stage, in a `Timeline:` assumption.
+const PLACE_WORDS: [&str; 4] = ["sits", "slowest", "longest", "bottleneck"];
+
+/// How many words the duration figure at `words[i]` takes: 1 for a number with its unit (`5min`), 2 for a
+/// number and a unit word (`12 minutes`), `None` when no duration starts there.
+fn duration_len(words: &[&str], i: usize) -> Option<usize> {
+    let word = *words.get(i)?;
+    if !word.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let end = word
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(word.len());
+    let (number, unit) = word.split_at(end);
+    if number.is_empty() || number.ends_with('.') {
+        return None;
+    }
+    if unit.is_empty() {
+        return words
+            .get(i + 1)
+            .is_some_and(|next| DURATION_UNITS.contains(next))
+            .then_some(2);
+    }
+    DURATION_UNITS.contains(&unit).then_some(1)
+}
+
+/// Whether the cut verb at `w[i]` has a duration figure as a speed target: as its object (after at most one
+/// filler word), after `by` or `off` within five words, as the target after `to` of a wide time noun, or a
+/// weak speed word within five words. A setting word between the verb and the figure cancels the cue.
+fn cut_verb_is_a_cue(w: &[&str], i: usize) -> bool {
+    let n = w.len();
+    let end = (i + 6).min(n);
+    let setting_between = |to: usize| w[i + 1..to].iter().any(|x| SETTING_WORDS.contains(x));
+    let figure_at = |at: usize| {
+        let at = if w.get(at).is_some_and(|x| FIGURE_FILLERS.contains(x)) {
+            at + 1
+        } else {
+            at
+        };
+        duration_len(w, at).is_some()
+    };
+    if figure_at(i + 1) {
+        return true;
+    }
+    (i + 1..end).any(|k| {
+        let by_off = matches!(w[k], "by" | "off") && figure_at(k + 1);
+        let to_target = w[k] == "to"
+            && duration_len(w, k + 1).is_some()
+            && w[i + 1..k].iter().any(|x| WIDE_TIME_NOUNS.contains(x));
+        let weak = WEAK_SPEED_WORDS.contains(&w[k]);
+        (by_off || to_target || weak) && !setting_between(k)
+    })
+}
+
+/// Whether the words of a request hold a cue that it asks for a speed-up, a shorter wait or a cut delay. Whole
+/// words only: `speedometer`, `slowloris` and `quickstart` are not cues.
+fn has_speed_cue(words: &[&str]) -> bool {
+    let n = words.len();
+    (0..n).any(|i| {
+        let word = words[i];
+        let next = words.get(i + 1).copied();
+        if SPEED_ALONE.contains(&word)
+            || (matches!(word, "speed" | "speeds") && next == Some("up"))
+            || (word == "head" && next == Some("start"))
+            || (word == "too" && next.is_some_and(|x| WEAK_SPEED_WORDS.contains(&x)))
+        {
+            return true;
+        }
+        if matches!(word, "take" | "takes" | "took" | "taking")
+            && (next == Some("longer")
+                || (next == Some("too") && words.get(i + 2) == Some(&"long")))
+        {
+            return true;
+        }
+        if SHORTEN_VERBS.contains(&word)
+            && words[i + 1..(i + 4).min(n)]
+                .iter()
+                .any(|x| NARROW_TIME_NOUNS.contains(x))
+        {
+            return true;
+        }
+        if matches!(word, "under" | "below" | "within") && duration_len(words, i + 1).is_some() {
+            let before = &words[i.saturating_sub(4)..i];
+            return before.iter().any(|x| WIDE_TIME_NOUNS.contains(x))
+                && !before.iter().any(|x| SETTING_WORDS.contains(x));
+        }
+        CUT_VERBS.contains(&word) && cut_verb_is_a_cue(words, i)
+    })
+}
+
+/// The part of a request that its own author wrote. A root-cause request (a line starting with
+/// [`crate::hestia::ROOT_CAUSE_MARKER`]) quotes the prevention text of earlier introspections on lines that
+/// start with [`crate::hestia::INTROSPECTION_PREFIX`] and hold [`crate::hestia::PREVENTION_MARK`]; those lines
+/// are dropped. An approved-proposal request (a line starting with
+/// [`crate::work_decisions::APPROVED_LINE`]) copies cited records from the line
+/// [`crate::work_decisions::SOURCE_HEADING`] on; the text from there is dropped. Any other request is whole.
+fn own_request_text(request: &str) -> String {
+    use crate::hestia::{INTROSPECTION_PREFIX, PREVENTION_MARK, ROOT_CAUSE_MARKER};
+    use crate::work_decisions::{APPROVED_LINE, SOURCE_HEADING};
+    let mut lines = request.lines();
+    if lines.clone().any(|l| l.starts_with(ROOT_CAUSE_MARKER)) {
+        return lines
+            .filter(|l| !(l.starts_with(INTROSPECTION_PREFIX) && l.contains(PREVENTION_MARK)))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if lines.any(|l| l.starts_with(APPROVED_LINE)) {
+        return request
+            .lines()
+            .take_while(|l| l.trim_end() != SOURCE_HEADING)
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    request.to_string()
+}
+
+/// Whether a request asks for something to be faster, to wait less or to lose a delay, so that its reading
+/// must hold a measured stage timeline ([`check_speed_timeline`]).
+///
+/// In order: a spec request (a line starting `Spec requirement: `) is a speed request exactly when its
+/// priority is high, because `spec_request` in `hestia.rs` sets high only for a requirement about speed, and
+/// its quoted requirement statement is never scanned; a Hestia slowdown or throughput request is one by its
+/// marker line; any other request is one when the text its author wrote ([`own_request_text`]) holds a cue
+/// ([`has_speed_cue`]).
+pub(crate) fn speed_request(request: &str) -> bool {
+    use crate::hestia::{SLOWDOWN_MARKER, SPEC_LINE, THROUGHPUT_MARKER};
+    if request.lines().any(|l| l.trim().starts_with(SPEC_LINE)) {
+        return Priority::from_text(request) == Priority::High;
+    }
+    if request
+        .lines()
+        .any(|l| l.starts_with(SLOWDOWN_MARKER) || l.starts_with(THROUGHPUT_MARKER))
+    {
+        return true;
+    }
+    let own = own_request_text(request);
+    let words: Vec<String> = request_words(&own).into_iter().map(|w| w.text).collect();
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    has_speed_cue(&words)
+}
+
+/// The `Timeline:` assumptions of a reading: those whose trimmed text starts with that label, in any case.
+fn timeline_assumptions(reading: &Reading) -> Vec<&str> {
+    reading
+        .assumptions
+        .iter()
+        .map(|a| a.trim())
+        .filter(|a| a.to_lowercase().starts_with("timeline:"))
+        .collect()
+}
+
+/// What is wrong with one `Timeline:` assumption, or `None` when its shape is right: it names a crates/
+/// path, has a `stages:` list of two or more stages, gives each stage a duration (unless it says `no recorded
+/// timing`) and, after the list, says where the delay sits: a place word (`sits`, `slowest`, `longest`,
+/// `bottleneck`) followed by the name of one of the stages.
+fn timeline_problem(text: &str) -> Option<String> {
+    if !names_crates_path(text) {
+        return Some("it names no crates/ path that was read".into());
+    }
+    let lower = text.to_lowercase();
+    let Some(at) = lower.find("stages:") else {
+        return Some("it has no `stages:` list".into());
+    };
+    let after = &lower[at + "stages:".len()..];
+    let list = sentences(after).first().copied().unwrap_or_default();
+    let rest = after.get(list.len() + 1..).unwrap_or_default();
+    let normalised = list
+        .replace("->", ",")
+        .replace('\u{2192}', ",")
+        .replace(" then ", ",");
+    let entries: Vec<&str> = normalised
+        .split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .collect();
+    if entries.len() < 2 {
+        return Some("its `stages:` list names fewer than two stages".into());
+    }
+    let no_timing = lower.contains("no recorded timing");
+    let mut names: Vec<Vec<String>> = Vec::new();
+    for entry in &entries {
+        let words: Vec<String> = request_words(entry).into_iter().map(|w| w.text).collect();
+        let refs: Vec<&str> = words.iter().map(String::as_str).collect();
+        if !no_timing && !(0..refs.len()).any(|i| duration_len(&refs, i).is_some()) {
+            return Some(format!(
+                "the stage {entry:?} has no duration (a number with s, ms, min or minutes); if nothing was \
+                 recorded, say `no recorded timing`"
+            ));
+        }
+        let name: Vec<String> = words
+            .into_iter()
+            .take_while(|w| !w.starts_with(|c: char| c.is_ascii_digit()))
+            .collect();
+        if !name.is_empty() {
+            names.push(name);
+        }
+    }
+    let tail: Vec<String> = request_words(rest).into_iter().map(|w| w.text).collect();
+    let placed = tail
+        .iter()
+        .position(|w| PLACE_WORDS.contains(&w.as_str()))
+        .is_some_and(|p| {
+            let after = format!(" {} ", tail[p + 1..].join(" "));
+            names.iter().any(|name| {
+                after.contains(&format!(" {} ", name.join(" ")))
+                    || after.contains(&format!(" {} ", name[0]))
+            })
+        });
+    if !placed {
+        return Some(
+            "after the stages it does not say where the delay sits: a clause with sits, slowest, longest or \
+             bottleneck followed by the name of one of the stages"
+                .into(),
+        );
+    }
+    None
+}
+
+/// Refuses a reading of a speed or delay request that has no `Timeline:` assumption: one that names the crates/
+/// path read, lists the stages in order with a measured duration each (or says no timing was recorded) and says
+/// which stage the delay sits in. Root cause: the reading stage checked a request's own figures only if the reader
+/// chose to, so a reading could plan around a stated timing (move the call earlier, twelve minutes of checks, a
+/// compile and run split) without a stage timeline from the code, and the plan then failed on the real stage
+/// order and durations. Jobs 20261025-110525-8hzb, 20261025-034733-c453 and 20261025-190606-eebk each failed that
+/// way, and the three introspections that traced them asked for the timeline before the method is fixed; the
+/// reading gate every speed request passes is where it is now required, for the whole class and not for those
+/// jobs. A speed request is found by [`speed_request`]: whole-word cues and duration targets, never a bare
+/// `delay`, `timing` or `slow`, and never text other people wrote (the prevention lines of a root-cause request,
+/// the requirement statement of a spec request, the copied source of an approved proposal). Limits: the check
+/// judges the shape of the timeline, not whether its figures are true, and it asks for a crates/ path, as
+/// [`check_code_survey`] does. It costs no model call and applies when the reading has a capability and no
+/// question. This check refuses more readings; the higher refusal rate is intended (expected 5% of newly
+/// refused readings, an estimate): a replay of accepted readings (`replay`) holds a job that newly refuses
+/// more than that share plus 5 points, and the criteria of the job that added it declare the share. The error
+/// says what is missing and gives the form to write.
+pub fn check_speed_timeline(reading: &Reading, request: &str) -> Result<()> {
+    if reading.capability.is_none() || reading.question.is_some() || !speed_request(request) {
+        return Ok(());
+    }
+    let timelines = timeline_assumptions(reading);
+    if timelines.iter().any(|t| timeline_problem(t).is_none()) {
+        return Ok(());
+    }
+    let why = timelines
+        .first()
+        .and_then(|t| timeline_problem(t))
+        .unwrap_or_else(|| "it has no assumption that starts `Timeline:`".into());
+    bail!(
+        "the reading was refused because the request asks for something to be faster or a delay to be cut, \
+         and its reading has no valid `Timeline:` assumption: {why}; the plan would rest on the request's own \
+         figures and not on the real stage order and durations. Read the code and the recorded run timings, then \
+         add an assumption in this form: `Timeline: read <crates/ path>; stages: <name> <duration>, <name> \
+         <duration>; the delay sits in <name>.` with at least two stages in order, a duration for each such as \
+         `9 min` or `40 s` (or the words `no recorded timing`), and the stage the claimed delay sits in"
+    )
 }
 
 /// The `Existing code:` assumptions of a reading: those whose trimmed text starts with that label, in any case.
@@ -7375,6 +7705,173 @@ mod tests {
             })
             .collect();
         reading
+    }
+
+    #[test]
+    fn speed_requests_are_found_by_whole_word_cues_and_figures() {
+        for request in [
+            "Make the checks faster.",
+            "Move the call earlier to save 12 minutes.",
+            "Speed up planning so it times out less.",
+            "Give the producer a head start.",
+            "Cut 5 minutes from the checks.",
+            "Shave 30 s off the run.",
+            "Reduce CI time by 5 minutes.",
+            "Reduce CI time to 6 minutes.",
+            "Get the checks under 6 minutes.",
+            "The full test run takes longer than it did.",
+            "Checking takes too long.",
+            "The retry is still too slow.",
+            "Cut the delay before the first call.",
+            "Shorten the run.",
+            "The change shortens that stage.",
+            "Lower latency matters here.",
+            "- Save about 2 minutes per job",
+            "Do this:\n1. Speed up the verifier",
+        ] {
+            assert!(speed_request(request), "{request:?} is a speed request");
+        }
+        for request in [
+            "Add a timeline view and a speedometer widget. Write a quickstart guide. Wait 30 seconds before the retry. Cover the slowloris case.",
+            "Add a retry delay setting.",
+            "Fix a timing attack.",
+            "Save the state every 30 seconds.",
+            "Reduce the retry timeout to 10 s.",
+            "Reduce the retry timeout by 5 s.",
+            "Trim the log after 5 minutes.",
+            "Reduce the grace period to 5 minutes.",
+            "The title is too long.",
+            "Shorten the error message.",
+            "Shorten the test names.",
+            "Update the guide.",
+            "Show the date, not the delay, in the list.",
+            "Lower the case of each heading.",
+        ] {
+            assert!(
+                !speed_request(request),
+                "{request:?} is not a speed request"
+            );
+        }
+    }
+
+    #[test]
+    fn speed_requests_ignore_text_other_people_wrote() {
+        // A root-cause request quotes prevention text; a cue there is not the request's goal.
+        let root_cause = "Fix the root cause of a repeated failure: a rule is never run\n\
+            Cause: a rule is never run on real inputs.\n\
+            Introspection 20261029-181811-bs86 (job 20261029-111202-2bpc); prevention it proposed: make it faster and save 12 minutes.\n\
+            Acceptance:\n- A test fails without the change";
+        assert!(!speed_request(root_cause));
+        let slow_cause = root_cause.replace("never run on real inputs", "too slow to finish");
+        assert!(speed_request(&slow_cause));
+        // An approved proposal copies its sources below the Source heading.
+        let approved = |title: &str, source: &str| {
+            format!(
+                "{title}\n\nA person approved this proposal from the steward role. Carry the work out as an ordinary change.\n\n## Source\n\n{source}\n\n## Evidence\n"
+            )
+        };
+        assert!(!speed_request(&approved(
+            "Tidy the notes",
+            "path notes.md\nMake it faster and save 12 minutes."
+        )));
+        assert!(speed_request(&approved(
+            "Make the notes build faster",
+            "path notes.md"
+        )));
+        // A spec request is a speed request exactly when its priority is high.
+        let spec = |priority: &str| {
+            format!(
+                "Priority: {priority}\n\nGive requirement R1 a mechanism\n\nRequirement: Checks finish faster.\n\nSpec requirement: R1\n\nAcceptance:\n- A test"
+            )
+        };
+        assert!(speed_request(&spec("high")));
+        assert!(!speed_request(&spec("normal")));
+        // Hestia's own requests are found by their marker line.
+        assert!(speed_request("Throughput slowdown: checks grew\n\nBody."));
+        assert!(speed_request("Throughput design: a bottleneck\n\nBody."));
+    }
+
+    fn timeline_reading(timeline: Option<&str>) -> Reading {
+        let mut reading = governed_reading(&["docs/x.md"], &["docs/x.md exists"], &[]);
+        reading.assumptions = timeline.map(|t| vec![t.to_string()]).unwrap_or_default();
+        reading
+    }
+
+    #[test]
+    fn a_timeline_assumption_needs_stages_durations_and_a_placed_delay() {
+        let request = "Move the call earlier to save 12 minutes.";
+        let error = check_speed_timeline(&timeline_reading(None), request)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("the reading was refused because"),
+            "{error}"
+        );
+        assert!(error.contains("no assumption that starts `Timeline:`"));
+        let good = "Timeline: read crates/athena-core/src/reading.rs; stages: compile 9 min, check 40 s; the delay sits in compile.";
+        check_speed_timeline(&timeline_reading(Some(good)), request).unwrap();
+        // A timeline of stages in order, joined by arrows or `then`, with a decimal duration.
+        for ok in [
+            "timeline: read crates/athena-core/src/reading.rs; stages: compile 9.5 min -> check 40 s; slowest is compile.",
+            "Timeline: read crates/a/b.rs; stages: compile 9 min then check 40 s. The bottleneck is check.",
+            "Timeline: read crates/a/b.rs; stages: read, write; no recorded timing exists; the delay sits in write.",
+            "Timeline: read crates/a/b.rs; stages: build 5min, test 2 hours; longest is test.",
+        ] {
+            check_speed_timeline(&timeline_reading(Some(ok)), request)
+                .unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for (bad, why) in [
+            (
+                "Timeline: stages: compile 9 min, check 40 s; the delay sits in compile.",
+                "no crates/ path",
+            ),
+            (
+                "Timeline: read crates/a/b.rs; compile 9 min, check 40 s; the delay sits in compile.",
+                "no `stages:` list",
+            ),
+            (
+                "Timeline: read crates/a/b.rs; stages: compile 9 min; the delay sits in compile.",
+                "fewer than two",
+            ),
+            (
+                "Timeline: read crates/a/b.rs; stages: compile 9 min, check; the delay sits in compile.",
+                "has no duration",
+            ),
+            (
+                "Timeline: read crates/a/b.rs; no recorded timing exists; the delay sits in compile.",
+                "no `stages:` list",
+            ),
+            (
+                "Timeline: read crates/a/b.rs; stages: compile 9 min, check 40 s.",
+                "where the delay sits",
+            ),
+            (
+                "Timeline: read crates/a/b.rs; stages: compile 9 min, check 40 s; the delay is real.",
+                "where the delay sits",
+            ),
+            (
+                "Timeline: read crates/a/b.rs; stages: compile 9 min, check 40 s; the delay sits in the pipeline.",
+                "where the delay sits",
+            ),
+            (
+                "Read crates/a/b.rs. Timeline: stages: compile 9 min, check 40 s; the delay sits in compile.",
+                "no assumption that starts `Timeline:`",
+            ),
+        ] {
+            let error = check_speed_timeline(&timeline_reading(Some(bad)), request)
+                .expect_err(bad)
+                .to_string();
+            assert!(error.contains(why), "{bad}: {error}");
+            assert!(error.starts_with("the reading was refused because"));
+        }
+        // The check does not apply to other requests, a decline or a question.
+        check_speed_timeline(&timeline_reading(None), "Update the guide.").unwrap();
+        let mut declined = timeline_reading(None);
+        declined.capability = None;
+        check_speed_timeline(&declined, request).unwrap();
+        let mut asking = timeline_reading(None);
+        asking.question = Some("Which call?".into());
+        check_speed_timeline(&asking, request).unwrap();
     }
 
     /// A request phrasing that names a governance path, and the path the reading must cover.

@@ -72,7 +72,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 23] = [
+const INPUT_FORMS: [&str; 37] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -96,6 +96,20 @@ const INPUT_FORMS: [&str; 23] = [
     "delivery-verb-technical-use",
     "out-of-scope-names-delivery",
     "delivery-state-in-content-criterion",
+    "speed-cue-word",
+    "speed-up-phrase",
+    "cut-minutes-figure",
+    "head-start-phrase",
+    "timeline-assumption",
+    "speed-word-lookalike",
+    "quoted-record-line",
+    "setting-time-figure",
+    "hestia-marker-request",
+    "takes-longer-phrase",
+    "target-figure-phrase",
+    "slowness-cause-line",
+    "spec-requirement-quote",
+    "approved-proposal-quote",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -250,6 +264,7 @@ fn cases() -> Vec<Case> {
     out.extend(request_citing_cases());
     out.extend(reading_check_cases());
     out.extend(delivery_cases());
+    out.extend(speed_timeline_cases());
     out
 }
 
@@ -915,6 +930,526 @@ fn boundary_word_cases() -> Vec<Case> {
     out
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Speed and delay requests (`check_speed_timeline`): the reading must hold a `Timeline:` assumption that names
+// a crates/ path, lists two or more stages with a duration each, and says which stage the delay sits in.
+// Sources are the three jobs whose requests named a fix and a figure that was never checked against the
+// stages; their briefs are rebuilt, not recorded requests. The machine-built request shapes mirror the
+// line shapes of the real builders in `hestia.rs` and `work_decisions.rs`, whose own tests feed the real
+// output to the same detector.
+
+const SPEED_SOURCE: &str = "jobs 20261025-110525-8hzb, 20261025-034733-c453 and 20261025-190606-eebk, which asked for speed; rebuilt from the job briefs, not recorded requests";
+const SPEED_CHECK: &str = "check_speed_timeline";
+const MOVE_EARLIER: &str = "Move the call earlier to save 12 minutes.";
+const GOOD_TIMELINE: &str = "Timeline: read crates/athena-core/src/reading.rs; stages: compile 9 min, check 40 s; the delay sits in compile.";
+const NO_TIMING_TIMELINE: &str = "Timeline: read crates/athena-core/src/reading.rs; stages: compile, check; no recorded timing exists; the delay sits in compile.";
+
+/// The request of a Hestia root-cause job, in the line shape of `root_cause_request` in `hestia.rs`.
+fn root_cause_shape(cause: &str, prevention: &str) -> String {
+    lines(&[
+        "Priority: high",
+        "",
+        &format!("Fix the root cause of a repeated failure: {cause}"),
+        "",
+        "The same cause has produced failures in more than one job. Find the cause where it originates and fix it there, so the whole class is prevented; do not work around one instance.",
+        "",
+        &format!("Cause: {cause}"),
+        "Seen 2 time(s) in 2 jobs. The introspections that record it:",
+        &format!(
+            "Introspection 20261029-181811-bs86 (job 20261029-111202-2bpc); prevention it proposed: {prevention}"
+        ),
+        &format!(
+            "Introspection 20261030-170739-hq09 (job 20261030-060751-5389); prevention it proposed: {prevention}"
+        ),
+        "",
+        "Acceptance:",
+        "- The root cause is named in the change description and fixed where it originates, not at one instance",
+        "- A test fails without the change and passes with it, for the cause and not only for one job",
+        "- fmt, clippy and test pass",
+        "",
+        "Files: crates/",
+    ])
+}
+
+/// The request of a Hestia slowdown job, in the line shape of `slowdown_request` in `hestia.rs`.
+fn slowdown_shape() -> String {
+    lines(&[
+        "Priority: high",
+        "",
+        "Throughput slowdown: producer grew from 25.0 to 45.0 min per landed job",
+        "",
+        "Athena's throughput review found that the median minutes per landed job rose from 25.0 to 60.0, more than 25%, since the previous throughput review. Find why the stage that grew most now takes longer and remove the cause.",
+        "",
+        "Stage that grew most: producer, a median of 45.0 minutes per landed job now, 25.0 before.",
+        "",
+        "Acceptance:",
+        "- The cause of the longer producer stage is found and stated in the change or in a note under docs/design/",
+        "- The change shortens that stage, and the next throughput review shows the median minutes per landed job falling",
+        "",
+        "Files: crates/, docs/design/",
+    ])
+}
+
+/// The request of a Hestia throughput design job, in the line shape of `throughput_request` in `hestia.rs`.
+fn throughput_shape() -> String {
+    lines(&[
+        "Priority: high",
+        "",
+        "Throughput design: The producer waits for the checks.",
+        "",
+        "Athena's throughput review named the biggest wait in the pipeline and an architectural change that would remove it. Design that change.",
+        "",
+        "Bottleneck: The producer waits for the checks.",
+        "Stage: checks",
+        "Proposed change: Start the pull request earlier.",
+        "Predicted saving: 12.0 minutes per landed job; the median was 60.0 minutes per landed job when the review ran.",
+        "Why: The checks start late.",
+        "",
+        "Acceptance:",
+        "- A design note under docs/design/ describes the change and how it removes the bottleneck",
+        "- The note states the minutes per landed job the change should save and how the next throughput review measures them",
+        "",
+        "Files: docs/design/",
+    ])
+}
+
+/// The request of a spec-gap job, in the line shape of `spec_request` in `hestia.rs`.
+fn spec_shape(priority: &str, statement: &str) -> String {
+    lines(&[
+        &format!("Priority: {priority}"),
+        "",
+        "Give requirement R-9 a mechanism",
+        "",
+        "Requirement R-9 in docs/spec.toml is active and has no mechanism.",
+        &format!("Requirement: {statement}"),
+        "Owner: steward",
+        "",
+        "Build the code path, role or check that meets the requirement, and record it as the mechanism in docs/spec.toml.",
+        "",
+        "Spec requirement: R-9",
+        "",
+        "Acceptance:",
+        "- Requirement R-9 names a mechanism that exists in the code, an owner and a measure",
+        "- A test fails without the mechanism and passes with it",
+        "- fmt, clippy and test pass",
+        "",
+        "Files: docs/spec.toml, crates/",
+    ])
+}
+
+/// The request of an approved-proposal job, in the line shape of `approve_request` in `work_decisions.rs`.
+fn approved_shape(title: &str, source: &str) -> String {
+    lines(&[
+        title,
+        "",
+        "A person approved this proposal from the steward role. Carry the work out as an ordinary change.",
+        "Everything the proposal cites is copied below; nothing here points at a file you cannot open.",
+        "",
+        "Proposal: 20261015-003903-khz6 (key notes), queued at 2026-10-15T00:39:03Z by the steward role.",
+        "Rung of the requirements ladder: implementation.",
+        "",
+        "## Source",
+        "",
+        source,
+        "",
+        "## Evidence",
+    ])
+}
+
+/// A case for a speed request: `timeline` is the one assumption of the reading, and `refused` says whether
+/// `check_speed_timeline` must refuse it (otherwise the gate accepts it).
+fn speed_case(
+    id: &'static str,
+    forms: &'static [&'static str],
+    request: &str,
+    bullets: usize,
+    timeline: Option<&str>,
+    refused: bool,
+) -> Case {
+    let expected = if refused {
+        Expected::Refuse(SPEED_CHECK)
+    } else {
+        Expected::Accept
+    };
+    let mut c = case(id, SPEED_SOURCE, forms, request, bullets, expected);
+    c.reading.assumptions = timeline.map(|t| vec![t.to_string()]).unwrap_or_default();
+    c
+}
+
+/// A retry of the job whose reading is `retry_request`'s subject, as in `retry-complaint-reading-names-the-job`.
+fn speed_retry_case(id: &'static str, timeline: Option<&str>, refused: bool) -> Case {
+    let mut c = speed_case(
+        id,
+        &["retry-complaint", "speed-cue-word"],
+        "The last attempt was rejected: it was still too slow. Try again.",
+        0,
+        timeline,
+        refused,
+    );
+    c.attempt = Some(earlier(RETRIED_JOB, "Check that a cited prior job exists"));
+    c.reading.summary =
+        format!("Retry of job {RETRIED_JOB}: the stage that makes the run slow is found first.");
+    c.reading.deliverables = vec![deliverable(
+        "crates/athena-core/src/reading.rs",
+        DeliverableAction::Modify,
+    )];
+    c.reading.out_of_scope = vec!["The reader and verifier prompts are not changed".into()];
+    c
+}
+
+fn speed_timeline_cases() -> Vec<Case> {
+    // Speed requests with no Timeline are refused, wherever the cue stands in the request.
+    let mut out: Vec<Case> = vec![speed_case(
+        "speed-request-without-a-timeline",
+        &["cut-minutes-figure"],
+        MOVE_EARLIER,
+        0,
+        None,
+        true,
+    )];
+    out.push(speed_case(
+        "speed-word-in-a-dash-bullet",
+        &["dash-bullet", "speed-cue-word"],
+        &lines(&["Update the guide.", "- Make the checks faster"]),
+        1,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "speed-word-in-a-star-bullet",
+        &["star-bullet", "speed-up-phrase"],
+        &lines(&["Update the guide.", "* Speed up the verifier"]),
+        1,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "speed-word-in-a-numbered-dot-part",
+        &["number-dot-parts", "cut-minutes-figure"],
+        &lines(&["Do this:", "1. Cut 5 minutes from the checks"]),
+        1,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "speed-word-in-a-numbered-paren-part",
+        &["number-paren-parts", "speed-cue-word"],
+        &lines(&["Please do this:", "2) Make the run faster"]),
+        0,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "speed-word-in-a-lettered-paren-part",
+        &["letter-paren-parts", "speed-cue-word"],
+        &lines(&["Please do this:", "(a) Make the run faster"]),
+        0,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "head-start-without-a-timeline",
+        &["head-start-phrase"],
+        "Give the producer a head start.",
+        0,
+        None,
+        true,
+    ));
+    out.push(speed_retry_case(
+        "retry-complaint-still-too-slow-without-a-timeline",
+        None,
+        true,
+    ));
+    out.push(speed_retry_case(
+        "retry-complaint-still-too-slow-with-a-timeline",
+        Some(GOOD_TIMELINE),
+        false,
+    ));
+    out.push(speed_case(
+        "takes-too-long-without-a-timeline",
+        &["takes-longer-phrase"],
+        "The full test run takes too long.",
+        0,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "get-the-checks-under-6-minutes-without-a-timeline",
+        &["target-figure-phrase"],
+        "Get the checks under 6 minutes.",
+        0,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "reduce-ci-time-to-6-minutes-without-a-timeline",
+        &["target-figure-phrase"],
+        "Reduce CI time to 6 minutes.",
+        0,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "shorten-the-run-without-a-timeline",
+        &["speed-cue-word"],
+        "Shorten the run.",
+        0,
+        None,
+        true,
+    ));
+    // A root-cause request: its own line is scanned, the quoted prevention text is not.
+    let mut c = speed_case(
+        "root-cause-request-with-its-own-speed-goal-without-a-timeline",
+        &[
+            "cites-job-without-relying",
+            "dash-bullet",
+            "quoted-record-line",
+            "speed-cue-word",
+        ],
+        &root_cause_request(&["Make the checks faster."]),
+        3,
+        None,
+        true,
+    );
+    c.referenced = vec![
+        earlier(OTHER_JOB, "Add parts coverage to reading acceptance"),
+        earlier(RETRIED_JOB, "Check that a cited prior job exists"),
+    ];
+    out.push(c);
+    out.push(speed_case(
+        "root-cause-request-whose-cause-is-slowness-without-a-timeline",
+        &["slowness-cause-line", "quoted-record-line", "dash-bullet"],
+        &root_cause_shape(
+            "verifier runs time out because the suite is too slow",
+            "add a check",
+        ),
+        3,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "root-cause-request-quoting-speed-words-in-its-prevention-needs-no-timeline",
+        &["quoted-record-line", "dash-bullet"],
+        &root_cause_shape(
+            "a rule is planned by reasoning and never run on real inputs",
+            "make the checks faster and save 12 minutes",
+        ),
+        3,
+        None,
+        false,
+    ));
+    // Hestia's own requests are speed requests by their marker line.
+    out.push(speed_case(
+        "slowdown-request-without-a-timeline",
+        &["hestia-marker-request", "dash-bullet"],
+        &slowdown_shape(),
+        2,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "slowdown-request-with-a-timeline",
+        &["hestia-marker-request", "dash-bullet"],
+        &slowdown_shape(),
+        2,
+        Some(GOOD_TIMELINE),
+        false,
+    ));
+    out.push(speed_case(
+        "throughput-design-request-without-a-timeline",
+        &["hestia-marker-request", "dash-bullet"],
+        &throughput_shape(),
+        2,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "throughput-design-request-with-a-timeline",
+        &["hestia-marker-request", "dash-bullet"],
+        &throughput_shape(),
+        2,
+        Some(GOOD_TIMELINE),
+        false,
+    ));
+    // A spec request is a speed request exactly when its priority is high; its statement is quoted.
+    out.push(speed_case(
+        "high-priority-spec-request-without-a-timeline",
+        &["spec-requirement-quote", "dash-bullet"],
+        &spec_shape("high", "Checks finish measurably sooner."),
+        3,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "high-priority-spec-request-with-a-timeline",
+        &["spec-requirement-quote", "dash-bullet"],
+        &spec_shape("high", "Checks finish measurably sooner."),
+        3,
+        Some(GOOD_TIMELINE),
+        false,
+    ));
+    out.push(speed_case(
+        "spec-request-with-faster-in-its-statement-needs-no-timeline",
+        &["spec-requirement-quote", "dash-bullet"],
+        &spec_shape("normal", "Athena learns faster from its mistakes."),
+        3,
+        None,
+        false,
+    ));
+    // An approved proposal copies cited records below its Source heading; only the title and the lines
+    // above are the request's own.
+    out.push(speed_case(
+        "approved-proposal-title-with-a-cue-without-a-timeline",
+        &["approved-proposal-quote"],
+        &approved_shape("Make the notes build faster", "path notes.md"),
+        0,
+        None,
+        true,
+    ));
+    out.push(speed_case(
+        "approved-proposal-source-quoting-speed-words-needs-no-timeline",
+        &["approved-proposal-quote"],
+        &approved_shape(
+            "Tidy the notes",
+            "path notes.md\nMake it faster and save 12 minutes.",
+        ),
+        0,
+        None,
+        false,
+    ));
+    // The Timeline itself.
+    out.push(speed_case(
+        "speed-request-with-a-timeline",
+        &["timeline-assumption", "cut-minutes-figure"],
+        MOVE_EARLIER,
+        0,
+        Some(GOOD_TIMELINE),
+        false,
+    ));
+    out.push(speed_case(
+        "speed-request-timeline-says-no-recorded-timing",
+        &["timeline-assumption"],
+        MOVE_EARLIER,
+        0,
+        Some(NO_TIMING_TIMELINE),
+        false,
+    ));
+    for (id, forms, timeline) in [
+        (
+            "timeline-without-a-crates-path",
+            &["timeline-assumption"][..],
+            "Timeline: stages: compile 9 min, check 40 s; the delay sits in compile.",
+        ),
+        (
+            "timeline-with-a-crate-relative-path",
+            &["timeline-assumption", "crate-relative-path"][..],
+            "Timeline: read src/reading.rs; stages: compile 9 min, check 40 s; the delay sits in compile.",
+        ),
+        (
+            "timeline-with-one-stage-only",
+            &["timeline-assumption"][..],
+            "Timeline: read crates/athena-core/src/reading.rs; stages: compile 9 min; the delay sits in compile.",
+        ),
+        (
+            "timeline-stage-without-a-duration",
+            &["timeline-assumption"][..],
+            "Timeline: read crates/athena-core/src/reading.rs; stages: compile 9 min, check; the delay sits in compile.",
+        ),
+        (
+            "timeline-says-no-recorded-timing-without-stages",
+            &["timeline-assumption"][..],
+            "Timeline: read crates/athena-core/src/reading.rs; no recorded timing exists; the delay sits in compile.",
+        ),
+        (
+            "timeline-without-where-the-delay-sits",
+            &["timeline-assumption"][..],
+            "Timeline: read crates/athena-core/src/reading.rs; stages: compile 9 min, check 40 s.",
+        ),
+        (
+            "timeline-place-word-names-no-stage",
+            &["timeline-assumption"][..],
+            "Timeline: read crates/athena-core/src/reading.rs; stages: compile 9 min, check 40 s; the delay sits in the pipeline.",
+        ),
+        (
+            "timeline-label-not-at-the-start",
+            &["timeline-assumption"][..],
+            "Read crates/athena-core/src/reading.rs. Timeline: stages: compile 9 min, check 40 s; the delay sits in compile.",
+        ),
+    ] {
+        out.push(speed_case(id, forms, MOVE_EARLIER, 0, Some(timeline), true));
+    }
+    // A reading that asks a question is not checked; a request with only look-alike words is not a speed
+    // request.
+    let mut c = speed_case(
+        "speed-request-question-reading-needs-no-timeline",
+        &["cut-minutes-figure"],
+        MOVE_EARLIER,
+        0,
+        None,
+        false,
+    );
+    c.reading.question = Some("Which call should move earlier?".into());
+    out.push(c);
+    out.push(speed_case(
+        "speed-word-lookalikes-are-not-speed-requests",
+        &["speed-word-lookalike"],
+        "Add a timeline view and a speedometer widget. Write a quickstart guide. Wait 30 seconds before the retry. Cover the slowloris case.",
+        0,
+        None,
+        false,
+    ));
+    for (id, forms, request) in [
+        (
+            "add-a-retry-delay-setting-is-not-a-speed-request",
+            &["speed-word-lookalike"][..],
+            "Add a retry delay setting.",
+        ),
+        (
+            "fix-a-timing-attack-is-not-a-speed-request",
+            &["speed-word-lookalike"][..],
+            "Fix a timing attack.",
+        ),
+        (
+            "save-the-state-every-30-seconds-is-not-a-speed-request",
+            &["setting-time-figure"][..],
+            "Save the state every 30 seconds.",
+        ),
+        (
+            "set-the-retry-timeout-to-10-s-is-not-a-speed-request",
+            &["setting-time-figure"][..],
+            "Set the retry timeout to 10 s.",
+        ),
+        (
+            "reduce-the-retry-timeout-by-5-s-is-not-a-speed-request",
+            &["setting-time-figure"][..],
+            "Reduce the retry timeout by 5 s.",
+        ),
+        (
+            "trim-the-log-after-5-minutes-is-not-a-speed-request",
+            &["setting-time-figure"][..],
+            "Trim the log after 5 minutes.",
+        ),
+        (
+            "reduce-the-grace-period-to-5-minutes-is-not-a-speed-request",
+            &["setting-time-figure"][..],
+            "Reduce the grace period to 5 minutes.",
+        ),
+        (
+            "the-title-is-too-long-is-not-a-speed-request",
+            &["speed-word-lookalike"][..],
+            "The title is too long.",
+        ),
+        (
+            "shorten-the-error-message-is-not-a-speed-request",
+            &["speed-word-lookalike"][..],
+            "Shorten the error message.",
+        ),
+    ] {
+        out.push(speed_case(id, forms, request, 0, None, false));
+    }
+    out
+}
+
 /// The cases that fail their expectation, each as a line naming the case and its source.
 fn mismatches(cases: &[Case]) -> Vec<String> {
     let mut found = Vec::new();
@@ -1145,6 +1680,108 @@ fn design_existing_code_refusal_is_declared_intended() {
     assert!(changelog.contains("check_design_existing_code"));
     assert!(changelog.contains("higher refusal rate is intended"));
     assert!(changelog.contains("expected 5% of newly refused readings"));
+}
+
+#[test]
+fn speed_timeline_refusal_is_declared_intended() {
+    // The declared share is read from the criterion text by the replay.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: "The check refuses more readings: expected 5% of newly refused readings".into(),
+            kind: CriterionKind::Behavior,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(5));
+    // The step line is in refusing_check once, right after the outcome-state step.
+    let body = function_body(READING_SOURCE, "pub fn refusing_check(");
+    let steps: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("step!(check_"))
+        .collect();
+    let outcome = steps
+        .iter()
+        .position(|l| *l == "step!(check_outcome_state(reading, request));")
+        .expect("the outcome-state step");
+    assert_eq!(
+        steps[outcome + 1],
+        "step!(check_speed_timeline(reading, request));"
+    );
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|l| l.starts_with("step!(check_speed_timeline("))
+            .count(),
+        1
+    );
+    // The check's doc comment is one paragraph with the cause, the jobs, the limits and the intended rate.
+    let doc = READING_SOURCE
+        .split("pub fn check_speed_timeline(")
+        .next()
+        .unwrap()
+        .rsplit("\n\n")
+        .next()
+        .unwrap();
+    assert!(
+        doc.lines().all(|l| l.starts_with("///") && l != "///"),
+        "{doc}"
+    );
+    let doc = doc
+        .lines()
+        .map(|l| l.trim_start_matches('/').trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "Root cause: the reading stage checked a request's own figures only if the reader chose to",
+        "20261025-110525-8hzb",
+        "20261025-034733-c453",
+        "20261025-190606-eebk",
+        "the shape of the timeline, not whether its figures are true",
+        "crates/ path",
+        "never text other people wrote",
+        "This check refuses more readings; the higher refusal rate is intended",
+        "expected 5% of newly refused readings",
+    ] {
+        assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+    }
+    // The changelog and the decision log wrap lines, so compare with runs of white space made single spaces.
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let changelog = flat(include_str!("../../../CHANGELOG.md"));
+    for needle in [
+        "check_speed_timeline",
+        "higher refusal rate is intended",
+        "expected 5% of newly refused readings",
+        "D163",
+        "fake.rs",
+        "hestia.rs",
+        "work_decisions.rs",
+        "drain.rs",
+    ] {
+        assert!(changelog.contains(needle), "the changelog lacks {needle:?}");
+    }
+    let decisions = flat(include_str!("../../../docs/decisions.md"));
+    let d163 = decisions
+        .split("## D163 ")
+        .nth(1)
+        .expect("decision D163 is in the log")
+        .to_lowercase();
+    for needle in [
+        "check_speed_timeline",
+        "prompt-only guidance",
+        "planner-stage check",
+        "reading gate check",
+        "verifier-stage check",
+        "the reading stage checked a request's own figures only if the reader chose to",
+        "prevention lines",
+        "requirement statement",
+        "approved-proposal",
+        "crates/ path",
+        "shape of the timeline, not whether its figures are true",
+        "design review",
+    ] {
+        assert!(d163.contains(needle), "D163 lacks {needle:?}");
+    }
 }
 
 #[test]
