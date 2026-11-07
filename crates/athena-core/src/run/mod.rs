@@ -363,7 +363,8 @@ fn run_bounded(
     command: &mut std::process::Command,
     timeout: std::time::Duration,
 ) -> std::result::Result<(), String> {
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let mut child =
+        athena_agent::procs::retry_busy(|| command.spawn()).map_err(|e| e.to_string())?;
     let started = Instant::now();
     loop {
         match child.try_wait() {

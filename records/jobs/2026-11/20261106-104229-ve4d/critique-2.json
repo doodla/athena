@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-104229-ve4d",
+  "round": 2,
+  "at": "2026-11-07T15:07:33.606866741Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-agent/src/procs.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-agent/src/procs.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/checks.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/checks.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/transport.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/transport.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The wrapper rule treats any function that sets a mode as an executable wrapper, even when the mode has no execute bit. A real function in the tree already qualifies.",
+      "evidence": "Under Decision 3, a function counts as a wrapper when its body holds a raw permission call, including an OpenOptions `.mode(` with an argument, and holds no write-bit expression. crates/athena-agent/src/claude.rs:240-249 `fn write_private` calls `OpenOptions::new()...mode(0o600).open(path)`. It has no `| 0o200` or `& !0o222`, so the rule classes it as a wrapper. Mode 0o600 makes a private, non-executable file. Any test in claude.rs that calls write_private would get a `wrapper call` hit for a file that can never be executed. It escapes today only because no test calls it (Grep: only claude.rs:324-325 call it, both in production code). This is a rule with an obvious false positive. It also means the write-bit exclusion is a special case for the toggles found today, not a general test. Fix: Count a body as a wrapper only when it sets an execute bit: a mode literal with an execute bit (any odd octal digit, such as 0o755, 0o700 or 0o111), a `+x` or `u+x` chmod argument, or a chmod-argument line. Keep the write-bit exclusion on top. Every real wrapper found so far has a 0o755 literal: toolconfig.rs, xtask main.rs:809 and git/snapshot.rs:477. Add a fixture: a function with `.mode(0o600)` called from test code is not flagged.",
+      "location": "Decision 3 / Step 8 (wrapper detection rule)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The cross-file wrapper pass matches bare names and ignores module paths. The function-header match misses generic functions.",
+      "evidence": "Step 9 builds one `shared` set from the pub wrappers of every scanned file and applies it to every file. A future pub wrapper with a common name (`install`, `write`, `mark`) would flag unrelated calls to a same-named function in any crate. Step 8 finds wrappers by `fn name(`, so `fn mark<P: AsRef<Path>>(p: P)` is never collected, and a wrapper that is generic over the path type escapes. Brace counting that ignores char literals such as '{' can also run a body past its end. Fix: Also match `fn name<` headers. Limit cross-file matching to files in the same crate, or say in D163 that a name collision is fixed by renaming or by an EXEMPT entry. Add a generic-wrapper fixture.",
+      "location": "Decision 3 / Step 8-9 (shared pub wrappers, fn header matching)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Skipping the whole write_executable( call counts parens outside ordinary string literals only, so a raw-string script can stretch the skipped span to 40 lines and hide real violations.",
+      "evidence": "Stand-in scripts are often raw strings, for example the claude.rs STAND_IN const at about lines 600-635, which uses r#\"...\"#. If a raw-string argument holds an unbalanced `(` (shell `$(`, `case ... )`), the depth never returns to zero. The skip then covers up to 40 following lines, including any set_permissions or chmod line in them. Fix: Treat raw strings (r\"..\", r#\"..\"#) as strings when counting depth, or end the span at the first line where depth returns to zero, ignoring string contents. Add a fixture: a multi-line write_executable call with a raw string holding `$(`, followed by a set_permissions line, and assert that line is flagged.",
+      "location": "Step 7 (helper_spans)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The run command filters tests by the substring `busy`, so it only proves something if the new tests are named to match.",
+      "evidence": "`cargo test --locked -p athena-agent -p xtask busy` runs only tests whose names contain `busy`. Steps 2 and 6 do not give the new tests names. A filter that matches nothing still exits 0. Fix: Name the new procs.rs and xtask tests with `busy` in them (for example `retry_busy_stops_at_the_bound`). State the expected count of tests run.",
+      "location": "Demonstrations, criterion 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Verdict: revise. One major finding in the scan design; everything else I checked holds up. What I checked, by reading the snapshot: the scan file at crates/athena-testkit/tests/no_in_process_exec_writes.rs has violations, tree, the EXEMPT list with the slot_exec.rs entry, and the exemption-staleness test. claude.rs has a private retry_busy at lines 45-58, used at lines 89 and 340. procs.rs exists and already depends on libc. The run sites are where the plan says: checks.rs:456, reading.rs:4679, gh/transport.rs:23, run/mod.rs:366 (copy then run at 2429-2436), slot_exec.rs:92, and xtask `found` (139) and `check_credentials` (761). athena-core and athena-cli already depend on athena-agent, and athena-agent already has athena-testkit as a dev-dependency. The D162 heading is at docs/decisions.md line 4506, the last link block ends at decision-links.toml line 199, and decisions.rs:511-531 is the Unreleased CHANGELOG reader. A Grep of all five primitives over the tree matches the plan's survey. The only stand-in written outside the helper is the slot_exec.rs test helper, and the other production sites that run programs (gitleaks, wiring, drain) are not given stand-ins in their tests. Re-using a Command after a failed spawn matches what claude.rs already does. The major finding: the wrapper rule counts any function that sets a mode and has no write-bit expression as an executable wrapper, without checking for an execute bit. claude.rs `write_private` (`.mode(0o600)`) already qualifies, so the rule has an obvious false positive. Requiring an execute-bit literal or `+x` fixes it. Minor points: cross-file matching by bare name, generic function headers missed, and raw strings not handled when skipping the helper call. Athena's own scope findings about procs.rs, checks.rs, reading.rs, transport.rs and run/mod.rs are fair. They are outweighed by criterion 4 (a retry at each run site), and the plan raises them as an open question for the user."
+}

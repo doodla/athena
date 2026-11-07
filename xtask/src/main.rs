@@ -136,12 +136,39 @@ fn output(cmd: &mut Command) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Runs `op`, which executes a program, again while it fails because the program file is busy
+/// (`ETXTBSY`), up to `attempts` more times with `pause` between runs. Other errors, and the busy error once
+/// the bound is reached, are returned unchanged.
+///
+/// A file written and run in one process stays busy while a write handle, or a child forked by another
+/// thread that copied it, holds the file open; the window ends when the holder execs or exits. This is a
+/// std-only copy of `athena_agent::procs::retry_busy_with`, because xtask does not depend on that crate.
+fn retry_busy_with<T>(
+    attempts: u32,
+    pause: std::time::Duration,
+    mut op: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut retries = 0;
+    loop {
+        match op() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && retries < attempts => {
+                retries += 1;
+                std::thread::sleep(pause);
+            }
+            other => return other,
+        }
+    }
+}
+
+/// [`retry_busy_with`] with the bound used at every run site: 20 retries, 50 ms apart (about one second).
+fn retry_busy<T>(op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    retry_busy_with(20, std::time::Duration::from_millis(50), op)
+}
+
 fn found(program: &str, arg: &str) -> Option<String> {
-    let out = Command::new(program)
-        .arg(arg)
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let mut cmd = Command::new(program);
+    cmd.arg(arg).stderr(Stdio::null());
+    let out = retry_busy(|| cmd.output()).ok()?;
     out.status.success().then(|| {
         String::from_utf8_lossy(&out.stdout)
             .lines()
@@ -760,10 +787,9 @@ fn write_machine_config(claude: &Path) -> Result<()> {
 
 fn check_credentials(claude: &Path) {
     // `claude auth status` reports whether Claude Code can authenticate, without a model call (E20).
-    let out = Command::new(claude)
-        .args(["auth", "status"])
-        .stderr(Stdio::null())
-        .output();
+    let mut cmd = Command::new(claude);
+    cmd.args(["auth", "status"]).stderr(Stdio::null());
+    let out = retry_busy(|| cmd.output());
     let logged_in = out
         .ok()
         .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
@@ -834,6 +860,81 @@ mod tests {
         let path = dir.join("claude");
         athena_testkit::write_executable(&path, format!("#!/bin/sh\necho '{output}'\n"));
         path
+    }
+
+    fn busy() -> std::io::Error {
+        std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy)
+    }
+
+    #[test]
+    fn xtask_retry_busy_returns_ok_on_first_try() {
+        let mut calls = 0;
+        let out = retry_busy_with(3, std::time::Duration::ZERO, || {
+            calls += 1;
+            Ok(7)
+        });
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn xtask_retry_busy_succeeds_after_busy_errors() {
+        let mut calls = 0;
+        let out = retry_busy_with(5, std::time::Duration::ZERO, || {
+            calls += 1;
+            if calls <= 3 { Err(busy()) } else { Ok(calls) }
+        });
+        assert_eq!(out.unwrap(), 4);
+    }
+
+    #[test]
+    fn xtask_retry_busy_stops_at_the_bound() {
+        let mut calls = 0;
+        let out: std::io::Result<()> = retry_busy_with(20, std::time::Duration::ZERO, || {
+            calls += 1;
+            Err(busy())
+        });
+        assert_eq!(
+            out.unwrap_err().kind(),
+            std::io::ErrorKind::ExecutableFileBusy
+        );
+        assert_eq!(calls, 21, "one run plus 20 retries");
+    }
+
+    #[test]
+    fn xtask_retry_busy_passes_other_errors_through() {
+        let mut calls = 0;
+        let out: std::io::Result<()> = retry_busy_with(20, std::time::Duration::ZERO, || {
+            calls += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+        assert_eq!(out.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn xtask_retry_busy_succeeds_once_a_held_file_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool");
+        athena_testkit::write_executable(&path, "#!/bin/sh\nexit 0\n");
+        // A plain write handle on the file makes exec fail with ETXTBSY until it is dropped.
+        let held = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let first = Command::new(&path).status();
+        assert_eq!(
+            first.unwrap_err().kind(),
+            std::io::ErrorKind::ExecutableFileBusy,
+            "the held file must be busy, or this test proves nothing"
+        );
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(held);
+        });
+        let status = retry_busy(|| Command::new(&path).status()).unwrap();
+        releaser.join().unwrap();
+        assert!(status.success());
     }
 
     const TOML: &str =

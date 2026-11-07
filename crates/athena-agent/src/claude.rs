@@ -6,8 +6,8 @@
 //! argument lists), and reads stream-json events as they arrive. It refuses to start inside a nested run.
 
 use crate::procs::{
-    GRACE, MIN_STALL_WINDOW, Registry, deadline_reason, isolate, kill_group, stall_reason,
-    stall_window,
+    GRACE, MIN_STALL_WINDOW, Registry, deadline_reason, isolate, kill_group, retry_busy,
+    stall_reason, stall_window,
 };
 use crate::stream::{ResultEvent, StreamState};
 use crate::{
@@ -40,21 +40,6 @@ pub struct ClaudeCodeDriver {
     refuse_nested_runs: bool,
     /// The shortest stall window; tests lower it to exercise the watchdog quickly.
     min_stall_window: Duration,
-}
-
-/// Retries an operation that executes a program while the program file is busy (ETXTBSY): a file that
-/// was just written can stay open for writing in a child that another thread forked, until it execs.
-fn retry_busy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
-    let mut attempt = 0;
-    loop {
-        match op() {
-            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
-                attempt += 1;
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            other => return other,
-        }
-    }
 }
 
 /// Checks that the binary at `bin` reports the pinned version, and returns it.

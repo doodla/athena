@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-104229-ve4d",
+  "round": 3,
+  "at": "2026-11-07T15:12:10.201222971Z",
+  "invocation_seq": 8,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-agent/src/procs.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-agent/src/procs.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/checks.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/checks.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/transport.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/transport.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "A wrapper that hides an external chmod and no raw permission call is not detected",
+      "evidence": "Decision 3 makes a fn a wrapper only when its body has BOTH a raw permission call (set_permissions(, from_mode(, .set_mode(, .mode(x)) AND an execute-bit signal. Under that rule a chmod-argument line counts only as a signal. So `fn mk(p: &Path) { Command::new(\"chmod\").arg(\"+x\").arg(p).status().unwrap(); }` above #[cfg(test)], called from a test, is never flagged. The primitive rule only looks at test-region lines. The request asks to flag 'wrappers and an external chmod outside the helper', and this is the combination of the two. Fix: Make a chmod child or chmod-argument line in a fn body enough on its own to mark the fn a wrapper, since it is both the permission call and the execute signal. Add a flagged fixture: a production-region fn that runs chmod through Command, called from test code.",
+      "location": "Decision 3 / step 8 (wrapper detection)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The held-open test passes even without the retry if the kernel does not return ETXTBSY",
+      "evidence": "The test holds a write handle, releases it after about 100 ms, and asserts that retry_busy(|| Command::new(&path).status()) succeeds. If exec does not fail while the handle is held, the first attempt succeeds and the test passes without exercising the retry. The behavior-evidence default says such a test must fail, not pass silently, when the environment cannot enforce the condition. Fix: While the handle is still held, first assert that a plain Command::new(&path).status() fails with raw_os_error() == Some(libc::ETXTBSY). Alternatively, run through retry_busy_with with a closure that counts attempts, and assert more than one attempt was made.",
+      "location": "Step 2 / Criterion 4 demonstration (retry_busy_succeeds_once_a_held_file_is_released)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "toolconfig.rs writes a file and then sets its execute mode in-process in production; the plan classifies it but does not say why it gets no retry",
+      "evidence": "toolconfig.rs:112-113 calls std::fs::write and then set_permissions(0o755) on base tool-config files in the verifier's tree. The checks then run in the same athena process. This is the request's root-cause shape, even though the files are not test stand-ins. The reading assumed 'toolconfig.rs materialisation' would get a retry. The plan leaves it unedited and only lists it as non-stand-in. Fix: In D163's row for toolconfig.rs, state that Athena never execs these files directly (cargo or the tools do, as grandchildren), so no Athena run site can retry them. Name this as the remaining production exposure, so the list of sites is complete for an outside reader.",
+      "location": "Decision 6 / D163 site table (toolconfig.rs set_executable)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "There are now two retry implementations, and they detect the error differently",
+      "evidence": "procs.rs checks raw_os_error() == Some(libc::ETXTBSY), while the xtask copy checks ErrorKind::ExecutableFileBusy. Both are correct, but they can drift apart. Fix: Use ErrorKind::ExecutableFileBusy in both copies; it is stable on 1.97, and then procs.rs no longer needs libc for this check. Or have each copy's doc comment point to the other.",
+      "location": "Decision 1 / step 6 (xtask private copy)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 3 holds up against the code I read. The scan file matches the plan's description: `violations` at line 73, `tree` at line 127, and three EXEMPT entries, including slot_exec.rs. The private retry_busy is at claude.rs:45-58, with callers at lines 89 and 340. procs.rs already exists as a public process-helper module. athena-core and athena-cli already depend on athena-agent, and xtask has athena-testkit as a dev-dependency. The run sites named in the plan exist: checks.rs:456, reading.rs:4685, transport.rs:23-27, run/mod.rs:366 (where run/mod.rs:2429 copies a binary in-process and runs it at 2436), slot_exec.rs:92, and xtask found/check_credentials. Every write_executable caller that runs its stand-in reaches one of these sites. D162 is the latest decision, and the D158->D162 link sits before the D08 [[governs]] block, as step 14 assumes. ErrorKind::ExecutableFileBusy is stable on the pinned 1.97 toolchain. The odd-digit execute-bit test separates the real 0o755 wrappers from the write-bit toggles and claude.rs's 0o600. The only private wrappers with a 0o755 literal (toolconfig.rs, git/snapshot.rs set_mode, xtask set_executable) have no callers in test regions. The dependents list covers the readers I found: EXEMPT, claude.rs callers, the CHANGELOG reader, decision links, and shard timings. Athena's five scope findings are justified by criterion 4 and left to the user's open question. What remains are four minor gaps, none of which blocks: a wrapper that hides only a chmod child escapes the wrapper rule; the held-open test can pass on a kernel that does not raise ETXTBSY; one production write-then-chmod path (toolconfig.rs) is classified without its reason being recorded; and the second retry copy in xtask detects the error a different way."
+}
