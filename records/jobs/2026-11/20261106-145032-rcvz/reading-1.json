@@ -1,0 +1,128 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-145032-rcvz",
+  "n": 1,
+  "at": "2026-11-07T22:45:23.181241171Z",
+  "invocation_seq": 1,
+  "base_commit": "a08b41d26c227ae6345453db161ee7b02c709583",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Fix the stand-in drain race in the drain pid-file stop test",
+  "summary": "Make the test's stand-in drain wait for a second \"release\" file that the test creates after the waiting stop_and_wait has started, so the outcome no longer depends on timing. Add a deterministic test showing the old failure when the stand-in exits before the waiting call. Production stop_and_wait stays unchanged, so a dead pid still reports NotRunning(Dead). Goal: a stable CI for the maintainers.",
+  "class_of_work": "tests",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Fix and tests written in Rust"
+    },
+    {
+      "id": "tested",
+      "how": "cargo test, clippy and fmt criteria"
+    },
+    {
+      "id": "root-cause",
+      "how": "Removes the timing dependency rather than adding sleeps or retries"
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the tests and check outcomes"
+    },
+    {
+      "id": "small",
+      "how": "Two files only"
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test"
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/drain.rs: stop_and_wait (~line 3776) writes the stop file, calls drain_state, returns NotRunning if the pid file's process is dead, Asked with no wait, otherwise polls until the process differs and returns Exited. The test is at ~line 5137; its stand-in is `sh -c` looping until the stop file exists. No record or data file is added, so the records allow-list is not involved.",
+    "Chosen fix is test-side: a dead process with no prior observation of it running cannot be told from a crashed or stale drain, so changing stop_and_wait to report Exited could hide a stale pid file from a real `drain-stop --wait` user. The report must say this.",
+    "The test releases the stand-in from a thread or after a delayed start of the waiting call, e.g. the stand-in loops until a second file exists and the test creates it from a helper thread once the wait has begun (the stop file already exists, so the release is the only thing that ends it).",
+    "The reproduction test makes the stand-in exit (creates both files and reaps or waits for it) before calling stop_and_wait with a wait, and asserts the NotRunning(Dead) outcome that caused the CI failure, showing the old test shape was timing-dependent.",
+    "CHANGELOG.md gets one entry stating only what the diff does (test made deterministic, no behavior change). athena.toml, defaults.toml and workflows are not changed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-cli status_and_stop_find_the_drain_by_pid_file`: the fixed test passes, and a new test that makes the stand-in exit before the waiting stop_and_wait call passes deterministically by asserting the old failure outcome NotRunning(Dead(pid)).",
+      "kind": "behavior"
+    },
+    {
+      "text": "In the diff, the fixed test's stand-in does not exit on the stop file alone; it also waits for a release file that the test creates after the waiting stop_and_wait call has started, with no reliance on sleeps to win the race.",
+      "kind": "content"
+    },
+    {
+      "text": "The original test's assertions on the pid file record, drain_status output, Asked outcome, stop file existence, Exited(record) result, and decoy untouched remain with unchanged meaning.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test` and `cargo clippy --all-targets` and `cargo fmt --check`: all pass and are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing only what the diff does (a test race fixed; no change to drain-stop behavior), and only drain.rs and CHANGELOG.md change.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Changing stop_and_wait behavior or the drain-stop CLI",
+    "Other flaky tests in the repository",
+    "Governance files and CI workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.68,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1800.0,
+        "p90": 4000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7375,
+      "p_verification_passes": 0.39285714285714285,
+      "p_user_intervenes": 0.09655172413793103,
+      "cost_usd": {
+        "p10": 0.25374952906047266,
+        "p50": 0.9942654,
+        "p90": 2.6200222261745734
+      },
+      "wall_time_s": {
+        "p10": 686.3429661593043,
+        "p50": 1898.348284544369,
+        "p90": 4439.669905234707
+      }
+    }
+  },
+  "departures": null
+}
