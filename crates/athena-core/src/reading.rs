@@ -3192,7 +3192,8 @@ pub fn check_reading_references(
 /// attribution rule is tested on ([`check_history_fixture`]), then the governance files the outcome needs
 /// ([`check_governance_coverage`]), then the observable state a delivery request needs
 /// ([`check_outcome_state`]), then the place, permissions and data reach of each action or source the reading
-/// assigns ([`check_environment_reach`]), then the deliverable paths and `content` criteria against the boundary
+/// assigns ([`check_environment_reach`]), then the structural terms the request uses and the reading leaves
+/// undefined ([`check_defined_terms`]), then the deliverable paths and `content` criteria against the boundary
 /// words and the deliverables against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
 /// there is no repository to compare with), then the repo paths its text relies on against the same files
 /// ([`check_reading_references`]). It applies to a first attempt as well as a retry. It runs
@@ -3250,6 +3251,7 @@ pub fn refusing_check(
     step!(check_governance_coverage(reading, request));
     step!(check_outcome_state(reading, request));
     step!(check_environment_reach(reading));
+    step!(check_defined_terms(reading, request));
     step!(check_boundary_and_repo_files(reading, repo_files));
     step!(check_reading_references(reading, repo_files));
     None
@@ -3656,10 +3658,10 @@ fn names_outcome_state(criterion: &str) -> bool {
 /// was read as "a page file exists", the criteria passed on the file, and nothing asked whether anyone could
 /// reach the page. Job 20261014-082328-g6vy failed that way. This check covers 1 of the 3 cited jobs, that
 /// one; the other two, 20261014-174815-7bf8 (a ladder of requirements) and 20261017-173508-0wtc (an ontology
-/// decision), contain no delivery verb, are another class (figurative or structural terms that need a glossary)
-/// and are outside the check, which does not catch them; all three recorded requests are replayed in
-/// `delivery_verb_replay_over_the_cited_jobs` in `crates/athena-core/tests/refusal_corpus.rs`, which asserts the
-/// count. The check reads only the request and the reading, costs no model call and, like the governance check,
+/// decision), contain no delivery verb, are another class (structural terms that need a definition) and are
+/// outside the check: [`check_defined_terms`] catches the first of them, and no check catches the second; all
+/// three recorded requests are replayed in `delivery_verb_replay_over_the_cited_jobs` in
+/// `crates/athena-core/tests/refusal_corpus.rs`, which asserts the count. The check reads only the request and the reading, costs no model call and, like the governance check,
 /// skips a reading with no capability, a question, or no deliverable. A verb is one of `publish`, `deploy`,
 /// `share` and `release` at the start of a segment (sentence, line or list part such as `2)`, `(a)`, `1.`, `-`
 /// or `*`) or after `and`, `then`, `please`, `also`, `should`, `can you`, `could you`, `would you`, `want to`,
@@ -3714,6 +3716,245 @@ pub fn check_outcome_state(reading: &Reading, request: &str) -> Result<()> {
          downloadable release; or, if this job must not deliver, name the delivery in out_of_scope (for \
          example \"Publishing is out of scope\")",
         uncovered.join(" and ")
+    )
+}
+
+/// The structural words a request can use that a reader must define before building on them
+/// ([`check_defined_terms`]). Each is matched as a whole word, in the singular, the plural and the possessive.
+const STRUCTURAL_TERMS: [&str; 4] = ["ladder", "rung", "tier", "layer"];
+
+/// The sentence with which Athena's root-cause request opens its body (`hestia::root_cause_request`). A line of
+/// that request that carries the words of earlier introspections is skipped only when this sentence is present.
+const ROOT_CAUSE_ANCHOR: &str = "The same cause has produced failures in more than one job.";
+
+/// The sentence with which Athena's approved-work request describes itself (`work_decisions::approve_request`).
+/// Its rung line, proposal line and copied sections are skipped only when this sentence is present.
+const APPROVAL_ANCHOR: &str = "A person approved this proposal from the steward role.";
+
+/// Whether a line of a request is text Athena's own generators wrote or copied, not the request's own use of a
+/// word. Each shape is exact, and the lines that carry free text from earlier records need the generator's
+/// anchor sentence as well, so a hand-written line that starts the same way still counts.
+fn is_generated_line(line: &str, root_cause: bool, approval: bool) -> bool {
+    let introspection = line.starts_with("Introspection ")
+        && line.contains(" (job ")
+        && line.contains("); prevention it proposed:");
+    let root_cause_line = root_cause
+        && [
+            "Failure class: ",
+            "Cause: ",
+            "Fix the root cause of a repeated failure: ",
+        ]
+        .iter()
+        .any(|prefix| line.starts_with(prefix));
+    let approval_line = approval
+        && (line.starts_with("Rung of the requirements ladder: ")
+            || (line.starts_with("Proposal: ")
+                && line.contains(" (key ")
+                && line.contains(" queued at ")));
+    introspection || root_cause_line || approval_line
+}
+
+/// The text of `line` without its quoted spans: double-quoted (straight or curly), backtick pairs, and
+/// single-quoted spans. A single quote opens a span only after the start, white space or a bracket and before a
+/// letter or digit, and closes it after a non-space and before a non-alphanumeric, so the apostrophes of
+/// "Sri's" and "don't" open nothing. An opener with no closer on the line stays as text.
+fn without_quoted_spans(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let find_from = |from: usize, close: char| {
+        chars[from..]
+            .iter()
+            .position(|c| *c == close)
+            .map(|at| from + at)
+    };
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let end = match chars[i] {
+            '"' => find_from(i + 1, '"'),
+            '\u{201C}' => find_from(i + 1, '\u{201D}'),
+            '`' => find_from(i + 1, '`'),
+            '\'' | '\u{2018}' => single_quote_end(&chars, i),
+            _ => None,
+        };
+        match end {
+            Some(end) => {
+                out.push(' ');
+                i = end + 1;
+            }
+            None => {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The index of the character that closes the single-quoted span opened at `open`, if one opens there.
+fn single_quote_end(chars: &[char], open: usize) -> Option<usize> {
+    let opens =
+        (open == 0 || chars[open - 1].is_whitespace() || matches!(chars[open - 1], '(' | '['))
+            && chars.get(open + 1).is_some_and(|c| c.is_alphanumeric());
+    if !opens {
+        return None;
+    }
+    (open + 2..chars.len()).find(|&j| {
+        matches!(chars[j], '\'' | '\u{2019}')
+            && !chars[j - 1].is_whitespace()
+            && chars.get(j + 1).is_none_or(|next| !next.is_alphanumeric())
+    })
+}
+
+/// Whether the text inside parentheses is a list of examples, not a statement: two or more commas, or an
+/// opening of `e.g.`, `i.e.`, `such as`, `for example` or `like`.
+fn is_example_list(inner: &str) -> bool {
+    let lower = inner.trim().to_lowercase();
+    inner.matches(',').count() >= 2
+        || ["e.g.", "i.e.", "such as ", "for example", "like "]
+            .iter()
+            .any(|opening| lower.starts_with(opening))
+}
+
+/// The text of `line` without its parenthesised example lists ([`is_example_list`]). A parenthetical that is a
+/// statement, such as "(the ladder, which ranks requirements)", stays.
+fn without_example_lists(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '(' {
+            let mut depth = 0usize;
+            let close = (i..chars.len()).find(|&j| {
+                match chars[j] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            });
+            if let Some(close) = close {
+                let inner: String = chars[i + 1..close].iter().collect();
+                if is_example_list(&inner) {
+                    out.push(' ');
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// One line of a request as plain prose: no quoted spans, no example lists, and no token that is a path or an
+/// identifier (it holds `/`, `_` or `::`).
+fn plain_line(line: &str) -> String {
+    let unquoted = without_quoted_spans(line);
+    without_example_lists(&unquoted)
+        .split_whitespace()
+        .filter(|token| !(token.contains('/') || token.contains('_') || token.contains("::")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The request as plain prose, where a structural word is a use and not a mention: it leaves out the text
+/// Athena's generators wrote or copied ([`is_generated_line`], and, in an approved-work request, everything from
+/// the `## Source` heading on), fenced code, quoted spans, example lists and paths or identifiers.
+fn plain_request_prose(request: &str) -> String {
+    let root_cause = request.contains(ROOT_CAUSE_ANCHOR);
+    let approval = request.contains(APPROVAL_ANCHOR);
+    let mut kept: Vec<String> = Vec::new();
+    let mut fenced = false;
+    for line in request.lines() {
+        if approval && line.trim_end() == "## Source" {
+            break;
+        }
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced || is_generated_line(line, root_cause, approval) {
+            continue;
+        }
+        kept.push(plain_line(line));
+    }
+    kept.join("\n")
+}
+
+/// The structural term a lowercase word is, in its singular, plural or possessive form.
+fn structural_term(word: &str) -> Option<&'static str> {
+    let word = word.strip_suffix("'s").unwrap_or(word);
+    STRUCTURAL_TERMS
+        .into_iter()
+        .find(|term| word == *term || word.strip_suffix('s') == Some(*term))
+}
+
+/// The structural terms the reading defines: an assumption that starts `Term <word>:` and gives at least
+/// three words of meaning after the colon, as the reader writes a `Code survey:` line.
+fn defined_terms(reading: &Reading) -> BTreeSet<&'static str> {
+    reading
+        .assumptions
+        .iter()
+        .filter_map(|assumption| {
+            let lower = assumption.trim().to_lowercase().replace('\u{2019}', "'");
+            let (word, meaning) = lower.strip_prefix("term ")?.split_once(':')?;
+            (meaning.split_whitespace().count() >= 3)
+                .then(|| structural_term(word.trim()))
+                .flatten()
+        })
+        .collect()
+}
+
+/// Refuses a reading that does not define a structural term (`ladder`, `rung`, `tier` or `layer`) the request
+/// itself uses. Root cause this check removes: readings are not checked against the outcome the user observes,
+/// so structural terms stay undefined. A request for "a ladder of requirements" was read as if the ladder were
+/// understood, no assumption said what it was, and the work was built on a guess; job 20261014-174815-7bf8
+/// failed that way, and job 20261017-173508-0wtc (an ontology decision) is the same class. This check covers 1
+/// of the 3 cited jobs, 20261014-174815-7bf8. It reads only the request and the reading, costs no model call
+/// and, like [`check_outcome_state`], skips a reading with no capability, a question, or no deliverable. A use
+/// is a whole word (`ladder`, `rungs`, `tier's`) in the plain prose of the request: `stepladder`, `delayer`,
+/// `layer_count` and `ladder.md` are not uses, and neither are quoted spans, backtick spans, fenced code, a
+/// parenthesised list of examples (two or more commas, or an opening of `e.g.`, `i.e.`, `such as`, `for
+/// example` or `like`), paths and identifiers, or text Athena's own generators wrote or copied (the earlier
+/// introspections a root-cause request carries, and the rung line, proposal line and `## Source` onward of an
+/// approved-work request, each skipped only when the generator's own sentence is present). A term is defined
+/// by an assumption that starts `Term ladder:` (the plural and `'s` forms of the word are accepted) with at
+/// least three words of meaning; the line may cite the file that defines it. The error names the terms and the
+/// repair. Limits: quoted mentions, terms outside the list (milestone, glossary, ontology) and the Hermes term
+/// of 20261017-173508-0wtc, whose recorded request holds no word of the list, are not covered. This check
+/// refuses more readings; the higher refusal rate is intended. The declared share, expected 3% of newly
+/// refused readings, is an estimate and not a measurement, over hand-written requests; the share the loop
+/// replay measures is recorded in the job's replay record at verification. Terms the repository defines
+/// (ladder, rung) are refused until the reading restates them with a `Term ladder:` line, and so are plain
+/// technical uses of tier (priority tiers) and layer (a caching layer). A proposed request read before this
+/// check whose plain prose uses a term is held until a person runs `athena go`: [`crate::steward::queued_work`]
+/// re-checks its stored reading and leaves it out of the queue.
+pub fn check_defined_terms(reading: &Reading, request: &str) -> Result<()> {
+    if reading.capability.is_none() || reading.question.is_some() || reading.deliverables.is_empty()
+    {
+        return Ok(());
+    }
+    let defined = defined_terms(reading);
+    let mut undefined: Vec<&'static str> = Vec::new();
+    for word in request_words(&plain_request_prose(request)) {
+        if let Some(term) = structural_term(&word.text)
+            && !defined.contains(term)
+            && !undefined.contains(&term)
+        {
+            undefined.push(term);
+        }
+    }
+    let Some(first) = undefined.first() else {
+        return Ok(());
+    };
+    bail!(
+        "the reading was refused because the request uses {} as a structural term but the reading does not \
+         define {}, so the work would be built on a guess at what it means. Repair: add an assumption that \
+         starts `Term {first}:` (one per term) saying what the term means in this job, and cite the file that \
+         defines it if there is one; a quoted or cited mention needs no definition",
+        undefined.join(" and "),
+        if undefined.len() == 1 { "it" } else { "them" }
     )
 }
 
@@ -8399,9 +8640,11 @@ mod tests {
             "20261014-174815-7bf8",
             "20261017-173508-0wtc",
             "outside the check",
+            "check_defined_terms",
         ] {
             assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
         }
+        assert!(!doc.contains("which does not catch them"), "{doc}");
         let acceptance_doc = source
             .split("pub fn check_reading_acceptance(")
             .next()
@@ -10278,6 +10521,414 @@ mod tests {
     /// The first refusing check of the reading, as the gate runs them.
     fn gate_refuser(reading: &Reading) -> Option<&'static str> {
         refusing_check(reading, "change the reading rules", None, &[], None).map(|(name, _)| name)
+    }
+
+    /// The first refusing check of the reading for this request, as the gate runs them.
+    fn refuser_for(reading: &Reading, request: &str) -> Option<&'static str> {
+        refusing_check(reading, request, None, &[], None).map(|(name, _)| name)
+    }
+
+    /// A reading that passes every check for a docs change, plus these assumptions.
+    fn terms_reading(assumptions: &[&str]) -> Reading {
+        let mut reading = governed_reading(&["docs/x.md"], &["docs/x.md exists"], &[]);
+        reading.assumptions = assumptions.iter().map(|a| a.to_string()).collect();
+        reading
+    }
+
+    /// The error of `check_defined_terms` for this request and these assumptions, if it refuses.
+    fn terms_error(request: &str, assumptions: &[&str]) -> Option<String> {
+        check_defined_terms(&terms_reading(assumptions), request)
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    const LADDER_DEFINED: &str =
+        "Term ladder: the ordered levels of requirements, from the design down to the code";
+
+    /// The request of job 20261014-174815-7bf8, whose plain prose uses the ladder.
+    const LADDER_REQUEST: &str = "Build what the BRIEF.md addendum '2026-10-14: A loop that steers Athena, \
+         roles, and a ladder of requirements' asks for, starting small. Use the ladder to decide what it may \
+         change itself.";
+
+    #[test]
+    fn defined_terms_refuses_each_undefined_structural_term() {
+        for (request, term) in [
+            ("Add a ladder of requirements.", "ladder"),
+            ("Rename the rung.", "rung"),
+            ("Show the top tier first.", "tier"),
+            ("Add a caching layer.", "layer"),
+            ("The ladders are long.", "ladder"),
+            ("The rungs are fixed.", "rung"),
+            ("Move the ladder's order.", "ladder"),
+            ("Fix the TIER.", "tier"),
+            (LADDER_REQUEST, "ladder"),
+        ] {
+            let error = terms_error(request, &[]).unwrap_or_else(|| panic!("{request}: accepted"));
+            assert!(
+                error.starts_with("the reading was refused because"),
+                "{error}"
+            );
+            assert!(error.contains(term), "{request}: {error}");
+            assert!(error.contains("`Term "), "{error}");
+            assert!(!error.contains('\n'), "{error}");
+        }
+        // The gate runs it and names it as the check that refused.
+        let reading = terms_reading(&[]);
+        assert_eq!(
+            refuser_for(&reading, LADDER_REQUEST),
+            Some("check_defined_terms")
+        );
+        let gate = check_reading_acceptance(&reading, LADDER_REQUEST, None, &[], None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(Some(gate), terms_error(LADDER_REQUEST, &[]));
+        // A definition, in the singular or the plural, with at least three words of meaning, passes.
+        assert_eq!(terms_error(LADDER_REQUEST, &[LADDER_DEFINED]), None);
+        assert_eq!(
+            terms_error(
+                "The ladders are long.",
+                &["  TERM Ladders: what the file docs/x.md calls levels"]
+            ),
+            None
+        );
+        assert_eq!(
+            terms_error(
+                "Add a caching layer.",
+                &["Term layers: the cache between the store and the reader"]
+            ),
+            None
+        );
+        assert_eq!(
+            refuser_for(&terms_reading(&[LADDER_DEFINED]), LADDER_REQUEST),
+            None
+        );
+        // A definition of one term leaves the other undefined, and the error names only that one.
+        let error = terms_error("The ladder has a tier.", &[LADDER_DEFINED]).unwrap();
+        assert!(error.contains("uses tier as"), "{error}");
+        assert!(!error.contains("ladder"), "{error}");
+        let both = terms_error("The ladder has a tier.", &[]).unwrap();
+        assert!(both.contains("ladder and tier"), "{both}");
+        assert!(both.contains("define them"), "{both}");
+        // Too short a meaning, another word, or another label does not define it.
+        for weak in [
+            "Term ladder: levels",
+            "Term rung: the step of a ladder on the wall",
+            "Ladder: the ordered levels of requirements",
+            "Terms ladder: the ordered levels of requirements",
+        ] {
+            assert!(terms_error(LADDER_REQUEST, &[weak]).is_some(), "{weak}");
+        }
+    }
+
+    #[test]
+    fn defined_terms_ignores_generated_lines_quotes_and_parentheses() {
+        // The shape of hestia's root-cause request: earlier introspections' words are cited, not used.
+        let root_cause = "Priority: high\n\n\
+             Fix the root cause of a repeated failure: a ladder has no rung\n\n\
+             The same cause has produced failures in more than one job. Find the cause where it originates and \
+             fix it there, so the whole class is prevented; do not work around one instance.\n\n\
+             Failure class: Tier problem (20261001-000000-abcd)\n\
+             Cause: the layer is undefined\n\
+             Seen 2 time(s) in 2 jobs. The introspections that record it:\n\
+             Introspection 20261029-181811-bs86 (job 20261029-111202-2bpc); prevention it proposed: add a ladder\n\
+             Introspection 20261030-170739-hq09 (job 20261030-060751-5389); prevention it proposed: a tier list\n\n\
+             Acceptance:\n- The root cause is named\n\nFiles: crates/\n";
+        assert_eq!(terms_error(root_cause, &[]), None);
+        // The shape of the approved-work request: the rung line, the proposal line and the copied sections.
+        let approval = "Change the thing\n\n\
+             A person approved this proposal from the steward role. Carry the work out as an ordinary change.\n\
+             Everything the proposal cites is copied below; nothing here points at a file you cannot open.\n\n\
+             Proposal: 20261015-003903-khz6 (key k), queued at 2026-10-15T00:00:00Z by the steward role.\n\
+             Rung of the requirements ladder: design decisions.\n\n\
+             ## Source\n\nThe ladder has five rungs in this layer.\n\n## Evidence\n\n### 1. a tier\n";
+        assert_eq!(terms_error(approval, &[]), None);
+        // Quoted spans: double, curly, backtick and single.
+        for quoted in [
+            "Rename \"ladder\" to `tier` and 'layer' in the guide.",
+            "Rename \u{201C}ladder\u{201D} and \u{2018}rung\u{2019} in the guide.",
+            "The addendum '2026-10-14: A ladder of requirements' asks for roles.",
+            "Rename `the ladder of tiers` in the guide.",
+            "Keep the code block:\n```\nlet ladder = tier;\n```\nOnly.",
+        ] {
+            assert_eq!(terms_error(quoted, &[]), None, "{quoted}");
+        }
+        // Parenthesised example lists: two or more commas, or an example opening.
+        for listed in [
+            "Define the terms (ladder, layer, tier) in the guide.",
+            "Define the terms (e.g. a tier) in the guide.",
+            "Define the terms (such as a rung) in the guide.",
+            "Define the terms (for example the layer) in the guide.",
+        ] {
+            assert_eq!(terms_error(listed, &[]), None, "{listed}");
+        }
+        // Paths and identifiers are not uses.
+        assert_eq!(
+            terms_error(
+                "Edit crates/x/layer/mod.rs, layer_count, Ladder::new and ladder.md.",
+                &[]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn defined_terms_keeps_hand_written_lines_and_single_comma_parentheticals() {
+        for (request, term) in [
+            ("Introspection of the ladder is needed.", "ladder"),
+            ("Cause: the ladder is undefined", "ladder"),
+            ("Failure class: the tier is undefined", "tier"),
+            (
+                "Update the guide.\n\nRung of the requirements ladder: x.\n\n## Source\n\nthe tier",
+                "ladder",
+            ),
+            (
+                "Define it (the ladder, which ranks requirements).",
+                "ladder",
+            ),
+            ("Fix the 'ladder", "ladder"),
+            ("Sri's note: don't rename the ladder", "ladder"),
+            ("Define the ladder (a list, of two).", "ladder"),
+        ] {
+            let error = terms_error(request, &[]).unwrap_or_else(|| panic!("{request}: accepted"));
+            assert!(error.contains(term), "{request}: {error}");
+        }
+        // The anchor sentences skip only the exact generated shapes; the title and the sentences between count.
+        let anchored_root_cause = "Introspection of the ladder is needed.\n\
+             The same cause has produced failures in more than one job.\nCause: the rung";
+        let error = terms_error(anchored_root_cause, &[]).unwrap();
+        assert!(
+            error.contains("ladder") && !error.contains("rung"),
+            "{error}"
+        );
+        let approval = "Fix the ladder ordering\n\n\
+             A person approved this proposal from the steward role. The tier matters.\n\n\
+             Rung of the requirements ladder: design decisions.\n\n## Source\n\nthe layer";
+        let error = terms_error(approval, &[]).unwrap();
+        assert!(error.contains("ladder and tier"), "{error}");
+        assert!(!error.contains("layer"), "{error}");
+    }
+
+    #[test]
+    fn defined_terms_matches_whole_words_only() {
+        for request in [
+            "Rename the stepladder helper and remove the delayer module.",
+            "Add a multilayered cache and a laddered scale.",
+            "Update the guide.",
+            "Edit ladder.md and layer.rs.",
+            "The tiers_list field is renamed.",
+            "Avoid the word 'layer' here.",
+        ] {
+            assert_eq!(terms_error(request, &[]), None, "{request}");
+            assert_eq!(refuser_for(&terms_reading(&[]), request), None, "{request}");
+        }
+        // Positive controls: the plural is a use.
+        assert!(terms_error("Document the layers.", &[]).is_some());
+        assert!(terms_error("Count the rungs.", &[]).is_some());
+    }
+
+    #[test]
+    fn defined_terms_skips_declines_questions_and_no_deliverables() {
+        let request = "Add a ladder of requirements.";
+        assert!(terms_error(request, &[]).is_some());
+        let mut declined = terms_reading(&[]);
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        check_defined_terms(&declined, request).unwrap();
+        let mut asking = terms_reading(&[]);
+        asking.question = Some("Which ladder?".into());
+        check_defined_terms(&asking, request).unwrap();
+        let mut none = terms_reading(&[]);
+        none.deliverables.clear();
+        check_defined_terms(&none, request).unwrap();
+    }
+
+    #[test]
+    fn defined_terms_has_one_step_line_after_environment_reach() {
+        let source = include_str!("reading.rs");
+        let body = source
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        let steps: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("step!(check_"))
+            .collect();
+        let line = "step!(check_defined_terms(reading, request));";
+        assert_eq!(steps.iter().filter(|l| **l == line).count(), 1, "{steps:?}");
+        let reach = steps
+            .iter()
+            .position(|l| *l == "step!(check_environment_reach(reading));")
+            .unwrap();
+        assert_eq!(steps[reach + 1], line);
+        let acceptance_doc = source
+            .split("pub fn check_reading_acceptance(")
+            .next()
+            .unwrap();
+        assert!(acceptance_doc.contains("[`check_defined_terms`]"));
+    }
+
+    #[test]
+    fn defined_terms_refusal_needs_the_step_line() {
+        // The refusal comes from the gate and not from a direct call: the gate refuses the undefined-ladder
+        // reading under the check's own name, and the step line is in its body.
+        let reading = terms_reading(&[]);
+        assert_eq!(
+            refuser_for(&reading, LADDER_REQUEST),
+            Some("check_defined_terms")
+        );
+        assert!(check_reading_acceptance(&reading, LADDER_REQUEST, None, &[], None).is_err());
+        let body = include_str!("reading.rs")
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        assert!(body.contains("step!(check_defined_terms(reading, request));"));
+    }
+
+    /// The text of the `///` block above `pub fn check_defined_terms(`, as one line.
+    fn defined_terms_doc() -> String {
+        let before = include_str!("reading.rs")
+            .split("pub fn check_defined_terms(")
+            .next()
+            .unwrap();
+        let mut doc_lines: Vec<&str> = before
+            .lines()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("///"))
+            .map(|l| l.trim_start().trim_start_matches('/'))
+            .collect();
+        doc_lines.reverse();
+        doc_lines
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn defined_terms_doc_and_changelog_name_the_cause() {
+        let before = include_str!("reading.rs")
+            .split("pub fn check_defined_terms(")
+            .next()
+            .unwrap();
+        let doc_block = before.rsplit("\n\n").next().unwrap();
+        assert!(
+            doc_block
+                .lines()
+                .all(|l| l.starts_with("///") && l != "///"),
+            "{doc_block}"
+        );
+        let doc = defined_terms_doc();
+        for needle in [
+            "readings are not checked against the outcome the user observes",
+            "structural terms",
+            "20261014-174815-7bf8",
+            "20261017-173508-0wtc",
+            "quoted",
+            "terms outside the list",
+            "Hermes",
+            "no deliverable",
+        ] {
+            assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+        }
+        let changelog = include_str!("../../../CHANGELOG.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for needle in [
+            "reading::check_defined_terms",
+            "readings are not checked against the outcome the user observes",
+            "structural terms",
+            "20261014-174815-7bf8",
+        ] {
+            assert!(changelog.contains(needle), "the changelog lacks {needle:?}");
+        }
+    }
+
+    #[test]
+    fn defined_terms_refusal_is_declared_intended() {
+        let declared = replay_declaration(
+            &[Criterion {
+                text: "The change refuses more readings: expected 3% of newly refused readings"
+                    .into(),
+                kind: CriterionKind::Behavior,
+            }],
+            &[],
+        );
+        assert_eq!(declared.share, Some(3));
+        let doc = defined_terms_doc();
+        let changelog = include_str!("../../../CHANGELOG.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let decisions = include_str!("../../../docs/decisions.md")
+            .split("## D164 ·")
+            .nth(1)
+            .expect("D164 is in the decision log")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for (label, text) in [
+            ("the doc comment", &doc),
+            ("the changelog", &changelog),
+            ("D164", &decisions),
+        ] {
+            for needle in [
+                "This check refuses more readings; the higher refusal rate is intended",
+                "expected 3% of newly refused readings",
+                "estimate",
+                "hand-written requests",
+                "(ladder, rung) are refused until the reading restates them",
+                "priority tiers",
+                "caching layer",
+                "replay record at verification",
+                "held until a person runs `athena go`",
+            ] {
+                assert!(text.contains(needle), "{label} lacks {needle:?}");
+            }
+        }
+        assert!(
+            doc.contains("This check refuses more readings; the higher refusal rate is intended."),
+            "{doc}"
+        );
+        for needle in [
+            "decide whether to narrow",
+            "approve_request",
+            "accept_request",
+            "shared delimiter",
+        ] {
+            assert!(decisions.contains(needle), "D164 lacks {needle:?}");
+        }
+        // The pinned false refusals: priority tiers and a caching layer need a definition.
+        for request in [
+            "Order the work items by priority tier.",
+            "Add a caching layer.",
+        ] {
+            assert_eq!(
+                refuser_for(&terms_reading(&[]), request),
+                Some("check_defined_terms"),
+                "{request}"
+            );
+        }
+        // The check_outcome_state comment no longer says the other two jobs are outside any check.
+        let outcome_doc = include_str!("reading.rs")
+            .split("pub fn check_outcome_state(")
+            .next()
+            .unwrap()
+            .rsplit("\n\n")
+            .next()
+            .unwrap()
+            .lines()
+            .map(|l| l.trim_start_matches('/').trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(outcome_doc.contains("check_defined_terms"), "{outcome_doc}");
+        assert!(
+            !outcome_doc.contains("which does not catch them"),
+            "{outcome_doc}"
+        );
     }
 
     /// Asserts the reading is refused by the history fixture check, then accepted once the fixture criterion
