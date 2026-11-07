@@ -504,6 +504,16 @@ mod tests {
                 "planner frame lacks: {wording}"
             );
         }
+        // The reading stage enforces the same three shapes by mechanism (`check_history_fixture` in
+        // athena-core `reading.rs`): a code reading with a landing, history or attribution rule is refused
+        // unless a behavior criterion names them. The planner frame must keep asking for the same three, so
+        // the plan and the accepted reading do not drift apart.
+        for shape in ["intervention commit", "records-only commit", "job landing"] {
+            assert!(
+                PLANNER_FRAME.text.contains(shape),
+                "planner frame lacks the shape the reading check requires: {shape}"
+            );
+        }
         for wording in [
             "Raise a major finding when a landing, history or attribution plan",
             "lacks the commit-shape table",

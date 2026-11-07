@@ -72,7 +72,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 30] = [
+const INPUT_FORMS: [&str; 34] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -103,6 +103,10 @@ const INPUT_FORMS: [&str; 30] = [
     "environment-assumption",
     "trigger-word-inside-other-word",
     "pr-or-api-wording",
+    "landing-history-rule",
+    "realistic-branch-fixture",
+    "landing-word-without-commit-shape",
+    "landing-source-path-without-commit-shape",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -716,6 +720,131 @@ fn reading_check_cases() -> Vec<Case> {
     c.reading.assumptions = vec![
         "Code survey: read crates/athena-core/src/reading.rs, the gate every reading passes".into(),
     ];
+    out.push(c);
+
+    // A code reading with a rule on commit classification, the history check or the attribution check needs a
+    // behavior criterion that names a realistic-branch fixture. Each source job below is rebuilt from its brief:
+    // the deliverable lists and the nature of the rule, not the original reading text.
+    let survey =
+        "Code survey: read crates/athena-core/src/reading.rs, the gate every reading passes";
+    let fixture_text = "Run `cargo test -p athena-cli --test reconcile`: on a realistic-branch fixture with an \
+                        intervention commit, a records-only commit and the job landing, the rule classifies \
+                        each as intended";
+    let history_case = |id: &'static str,
+                        source: &'static str,
+                        forms: &'static [&'static str],
+                        request: &str,
+                        paths: &[&str],
+                        expected: Expected| {
+        let mut c = case(id, source, forms, request, 1, expected);
+        c.reading.class_of_work = "code".into();
+        c.reading.acceptance_criteria[0].kind = CriterionKind::Behavior;
+        c.reading.assumptions = vec![survey.into()];
+        c.reading.deliverables = paths
+            .iter()
+            .map(|p| deliverable(p, DeliverableAction::Modify))
+            .collect();
+        // The land, gh and commits sources are not in the small file set of the corpus.
+        c.repo_files = None;
+        c
+    };
+    out.push(history_case(
+        "landing-rule-on-job-commits-only-job-1rve",
+        "job 20261024-153908-1rve, a pr_commits classification tested on job commits; rebuilt from the job brief",
+        &["dash-bullet", "landing-history-rule"],
+        &lines(&[
+            "Classify pull request commits by content.",
+            "- Run `cargo test -p athena-core land::`: pr_commits classifies the job commits by content",
+        ]),
+        &[
+            "crates/athena-core/src/land.rs",
+            "crates/athena-core/src/gh.rs",
+            "crates/athena-gate/src/invariant.rs",
+        ],
+        Expected::Refuse("check_history_fixture"),
+    ));
+    out.push(history_case(
+        "commit-shape-rule-without-a-fixture-job-e65v",
+        "job 20261024-154552-e65v, a merge method that follows the commit shape; rebuilt from the job brief",
+        &["dash-bullet", "landing-history-rule"],
+        &lines(&[
+            "Make the reconcile merge method follow the commit shape.",
+            "- Run `cargo test -p athena-core land::`: the merge method follows the commit shape of the branch",
+        ]),
+        &[
+            "crates/athena-core/src/land.rs",
+            "crates/athena-gate/src/invariant.rs",
+        ],
+        Expected::Refuse("check_history_fixture"),
+    ));
+    out.push(history_case(
+        "trailer-cutover-reading-without-a-fixture-job-hac3",
+        "job 20261025-012657-hac3, a trailer cutover; rebuilt from the job brief",
+        &["dash-bullet", "landing-history-rule"],
+        &lines(&[
+            "Stop writing Athena trailers after the cutover commit.",
+            "- Run `cargo test -p athena-cli --test lifecycle`: no Athena trailers are written after C0",
+        ]),
+        &[
+            "crates/athena-core/src/commits.rs",
+            "crates/athena-git/src/attrs.rs",
+        ],
+        Expected::Refuse("check_history_fixture"),
+    ));
+    let mut c = history_case(
+        "landing-rule-with-a-realistic-branch-fixture",
+        "job 20261024-153908-1rve, the same rule with a realistic-branch fixture criterion; rebuilt from the job brief",
+        &[
+            "dash-bullet",
+            "landing-history-rule",
+            "realistic-branch-fixture",
+        ],
+        &lines(&[
+            "Classify pull request commits by content.",
+            "- Run `cargo test -p athena-core land::`: pr_commits classifies the job commits by content",
+        ]),
+        &["crates/athena-core/src/land.rs"],
+        Expected::Accept,
+    );
+    c.reading.acceptance_criteria.push(Criterion {
+        text: fixture_text.into(),
+        kind: CriterionKind::Behavior,
+    });
+    out.push(c);
+    out.push(history_case(
+        "landing-queue-reading-is-not-refused",
+        "the landing queue and CI wait jobs, which name landing but no commit shape; rebuilt from the job brief",
+        &["dash-bullet", "landing-word-without-commit-shape"],
+        &lines(&[
+            "Land jobs first in, first out.",
+            "- Run `cargo test -p athena-core gh::`: a job waits for the early CI run and lands in queue order",
+        ]),
+        &["crates/athena-core/src/gh/landing.rs"],
+        Expected::Accept,
+    ));
+    out.push(history_case(
+        "land-path-deliverable-without-a-commit-shape-rule",
+        "the dispatch-branch job, which changed land.rs with no commit-shape rule; rebuilt from the job brief",
+        &["dash-bullet", "landing-source-path-without-commit-shape"],
+        &lines(&[
+            "Land a job only on the branch it was dispatched from.",
+            "- Run `cargo test -p athena-core land::`: a job lands only on the branch it was dispatched from",
+        ]),
+        &["crates/athena-core/src/land.rs"],
+        Expected::Accept,
+    ));
+    let mut c = case(
+        "docs-reading-naming-the-history-check",
+        "job 20261024-220048-engm, a docs reading that names the history check; rebuilt from the job brief",
+        &["dash-bullet", "landing-history-rule"],
+        &lines(&[
+            "Describe the history check.",
+            "- The history check reads the job records on the records branch",
+        ]),
+        1,
+        Expected::Accept,
+    );
+    c.reading.acceptance_criteria[0].kind = CriterionKind::Content;
     out.push(c);
 
     // A design reading is written from request text alone, with no inventory of the existing code.
@@ -1431,6 +1560,51 @@ fn environment_reach_refusal_is_declared_intended() {
     assert!(changelog.contains("check_environment_reach"));
     assert!(changelog.contains("higher refusal rate is intended"));
     assert!(changelog.contains("expected 8% of newly refused readings"));
+}
+
+#[test]
+fn history_fixture_refusal_is_declared_intended() {
+    // The declared share is read from the criterion text by the replay.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: "The change refuses more readings: expected 4% of newly refused readings".into(),
+            kind: CriterionKind::Behavior,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(4));
+    // The step line is in refusing_check, and the doc comment names the cause and the estimate.
+    assert!(acceptance_check_names(READING_SOURCE).contains(&"check_history_fixture".to_string()));
+    let doc = READING_SOURCE
+        .split("pub fn check_history_fixture(")
+        .next()
+        .unwrap()
+        .lines()
+        .rev()
+        .take_while(|l| l.starts_with("///"))
+        .map(|l| l.trim_start_matches('/').trim())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "This check refuses more readings; the higher refusal rate is intended.",
+        "derived from the happy-path commit shape",
+        "20261024-153908-1rve",
+        "20261024-154552-e65v",
+        "20261025-012657-hac3",
+        "estimate",
+    ] {
+        assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+    }
+    let changelog = include_str!("../../../CHANGELOG.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(changelog.contains("check_history_fixture"));
+    assert!(changelog.contains("higher refusal rate is intended"));
+    assert!(changelog.contains("expected 4% of newly refused readings"));
 }
 
 #[test]

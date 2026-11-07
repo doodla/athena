@@ -9,6 +9,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A reading check for landing, history and attribution rules, `reading::check_history_fixture`, run as a
+  `step!` in `refusing_check` right after `check_code_survey`. Root cause: rules about landing, history and
+  attribution were derived from the happy-path commit shape, the job's own commits, and not from every shape
+  the real branch holds; the only guard was prose in the planner and critic prompts. Jobs
+  20261024-153908-1rve, 20261024-154552-e65v and 20261025-012657-hac3 each began from a reading whose criteria
+  never required a branch with an intervention commit, a records-only commit and the job landing, and the
+  missing shapes surfaced late. The check is fixed where readings are accepted, not at one `pr_commits` or
+  trailer instance, because every landing rule passes that seam and the next one would otherwise be tested on
+  job commits only. The check reads only the reading: it applies to a code or tests reading with a behavior
+  criterion, and fires when any criterion holds a classification phrase or function name (`commit shape`,
+  `pr_commits`, `classify_commit`, `history check`, `attribution check`, `trailer`, `--history` and the like).
+  A file path or the bare word `landing` does not fire it. It is met by a behavior criterion that names a
+  realistic-branch fixture with an intervention commit, a records-only commit and the job landing. The
+  retry-after-block landing, and any other shape the branch produces, is not enforced: the planner's
+  commit-shape table remains the guard, and the refusal text asks the reader to name them. There is no reader
+  rule line for it, because this change does not grow reader-facing text and the rule list lives in
+  `briefs.rs`, which it leaves alone; the reader sees the refusal text, with an example criterion, on its
+  second read. This check refuses more readings; the higher refusal rate is intended: expected 4% of newly
+  refused readings, an estimate and not measured (about 8 of the last 200 commits changed classification,
+  history or attribution behavior).
 - A reading check for the place an action runs, `reading::check_environment_reach`, run as a `step!` in
   `refusing_check` right after `check_outcome_state`. Root cause: the reading stage had no step asking who
   performs each action, where, with what permissions, and what data it reaches, so a reading worked from the
