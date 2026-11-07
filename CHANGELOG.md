@@ -9,6 +9,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A reading check for the place an action runs, `reading::check_environment_reach`, run as a `step!` in
+  `refusing_check` right after `check_outcome_state`. Root cause: the reading stage had no step asking who
+  performs each action, where, with what permissions, and what data it reaches, so a reading worked from the
+  request text and the local repository view and assumed that CI can write, that a GitHub origin exists, or that
+  the job records are reachable. Job 20261024-220048-engm stopped in planning on records a read-only CI job could
+  not reach; job 20261025-070538-8ra0 was refused because its early push and pull request met a working copy
+  with no origin or a non-GitHub origin; job 20261025-034247-nm0k cited job records and history without quoting
+  the figures or listing a file that holds them. The check reads only a created or modified workflow
+  deliverable, behavior criteria and the summary. It fires on a workflow deliverable, on a host action in a
+  behavior criterion (a `git` or `gh` command, a push with a ref or origin, a pull request or `PR` with an
+  opening, merging or reusing verb, a GitHub API call, a CI write), on a behavior criterion that reads the
+  records branch or git history, and on a summary that cites job records or history as a source. The first
+  three are met by one assumption that starts `Environment:` and names the site, its read or write permissions
+  and the data or refs it reaches; a local working copy must also say what happens with no origin or a
+  non-GitHub origin. The summary case is met by a counted figure quoted in an assumption (`3 jobs`, `40%`) or by
+  an `Environment:` assumption that lists a reachable data or doc file. A records-branch read in a criterion
+  asks for the `Environment:` statement and not for figures, because figures say nothing about where code runs.
+  The reader brief gains one rule line. Limits: the check is lexical, skips paths, identifiers and non-command
+  backticks, misses a source more than 6 words from its verb, and does not check that a listed file exists
+  (`check_reading_references` does, for known top directories). This check refuses more readings; the higher
+  refusal rate is intended; expected 8% of newly refused readings. That 8% is an estimate and was not measured:
+  the records are not in the producer's working copy, and the basis is that few stored readings carry a
+  workflow deliverable, a push or pull request action, or records cited in the summary. The replay at
+  verification measures it. Tests: `cargo test -p athena-core environment_reach` and the `environment-*` cases of
+  `cargo test -p athena-core --test refusal_corpus`.
 - Two structure rules in the mirror registry (`crates/athena-core/src/mirrors.rs`), so a prompt edit that breaks
   its list structure and a decision inserted inside another are sent back at the producer step, not found at the
   final verdict. Root cause: nothing compared the finished diff with the structure it must keep, before
