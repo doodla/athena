@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060835-ryvc",
+  "round": 2,
+  "at": "2026-11-07T12:23:45.48121787Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-agent/src/fake.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-agent/src/fake.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The speed-cue detector scans the quoted cause and prevention text in Hestia's root-cause requests, so requests to change a rule, including this job's own, are refused as speed requests. The plan pins this false positive as a Refuse corpus case.",
+      "evidence": "`root_cause_request_at` (crates/athena-core/src/hestia.rs:458-507) builds every High-priority root-cause request by pasting text from earlier records into the body: `Failure class: …`, `Cause: …`, and one `Introspection … ; prevention it proposed: …` line for each introspection. The plan's detector reads the whole request, so any root-cause request whose quoted cause or prevention says 'speed-up', 'faster', 'latency' or 'cut … minutes' counts as a speed request. That includes this job's own request, which quotes 'claims a delay or speed-up' (strong cue `speed` + `up`). Such requests ask to change a rule, not to speed anything up. A truthful reading has no stages and no place where a delay sits, so the reader must make up a Timeline or be refused twice. The plan treats this false positive as correct: its corpus case expects `check_speed_timeline` to refuse a root-cause request whose only cue is the quoted prevention line. This is a rule with an obvious false positive on a request shape Hestia generates automatically. Fix: Detect speed cues only in the request's own text. Skip the lines that quote records: lines starting `Failure class:` or `Cause:`, and `Introspection <id> (job <id>); prevention it proposed:` lines, the shapes `root_cause_request_at` writes. Better still, put the list of quoted-line prefixes in one place shared with hestia.rs so they cannot drift. Change the corpus case to expect Accept (a root-cause request whose only cue is quoted prevention text needs no Timeline). Add a case where the request's own goal line asks for a speed-up and is still refused. Add a unit test that feeds the real output of `root_cause_request` for a speed-related cause through `speed_request` and expects false.",
+      "location": "Plan step 2 (`speed_request` over `request_words` of the whole request) and step 6 corpus case `root-cause-request-names-a-delay-without-a-timeline` (expected Refuse)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Treating a cut verb ('save', 'trim', 'reduce') plus a nearby duration as a strong cue flags common requests that are not about speed.",
+      "evidence": "Common requests that are not about speed match this rule. Examples: 'Save the state every 30 seconds', 'Reduce the retry timeout to 10 s', 'Trim the log after 5 minutes'. Each of these would be refused until the reader writes a stage timeline. The corpus pins only 'add a retry delay setting' and 'fix a timing attack', neither of which uses a cut verb with a figure. Fix: Count a cut verb with a figure only when the figure follows 'by', 'from' or 'off', or the verb's object is a time word ('save 12 minutes', 'cut 5 minutes from'). Add an Accept corpus pin for 'Save the state every 30 seconds' and one for 'Set the retry timeout to 10 s'.",
+      "location": "Plan step 2, CUT_VERBS ('save', 'saves', 'saving', 'trim', 'reduce') plus a duration figure within five words, used as a strong cue",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The fake reader's Timeline passes `check_reading_references` by falsely saying a file does not exist. That is fragile and no test pins it against the reference check.",
+      "evidence": "The text uses the ABSENCE_PHRASES skip in `check_reading_references` (reading.rs:3030, 3160) to hide a path that does exist in Athena's repository. That works with the current skip rule, but it ties every fixture-based CLI test to the exact wording of that rule. The added assumption is also a false statement in every recorded fake reading. Fix: Keep the approach if no better one fits one run. But state in the fake.rs comment that the absence phrase exists only to pass `check_reading_references` in the fixture repository, and add a test that asserts the fake's Timeline passes both `check_speed_timeline` and `check_reading_references` with a fixture-like `repo_files`. If athena-agent cannot call athena-core, put it in a drain-level or athena-core test. Then a change to ABSENCE_PHRASES fails a test that names the cause.",
+      "location": "Plan step 5 / Decision 6: the fake reader's fixed Timeline 'read crates/athena-agent/src/fake.rs, which does not exist in a nested-run repository'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 2 deals with the earlier findings. The fake reader gets a Timeline that passes both gates in the fixture repository, the no-timing escape still requires stages and a placement, 'delay' alone does not place the delay, weak cues need a cut verb or 'too' before them, and the crates/ limit is stated (`check_code_survey` has the same limit, reading.rs:3888-3934). I checked the named code against the snapshot: `refusing_check` (3226-3252) with `check_outcome_state` at 3248, `sentences` splitting at ';' (3045), ABSENCE_PHRASES including 'not exist' (3030), `names_crates_path` (3838), the drain test at drain.rs:7008, and fake.rs:283 with a test module at :408. A grep of strong cue words across crates/*.rs found no other request text that goes through the gate. One soundness problem remains. Hestia's `root_cause_request_at` (hestia.rs:458-507) pastes introspection cause and prevention text into every root-cause request, and the detector scans that quoted text. Root-cause requests about speed-related failure classes, including this job's own request, would therefore need a made-up stage timeline. The plan even adds a corpus case that expects this refusal. Fix the detection so it skips quoted record lines, and flip that case to Accept. Two minor points: the 'save/trim/reduce + duration' cue gives false positives, and the fake's absence-phrase workaround is fragile. Athena's own finding on fake.rs is fair, and the plan justifies the extra file."
+}
