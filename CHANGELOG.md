@@ -9,6 +9,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A reading check for structural request terms, `reading::check_defined_terms`, run as a `step!` in
+  `refusing_check` right after `check_environment_reach`. Root cause: readings are not checked against the
+  outcome the user observes, so structural terms stay undefined. Job 20261014-174815-7bf8 asked for roles and
+  "a ladder of requirements", the reading never said what the ladder was, and the work was built on a guess;
+  job 20261017-173508-0wtc, an ontology decision, is the same class. The check refuses a reading that does not
+  define a structural term (ladder, rung, tier, layer) the request itself uses, as a whole word in its plain
+  prose; the reading defines a term with an assumption that starts `Term ladder:` and may cite the file that
+  defines it. A quoted or cited mention is not a use: quoted and backtick spans, a parenthesised list of
+  examples, paths and identifiers, `stepladder` and `delayer`, and the text Athena's own generators write or
+  copy (the earlier introspections in a root-cause request, and the rung line, proposal line and copied
+  sections of an approved-work request) do not count. check_defined_terms covers 1 of the 3 cited jobs,
+  20261014-174815-7bf8, and replaying the recorded requests shows 20261014-082328-g6vy is caught by
+  `check_outcome_state` and 20261017-173508-0wtc by no check: its Hermes term and terms outside the list are
+  not covered. This check refuses more readings; the higher refusal rate is intended: expected 3% of newly
+  refused readings, an estimate over hand-written requests and not a measurement; the share the loop replay
+  measures is recorded in the job's replay record at verification. Terms the repository defines (ladder, rung)
+  are refused until the reading restates them, and so are plain technical uses of tier (priority tiers) and
+  layer (a caching layer). A proposed request read before this change whose plain prose uses a term is held
+  until a person runs `athena go`: the queue re-checks its stored reading and leaves it out. The reader sees a
+  rule line for it and the refusal text, as recorded in D164.
 - A reading check for landing, history and attribution rules, `reading::check_history_fixture`, run as a
   `step!` in `refusing_check` right after `check_code_survey`. Root cause: rules about landing, history and
   attribution were derived from the happy-path commit shape, the job's own commits, and not from every shape

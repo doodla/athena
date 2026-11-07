@@ -1,0 +1,299 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-110049-k8c2",
+  "round": 1,
+  "at": "2026-11-07T18:20:51.471338662Z",
+  "invocation_seq": 2,
+  "approach": "Add one reading check, `check_defined_terms(reading, request)`, in crates/athena-core/src/reading.rs. It is one `step!` line in `refusing_check`, placed after `check_environment_reach` and before `check_boundary_and_repo_files`. A small const lists the structural words (ladder, rung, tier, layer). `request_words` already splits text into lowercase whole words, so `structural_terms_in` reuses it; plurals and `'s` map to the base word, and `stepladder` and `delayer` do not match. For each word the request uses, the reading must have (a) a summary line or assumption that starts `Term <word>:` followed by at least 4 words saying what it ranks or does, and (b) a criterion of kind behavior that names the word as a whole word. If not, the check bails with \"the reading was refused because ...\" and gives both repairs. `read_for` already sends that text to the reader for its one re-read, so the reader prompt needs no change. It skips a reading with no capability or with a question. A doc comment names the root cause, jobs 7bf8 and 0wtc, the limits, and \"expected 3% of newly refused readings\". The tests are corpus cases in refusal_corpus.rs and unit tests in reading.rs. The replay test over the three cited requests is rewritten: g6vy is caught by check_outcome_state, 7bf8 by check_defined_terms, and 0wtc holds no structural word and is asserted as outside the class. The old check_outcome_state doc, its test needles, and the old CHANGELOG sentence \"are not caught\" are corrected. A rule line is added to READING_RULES in briefs.rs, which is brief text and not the budgeted prompt, so the reader is told up front. The change is recorded in CHANGELOG.md and as a new decision D164 that amends D161 in prose, because the log is append-only.",
+  "decisions": [
+    {
+      "choice": "Fix at reading acceptance: a new `step!(check_defined_terms(reading, request))` in `refusing_check`, which is where a reading is first accepted without being checked against what the user observes. Do not patch one job's request.",
+      "reason": "The shared cause is that `check_reading_acceptance` takes request wording on faith. `check_outcome_state` (reading.rs:3680) covers only four delivery verbs, and its doc names the other two jobs as uncovered. One new step covers the whole structural-term class with no new plumbing, and the corpus mechanism (`every_acceptance_check_has_a_refusing_corpus_case`) forces a case for it.",
+      "rejected": [
+        {
+          "option": "Extend check_outcome_state's verb list with ladder, tier and similar",
+          "why": "They are nouns that rank things, not delivery verbs. The repair differs (a definition plus an observable test, not a reachable state), and that function's rules and tests are out of scope beyond its doc."
+        },
+        {
+          "option": "Read docs/ontology.toml at reading time and check against the glossary",
+          "why": "It needs new plumbing and touches the rejected 0wtc ontology work, which is out of scope. A const list is enough for now."
+        },
+        {
+          "option": "Judge definitions with a model call or in the verifier",
+          "why": "The verifier sees the problem only after the producer has run. A lexical check costs no call and can be tested in the corpus."
+        }
+      ]
+    },
+    {
+      "choice": "Place the step right after `check_environment_reach` and before `check_boundary_and_repo_files`.",
+      "reason": "Existing tests pin neighbours: `check_outcome_state_doc_names_root_cause_and_scope` pins outcome_state right after governance, and `environment_reach_has_one_step_line` pins environment_reach right after outcome_state. Placing the new step after environment_reach breaks neither. The check reads only the reading and the request, so it sits before the file-comparing checks.",
+      "rejected": [
+        {
+          "option": "Insert directly after check_outcome_state",
+          "why": "It would make `environment_reach_has_one_step_line` (reading.rs:8856) fail, which needs an unrelated test edit."
+        }
+      ]
+    },
+    {
+      "choice": "Matching: terms are ladder, rung, tier, layer. A request word counts if it equals the term, term+`s`, or either with `'s` (via `request_words`, which splits on `-`). A definition is a summary line or assumption whose lowercase text starts `term <word>:` with at least 4 words after the colon. A criterion counts only if its kind is Behavior and it names the word as a whole word. The check skips a reading with no capability or with a question.",
+      "reason": "Whole-word matching keeps `stepladder` and `delayer` accepted (criterion 2). Plurals (`three tiers`) are the same misread. Requiring 4 words stops a bare `Term ladder: yes`. A content criterion can be met by a Grep on a file, which is the g6vy lesson, so only behavior counts. The skip mirrors check_outcome_state.",
+      "rejected": [
+        {
+          "option": "Accept an out_of_scope item as an exemption, as check_outcome_state does",
+          "why": "The accepted reading gives two repairs only: define the term, and give a behavior criterion that names it."
+        },
+        {
+          "option": "Substring match on the request",
+          "why": "It would refuse `stepladder` and `delayer`, which criterion 2 requires to pass."
+        },
+        {
+          "option": "Exact singular words only",
+          "why": "`two tiers` would pass undefined. The extra refusal is small and is counted in the declared 3% estimate."
+        }
+      ]
+    },
+    {
+      "choice": "Expose `pub fn structural_terms_in(request: &str) -> Vec<&'static str>` (unique words, in order) from reading.rs for the corpus replay test.",
+      "reason": "Criterion 8 requires the test to assert that 0wtc's request holds no structural word and is outside the class. That count must come from the production matcher, not a copy of it in the test.",
+      "rejected": [
+        {
+          "option": "A hard-coded 0 in the test",
+          "why": "It would not follow the matcher if the list changes."
+        }
+      ]
+    },
+    {
+      "choice": "Add one rule line to `READING_RULES` in crates/athena-context/src/briefs.rs and update its test, instead of editing the budgeted reader prompt.",
+      "reason": "briefs.rs is a listed deliverable. The rule list is brief text outside the budgeted prompt sets (docs/system-facts.md: briefs sit outside the sets), so the 3 tokens left in the reader prompt do not matter. check_environment_reach did the same. The reader then learns the rule on its first read, not only from the refusal.",
+      "rejected": [
+        {
+          "option": "Edit crates/athena-context/prompts/reader.md",
+          "why": "The brief gives no room and lists prompt text as out of scope."
+        },
+        {
+          "option": "No reader rule line, as D161 did",
+          "why": "A listed deliverable lets the producer tell the reader up front, so fewer readings burn their one re-read."
+        }
+      ]
+    },
+    {
+      "choice": "Record the change as a new entry D164 appended to docs/decisions.md, amending D161 in prose, and correct the old Unreleased CHANGELOG sentence 'are not caught' for the first of the two jobs.",
+      "reason": "The decision log is append-only: the mirror rule `DecisionEntries` and `decision_log_problems` judge entries after the base. D161 says the other two jobs are not caught and cannot be edited, so D164 states the new scope. The CHANGELOG entry is still Unreleased, so correcting it is allowed.",
+      "rejected": [
+        {
+          "option": "Edit D161 text",
+          "why": "The log guard and the append-only rule would flag it."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `STRUCTURAL_TERMS`, helpers `structural_term`, `pub structural_terms_in`, `term_is_defined` and `criterion_names_term`, and `pub fn check_defined_terms` with its doc comment. Add `step!(check_defined_terms(reading, request));` after check_environment_reach, link [`check_defined_terms`] in the check_reading_acceptance doc, and update the doc of check_outcome_state. Add and update unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add `structural_term_cases()` to `cases()`, the new input-form tags (INPUT_FORMS length changes), a shared `BF8_REQUEST` const, a rewritten replay test over the three cited jobs, and `defined_terms_refusal_is_declared_intended`. Update the module header.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "New Unreleased/Added entry naming the root cause and `check_defined_terms`. Correct the old check_outcome_state entry sentence 'are not caught' to 'not caught by this check'.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D164 (amends D161 in prose): case, decision, alternatives, tradeoff with the 3% estimate, reversal cost, provenance.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add one `Defined terms:` line to READING_RULES (8 lines, each at most 220 characters) and update `the_reader_brief_names_each_reading_rule_in_one_short_line`: length 8, new check in the list, and the section-size bound and its comment raised only as far as measured.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-core/src/reading.rs, after `check_outcome_state` (reading.rs:3718), add `const STRUCTURAL_TERMS: [&str; 4] = [\"ladder\",\"rung\",\"tier\",\"layer\"]`, `const DEFINITION_MIN_WORDS: usize = 4`, and `fn structural_term(word) -> Option<&'static str>`. It strips a trailing `'s`, then matches the term or term+`s`. Add `pub fn structural_terms_in(request) -> Vec<&'static str>` over `request_words(request)`, unique and in order, and the private helpers `term_is_defined(reading, term)` (lines of `reading.summary` plus every assumption, lowercased, trimmed, strip prefix `term `, split at the first `:`, label maps to the same term, at least 4 words after) and `criterion_names_term(text, term)`. Add `pub fn check_defined_terms(reading, request) -> Result<()>`: return Ok when `capability` is None or `question` is Some, or when no term is found. For each term collect a missing-definition or missing-behavior-criterion note. If any note exists, `bail!` with text starting 'the reading was refused because the request uses ...', naming the word, saying a content criterion cannot meet it, and giving both repairs (an assumption that starts `Term <word>:` saying what it ranks or does, and a Behavior criterion naming the word with what the user can do or see).",
+    "Write the one-paragraph `///` doc above check_defined_terms (no blank `///` lines). It states: the root cause (readings are not checked against the outcome the user observes, so structural terms such as ladder, rung, tier and layer stay undefined); jobs 20261014-174815-7bf8 (a ladder of requirements) and 20261017-173508-0wtc (an ontology decision, which holds no structural word, so this check does not cover it); what the check does not cover (other figurative words, the glossary and ontology, delivery verbs, which check_outcome_state covers, and whether a definition is true, because the match is lexical); 'This check refuses more readings; the higher refusal rate is intended.'; and 'expected 3% of newly refused readings', an estimate that was not measured. Add `step!(check_defined_terms(reading, request));` after the check_environment_reach step. Link [`check_defined_terms`] in the doc of `check_reading_acceptance` after the environment-reach clause. Rewrite the check_outcome_state doc sentence about the other two jobs: 7bf8 is caught by check_defined_terms; 0wtc holds no structural word and is outside both checks; keep 'covers 1 of the 3 cited jobs' and the 5% estimate sentence.",
+    "In the reading.rs test module add tests: `check_defined_terms_refuses_an_undefined_term`; `..._accepts_a_defined_term_with_a_behavior_criterion`; a summary-line definition; a too-short definition refused; a content criterion naming the word still refused; two terms with one defined refused naming the other; `structural_terms_match_whole_words_only` (stepladder and delayer give an empty list, tiers, layer's and a hyphenated multi-layer are found); a skip test for a declined and a questioning reading; `defined_terms_has_one_step_line` (one line, directly after the environment step and before check_boundary_and_repo_files, and the acceptance doc links it); `check_defined_terms_doc_names_root_cause_and_limits`; `defined_terms_refusal_is_declared_intended` (doc sentences, 'expected 3% of newly refused readings', and `replay_declaration` giving Some(3)). Update the needles in `check_outcome_state_doc_names_root_cause_and_scope`: drop 'outside the check', add '[`check_defined_terms`]', and assert the doc no longer says 'not caught'.",
+    "In crates/athena-core/tests/refusal_corpus.rs add `const BF8_REQUEST` (the 7bf8 request text, verbatim) and make `CITED_REQUESTS` use it. Add `structural_term_cases()` to `cases()` with ids: `structural-term-ladder-undefined-is-refused`, `structural-term-ladder-defined-with-a-behavior-criterion-is-accepted`, `structural-term-defined-without-a-behavior-criterion-is-refused`, `structural-term-behavior-criterion-without-a-definition-is-refused`, `structural-term-in-a-dash-bullet-is-refused` (request lines 'Update the guide.' and '- Add a layer between the CLI and the core', bullets 1), `structural-term-plural-tiers-is-refused`, `structural-word-inside-another-word-is-accepted` (stepladder and delayer), `no-structural-term-is-accepted`. Each states its source (the 7bf8 case verbatim; the rest rebuilt, not recorded) and builds from `base_reading` with `with_behavior` where needed. Add the four new tags to INPUT_FORMS and set the array length to the new count.",
+    "Rewrite `delivery_verb_replay_over_the_cited_jobs` in refusal_corpus.rs to record `(job, refusing check)` for each cited request. Assert g6vy gives check_outcome_state (error contains 'reachable URL') and 7bf8 gives check_defined_terms (error contains 'Term ladder:'). Assert 0wtc is accepted with `structural_terms_in` empty and a message that it is outside the class. Update the changelog assertions: 'together cover 2 of the 3 cited jobs', every job id named, 'not caught by this check', and no '3 of the 3'. Update the module header paragraph. Add `defined_terms_refusal_is_declared_intended` (changelog needles, doc needles, `replay_declaration` Some(3)).",
+    "In crates/athena-context/src/briefs.rs add to READING_RULES (length 7 to 8, before the `Valid reading` line is fine) a line of about 190 characters, at most 220: 'Defined terms: a request that uses ladder, rung, tier or layer needs a `Term <word>:` assumption saying what it ranks or does, and a behavior criterion naming the word (`check_defined_terms`).' Update the array length and the test `the_reader_brief_names_each_reading_rule_in_one_short_line`: add check_defined_terms to the list, `assert_eq!(READING_RULES.len(), 8)`, an assertion that a line names `Term <word>:` and its check, the 'seven rule lines' comment, and the 2600-byte bound only as far as the test measures.",
+    "Edit CHANGELOG.md: add a top Unreleased/Added entry that names the root cause (readings are not checked against the outcome the user observes, and structural terms stay undefined), the step `reading::check_defined_terms` after `check_environment_reach`, the matching rules and limits, 'together cover 2 of the 3 cited jobs' with 0wtc outside the class, 'This check refuses more readings; the higher refusal rate is intended: expected 3% of newly refused readings' (estimate, not measured, since records are absent from the snapshot), and the files changed. Correct the old check_outcome_state entry's 'and are not caught' to 'and are not caught by this check; `check_defined_terms` covers the first'.",
+    "Append `## D164 · A structural request term must be defined and given a behavior criterion; amends D161 in prose` to the end of docs/decisions.md, after D163, with the Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance bullets. Provenance cites the files read and the recorded request text of the three jobs. Do not edit D161.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Set the `bullets_expected` values from the parser result if a case reports a mismatch. Run `cargo test -p athena-core --test refusal_corpus` and `cargo test -p athena-context` explicitly. In the final output report the files changed and that no request count was possible because records are absent from the snapshot."
+  ],
+  "risks": [
+    {
+      "risk": "The refusal rate is higher than 3%: `layer` and `tier` are common words in code requests, such as 'network layer' or 'two-tier'. The 3% figure is an estimate. The records are absent from the producer snapshot, so the producer cannot count recorded requests.",
+      "mitigation": "The doc, CHANGELOG and D164 say 'estimate, not measured'. The replay at verification measures the real share against the declared 3% (hold above 3 plus 5 points). The error text gives both repairs so the reader's one re-read can usually fix it. The producer reports in its output that no count was possible."
+    },
+    {
+      "risk": "The new corpus case `bullets_expected` values (0 for the 7bf8 request, 1 for the dash-bullet case) cannot be run in planning. The first guess could be wrong.",
+      "mitigation": "`corpus_cases_get_the_expected_outcome` pins the count, so the producer runs `cargo test -p athena-core --test refusal_corpus` and sets the numbers from the parser result. The existing replay test already shows `base_reading(7bf8)` passes every earlier check."
+    },
+    {
+      "risk": "The new rule line pushes the reader-brief rules section over the 2600-byte bound in briefs.rs, or over 220 characters.",
+      "mitigation": "Keep the line near 190 characters. The producer runs the athena-context test and raises the bound (a test constant, not a token budget) only as far as measured, with the comment updated."
+    },
+    {
+      "risk": "A reader satisfies the lexical check with a hollow definition ('Term ladder: it is a ladder of things') or a behavior criterion that merely mentions the word.",
+      "mitigation": "The doc comment lists this as a limit: the check is lexical and requires 4 words and a Behavior kind. The verifier still judges the criterion against the code; the check does not claim to judge meaning."
+    },
+    {
+      "risk": "INPUT_FORMS is a fixed-size array, so a wrong length is a compile error, and a tag no case carries fails `corpus_covers_the_listed_input_forms`.",
+      "mitigation": "Add the four tags (structural-term-in-request, structural-term-defined, structural-term-plural, structural-term-absent) and the same producer step sets the array length to the new count. Each tag is carried by a new case."
+    },
+    {
+      "risk": "Existing tests elsewhere pass requests that contain one of the words and are now refused.",
+      "mitigation": "Searched crates for ladder, rung, tier, layer and plurals. In refusal_corpus.rs only the cited 7bf8 request hits. The reading.rs, run/, athena-cli/tests and testkit hits are comments, plan-side 'ladder rung' strings and steward rung fields, not requests sent through `check_reading_acceptance`. The producer still runs the whole `cargo test --locked`."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusing_check step list and order (new step `check_defined_terms`)",
+      "dependent": "crates/athena-core/src/reading.rs: `check_reading_acceptance` (3200), which `read_once` calls at reading.rs:663 for every first read and for the one re-read; `check_reading_text` (4755), which `athena check-reading` runs and the replay of stored readings reaches; the replay hold in crates/athena-core/src/run/mod.rs (`touches_reading_rules`, reading.rs:5015)",
+      "kind": "code",
+      "test": "crates/athena-core/tests/refusal_corpus.rs `the_wrapper_agrees_with_refusing_check_on_every_case`, `corpus_cases_get_the_expected_outcome`; `cargo test -p athena-core` and `cargo test -p athena-cli`",
+      "reason": null
+    },
+    {
+      "name": "position of check_environment_reach right after check_outcome_state",
+      "dependent": "reading.rs test `environment_reach_has_one_step_line` (8838), and `check_outcome_state_doc_names_root_cause_and_scope` (8358, governance then outcome_state)",
+      "kind": "code",
+      "test": null,
+      "reason": "The new step goes after check_environment_reach, so both neighbour pins hold. The `an_extra_check_with_no_case_is_reported` anchor `step!(check_reading_references(` is also unmoved. History-fixture tests pin only check_code_survey and check_history_fixture."
+    },
+    {
+      "name": "check_outcome_state doc comment and its test needles ('outside the check', 'covers 1 of the 3 cited jobs')",
+      "dependent": "reading.rs tests `check_outcome_state_doc_names_root_cause_and_scope` (8358) and `outcome_state_refusal_is_declared_intended` (8413)",
+      "kind": "code",
+      "test": "Both tests; the first has its needles updated in step 3 and the second keeps passing because the 'This check refuses more readings; the higher refusal rate is intended.' sentence and the 5% estimate stay in the doc",
+      "reason": null
+    },
+    {
+      "name": "delivery_verb_replay_over_the_cited_jobs and the old CHANGELOG sentence 'are not caught'",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs:476-532, which reads CHANGELOG.md for 'covers 1 of the 3 cited jobs', 'are not caught' and each cited job id",
+      "kind": "code",
+      "test": "The rewritten replay test (step 6); the CHANGELOG correction is made in step 7 in the same change so the two cannot drift",
+      "reason": null
+    },
+    {
+      "name": "READING_RULES (7 lines) in crates/athena-context/src/briefs.rs:2225",
+      "dependent": "briefs.rs test `the_reader_brief_names_each_reading_rule_in_one_short_line` (4401: length 7, line length at most 220, section under 2600 bytes) and the reader brief built by `reader_brief`",
+      "kind": "code",
+      "test": "The same test, updated in step 5 to length 8 and a `check_defined_terms` entry",
+      "reason": null
+    },
+    {
+      "name": "Reader prompt budget (reader 1997 of 2000) in docs/system-facts.md and `system_facts_budgets_match_computed`",
+      "dependent": "crates/athena-cli/tests/budgets.rs, docs/system-facts.md",
+      "kind": "rule",
+      "test": null,
+      "reason": "The budget counts the always-loaded prompt set. The system facts file says briefs sit outside the sets, and READING_RULES is brief text in briefs.rs. No prompt file or budget line changes."
+    },
+    {
+      "name": "Decision log shape and append-only rule",
+      "dependent": "mirror rule `DecisionEntries` and `decision_log_problems` in crates/athena-core/src/mirrors.rs:354, and the athena-cli decision log guard",
+      "kind": "rule",
+      "test": "`cargo test -p athena-core mirrors` and `cargo test -p athena-cli`: D164 is appended at the end with the next id (D163 is the highest) and a Provenance bullet",
+      "reason": null
+    },
+    {
+      "name": "Replay hold on newly refused stored readings (`replay_declaration`, declared share)",
+      "dependent": "crates/athena-core/src/reading.rs `replay_cases` (4843), `replay_declaration`, and the candidate gate in crates/athena-core/src/run/mod.rs (~2123-2257)",
+      "kind": "rule",
+      "test": "refusal_corpus.rs and reading.rs declared-intended tests check the `expected 3% of newly refused readings` wording parses to Some(3)",
+      "reason": "The replay measures the true share at verification. Fake-reader and run tests use requests with no structural word (grep over crates/athena-core/src/run and crates/athena-cli/tests found only plan-side 'ladder rung' and steward rung uses, which do not go through reading acceptance)."
+    },
+    {
+      "name": "Host settings (athena.toml, defaults.toml, workflows)",
+      "dependent": "none read by the check",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The check reads only the reading and the request text. No config key, workflow or host setting is added or changed."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Corpus cases drive the production gate `refusing_check`, the function `check_reading_acceptance` wraps (reading.rs:3228). Case `structural-term-ladder-undefined-is-refused` uses the verbatim 7bf8 request, now a shared const `BF8_REQUEST`, which `CITED_REQUESTS` reuses. Its reading is `base_reading(request)`: a docs reading with a content criterion, which the existing replay test shows passes every earlier check. It expects `Expected::Refuse(\"check_defined_terms\")`. Case `structural-term-ladder-defined-with-a-behavior-criterion-is-accepted` is the same request. The helper `with_behavior` adds a Behavior criterion naming ladder, and the case pushes the assumption 'Term ladder: ranks requirements from the owner goals down to implementation, and a role may change only rungs at or below its limit'. It expects Accept. Two more cases isolate each half: a definition with no behavior criterion is refused, and a behavior criterion with no definition is refused. Matching unit tests in reading.rs cover the summary-line definition, the too-short definition, and a content criterion that names the word.",
+      "command": "cargo test -p athena-core --test refusal_corpus corpus_cases_get_the_expected_outcome; cargo test -p athena-core check_defined_terms",
+      "observes": "`corpus_cases_get_the_expected_outcome` runs `mismatches(&cases())`. The undefined case is refused by check_defined_terms, and the defined and behavior-naming case is accepted. The reading.rs unit tests pass.",
+      "fails_without": "Without the check, the 7bf8 reading with no 'Term ladder:' line is accepted (`refusing_check` returns None), so the refuse case reports a mismatch. Without the definition-and-behavior pass logic, the accepted case would be refused. Because the first half of each pair (undefined refused) and the second half (defined accepted) both run, the check cannot be a blanket refusal.",
+      "seam": "Production entry `athena_core::reading::refusing_check` (pub, exists). Fixture `base_reading`, `case`, `with_behavior` in refusal_corpus.rs (exist). The new corpus cases are added by plan step 6. The `Case` list is injected through `cases()`. No double holds the logic under test."
+    },
+    {
+      "criterion": 2,
+      "method": "Corpus accept cases run through `refusing_check`. `structural-word-inside-another-word-is-accepted` uses the request 'Add a stepladder to the safety guide and a delayer to the build notes.' `no-structural-term-is-accepted` uses 'Update the guide with the new retry wording.' The existing accept cases, such as `steward-three-dash-bullets` and `delivery-word-as-a-noun-is-accepted`, use requests with no structural word. A unit test calls `structural_terms_in` on both requests and expects an empty list, and on 'Group the work into three tiers' and 'Fix the layer's width' to prove plural and possessive match.",
+      "command": "cargo test -p athena-core --test refusal_corpus corpus_cases_get_the_expected_outcome; cargo test -p athena-core structural_terms_match_whole_words_only",
+      "observes": "Both requests are accepted with the default docs reading and no 'Term' assumption. The unit test shows the matcher returns [] for the stepladder and delayer text.",
+      "fails_without": "A substring matcher would find 'ladder' in 'stepladder' and 'layer' in 'delayer' and refuse both accept cases, so the whole-word rule is what these cases pin.",
+      "seam": "`refusing_check` plus `structural_terms_in` (added by step 1; the matcher is exercised through the public gate). Corpus fixtures exist; the two new cases are added by step 6."
+    },
+    {
+      "criterion": 3,
+      "method": "Two guards. (1) The new corpus case `structural-term-ladder-undefined-is-refused` needs the step line: with `step!(check_defined_terms(reading, request))` deleted, `refusing_check` returns None for that case and `corpus_cases_get_the_expected_outcome` fails. (2) New reading.rs test `defined_terms_has_one_step_line` extracts the body of `refusing_check`, as `environment_reach_has_one_step_line` at reading.rs:8838 does. It asserts exactly one `step!(check_defined_terms(reading, request));` line, directly after `step!(check_environment_reach(reading));` and before `step!(check_boundary_and_repo_files(`. It also asserts that the doc of `check_reading_acceptance` links [`check_defined_terms`]. The existing `every_acceptance_check_has_a_refusing_corpus_case` (refusal_corpus.rs:1429) must also pass: it lists every `step!(check_` name and requires a corpus case in which that check refuses. A proxy check removes the line from a doctored copy of READING_SOURCE and shows the case is no longer refused only through the real gate, so no doctored copy is added.",
+      "command": "cargo test -p athena-core --test refusal_corpus every_acceptance_check_has_a_refusing_corpus_case; cargo test -p athena-core defined_terms_has_one_step_line",
+      "observes": "The check name appears in the extracted step list and a refusing case exists, so both tests pass. `defined_terms_has_one_step_line` also pins the order.",
+      "fails_without": "Delete the step line: `defined_terms_has_one_step_line` fails (count 0), and the corpus ladder case is accepted instead of refused. Add the step with no corpus case: `every_acceptance_check_has_a_refusing_corpus_case` fails and names check_defined_terms.",
+      "seam": "Production `refusing_check` and its source text via `include_str!(\"reading.rs\")`/`READING_SOURCE`, both exist. The step and the tests are added by steps 2, 3 and 6."
+    },
+    {
+      "criterion": 4,
+      "method": "New reading.rs test `check_defined_terms_doc_names_root_cause_and_limits` reads the doc paragraph above `pub fn check_defined_terms(`, using the same approach as `check_outcome_state_doc_names_root_cause_and_scope` (reading.rs:8358): the last paragraph before the fn, all lines `///`, joined and whitespace-collapsed. It asserts these phrases: 'not checked against the outcome the user observes', 'structural terms', '20261014-174815-7bf8', '20261017-173508-0wtc', 'does not cover' (followed by the glossary, the verbs of check_outcome_state, and the Hermes definition of 0wtc, which holds no structural word).",
+      "command": "cargo test -p athena-core check_defined_terms_doc_names_root_cause_and_limits",
+      "observes": "The doc comment holds the root cause, both job ids and the limits sentence. The test fails if any is dropped.",
+      "fails_without": "Without the doc comment or with a phrase dropped, the assertion names the missing needle.",
+      "seam": "The doc text of `check_defined_terms` through `include_str!(\"reading.rs\")` inside the existing `#[cfg(test)]` module (exists). The doc is written in step 1; the test in step 3."
+    },
+    {
+      "criterion": 5,
+      "method": "Two tests. New `defined_terms_refusal_is_declared_intended` in reading.rs asserts that the check_defined_terms doc contains 'This check refuses more readings; the higher refusal rate is intended.', 'expected 3% of newly refused readings' and 'estimate'. It calls `replay_declaration` on a criterion with that wording and expects `share == Some(3)`, as `outcome_state_refusal_is_declared_intended` does. The updated `check_outcome_state_doc_names_root_cause_and_scope` now requires the check_outcome_state doc to contain '[`check_defined_terms`]' and to no longer contain 'outside the check', 'are not caught' and 'not caught'.",
+      "command": "cargo test -p athena-core defined_terms_refusal_is_declared_intended; cargo test -p athena-core check_outcome_state_doc_names_root_cause_and_scope",
+      "observes": "Declared share is Some(3); the new doc and the updated check_outcome_state doc hold the required text and drop the stale claim.",
+      "fails_without": "If the sentence or the 3% figure is missing the first test fails; if check_outcome_state's doc still says the other two jobs are outside any check, the second fails.",
+      "seam": "`replay_declaration` (pub, used in refusal_corpus.rs:1472, exists) and the doc text through `include_str!`. The doc edits are step 2; the tests are step 3."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks on the whole workspace, as the checks listed in the brief do.",
+      "command": "cargo fmt --all --check; cargo clippy --all-targets --locked -- -D warnings; cargo test --locked",
+      "observes": "All three exit 0. The test run includes athena-core (reading.rs unit tests and refusal_corpus), athena-context (briefs.rs tests) and athena-cli (decision log guard, check-reading), which all reach the changed gate or text.",
+      "fails_without": "Any formatting drift, clippy warning (for example an unused helper), or an existing test left stale by the change fails one of the three.",
+      "seam": "The workspace as built; nothing is injected."
+    },
+    {
+      "criterion": 7,
+      "method": "New corpus test `defined_terms_refusal_is_declared_intended` in refusal_corpus.rs. It reads `include_str!(\"../../../CHANGELOG.md\")` with whitespace collapsed, as the sibling tests at refusal_corpus.rs:1518-1608 do. It asserts the text contains 'check_defined_terms', 'readings are not checked against the outcome the user observes' (the root cause), 'higher refusal rate is intended' and 'expected 3% of newly refused readings'.",
+      "command": "cargo test -p athena-core --test refusal_corpus defined_terms_refusal_is_declared_intended",
+      "observes": "The new Unreleased entry names the root cause and the new check.",
+      "fails_without": "Without the CHANGELOG entry, the changelog assertions fail naming the missing needle.",
+      "seam": "`CHANGELOG.md` through `include_str!` (exists). The entry is added by step 7 and the test by step 6."
+    },
+    {
+      "criterion": 8,
+      "method": "Rewrite `delivery_verb_replay_over_the_cited_jobs` (refusal_corpus.rs:476) over `CITED_REQUESTS`. For each recorded request it runs `refusing_check(&base_reading(request), request, None, &[], Some(&repo_files()))` and records `(job, refusing check name)`. It asserts the list is `[(\"20261014-082328-g6vy\",\"check_outcome_state\"), (\"20261014-174815-7bf8\",\"check_defined_terms\")]`. For 20261017-173508-0wtc it asserts the outcome is None, `structural_terms_in(request)` is empty, and the message says it is outside the class. The error text for g6vy still contains 'reachable URL' and the text for 7bf8 contains 'Term ladder:'. Changelog assertions are updated to the new claims ('together cover 2 of the 3 cited jobs', each job id named, and no claim of '3 of the 3'). The old Unreleased sentence is corrected to 'are not caught by this check'.",
+      "command": "cargo test -p athena-core --test refusal_corpus delivery_verb_replay_over_the_cited_jobs",
+      "observes": "g6vy is refused by check_outcome_state, 7bf8 by check_defined_terms, and 0wtc is accepted with a counted structural-word total of 0, stated as outside the class.",
+      "fails_without": "Without check_defined_terms the 7bf8 request is accepted, so the caught list holds only g6vy and the assertion fails. A matcher that wrongly found a structural word in 0wtc would fail the empty-list assertion.",
+      "seam": "Production gate `refusing_check`, `structural_terms_in` (step 1), fixtures `base_reading` and `repo_files` (exist). `CITED_REQUESTS` exists at refusal_corpus.rs:456. The test edit is step 6."
+    }
+  ],
+  "open_questions": [
+    "User: should the structural-term list grow beyond ladder, rung, tier and layer (for example stack, pipeline or ontology)? The plan keeps four, as the accepted reading says, and leaves a glossary-fed list to a later job."
+  ],
+  "producer_section_sha256": "05741fb9f46f7fc6a0c242840c3ec284dc2fdf7d0cb9b99a758f64cc83d45c3b"
+}
