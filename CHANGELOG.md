@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Planner and critic prompts now require landing, history-check and attribution rules to be derived from every
+  commit shape the real branch holds. Root cause: such rules were derived from the happy-path commit shape, not
+  from the full set of shapes, and demonstrated on an unrealistic fixture; introspections 20261024-154443-51wt,
+  20261024-161503-q0pp and 20261025-012736-2q6w saw the class. The fix is in the planner prompt (a commit-shape
+  table, a realistic-branch fixture with an intervention commit, a records-only commit and the job landing, and
+  the tests of every crate that calls the changed classification functions) and the critic prompt (a major
+  finding when any is missing). The guard is prose-only; a phrase-pinning test in `athena-context` keeps the
+  wording from being dropped.
 - Wasted work in the throughput section of `athena status` and in the throughput review. The section now shows
   attempts per landed change, money spent on attempts that did not land, and the share of changes that landed on
   the first attempt, over the newest 20 landings and the 20 before them (`athena_core::status::waste_windows`,
