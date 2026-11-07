@@ -9,6 +9,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Two structure rules in the mirror registry (`crates/athena-core/src/mirrors.rs`), so a prompt edit that breaks
+  its list structure and a decision inserted inside another are sent back at the producer step, not found at the
+  final verdict. Root cause: nothing compared the finished diff with the structure it must keep, before
+  verification. A prompt file is edited as free text, so job 20261015-095214-y8kr joined two bullets into one
+  line (`...suffice.- deliverables: ...`); job 20261025-034452-wqp8 inserted a decision inside the entry above it,
+  which left that entry without its Provenance bullet. Both were found only at the final verdict. The rules are
+  two `REGISTRY` entries, so `mirror_drift_in` in the producer loop and the candidate gate run them with no new
+  call site. `PromptStructure` covers `crates/*/prompts/*.md` (new `Mirror::files` and `Mirror::covers` let one
+  entry name a glob; a finding names the edited file) and judges only lines the change adds: a list item that the
+  base text kept on its own line must not sit inside another line, and an added list item must not hold a second
+  item glued after its text, where an item head (`name:` or the next number) follows the second marker, so
+  `one- or two-line`, `*Never do X.* Then` and `see 1.2. Then` are not found. `DecisionEntries` judges only the
+  entries after the end of the base text, when the base is an exact prefix: a `## D<n> · ` heading, the id one
+  greater than the highest before it, and a Provenance bullet inside the entry's own text; legacy entries are
+  not reported. The append-only finding names the entry that holds the first changed line (`in D121`) or the
+  entry the change was inserted before. The decision log now has one definition of a well-formed log
+  (`decision_log_problems`), which the `athena-cli` log guard also calls. Limits: the rules judge structure, not
+  intent, since the job carries no machine-readable intended edit; other file classes and the truth of a
+  changelog claim are not covered. Tests: `cargo test -p athena-core mirrors` (the shapes of both jobs, prose
+  that must not be found, untouched legacy entries) and, in `run/tests.rs`, the `mirrors_` tests that show a
+  break sent back at the producer step. Three files beyond the listed deliverables changed because the change
+  needs them: `crates/athena-cli/tests/mirrors.rs` (an exhaustive match on the rule and a glob-aware
+  assertion), `crates/athena-core/src/run/tests.rs` (the producer-step tests) and
+  `crates/athena-cli/src/decisions.rs` (the single log definition). Recorded as D162, which amends D158 in
+  prose only.
 - A reading check for delivery requests, `reading::check_outcome_state`, run as a `step!` in `refusing_check`
   right after `check_governance_coverage`. Root cause: a delivery verb (publish, deploy, share, release) was
   read as a narrow deliverable, and reading acceptance had no check against the state the user observes, so

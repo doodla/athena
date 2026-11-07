@@ -70,7 +70,8 @@ fn replay_problem(replay: &LoopReplay) -> String {
 
 /// The hand-kept files that disagree with their source in the producer's work tree (`crate::mirrors`), for the
 /// entries the changed paths can affect. The base text of a file is read from the snapshot's base commit; with no
-/// base commit the append-only rule is skipped. Empty unless the work tree is Athena's own source: the registry
+/// base commit the rules that compare with it (append-only, prompt structure, decision entries) are skipped.
+/// Prompt files and new decision entries are among the files checked. Empty unless the work tree is Athena's own source: the registry
 /// holds Athena's conventions, which another repository need not follow.
 fn mirror_drift_in(snapshot: &Snapshot, changed: &[String]) -> Vec<Drift> {
     if !mirrors::is_athena_source(snapshot.dir()) {
@@ -187,8 +188,10 @@ impl Athena {
     ///
     /// Hand-kept files that disagree with their source ([`crate::mirrors`]: shard timings, the decision log, the
     /// CI cache key, the ontology) are sent back the same way, for the registry entries the changed paths can
-    /// affect, in Athena's own source tree only. The root cause: such a file was tested for its shape, so
-    /// content that contradicted the source was found only at the final verdict. The send-back is shared with
+    /// affect, in Athena's own source tree only. The same registry compares the finished diff of a prompt file
+    /// and the entries a change appends to the decision log with the structure they must keep (a bullet joined
+    /// onto another line, a decision inserted inside another). The root cause: such a file was tested for its
+    /// shape, so content that contradicted the source was found only at the final verdict. The send-back is shared with
     /// the unmet criteria. Drift left at the limit does not stop the job here: the repo test `mirrors`, run by
     /// the configured test check, fails on it at verification.
     pub(super) fn producer_loop(
@@ -353,7 +356,8 @@ impl Athena {
                 None
             };
             // Hand-kept files the producer's change can leave disagreeing with their source (shard timings, the
-            // decision log, the CI cache key, the ontology). Empty in a nested run and outside Athena's source.
+            // decision log, the CI cache key, the ontology), and prompt files and new decision entries whose
+            // structure the change broke. Empty in a nested run and outside Athena's source.
             let mirror_drift = if self.nested.is_none() && !changes.is_empty() {
                 mirror_drift_in(&snapshot, &changed)
             } else {
