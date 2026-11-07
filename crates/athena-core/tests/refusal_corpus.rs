@@ -17,13 +17,19 @@
 //! Delivery requests (`check_outcome_state`): `delivery_cases` holds the positions a delivery verb takes in a
 //! request and the words that are not delivery, and `delivery_verb_replay_over_the_cited_jobs` runs the recorded
 //! request text of the three jobs the check cites through the gate: it refuses 1 of the 3, the real publish
-//! misread, and the changelog must state that count.
+//! misread, and the changelog must state that count. The other two are caught by `check_defined_terms`.
 //!
 //! Structural terms (`check_defined_terms`): `defined_terms_cases` holds requests that use `ladder`, `rung`,
 //! `tier` or `layer` in plain prose (refused until the reading defines the term), requests that only quote or
 //! cite those words (accepted), and requests built by Athena's own generators, `hestia::root_cause_request` and
 //! `work_decisions::approve_request`, whose copied text is cited content. `defined_terms_replay_over_the_cited_jobs`
-//! runs the three cited requests through the gate: 1 of the 3, the ladder request, is caught.
+//! runs the three cited requests through the gate: 2 of the 3, the ladder request and the Hermes request, are
+//! caught.
+//!
+//! Ambiguous ontology names (`check_defined_terms`): the `ambiguous-name-*` cases hold requests that use
+//! `Hermes` (a name `docs/ontology.toml` records with two senses) in plain prose, which is refused until the
+//! reading restates the name in a `Term Hermes:` assumption, and requests that only quote it or carry it in a
+//! path, an identifier or Athena-generated text, which are accepted.
 //!
 //! What the mechanism covers, and what it does not:
 //! - Every `check_*` step in `refusing_check` must have a case in which that check refuses
@@ -81,7 +87,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 38] = [
+const INPUT_FORMS: [&str; 41] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -120,6 +126,9 @@ const INPUT_FORMS: [&str; 38] = [
     "structural-term-quoted-or-cited",
     "structural-term-defined",
     "structural-term-generated-approval",
+    "ambiguous-name-plain-prose",
+    "ambiguous-name-defined",
+    "ambiguous-name-quoted-or-generated",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -474,19 +483,23 @@ const REQUEST_7BF8: &str = "Build what the BRIEF.md addendum '2026-10-14: A loop
      work items, including one for anything it could not see. Record only what would otherwise be lost; \
      pull the rest from where it lives. Use the ladder to decide what it may change itself.";
 
+/// The recorded request of job 20261017-173508-0wtc, verbatim: it names Hermes Agent in plain prose and holds
+/// none of the structural words.
+const REQUEST_0WTC: &str = "From Sri's decision sheet of 2026-10-17 (relay note in BRIEF.md, addendum \"2026-10-17: Olympus\"), \
+     decision 5, worded as on the sheet: Should Athena keep an ontology? A small shared vocabulary, grown \
+     from misreads. Defined terms and how they relate, each with its source, in one file that agents read \
+     and checks can use. A term is added when it causes a misread. The study keeps its own concept model, \
+     so firstmate, Hermes Agent and Athena are compared in the same terms.";
+
 /// The recorded requests of the three jobs the change cites, verbatim from their request records.
 const CITED_REQUESTS: [(&str, &str); 3] = [
     ("20261014-082328-g6vy", G6VY_REQUEST),
     ("20261014-174815-7bf8", REQUEST_7BF8),
-    (
-        "20261017-173508-0wtc",
-        "From Sri's decision sheet of 2026-10-17 (relay note in BRIEF.md, addendum \"2026-10-17: Olympus\"), \
-         decision 5, worded as on the sheet: Should Athena keep an ontology? A small shared vocabulary, grown \
-         from misreads. Defined terms and how they relate, each with its source, in one file that agents read \
-         and checks can use. A term is added when it causes a misread. The study keeps its own concept model, \
-         so firstmate, Hermes Agent and Athena are compared in the same terms.",
-    ),
+    ("20261017-173508-0wtc", REQUEST_0WTC),
 ];
+
+/// A meaning of the Hermes term that is three words or more.
+const HERMES_DEFINED: &str = "Term Hermes: the studied self-improving agent, not part of Athena";
 
 #[test]
 fn delivery_verb_replay_over_the_cited_jobs() {
@@ -511,7 +524,7 @@ fn delivery_verb_replay_over_the_cited_jobs() {
     let total = CITED_REQUESTS.len();
     // The check refuses exactly the real delivery-verb misread. The ladder-of-requirements request and the
     // ontology request hold no delivery verb: they are another class, which `check_defined_terms` covers for
-    // the first of them (see `defined_terms_replay_over_the_cited_jobs`) and no check covers for the second.
+    // both (see `defined_terms_replay_over_the_cited_jobs`).
     assert_eq!(
         caught,
         ["20261014-082328-g6vy"],
@@ -534,17 +547,19 @@ fn delivery_verb_replay_over_the_cited_jobs() {
             assert_eq!(name, "check_defined_terms");
             assert!(error.to_string().contains("ladder"), "{error}");
         } else {
-            assert!(outcome.is_none(), "{job}: {:?}", outcome.map(|(n, _)| n));
+            let (name, error) = outcome.expect("the ontology request is refused");
+            assert_eq!(name, "check_defined_terms");
+            assert!(error.to_string().contains("Hermes"), "{error}");
         }
     }
-    // The changelog states the same count and does not claim the other two.
+    // The changelog states the same count and does not claim the other two for this check.
     let changelog = include_str!("../../../CHANGELOG.md")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
     let claim = format!("covers {} of the {} cited jobs", caught.len(), total);
     assert!(changelog.contains(&claim), "the changelog lacks {claim:?}");
-    assert!(changelog.contains("are not caught"));
+    assert!(changelog.contains("are not caught by this check"));
     for job in CITED_REQUESTS.iter().map(|(job, _)| job) {
         assert!(changelog.contains(job), "the changelog does not name {job}");
     }
@@ -554,7 +569,7 @@ fn delivery_verb_replay_over_the_cited_jobs() {
 #[test]
 fn defined_terms_replay_over_the_cited_jobs() {
     // Each reading is the file-only reading `base_reading` builds, with no `Term` line, so a request is
-    // refused by `check_defined_terms` only when its plain prose uses a structural word.
+    // refused by `check_defined_terms` only when its plain prose uses a structural word or an ambiguous name.
     let caught: Vec<&str> = CITED_REQUESTS
         .iter()
         .filter(|(_, request)| {
@@ -571,13 +586,15 @@ fn defined_terms_replay_over_the_cited_jobs() {
         })
         .map(|(job, _)| *job)
         .collect();
-    assert_eq!(caught, ["20261014-174815-7bf8"], "caught {caught:?} of 3");
-    // The ontology request is outside the class: its text holds none of the four words, so no check
-    // refuses it, and its Hermes term is not covered.
-    let (_, ontology) = CITED_REQUESTS
-        .iter()
-        .find(|(job, _)| *job == "20261017-173508-0wtc")
-        .unwrap();
+    assert_eq!(
+        caught,
+        ["20261014-174815-7bf8", "20261017-173508-0wtc"],
+        "caught {caught:?} of 3"
+    );
+    // The ontology request holds none of the four structural words, so it is caught for the ambiguous name
+    // alone: Hermes (Hermes Agent, the studied system, or the Orchestration god) used in plain prose with no
+    // `Term Hermes:` line.
+    let ontology = REQUEST_0WTC;
     for word in ontology
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
@@ -587,16 +604,33 @@ fn defined_terms_replay_over_the_cited_jobs() {
             "the ontology request holds {word:?}"
         );
     }
-    assert!(
-        refusing_check(
-            &base_reading(ontology),
-            ontology,
-            None,
-            &[],
-            Some(&repo_files())
-        )
-        .is_none()
+    let refused = refusing_check(
+        &base_reading(ontology),
+        ontology,
+        None,
+        &[],
+        Some(&repo_files()),
     );
+    let (name, error) = refused.expect("the ontology request is refused with no Term Hermes line");
+    assert_eq!(name, "check_defined_terms");
+    let error = error.to_string();
+    assert!(
+        error.contains("Hermes") && error.contains("`Term Hermes:"),
+        "{error}"
+    );
+    // The same reading with a meaning of three words or more is accepted.
+    let mut defined = base_reading(ontology);
+    defined.assumptions = vec![HERMES_DEFINED.into()];
+    assert!(
+        refusing_check(&defined, ontology, None, &[], Some(&repo_files())).is_none(),
+        "a Term Hermes line of three or more words is accepted"
+    );
+    // A one-word meaning does not define it.
+    let mut short = base_reading(ontology);
+    short.assumptions = vec!["Term Hermes: agent".into()];
+    let (name, _) = refusing_check(&short, ontology, None, &[], Some(&repo_files()))
+        .expect("a one-word meaning is refused");
+    assert_eq!(name, "check_defined_terms");
     // The changelog states the same count and does not claim the other two.
     let changelog = include_str!("../../../CHANGELOG.md")
         .split_whitespace()
@@ -997,7 +1031,177 @@ fn defined_terms_cases() -> Vec<Case> {
         3,
         Expected::Accept,
     ));
+    out.extend(ambiguous_name_cases());
     out
+}
+
+/// Cases for the ambiguous names of `docs/ontology.toml` that `check_defined_terms` also covers: Hermes, the
+/// name of the studied agent and of the Orchestration god, as in the request of job 20261017-173508-0wtc.
+fn ambiguous_name_cases() -> Vec<Case> {
+    const SRC_0WTC: &str = "job 20261017-173508-0wtc, its recorded request, verbatim; the reading is the file-only reading `base_reading` builds";
+    const OWN: &str = "this job, 20261107-200727-xwss; text built by the real generator";
+    const BRIEF: &str =
+        "the request in the brief of job 20261107-200727-xwss; rebuilt, not a recorded request";
+    let refuse = "check_defined_terms";
+    let mut out: Vec<Case> = Vec::new();
+
+    // The recorded request names Hermes Agent in plain prose and its reading defines nothing.
+    out.push(case(
+        "ambiguous-name-hermes-undefined-in-0wtc-request",
+        SRC_0WTC,
+        &["ambiguous-name-plain-prose"],
+        REQUEST_0WTC,
+        0,
+        Expected::Refuse(refuse),
+    ));
+    // The same reading with a `Term Hermes:` line of three or more words is accepted.
+    let mut c = case(
+        "ambiguous-name-hermes-defined-is-accepted",
+        SRC_0WTC,
+        &["ambiguous-name-defined"],
+        REQUEST_0WTC,
+        0,
+        Expected::Accept,
+    );
+    c.reading.assumptions = vec![HERMES_DEFINED.into()];
+    out.push(c);
+
+    // Other uses in plain prose are refused: a possessive, a bullet, a lowercase spelling.
+    out.push(case(
+        "ambiguous-name-possessive-and-lowercase-use-is-refused",
+        BRIEF,
+        &["ambiguous-name-plain-prose"],
+        "Compare Hermes's skills with Athena's.",
+        0,
+        Expected::Refuse(refuse),
+    ));
+    out.push(case(
+        "ambiguous-name-lowercase-use-is-refused",
+        BRIEF,
+        &["ambiguous-name-plain-prose"],
+        "Fix the hermes note in the guide.",
+        0,
+        Expected::Refuse(refuse),
+    ));
+    out.push(case(
+        "ambiguous-name-in-acceptance-bullet-is-refused",
+        BRIEF,
+        &["dash-bullet", "ambiguous-name-plain-prose"],
+        &lines(&[
+            "Update the guide.",
+            "- Hermes Agent is described in the guide",
+        ]),
+        1,
+        Expected::Refuse(refuse),
+    ));
+
+    // Quotes, paths, identifiers and other words are not uses.
+    out.push(case(
+        "ambiguous-name-quoted-path-and-identifier-are-accepted",
+        BRIEF,
+        &["ambiguous-name-quoted-or-generated"],
+        "Rename \"Hermes\" in the guide, then fix docs/hermes.md and Hermes::new.",
+        0,
+        Expected::Accept,
+    ));
+    out.push(case(
+        "ambiguous-name-inside-other-words-is-accepted",
+        BRIEF,
+        &[
+            "trigger-word-inside-other-word",
+            "ambiguous-name-quoted-or-generated",
+        ],
+        "Rename the hermeshub helper.",
+        0,
+        Expected::Accept,
+    ));
+
+    // The request text of an approved work item, built by the real generator: the copied source is cited
+    // content, and the title is the steward's own wording.
+    out.push(case(
+        "ambiguous-name-approve-request-source-is-accepted",
+        OWN,
+        &[
+            "structural-term-generated-approval",
+            "ambiguous-name-quoted-or-generated",
+        ],
+        &generated_approval_request("Change the thing", "Hermes Agent writes its own skills.\n"),
+        0,
+        Expected::Accept,
+    ));
+    out.push(case(
+        "ambiguous-name-approve-request-title-use-is-refused",
+        OWN,
+        &[
+            "structural-term-generated-approval",
+            "ambiguous-name-plain-prose",
+        ],
+        &generated_approval_request("Compare Hermes with Athena", "A note.\n"),
+        0,
+        Expected::Refuse(refuse),
+    ));
+    // An Introspection line of a root-cause request is cited content.
+    let mut c = case(
+        "ambiguous-name-introspection-line-is-accepted",
+        "job 20261030-170757-gev8's request plus an introspection line that names Hermes; rebuilt from the job brief",
+        &["dash-bullet", "ambiguous-name-quoted-or-generated"],
+        &root_cause_request(&[
+            "Introspection 20261031-000000-abcd (job 20261029-111202-2bpc); prevention it proposed: compare Hermes with Athena.",
+        ]),
+        3,
+        Expected::Accept,
+    );
+    c.referenced = vec![
+        earlier(OTHER_JOB, "Add parts coverage to reading acceptance"),
+        earlier(RETRIED_JOB, "Check that a cited prior job exists"),
+    ];
+    out.push(c);
+    out
+}
+
+#[test]
+fn ambiguous_name_changelog_and_decision() {
+    let changelog = include_str!("../../../CHANGELOG.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "readings are not checked against the outcome the user observes, so structural terms stay undefined, and so do ambiguous ontology names such as Hermes",
+        "20261014-082328-g6vy",
+        "20261014-174815-7bf8",
+        "20261017-173508-0wtc",
+        "check_defined_terms covers 2 of the 3 cited jobs",
+        "covers 1 of the 3 cited jobs",
+        "`check_outcome_state` and `check_governance_coverage` cover 20261014-082328-g6vy",
+        "are not caught by this check",
+        "AMBIGUOUS_NAMES",
+        "UNGATED_TERMS",
+        "`Term Hermes: <meaning of at least three words>`",
+        "expected 2% of newly refused readings",
+    ] {
+        assert!(changelog.contains(needle), "the changelog lacks {needle:?}");
+    }
+    assert!(!changelog.contains("3 of the 3 cited jobs"));
+    assert!(!changelog.contains("20261017-173508-0wtc by no check"));
+    let decisions = include_str!("../../../docs/decisions.md");
+    let (_, d165) = decisions
+        .split_once("## D165 · ")
+        .expect("docs/decisions.md holds D165");
+    let d165: String = d165.split_whitespace().collect::<Vec<_>>().join(" ");
+    for needle in [
+        "**Alternatives:**",
+        "**Provenance:**",
+        "revises D164's scope sentence",
+        "readings are not checked against the outcome the user observes",
+        "expected 2% of newly refused readings",
+        "cannot verify",
+        "UNGATED_TERMS",
+        "20261014-082328-g6vy",
+        "20261014-174815-7bf8",
+        "20261017-173508-0wtc",
+    ] {
+        assert!(d165.contains(needle), "D165 lacks {needle:?}");
+    }
 }
 
 /// A proposed request of the user's queue: its stored reading is `base_reading`, with these assumptions.

@@ -4693,3 +4693,57 @@ should replace those estimates with its figures.
   replay of those three requests (g6vy by `check_outcome_state`, 7bf8 by `check_defined_terms`, 0wtc by none) and the
   accepted cases built from the real generators. Not measured: the share of past readings newly refused; the loop
   replay records it at verification.
+
+## D165 · A reading must define an ambiguous ontology name its request uses; check_defined_terms now covers 2 of the 3 cited jobs
+
+- **Case:** D164 left job 20261017-173508-0wtc open: its request named Hermes Agent in plain prose and held none of
+  the four structural words, so no check refused its reading. `docs/ontology.toml` records two senses of Hermes (the
+  studied agent, and the Orchestration god), and the job was built on one guess at it. Root cause, the same as D164's:
+  readings are not checked against the outcome the user observes, so structural terms stay undefined, and so do
+  ambiguous ontology names. This entry revises D164's scope sentence, which said 20261017-173508-0wtc is caught by
+  no check, and its 3% share. D161 and D164 stand otherwise, and their text is not edited. Job 20261014-082328-g6vy (a publish request) stays covered by
+  `check_outcome_state` and `check_governance_coverage`; job 20261014-174815-7bf8 (the ladder) stays covered by
+  `check_defined_terms`.
+- **Decision:** `check_defined_terms` requires a `Term <name>:` assumption of three or more words for each structural
+  term and for each name in a new constant `AMBIGUOUS_NAMES` in `reading.rs`, today `Hermes`. One private function,
+  `named_term`, replaces `structural_term`; the name is stored as the ontology writes it, matched in lowercase as the
+  exact word or its possessive (no plural), and returned as written so the error says `Term Hermes:`. The plain-prose
+  filter, the skipped generated lines, the three-word rule and the step line are reused. The error now says "a
+  structural term or an ambiguous name" and, for a name, asks the line to say which recorded sense applies and to cite
+  `docs/ontology.toml`. The list cannot drift from the shared vocabulary: a test-only `UNGATED_TERMS` holds every other
+  ontology term with a reason (planning, job and landed are common words; Athena is the system's own name; Sri is a
+  naming convention; "product versus system" is a phrase the single-word matcher cannot match), and the test
+  `ambiguous_and_ungated_terms_cover_the_ontology` requires every `[[term]]` of `docs/ontology.toml` to be in exactly
+  one of the two lists and every listed name to be an ontology term. A term added to the ontology therefore fails the
+  build until someone decides whether readings must define it. A name is added to `AMBIGUOUS_NAMES` only after it
+  caused a misread, as the ontology's own rule requires. Scope: the check covers 2 of the 3 cited jobs,
+  20261014-174815-7bf8 and 20261017-173508-0wtc (test `defined_terms_replay_over_the_cited_jobs`); the check
+  `check_outcome_state` covers 20261014-082328-g6vy (test `delivery_verb_replay_over_the_cited_jobs`).
+- **Alternatives:** A new check step for ambiguous names: duplicates the prose filter and the definition parsing, and
+  needs new step-order and corpus entries for no gain. A one-direction test (listed names exist in the ontology) with a
+  sentence in this entry: it cannot fail when a term is added to the ontology, so the class stays open, and rules that
+  matter are enforced by mechanism. Gate every ontology term, or read `docs/ontology.toml` at run time: job, planning,
+  landed and Athena appear in most requests, so refusals would be constant, and the file is not in the plain copy
+  readers see. Match "Hermes Agent" as a phrase: the bare name is the other sense and needs a definition too. Store the
+  name in lowercase: the error would say `Term hermes:` and the test could not compare with the ontology name exactly.
+  Accept an ambiguous-name line only when it cites `docs/ontology.toml`: it would contradict a three-word line being
+  accepted and would still not prove the sense right. Edit D164: the decision log is append-only. Wire the whole
+  ontology into the reader prompt: out of scope, there is no token headroom.
+- **Tradeoff:** This check refuses more readings; the higher refusal rate is intended: expected 2% of newly refused
+  readings, an estimate and not a measurement, over hand-written requests; few requests name Hermes outside quotes or
+  generated text, and the share the loop replay measures is recorded in the job's replay record at verification. A
+  proposed request read before this change whose plain prose names Hermes is held until a person runs `athena go`:
+  `steward::queued_work` re-checks its stored reading. The reader prompt is unchanged, so the reader may need one
+  retry; the refusal text gives the exact label. Limit: the check forces a restatement of the name but cannot verify
+  that the restatement matches the recorded senses, so a `Term Hermes:` line that names one of the two senses still
+  passes; it is the 20261017-173508-0wtc misread in miniature, and only a person can judge it. To narrow, empty the
+  list or drop the name; the test then asks for it in `UNGATED_TERMS` with a reason.
+- **Reversal cost:** Low. Delete `AMBIGUOUS_NAMES`, `UNGATED_TERMS`, the partition test and the corpus cases, and
+  return `named_term` to the structural terms; nothing recorded depends on the check.
+- **Provenance:** Read: `crates/athena-core/src/reading.rs` (`refusing_check`, `check_defined_terms`,
+  `check_outcome_state`, `plain_request_prose`), `crates/athena-core/tests/refusal_corpus.rs`, `docs/ontology.toml`
+  (its seven terms and the rule that a term is added after a misread), `crates/athena-core/src/mirrors.rs`
+  (`parse_ontology`), D161 and D164. Measured: the corpus replay of the recorded requests of jobs
+  20261014-082328-g6vy, 20261014-174815-7bf8 and 20261017-173508-0wtc (g6vy by `check_outcome_state`, 7bf8 and 0wtc by
+  `check_defined_terms`), and the accepted and refused `ambiguous-name-*` cases built with the real generators. Not
+  measured: the share of past readings newly refused; the loop replay records it at verification.

@@ -1,0 +1,264 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-200727-xwss",
+  "round": 1,
+  "at": "2026-11-07T20:12:41.850342927Z",
+  "invocation_seq": 2,
+  "approach": "Extend `check_defined_terms` in crates/athena-core/src/reading.rs so the names it requires a `Term <name>:` definition for are STRUCTURAL_TERMS plus a new constant `AMBIGUOUS_NAMES: [&str; 1] = [\"Hermes\"]`. A private `named_term(word)` replaces `structural_term`. Structural terms keep the singular, plural and possessive forms, and an ambiguous name matches as a whole word or its possessive. The plain-prose filter (`plain_request_prose`), the skipped generated lines, `defined_terms` and the three-word rule are reused unchanged. The error text is reworded to cover ambiguous names and still ends with the repair `Term Hermes: <meaning>`. A unit test parses docs/ontology.toml with the existing `crate::mirrors::parse_ontology` and fails if any listed name is not a term there, so the list cannot drift from the shared vocabulary. The doc comment of `check_defined_terms` is rewritten (root cause, the three jobs, 2 of 3, expected 2%, and no claim that Hermes is uncovered). The `check_outcome_state` doc line \"no check catches the second\" is corrected. Corpus: the 0wtc request becomes a named constant, the two replay tests assert that check_defined_terms now refuses it (2 of 3) and accepts it once a `Term Hermes:` line is added, and new cases cover the input forms. CHANGELOG.md gets a new entry at the top of Added (old entries stay as history). docs/decisions.md gets an appended D165 (the log is append-only) that amends D164. Root cause named in all three places: readings are not checked against the outcome the user observes, so ambiguous names stay undefined.",
+  "decisions": [
+    {
+      "choice": "Add `AMBIGUOUS_NAMES` beside STRUCTURAL_TERMS and run both through the one function `named_term`; do not add a second check.",
+      "reason": "The need is the same: the request uses a word whose meaning the reading must state before work builds on it. The plain-prose filter, the generated-line skips, the `Term x:` definition rule and the step line in `refusing_check` already exist and are tested. The fault starts in the one gate that turns wording into a reading. One list-driven function covers the class (any recorded ambiguous name), not just Hermes.",
+      "rejected": [
+        {
+          "option": "A new `check_ambiguous_names` step in `refusing_check`",
+          "why": "It would duplicate the prose filter and definition parsing. `every_acceptance_check_has_a_refusing_corpus_case` and the step-order tests would need new entries, for no gain."
+        },
+        {
+          "option": "Read every `[[term]]` name from docs/ontology.toml at run time and refuse on any of them",
+          "why": "The ontology holds names like `job`, `planning` and `landed` that appear in most requests, so refusals would be very frequent. The file is not in the snapshot a reader sees, and the request puts wiring the ontology into agent prompts out of scope. A small constant plus a sync test keeps the list to terms that caused a reading misread."
+        },
+        {
+          "option": "Match 'Hermes Agent' as a phrase",
+          "why": "The misread is the bare name. A request that says 'Hermes' alone (the Orchestration god) is the other sense and needs the same definition."
+        }
+      ]
+    },
+    {
+      "choice": "Store the name in its ontology case (`\"Hermes\"`) and compare it lowercase, returning the canonical string, so the error says `Term Hermes:`. Structural terms stay lowercase. Ambiguous names get no plural stem, only the exact word and the `'s` possessive.",
+      "reason": "The brief asks for the repair text `Term Hermes: <meaning of at least three words>`. `defined_terms` already lowercases assumptions, so `term hermes:` and `Term Hermes:` both define it. A plural stem would make `hermess` a use, which is not a word.",
+      "rejected": [
+        {
+          "option": "Store the name lowercase like the structural terms",
+          "why": "The error would say `Term hermes:`, which does not match the ontology name or the requested repair text, and the sync test could not compare it with the `[[term]]` name directly."
+        }
+      ]
+    },
+    {
+      "choice": "Check the list against the ontology with a unit test in reading.rs, using the existing `crate::mirrors::parse_ontology` and `include_str!(\"../../../docs/ontology.toml\")`, with a negative control.",
+      "reason": "This is enforced by mechanism, not prose, and needs no new dependency. `include_str!` makes a moved or renamed ontology fail the build. The control (a name not in the ontology is reported) shows the test can fail.",
+      "rejected": [
+        {
+          "option": "Put the test in crates/athena-cli/tests/ontology.rs",
+          "why": "That file is a kept deliverable of 0wtc and the brief says it stays unchanged. The constant is private to athena-core."
+        },
+        {
+          "option": "A line scan for `name = \"...\"`",
+          "why": "It duplicates the parser and breaks on a reordered key."
+        }
+      ]
+    },
+    {
+      "choice": "Keep old CHANGELOG and decision-log entries untouched and add new text: a new CHANGELOG bullet and a new D165 that amends D164.",
+      "reason": "docs/decisions.md is append-only (mirrors.rs append-only rule; `SHARED_APPEND_ONLY` in plan.rs). The existing tests `delivery_verb_replay_over_the_cited_jobs` and `defined_terms_decision_and_changelog` still need the old wording (`covers 1 of the 3 cited jobs`, `are not caught`, the D164 needles). The new text states that it supersedes the old counts.",
+      "rejected": [
+        {
+          "option": "Edit D164 and the old changelog bullet to say 2 of 3",
+          "why": "This breaks the append-only rule and the old-wording tests. History would be rewritten."
+        }
+      ]
+    },
+    {
+      "choice": "The share in the doc comment, CHANGELOG and D165 is `expected 2% of newly refused readings`, and the existing declared-intended test is split so the doc must say 2% while the 3% text stays in D164 and the old bullet.",
+      "reason": "Criterion 5 requires 2% in the doc comment. The old test required `expected 3%` in the doc, the changelog and D164, which now cannot hold for the doc. The test is changed to the true state, not deleted.",
+      "rejected": [
+        {
+          "option": "Leave the doc at 3%",
+          "why": "It contradicts criterion 5 and the declared share of this change."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `AMBIGUOUS_NAMES`; rename `structural_term` to `named_term` and make it match ambiguous names; update `defined_terms` and `check_defined_terms` (loop, error text, doc comment). Fix the `check_outcome_state` doc sentence. Add unit tests (ambiguous-name refusals and accepts, ontology sync with control, doc and error text) and change the share needle in `defined_terms_refusal_is_declared_intended`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Extract `REQUEST_0WTC`; update the module doc counts; add three input-form tags (INPUT_FORMS length 41); change the 0wtc branch of `delivery_verb_replay_over_the_cited_jobs` and the assertions of `defined_terms_replay_over_the_cited_jobs` (2 of 3, refused, then accepted with a `Term Hermes:` line); add `ambiguous-name-*` corpus cases and `ambiguous_name_changelog_and_decision`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "New bullet at the top of Added: root cause, the three jobs, which check covers which, the 2% estimate, and that it supersedes the earlier counts. Old bullets are not edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D165 (amends D164) with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance. No earlier line changes.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read reading.rs around lines 3722-3960 (STRUCTURAL_TERMS, `plain_request_prose`, `structural_term`, `defined_terms`, `check_defined_terms`) and the tests at 10532-10932, and refusal_corpus.rs lines 478-614, 830-1001, to start from the exact current text.",
+    "reading.rs, source: add `/// ...` documented `const AMBIGUOUS_NAMES: [&str; 1] = [\"Hermes\"];` after STRUCTURAL_TERMS (doc: each is a `[[term]]` name in docs/ontology.toml, matched as a whole word or possessive, case-insensitively, checked by `ambiguous_names_are_terms_of_the_ontology`). Replace `structural_term` with `named_term(word: &str) -> Option<&'static str>`: strip `'s`, try STRUCTURAL_TERMS (exact or plural), else the AMBIGUOUS_NAMES entry whose lowercase equals the word, returning the entry as written. Point `defined_terms` and `check_defined_terms` at it. Reword the error to: `the reading was refused because the request uses {} as a structural term or an ambiguous name but the reading does not define {}, so the work would be built on a guess at what it means. Repair: add an assumption that starts `Term {first}:` (one per term) saying what the term means in this job, in at least three words, and cite the file that defines it if there is one, such as docs/ontology.toml; a quoted or cited mention needs no definition`. Do not name any structural term in the generic text. Rewrite the doc comment of `check_defined_terms` as one contiguous `///` block: name the root cause (readings are not checked against the outcome the user observes); cite 20261014-082328-g6vy (publish, covered by `check_outcome_state`), 20261014-174815-7bf8 (ladder) and 20261017-173508-0wtc (the Hermes misread); say the check covers 2 of the 3 cited jobs; keep the use rules and the phrases `terms outside the list`, `no deliverable`, `(ladder, rung) are refused until the reading restates them`, `priority tiers`, `caching layer`, `replay record at verification`, `held until a person runs `athena go``; say `This check refuses more readings; the higher refusal rate is intended` with `expected 2% of newly refused readings`, an estimate over hand-written requests; and remove the sentence that the Hermes term is not covered. In the `check_outcome_state` doc, replace 'and no check catches the second' with 'and `check_defined_terms` catches both of them', keeping `covers 1 of the 3 cited jobs` and `outside the check`.",
+    "reading.rs, tests: (a) add `defined_terms_refuses_an_ambiguous_ontology_name` using `terms_error`: refuse `Compare Hermes with Athena.`, `Hermes's skills differ.`, `Fix the hermes note.`, `Acceptance:\\n- Hermes Agent is described in the guide`; accept quoted, backtick, curly-quote, example-list, `docs/hermes.md`, `Hermes::new`, `hermeshub`, `Hermesian` and a request with no listed name; check that `Term Hermes: a studied agent, not Athena` and `term hermes: ...` define it, that `Term Hermes: agent` and `Term Hermes: a studied` do not, and that defining Hermes leaves ladder undefined and the reverse; check the error contains `Term Hermes:` and `ambiguous name`, has no newline and starts `the reading was refused because`; check `refuser_for` names `check_defined_terms`. (b) add helper `unlisted_names` and test `ambiguous_names_are_terms_of_the_ontology` using `crate::mirrors::parse_ontology(include_str!(\"../../../docs/ontology.toml\"))`, asserting the list is non-empty, the real result is empty, and the control `[\"Zeus\"]` is reported. (c) add `ambiguous_name_doc_and_error_text` over `defined_terms_doc()`. (d) in `defined_terms_refusal_is_declared_intended` drop `expected 3% of newly refused readings` from the shared needle loop; assert it for the changelog and D164 and assert `expected 2% of newly refused readings` for the doc, changelog and D165 (`split(\"## D165 ·\")`).",
+    "refusal_corpus.rs, replay: move the 0wtc text into `const REQUEST_0WTC` (beside REQUEST_7BF8) and use it in CITED_REQUESTS. In `delivery_verb_replay_over_the_cited_jobs` change the final `else` branch to expect `check_defined_terms` with `Hermes` in the error, and rewrite the comment at lines 512-514 (check_outcome_state still catches exactly g6vy). In `defined_terms_replay_over_the_cited_jobs` assert caught == [7bf8, 0wtc] with `caught {caught:?} of 3`; keep the loop proving the 0wtc text holds none of ladder, rung, tier or layer; assert the 0wtc refusal names Hermes and `Term Hermes:`; add the accepted run with `reading.assumptions = [\"Term Hermes: the studied self-improving agent, not part of Athena\"]` and a refused run with a two-word meaning; keep the claim `check_defined_terms covers {} of the 3 cited jobs` (now 2). Update the module doc (lines 17-26) to say 2 of 3 for defined terms.",
+    "refusal_corpus.rs, corpus: grow INPUT_FORMS to `[&str; 41]` with `ambiguous-name-plain-prose`, `ambiguous-name-defined`, `ambiguous-name-quoted-or-generated`. In `defined_terms_cases` add cases (source stated, bullets pinned): `ambiguous-name-hermes-undefined-in-0wtc-request` (REQUEST_0WTC, 0 bullets, Refuse check_defined_terms); `ambiguous-name-hermes-defined-is-accepted` (same request plus the Term Hermes assumption, Accept); `ambiguous-name-possessive-and-lowercase-use-is-refused` (`Compare Hermes's skills with Athena's.`); `ambiguous-name-in-acceptance-bullet-is-refused` (dash-bullet, 1 bullet); `ambiguous-name-quoted-path-and-identifier-are-accepted` (`Rename \"Hermes\" in the guide, then fix docs/hermes.md and Hermes::new.`); `ambiguous-name-inside-other-words-is-accepted` (`Rename the hermeshub helper.`); `ambiguous-name-approve-request-source-is-accepted` and `ambiguous-name-approve-request-title-use-is-refused` using `generated_approval_request`; `ambiguous-name-introspection-line-is-accepted` using `root_cause_request(&[...Hermes line...])` with the same `referenced` as the existing introspection case. Add test `ambiguous_name_changelog_and_decision` (needles for the new changelog bullet and D165; also that the old `covers 1 of the 3 cited jobs` and `are not caught` text and `3 of the 3 cited jobs` absence still hold).",
+    "Check the pre-change failure by reasoning from the code: before step 2 the new tests fail because `check_defined_terms` returns Ok for a Hermes request. The verifier runs `cargo test -p athena-core --test refusal_corpus` and `cargo test -p athena-core`; the producer runs both too.",
+    "CHANGELOG.md: insert one bullet at the top of `### Added` (above the `reading::check_defined_terms` bullet) that names the root cause (readings are not checked against the outcome the user observes, so ambiguous names and structural terms stay undefined), the three jobs, and which check covers which (`check_outcome_state` and `check_governance_coverage` cover 20261014-082328-g6vy; `check_defined_terms` covers 20261014-174815-7bf8 and, from this change, 20261017-173508-0wtc, so it covers 2 of the 3 cited jobs); the `AMBIGUOUS_NAMES` list and the sync test; the exact repair; `expected 2% of newly refused readings` as an estimate; that it supersedes the earlier count and that earlier entries are history. Do not write the string `3 of the 3 cited jobs`.",
+    "docs/decisions.md: append `## D165 · A reading must define an ambiguous ontology name its request uses; check_defined_terms now covers 2 of the 3 cited jobs` after D164 with Case, Decision, Alternatives (new check, whole-ontology list, runtime read of the ontology, phrase match, editing D164), Tradeoff (2% estimate, held proposals via `steward::queued_work`, how to narrow), Reversal cost, and a Provenance bullet listing what was read and what was measured (the corpus replay of the three requests); say it amends D164 and its scope sentence. Change nothing above the new heading.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix any warning (no leftover use of `structural_term`; no unused import). Run `cargo test -p athena-core --test refusal_corpus` and `cargo test -p athena-core`, and, because the check is reached from the steward queue and the CLI, the whole `cargo test` workspace run."
+  ],
+  "risks": [
+    {
+      "risk": "A request that merely mentions Hermes (for example about the study of Hermes Agent) is now refused until the reading adds a definition. This is intended but adds one reader retry.",
+      "mitigation": "The matcher counts only plain prose and Athena-generated lines are skipped; new corpus cases pin both. The 2% share is stated as an estimate, and the loop replay measures the real share at verification. Reversal is a one-element list edit."
+    },
+    {
+      "risk": "The reader prompt is not changed (no token headroom), so the reader may not define Hermes on the first attempt.",
+      "mitigation": "The error gives the exact label and says what to write (`Term Hermes: <meaning of at least three words>`) and to cite docs/ontology.toml. The same label rule is already taught in READING_RULES, and the existing tests keep that line unchanged."
+    },
+    {
+      "risk": "The doc rewrite drops a phrase an existing test pins (`terms outside the list`, `no deliverable`, `priority tiers`, `held until a person runs `athena go``) or the contiguous `///` shape.",
+      "mitigation": "Step 3 changes the share needle in the test to the true state and keeps every other needle; the doc keeps all the phrases listed in the dependents. The doc block must stay a contiguous `///` block with no bare `///` line, which `defined_terms_doc_and_changelog_name_the_cause` checks."
+    },
+    {
+      "risk": "The append-only decision-log rule or the old-wording tests fail (for example `!changelog.contains(\"3 of the 3 cited jobs\")`).",
+      "mitigation": "Do not edit old entries; add new text only. Assert in `ambiguous_name_changelog_and_decision` that `3 of the 3 cited jobs` is absent and that the old claims remain. D165 is appended after D164 with `## D165 · ` heading form and a Provenance bullet so `mirrors` accepts it."
+    },
+    {
+      "risk": "The list grows to common words and the refusal rate rises.",
+      "mitigation": "Only the ontology term name `Hermes` is listed. The sync test makes any later addition prove it is a recorded term, and the D165 text says a name is added only when it caused a reading misread, as the ontology rule says."
+    },
+    {
+      "risk": "Case differences between the constant and the ontology name hide drift.",
+      "mitigation": "Make the list-driven test compare names exactly (case-sensitive) with `OntologyTerm.name`, matching how the ontology test treats names; the matcher lowercases only the request word."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "check_defined_terms refusal behavior (more requests refused: those with a plain-prose Hermes)",
+      "dependent": "crates/athena-core/src/reading.rs `refusing_check` (step line `step!(check_defined_terms(reading, request));`, after check_environment_reach) and its wrapper `check_reading_acceptance` (reading.rs:3201). Callers: the reader loop (reading.rs:663, the real read with repo files), `check_reading_text` (reading.rs:4996, what `athena check-reading` runs) and `steward::queued_work`, which re-checks stored readings of proposed requests",
+      "kind": "code",
+      "test": "New corpus cases (`ambiguous-name-*`) go through `refusing_check` and `the_wrapper_agrees_with_refusing_check_on_every_case`. `defined_terms_has_one_step_line_after_environment_reach` and `defined_terms_refusal_needs_the_step_line` stay unchanged and pass (step line untouched). The held-proposal path is already pinned by `queued_work_holds_a_proposed_request_whose_stored_reading_leaves_a_term_undefined` (refusal_corpus.rs:1030) and uses the same function.",
+      "reason": null
+    },
+    {
+      "name": "declared share `expected 2% of newly refused readings`",
+      "dependent": "crates/athena-core/src/reading.rs `replay_cases` / `replay_declaration` (the verification-time replay that holds a candidate checker when it newly refuses more than the declared share)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The replay reads the share from the reading's acceptance criteria (`replay_declaration`), not from the doc comment. The brief's reading records 2% as an estimate. The 2% text in the doc, changelog and D165 is documentation only. The test `defined_terms_refusal_is_declared_intended` is updated to the 2% for the doc and still exercises `replay_declaration` with a synthetic criterion."
+    },
+    {
+      "name": "doc comment and error text of check_defined_terms; doc of check_outcome_state",
+      "dependent": "crates/athena-core/src/reading.rs tests: `defined_terms_doc_and_changelog_name_the_cause`, `defined_terms_refusal_is_declared_intended`, the `check_outcome_state` doc test (needles `covers 1 of the 3 cited jobs`, `outside the check`, `check_defined_terms`, absence of `which does not catch them`), `defined_terms_refuses_each_undefined_structural_term` (error shape: `uses tier as`, no `ladder` in a tier-only error, `ladder and tier`, `define them`, `` `Term ``, one line)",
+      "kind": "code",
+      "test": "Step 3 edits only the share needle of `defined_terms_refusal_is_declared_intended` and keeps the other needles in the new doc. The new error text keeps `uses {terms} as`, `define them`/`define it` and `` `Term {first}: ``, and does not name `ladder`, so these tests keep passing. The check_outcome_state doc keeps its three needles; only the sentence 'no check catches the second' changes, and `outcome_state_*` tests are run with the full crate tests.",
+      "reason": null
+    },
+    {
+      "name": "CITED_REQUESTS outcome for 0wtc; INPUT_FORMS list",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `delivery_verb_replay_over_the_cited_jobs`, `defined_terms_replay_over_the_cited_jobs`, `defined_terms_decision_and_changelog`, `corpus_covers_the_listed_input_forms` (INPUT_FORMS array length 38), `every_acceptance_check_has_a_refusing_corpus_case`",
+      "kind": "code",
+      "test": "Step 4/5 changes the 0wtc branch from `is_none()` to a `check_defined_terms` refusal, sets the replay count to 2, grows INPUT_FORMS to 41 with three new tags that each have a case, and keeps the D164 needles (D164's text stays in the log). `corpus_covers_the_listed_input_forms` fails if a tag is unused.",
+      "reason": null
+    },
+    {
+      "name": "cited-job counts stated in the changelog and decision log",
+      "dependent": "CHANGELOG.md and docs/decisions.md (D161, D164, existing changelog bullets: counts `1 of the 3`, `are not caught`; D164 `covers 1 of the 3 cited jobs`)",
+      "kind": "rule",
+      "test": "`ambiguous_name_changelog_and_decision` (new) and the mirrors decision-log checks that run over the diff at verification.",
+      "reason": "Old entries are history and stay byte-for-byte. The docs/decisions.md append-only rule (mirrors.rs; `SHARED_APPEND_ONLY` in plan.rs) requires an exact byte prefix, so D165 is appended after D164 with the next id and a Provenance bullet. The new CHANGELOG bullet and D165 say they supersede the earlier counts."
+    },
+    {
+      "name": "ontology term names",
+      "dependent": "docs/ontology.toml (`Hermes` term) and crates/athena-cli/tests/ontology.rs, crates/athena-core/src/mirrors.rs (`parse_ontology`, `ontology_problems`)",
+      "kind": "code",
+      "test": null,
+      "reason": "Read only. The ontology file, its walk and its test are not edited. The new sync test only reads term names through `parse_ontology`, so the athena-cli ontology test and the mirrors registry are unaffected."
+    },
+    {
+      "name": "reader prompt rule for `Term` assumptions",
+      "dependent": "crates/athena-context/src/briefs.rs line 2232 (READING_RULES `Terms:` line) and its test at briefs.rs:4420-4429",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged. The brief puts prompt files out of scope (no token headroom). The reader learns of the Hermes rule from the refusal text on its re-read, as it did for structural terms in D164. `Term Hermes:` uses the same label the existing rule teaches, so the pinned briefs test is unaffected."
+    },
+    {
+      "name": "requests that Athena writes itself",
+      "dependent": "Request generators `hestia::root_cause_request`, `work_decisions::approve_request`, `steward::blind_spot_change` and other Athena-built requests",
+      "kind": "code",
+      "test": "corpus cases `ambiguous-name-approve-request-source-is-accepted`, `ambiguous-name-approve-request-title-use-is-refused`, `ambiguous-name-introspection-line-is-accepted`.",
+      "reason": "No crate source or generator text contains the word Hermes (searched crates/ case-insensitively; matches are only test fixtures, the cited request in refusal_corpus.rs and ontology tests). Root-cause and approval requests copy earlier text only in lines the filter already skips, so a Hermes in copied text is not a use; new corpus cases pin this with the real generators."
+    },
+    {
+      "name": "fmt/clippy/test checks",
+      "dependent": "Host setting: CI workflow checks (fmt, clippy `-D warnings`, `cargo test --locked`)",
+      "kind": "host_setting",
+      "test": "Criterion 7 command run.",
+      "reason": "The change adds a const, renames one private fn and edits tests. No Cargo, lint or workflow file changes. A private const used by tests only would trigger dead_code, so `AMBIGUOUS_NAMES` is used by non-test `named_term`."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Replay the recorded 0wtc request through the real gate with the file-only reading, once with no `Term Hermes:` assumption and once with one of three or more words. Also try a one- or two-word meaning.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "With no Term line the result is `Some((\"check_defined_terms\", error))` and the error text contains `Hermes` and `Term Hermes:`. With the assumption `Term Hermes: the studied self-improving agent, not part of Athena` the result is None. With `Term Hermes: agent` it is still refused.",
+      "fails_without": "Before the change `refusing_check` returns None for the 0wtc request with no `Term Hermes:` line, so the `expect(\"refused\")` / `matches!(.., Some((\"check_defined_terms\", _)))` assertion in `defined_terms_replay_over_the_cited_jobs` fails. Without the three-word rule the short-meaning case would pass when it must be refused.",
+      "seam": "Production entry point: `athena_core::reading::refusing_check(&reading, request, None, &[], Some(&repo_files()))`, which is `pub` and imported at refusal_corpus.rs:46 (exists). Fixture: `base_reading(request)` (refusal_corpus.rs:141, exists) builds the reading; the test sets `reading.assumptions` directly (the field exists). The request is the recorded 0wtc text, extracted from the CITED_REQUESTS tuple (refusal_corpus.rs:478-488) into `const REQUEST_0WTC` in plan step 4. The guard is `capability.is_some()`, no question and a non-empty deliverables list, all true in `base_reading`. No double stands in for the logic."
+    },
+    {
+      "criterion": 2,
+      "method": "Replay all three CITED_REQUESTS through `refusing_check` and collect the jobs whose first refusing check is `check_defined_terms`. Do the same for `check_outcome_state`. Then read CHANGELOG.md through `include_str!` and look for the counts.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "`check_defined_terms` catches exactly 7bf8 and 0wtc. `check_outcome_state` catches exactly g6vy, with `delivery_verb_replay_over_the_cited_jobs` changed so that its 0wtc branch expects `check_defined_terms` with `Hermes` in the error, not None. The whitespace-normalised changelog contains `check_defined_terms covers 2 of the 3 cited jobs` and `covers 1 of the 3 cited jobs` (the latter for check_outcome_state) and does not contain `3 of the 3 cited jobs`.",
+      "fails_without": "Before the change `caught` in `defined_terms_replay_over_the_cited_jobs` is [7bf8] only, so the `assert_eq!(caught, [\"20261014-174815-7bf8\", \"20261017-173508-0wtc\"])` fails. Without the CHANGELOG entry the claim `check_defined_terms covers 2 of the 3 cited jobs` is not found.",
+      "seam": "Production entry point: `refusing_check` (exists), over `CITED_REQUESTS` (refusal_corpus.rs:478, exists) with `base_reading` and `repo_files()` (exist). The changelog is read through `include_str!(\"../../../CHANGELOG.md\")` (as at refusal_corpus.rs:541 and 601, exists). The CHANGELOG entry is added in step 8. The test edits are in step 4."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in reading.rs and corpus cases, run together by `cargo test -p athena-core`. Unit test `defined_terms_refuses_an_ambiguous_ontology_name` uses `terms_error`. The corpus cases are listed in the dependents and input-form mapping.",
+      "command": "cargo test -p athena-core",
+      "observes": "Refused: `Compare Hermes with Athena.`, `Hermes's skills`, `hermes` in lowercase, Hermes in an Acceptance bullet, an approved-work title that uses Hermes. Accepted: `\"Hermes\"` in double, curly, backtick and single quotes, a parenthesised example list, `docs/hermes.md`, `Hermes::new`, `hermeshub`, `Hermesian`, the copied `## Source` section and introspection line of generated requests, and requests with no listed name (`structural-term-no-structural-word-is-accepted`). A definition for Hermes does not define ladder, and the reverse. `Term hermes:` with three or more words defines it, with fewer does not.",
+      "fails_without": "Before the change every Hermes request below is accepted, so each `terms_error(..).unwrap_or_else(panic)` and each `Expected::Refuse(\"check_defined_terms\")` corpus case fails. If quote, path or generated-line skipping were lost, the accept cases fail.",
+      "seam": "Production entry points: `check_defined_terms` (pub, exists) through `terms_error` and `terms_reading` (reading.rs:10532-10543, exist), and `refusing_check` through the corpus `case()` helper (refusal_corpus.rs:210, exists). Generated-text fixtures use the real generators `generated_approval_request` (refusal_corpus.rs:743, exists) and `root_cause_request` (refusal_corpus.rs:249, exists). New corpus cases are added in step 5; new unit tests in step 3."
+    },
+    {
+      "criterion": 4,
+      "method": "Parse the real ontology text and compare each listed name with the term names. Also assert the list is non-empty and that the control reports an unknown name.",
+      "command": "cargo test -p athena-core ambiguous_names_are_terms_of_the_ontology",
+      "observes": "`unlisted_names(&AMBIGUOUS_NAMES, &terms)` is empty for the real file and non-empty for a made-up name.",
+      "fails_without": "If a name were added to `AMBIGUOUS_NAMES` that is not a `[[term]]` name in docs/ontology.toml (for example the control name `Zeus`), the test fails. The control assertion shows `unlisted_names(&[\"Zeus\"], &terms)` returns [\"Zeus\"], so the check can detect drift.",
+      "seam": "Production items: `AMBIGUOUS_NAMES` (private const, added in step 1, visible to the child `tests` module) and `crate::mirrors::parse_ontology(&str) -> Result<Vec<OntologyTerm>, String>` (pub, mirrors.rs:880, exists), with `OntologyTerm.name` (mirrors.rs:668). The fixture is the real docs/ontology.toml included at compile time with `include_str!(\"../../../docs/ontology.toml\")`; the path is the same depth as the existing `../../../CHANGELOG.md` include in reading.rs. The test helper `unlisted_names` is new (step 3) and contains only the set comparison, not the check logic."
+    },
+    {
+      "criterion": 5,
+      "method": "A content test over the source text. It reads the `///` block above `pub fn check_defined_terms(` (the helper `defined_terms_doc()` exists at reading.rs:10791), and calls `check_defined_terms` on a Hermes request to read the error. The updated `defined_terms_refusal_is_declared_intended` keeps the old needles other than the share and requires `expected 2% of newly refused readings` in the doc.",
+      "command": "cargo test -p athena-core ambiguous_name_doc_and_error_text",
+      "observes": "The doc contains `readings are not checked against the outcome the user observes`, the three job ids, `covers 2 of the 3 cited jobs` and `expected 2% of newly refused readings`, and does not contain `whose recorded request holds no word of the list`. The error contains `ambiguous name`, `Term Hermes:` and no newline, and still starts with `the reading was refused because`.",
+      "fails_without": "Without the rewrite the doc comment still says the Hermes term is not covered and has no `expected 2%` text, and the error says only `structural term`, so the test's contains and does-not-contain assertions fail.",
+      "seam": "Production entry points: `check_defined_terms` and the source text via `include_str!(\"reading.rs\")` (the pattern used by `defined_terms_doc`, exists). No double. New test added in step 3; the declared-intended test is edited in step 3."
+    },
+    {
+      "criterion": 6,
+      "method": "A content test that reads CHANGELOG.md and docs/decisions.md with `include_str!` and checks the new entry and D165 for the needles. It also checks that the old wording the other tests need is still present.",
+      "command": "cargo test -p athena-core --test refusal_corpus ambiguous_name_changelog_and_decision",
+      "observes": "The whitespace-normalised changelog holds `readings are not checked against the outcome the user observes`, the ids 20261014-082328-g6vy, 20261014-174815-7bf8 and 20261017-173508-0wtc, and states that `check_outcome_state` covers 20261014-082328-g6vy while `check_defined_terms` covers 20261014-174815-7bf8 and 20261017-173508-0wtc. D165 holds `**Alternatives:**`, `**Provenance:**`, the same root-cause sentence, `amends D164` and `expected 2% of newly refused readings`. The existing `mirrors` decision-log checks (Provenance bullet, next id) accept D165.",
+      "fails_without": "Without the CHANGELOG entry and D165 the needles (root cause sentence, the three job ids, `check_outcome_state`, `check_defined_terms`, `covers 2 of the 3 cited jobs`) are not found.",
+      "seam": "Production items: the two files themselves, included at compile time as in refusal_corpus.rs:541 and 618 (exist). The test is added in step 5. No double."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three checks the same way Athena does: `cargo fmt --all --check`, `cargo clippy --all-targets --locked`, `cargo test --locked`, with warnings treated as errors by the host (`-- -D warnings`). Because the run also calls `cargo test` for the whole workspace, it exercises every crate that reaches `check_reading_acceptance`.",
+      "command": "cargo fmt --check",
+      "observes": "All three exit 0 with no warning output. Also run `cargo clippy --all-targets --locked` and `cargo test --locked`. The workspace test run covers athena-core (unit and refusal_corpus), athena-cli (ontology and mirrors tests, unchanged) and athena-context (briefs tests).",
+      "fails_without": "A formatting error, a clippy warning (for example an unused `structural_term` left after the rename, or `dead_code` on `AMBIGUOUS_NAMES`) or a broken existing test fails the respective command.",
+      "seam": "The cargo commands themselves; nothing to inject. The three commands are in the verifier's list."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "8e87e94b9c98aa4dd3c01c2b750d6eb6b12bf98f737a8c80203ae47f01d8b5e8"
+}
