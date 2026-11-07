@@ -4676,13 +4676,13 @@ impl ReadingChecker for BinaryChecker {
             &reading_file,
             AnyRecord::Reading(Box::new(reading.clone())).to_json(),
         )?;
-        let output = std::process::Command::new(&self.bin)
-            .arg("check-reading")
+        let mut cmd = std::process::Command::new(&self.bin);
+        cmd.arg("check-reading")
             .arg("--request")
             .arg(&request_file)
             .arg("--reading")
-            .arg(&reading_file)
-            .output()
+            .arg(&reading_file);
+        let output = athena_agent::procs::retry_busy(|| cmd.output())
             .with_context(|| format!("running {} check-reading", self.bin.display()))?;
         // Exit 0 is accept and 2 is refuse; both print the one line. Anything else is a failure to check.
         if !matches!(output.status.code(), Some(0 | 2)) {

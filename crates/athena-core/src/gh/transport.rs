@@ -20,10 +20,9 @@ pub struct GhCli;
 
 impl Runner for GhCli {
     fn gh(&self, args: &[String]) -> Result<String> {
-        let out = Command::new("gh")
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
+        let mut cmd = Command::new("gh");
+        cmd.args(args).stdin(Stdio::null());
+        let out = athena_agent::procs::retry_busy(|| cmd.output())
             .context("running gh; is the GitHub client installed?")?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);

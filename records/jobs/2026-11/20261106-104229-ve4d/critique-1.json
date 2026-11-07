@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-104229-ve4d",
+  "round": 1,
+  "at": "2026-11-07T15:00:58.010574385Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Production run sites that tests feed stand-ins inside the test process are left without the retry, so criterion 4 ('the retry at each such run site') goes unmet. The stated reason for skipping them is false.",
+      "evidence": "checks.rs `run_check` spawns `Command::new(program)` (line 447/456), and its test at line 1003 writes a fake `cargo` with write_executable and runs it in-process. reading.rs `stub_binary` (line 9857) writes a stand-in that a checker runs. crates/athena-core/Cargo.toml line 12 already has `athena-agent.workspace = true`, so `athena_agent::claude::retry_busy` is reachable with no Cargo.toml edit and no new file. Earlier objections were to a new athena-data module and six new files, not to a small edit at each of these sites. The plan instead adds the retry in slot_exec.rs, where the real cargo runs as a child of a separate athena process. Fix: Wrap the spawn in checks.rs run_check and in reading.rs's checker (and in gh/transport.rs or run/mod.rs if their tests run stand-ins) with the public retry_busy. Add these files to the deliverables and their existing stand-in tests to the dependents list. Otherwise, state plainly that criterion 4 is not met instead of claiming it in the demonstration.",
+      "location": "Plan Decision 1 / Step 4 / Criterion 4 demonstration; crates/athena-core/src/checks.rs:428-456, crates/athena-core/src/reading.rs:9855-9861",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The wrapper rule matches by bare name and keywords, which invites false positives and misses.",
+      "evidence": "`primitive` reuses the existing `set_executable(` name check, so the public `apply_base_tool_config` (toolconfig.rs:73, body calls `set_executable(` at line 113) becomes a cross-file wrapper, and any future test calling it would be flagged though it writes no stand-in. How calls are matched is not specified. The fixtures define functions named `t` and `f` that hold permission calls, so plain substring matching of `t(` or `f(` would hit unrelated lines. The 0o200/0o222/set_readonly exclusion turns on a keyword anywhere in the body, not on the mode actually set. Fix: Match whole identifiers (a non-identifier character before the name, `(` after it). Count a function as a wrapper only when its body holds a raw permission call (set_permissions, from_mode, .set_mode(, OpenOptions .mode(), not merely a call to a function named set_executable. Exclude write-bit toggles by the mode value passed (an expression with `| 0o200` or `& !0o222`) rather than by a keyword anywhere in the body. Add a fixture with a single-letter wrapper name.",
+      "location": "Plan Decision 3(a) / Step 6 (wrapper detection)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The chmod rule skips only lines that contain `write_executable(`, and treats any `-c` substring as a command marker.",
+      "evidence": "Real helper calls put the script on later lines (checks.rs:1003-1006; reconcile.rs:134-137). A script line that mentions chmod together with a marker would be flagged even though it goes through the helper. A bare `-c` matches text such as `git -c` or `--cached` in the policy tests' shell strings. Fix: Skip from an open `write_executable(` to its closing bracket. Match the shell flag as the quoted argument `\"-c\"`. Add a multi-line write_executable fixture to the not-flagged set.",
+      "location": "Plan Decision 3(b) / Step 5 (chmod_arg)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A CHANGELOG reader is missing from the dependents list.",
+      "evidence": "crates/athena-cli/src/decisions.rs:511-531 `the_root_cause_is_named_in_the_changelog_and_the_log` splits CHANGELOG.md on `\\n## [` and requires the Unreleased section to contain D156's ROOT_CAUSE text. The plan inserts a new Fixed entry in that section but lists only the boundary-word scan as a CHANGELOG reader. Fix: Add this reader to the dependents list, with `cargo test --locked -p athena-cli --lib decisions` as its test, and require that the existing Unreleased entries stay untouched.",
+      "location": "Plan Dependents (CHANGELOG entry)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A general ETXTBSY retry is made public from the Claude-specific module.",
+      "evidence": "retry_busy sits at claude.rs:47. The plan makes it public as `athena_agent::claude::retry_busy` and calls it from slot_exec.rs (and should call it from athena-core). Unrelated crates would then import a process helper from the Claude driver module. The plan notes that procs.rs already uses libc. Fix: Move retry_busy and retry_busy_with to a neutral module (for example athena_agent::procs). Keep claude.rs calling it there.",
+      "location": "Plan Decision 2 / Step 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "'After the D160 link' is ambiguous, and placing it there breaks line order.",
+      "evidence": "docs/decision-links.toml has only one D160 link, older D08 and newer D160 at line 4443 (lines 187-192). It is followed by the D158 → D162 link at line 4514. A D163 link lands after line 4514. Fix: Place the new [[link]] after the D158 → D162 link (lines 194-199) so the link lines stay in ascending order.",
+      "location": "Plan Step 12",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan finds the right call sites (I confirmed them by Grep). The slot_exec.rs helper change, dropping its exemption, the D163 entry with its D160 link, and the scan fixtures that call the real `violations` function all hold up. D162 is the last decision entry and no D08-governed file is touched. The main gap is the retry. The request and criterion 4 ask for a brief retry wherever production code runs a stand-in. Yet the plan skips checks.rs `run_check` and reading.rs's checker, whose tests run stand-ins inside the multi-threaded test process (checks.rs:1003, reading.rs:9857). Its reason is that they would need new files or a Cargo edit, but athena-core already depends on athena-agent (crates/athena-core/Cargo.toml line 12), so each is a small edit with no new files. Meanwhile it retries in slot_exec.rs, where cargo runs in a separate process and the retry helps less. Smaller problems: the wrapper rule matches bare names and counts any production function that calls a `set_executable` helper. The chmod rule skips only lines that contain `write_executable(` and treats any `-c` text as a marker. The dependents list misses the CHANGELOG reader in decisions.rs. The new link should go after the D162 link to keep line order."
+}

@@ -1,0 +1,488 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261106-104229-ve4d",
+  "round": 2,
+  "at": "2026-11-07T15:04:25.764964432Z",
+  "invocation_seq": 5,
+  "approach": "Root cause: an executable is written and run in the same process while a write handle (or a forked child that copied it) still holds the file. Four earlier jobs guarded the last symptom. Every test stand-in already goes through athena_testkit::write_executable except the `script` helper in slot_exec.rs unit tests, so the fix has four parts. (1) Widen the scan in no_in_process_exec_writes.rs: whole-identifier wrapper detection (a fn whose body holds a raw permission call and no write-bit expression, called from test code in the same file, or pub/pub(crate) from another file) and a chmod-in-argument rule (`sh -c`, .arg/.args, split Command::new), skipping a full multi-line write_executable( call, with fixtures that fail on both and pass on the helper. (2) Convert the slot_exec.rs `script` helper and drop its EXEMPT entry. (3) Move the ETXTBSY retry out of claude.rs into the neutral athena_agent::procs module (pub retry_busy plus retry_busy_with, 20 x 50 ms, libc::ETXTBSY only) and use it at every production site whose tests feed it a stand-in: claude.rs (2 sites), checks.rs run_check, reading.rs BinaryChecker::check, gh/transport.rs GhCli::gh, run/mod.rs run_bounded, slot_exec.rs real-cargo status; xtask gets its own std-only copy (no athena-agent edge, no Cargo.toml edit). (4) Record it: CHANGELOG Fixed entry whose first sentence is the root cause, D163 with the site table, a D160->D163 link placed after the D158->D162 link. This round answers critic findings 1-6: the athena-core run sites are now retried (athena-core already depends on athena-agent, Cargo.toml line 12), wrapper matching is by whole identifier and raw call, the multi-line helper call is skipped, the decisions.rs CHANGELOG reader is a dependent, the retry lives in procs, and the link order is fixed.",
+  "decisions": [
+    {
+      "choice": "Retry at every production run site whose tests feed it a stand-in, using one shared fn: checks.rs:456 `cmd.spawn()`, reading.rs:4679 BinaryChecker::check, gh/transport.rs:23 GhCli::gh, run/mod.rs:366 run_bounded, slot_exec.rs:92, claude.rs:89 and :340; xtask `found` (139) and `check_credentials` (761) use a private copy.",
+      "reason": "Criterion 4 says the retry is at each run site. checks.rs:1003 and reading.rs:9857 write a stand-in with write_executable and run it in the test process, reconcile.rs:134 writes a gh stand-in that the athena binary runs through GhCli, and run/mod.rs:2429-2436 copies a binary in-process and runs it at once, the exact root-cause shape in production. athena-core and athena-cli already list athena-agent in [dependencies] (core Cargo.toml:12, cli Cargo.toml:16), so no Cargo.toml edit and no new file are needed. Finding 1 showed the earlier reason for skipping them was false.",
+      "rejected": [
+        {
+          "option": "Name the other run sites as a follow-up and say criterion 4 is not met",
+          "why": "The edits are one line per site with no new dependency; leaving them contradicts the criterion."
+        },
+        {
+          "option": "A new athena_data::busy module",
+          "why": "Adds files and an edge that earlier rounds rejected; procs already exists and every site's crate depends on athena-agent."
+        },
+        {
+          "option": "Retry inside a wrapper around Command for all callers",
+          "why": "Changes more code than the run sites; the per-site closure keeps each error message unchanged."
+        },
+        {
+          "option": "Add athena-agent to xtask",
+          "why": "Edits xtask/Cargo.toml and Cargo.lock, not deliverables; xtask keeps a std-only copy using ErrorKind::ExecutableFileBusy (stable, toolchain 1.97.0)."
+        }
+      ]
+    },
+    {
+      "choice": "Put `pub fn retry_busy` and `pub fn retry_busy_with(attempts, pause, op)` in crates/athena-agent/src/procs.rs; claude.rs imports them from there and its private copy is deleted.",
+      "reason": "Finding 5: a process helper should not be imported from the Claude driver module. procs.rs is already a pub module of process helpers, it already depends on libc (libc::kill, SIGTERM at lines 49-111), and claude.rs already imports from it (claude.rs lines 8-11). ETXTBSY is only a libc constant, so the unsafe-code note at procs.rs line 40 stays true. Bound stays 20 attempts x 50 ms and only libc::ETXTBSY is retried.",
+      "rejected": [
+        {
+          "option": "Keep it in claude.rs and make it pub",
+          "why": "Unrelated crates would import from the Claude driver module."
+        },
+        {
+          "option": "Put it in athena-testkit",
+          "why": "It is a dev-dependency only; production cannot use it."
+        }
+      ]
+    },
+    {
+      "choice": "Wrapper detection by whole identifier and raw call. A fn is a wrapper when its body (brace-counted) contains a raw permission call (`set_permissions(`, `from_mode(`, `.set_mode(`, or an OpenOptions `.mode(` with an argument) or a chmod-argument line, and contains no write-bit expression (`| 0o200`, `| 0o222`, `& !0o200`, `& !0o222`, whitespace-normalised, or `set_readonly(`). A body that only calls a function named set_executable is not a wrapper. A call is the name at an identifier boundary (previous char not alphanumeric, `_`, `.`), followed by `(`, on a test-region non-comment line that is not the `fn` line. Any same-file fn counts; a pub or pub(crate) fn counts in every file; fns under crates/athena-testkit/src/ are skipped.",
+      "reason": "Finding 2. The write-bit exclusion keys on the mode expression, not any keyword in the body: the toggles in pin.rs:186-191, core/snapshot.rs:188-192 and git/snapshot.rs:440-445 all use `| 0o200` / `& !0o222`, so they are not wrappers. toolconfig.rs set_executable (private, line 15) and apply_base_tool_config (calls it) are not shared wrappers, so a future test calling apply_base_tool_config is not flagged for a stand-in it does not write. Identifier-boundary matching means a single-letter wrapper `t` is not found inside `format(` or `x.t(`. A fixture pins this.",
+      "rejected": [
+        {
+          "option": "Substring match on `name(`",
+          "why": "A one-letter wrapper would match inside unrelated calls."
+        },
+        {
+          "option": "Exclude wrappers by a keyword anywhere in the body",
+          "why": "A body that sets 0o755 and mentions 0o222 in a comment or other line would escape."
+        },
+        {
+          "option": "Parse Rust with syn",
+          "why": "A new dependency for a lint over a few shapes; D160 chose a text scan, and the limits go in D163."
+        }
+      ]
+    },
+    {
+      "choice": "chmod-in-argument rule: a non-comment test-region line with the word `chmod` plus one of `Command::new(`, `.arg(`, `.args(`, `\"sh\"`, `\"bash\"`, or the quoted flag `\"-c\"`; or a line whose first token is `\"chmod\"` right after a line ending `Command::new(`. Lines inside a write_executable( call are skipped from the opening line to its closing paren (paren depth counted outside ordinary string literals, capped at 40 lines).",
+      "reason": "Finding 3. Real helper calls put the script on later lines (checks.rs:1003-1006, reconcile.rs:134-137), so a script line mentioning chmod beside a marker must pass. The quoted `\"-c\"` avoids `git -c` and `--cached` in policy shell strings. Policy-test inputs such as `\"chmod +x src/lib.rs\"` (policy.rs:1201) have no marker and stay unflagged.",
+      "rejected": [
+        {
+          "option": "Skip only the line that contains write_executable(",
+          "why": "Misses the script lines of a multi-line call."
+        },
+        {
+          "option": "Flag every line with the word chmod",
+          "why": "False positives on policy.rs and cap-change lib.rs:175 string inputs."
+        }
+      ]
+    },
+    {
+      "choice": "Convert only the slot_exec.rs unit-test `script` helper (`mode & 0o111 != 0` goes to athena_testkit::write_executable, otherwise std::fs::write) and drop its EXEMPT entry. Keep the scan file and stand_in_stress.rs exempt.",
+      "reason": "The stated exemption reason (0o644 case) needs no chmod because a new file is not executable. athena-cli lists athena-testkit in dev-dependencies (Cargo.toml:32). The stress control must write the bad way to measure the race.",
+      "rejected": [
+        {
+          "option": "Leave slot_exec.rs exempt",
+          "why": "The request says send all stand-in writes through the helper."
+        }
+      ]
+    },
+    {
+      "choice": "Leave toolconfig.rs (set_executable, lines 15-20), xtask set_executable (807-822), git/snapshot.rs (set_mode 475-480, set_write_bits 437-455), pin.rs and core/snapshot.rs toggles unedited; D163 lists each as non-stand-in production use. No D08 path is edited, so no D08 link.",
+      "reason": "They set file modes of repository files, installed tool binaries or write bits; none writes a test stand-in, and production cannot call the dev-only helper. Editing git/snapshot.rs would force a D08 reconciliation with no behavior gain. The brief's criterion 9 is conditional on touching a D08 path.",
+      "rejected": [
+        {
+          "option": "Route them through write_executable",
+          "why": "The helper is test-only and these are not stand-ins."
+        },
+        {
+          "option": "Doc edit to git/snapshot.rs",
+          "why": "Forces a D08 entry and link for nothing."
+        }
+      ]
+    },
+    {
+      "choice": "Add D163 at the end of docs/decisions.md (D162 heading is at line 4506) with a line starting `Amends D160 in prose only:`, and a [[link]] older D160, newer D163, status amended, placed after the D158->D162 link (decision-links.toml lines 194-199) so line numbers ascend. CHANGELOG entry goes in [Unreleased] Fixed above the existing ETXTBSY entry; existing Unreleased text is not edited.",
+      "reason": "D160 rejected retrying at run sites as hiding the race; D163 adds the retry beside the helper and says D160 otherwise stands. The only D160 link today is older D08, newer D160 at line 4443 (links lines 187-192); the last link block ends at line 199. The log is append-only, so no earlier line moves.",
+      "rejected": [
+        {
+          "option": "Edit D160 in place",
+          "why": "The AppendOnly mirror rule refuses it."
+        },
+        {
+          "option": "Place the link right after the D08->D160 link",
+          "why": "Breaks ascending line order (finding 6)."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-testkit/tests/no_in_process_exec_writes.rs",
+      "action": "modify",
+      "purpose": "Add wrapper detection, the chmod-in-argument rule, the write_executable( span skip, violations_with, the shared-wrapper pass over the tree, new fixtures; drop the slot_exec.rs EXEMPT entry; update the module doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/procs.rs",
+      "action": "modify",
+      "purpose": "Add pub retry_busy and retry_busy_with (20 x 50 ms, libc::ETXTBSY only) with unit tests, including a held-open-file test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "purpose": "Delete the private retry_busy and import it from procs; callers at lines 89 and 340 unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Retry the run_check spawn on ETXTBSY with athena_agent::procs::retry_busy; keep the could-not-start note.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Retry BinaryChecker::check's output() on ETXTBSY; keep the context message.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/transport.rs",
+      "action": "modify",
+      "purpose": "Retry GhCli::gh's output() on ETXTBSY; keep the context message and GhFailure mapping.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Retry the spawn in run_bounded on ETXTBSY.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/slot_exec.rs",
+      "action": "modify",
+      "purpose": "Retry the real-cargo status with athena_agent::procs::retry_busy; convert the test `script` helper to write_executable / std::fs::write.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "purpose": "Add a private std-only retry_busy (ErrorKind::ExecutableFileBusy) with unit tests; use it in `found` and `check_credentials`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-testkit/src/lib.rs",
+      "action": "modify",
+      "purpose": "Doc comment only: the scan covers wrappers and chmod; production run sites retry as a second layer.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "New Fixed entry in [Unreleased] whose first sentence states the root cause; cites D163.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D163: root cause, the four earlier jobs, site table, widened scan, retry sites, text-scan limits, 'Amends D160 in prose only', 0% newly refused, no D08 path touched, Provenance.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Add [[link]] older D160, newer D163, status amended, after the D158->D162 link, at the line of 'Amends D160'.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/toolconfig.rs",
+      "action": "modify",
+      "purpose": "No edit planned (private set_executable sets a repository file mode, not a stand-in); listed as a deliverable but only named in D163.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "purpose": "No edit planned (non-stand-in set_mode and write-bit toggle, a D08 path); only named in D163.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-testkit/tests/stand_in_stress.rs",
+      "action": "modify",
+      "purpose": "No edit planned (it stays exempt as the in-process control); only named in D163.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Re-run Grep `set_permissions|from_mode|set_mode|set_executable|chmod|\\.mode\\(` over crates/*/{src,tests} and xtask, and `Command::new` over crates/*/src plus xtask/src. List every hit with its category (converted, retried, non-stand-in production, string input, exempt control, scan file, helper) for the D163 table. Survey: slot_exec.rs test helper (converted); toolconfig.rs 15-20, pin.rs 186-199, core/snapshot.rs 188-196, git/snapshot.rs 437-480, xtask 807-822 (non-stand-in); policy.rs and cap-change lib.rs:175 (string inputs); stand_in_stress.rs (control); testkit lib.rs:25 (the helper).",
+    "In crates/athena-agent/src/procs.rs add `pub fn retry_busy_with<T>(attempts: u32, pause: Duration, op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T>` (loop retrying only when `e.raw_os_error() == Some(libc::ETXTBSY)` and fewer than `attempts` retries were made) and `pub fn retry_busy<T>(op)` calling it with 20 and 50 ms; both with doc comments naming the cause. Add unit tests: counting closure ok first try; ok after 3 busy errors; stops at the bound and returns the busy error after attempts+1 calls; a different error returns after one call; zero pause so they are instant; plus a real test that writes a script with athena_testkit::write_executable, opens it for writing with std::fs::OpenOptions (a plain write open, which the scan does not flag), releases it from another thread after about 100 ms, and asserts retry_busy(|| Command::new(&path).status()) succeeds.",
+    "In crates/athena-agent/src/claude.rs delete the private retry_busy (lines 45-58), add retry_busy to the existing `use crate::procs::{...}` list, leave the call sites at lines 89 and 340, and drop any import left unused.",
+    "In crates/athena-core/src/checks.rs change `cmd.spawn()` at line 456 to `athena_agent::procs::retry_busy(|| cmd.spawn())`. In reading.rs BinaryChecker::check build `let mut cmd = Command::new(&self.bin); cmd.arg(...)...;` and call `retry_busy(|| cmd.output())` keeping the `with_context` text. In gh/transport.rs build `let mut cmd = Command::new(\"gh\"); cmd.args(args).stdin(Stdio::null());` and use `retry_busy(|| cmd.output())` with the same context. In run/mod.rs run_bounded use `retry_busy(|| command.spawn())` and keep `.map_err(|e| e.to_string())`.",
+    "In crates/athena-cli/src/slot_exec.rs build `let mut cmd = Command::new(&real); cmd.args(args).env(\"PATH\", &path);` and replace line 92 with `athena_agent::procs::retry_busy(|| cmd.status())`, keeping both match arms and messages. Convert the test `script` helper (lines 126-130) to `if mode & 0o111 != 0 { athena_testkit::write_executable(&path, \"#!/bin/sh\\nexit 0\\n\") } else { std::fs::write(&path, \"#!/bin/sh\\nexit 0\\n\").unwrap() }`; keep PermissionsExt (used at line 118) and drop any import that becomes unused.",
+    "In xtask/src/main.rs add a private std-only `retry_busy<T>(op)` and `retry_busy_with` using `ErrorKind::ExecutableFileBusy`, 20 attempts, 50 ms, with the same unit tests in its tests module. In `found` (line 139) and `check_credentials` (line 761) build the Command with `let mut cmd` and use `retry_busy(|| cmd.output())`, keeping messages. Do not edit xtask/Cargo.toml.",
+    "In no_in_process_exec_writes.rs move the if-chain into `fn primitive(line) -> Option<&'static str>`. Add `fn chmod_arg(line, prev_line) -> bool` (the chmod rule from Decision 3) and a helper `fn helper_spans(text) -> Vec<bool>` marking lines inside a write_executable( call by paren depth outside ordinary string literals, capped at 40 lines; both primitive checks and chmod_arg skip marked lines. Keep the old `Command::new(` + `chmod\"` hit as `chmod child`; report new hits as `chmod argument`.",
+    "Add `fn wrappers(text) -> Vec<(String, bool)>`: for each `fn name(` collect the body by brace counting; it is a wrapper if the body holds a raw permission call or chmod_arg line and no write-bit expression (`| 0o200`, `| 0o222`, `& !0o200`, `& !0o222` after whitespace normalisation, or `set_readonly(`); a body that only calls set_executable( is not a wrapper; the bool is pub/pub(crate) read from the fn line. Add `violations_with(rel, text, shared: &BTreeSet<String>)`: the existing hits, then `wrapper call` hits on test-region non-comment lines that call a same-file wrapper or a shared one at an identifier boundary (previous char not alphanumeric, `_` or `.`, next char `(`), skipping the `fn` definition line. `violations(rel, text)` calls it with an empty set.",
+    "In the tree test and the exemption test, build `shared` from the pub wrappers of every scanned file except those under crates/athena-testkit/src/, and pass it to every file's scan. Drop the slot_exec.rs EXEMPT entry. Update the module doc to describe wrappers, chmod shapes and the text-scan limits.",
+    "Add the fixtures. Flagged: (a) a pub wrapper `mark_runnable` with set_permissions/0o755 above `#[cfg(test)]`, called from a test line; (b) a test-only wrapper definition and its call; (c) a pub wrapper from another file through violations_with with a shared set, and the same fn private (not flagged); (d) a one-letter wrapper `t` with lines like `format(1)` and `x.t(2)` that are not flagged while the real call is; (e) `sh -c` with a chmod string, `.arg(\"chmod\")`, `.args([\"-c\", \"chmod +x t\"])`, and the split `Command::new(` then `\"chmod\"`. Not flagged: `athena_testkit::write_executable(&p, \"#!/bin/sh\\nchmod +x x\\n\")`; a multi-line write_executable( call whose script line mentions chmod beside `.arg(`-like text; a write-bit toggle fn using `| 0o200` / `& !0o222`; a `git -c` shell string; and a policy-style `[\"chmod +x src/lib.rs\"]` array. Keep all existing tests.",
+    "Update only the doc comment in crates/athena-testkit/src/lib.rs (the scan covers wrappers and chmod; production run sites retry on ETXTBSY as a second layer).",
+    "Write the CHANGELOG entry under `## [Unreleased]` / `### Fixed`, above the existing 'Flaky \"Text file busy\"' entry, without editing existing text. First sentence: an executable is written and run in the same process while a write handle or forked child still holds it. Then say four earlier jobs each guarded the last symptom, and this one sends every stand-in write through the helper, widens the scan, adds the bounded retry at the listed run sites, and cites D163.",
+    "Append D163 to docs/decisions.md after D162 in the house shape: Case (root cause, the four earlier jobs), Decision (a line starting 'Amends D160 in prose only:' saying D160 stands and the retry sits beside the helper, not in its place; the site table with converted / retried / non-stand-in per hit; the widened scan; 0% newly refused over the current tree, no past readings replayed; no D08 path touched), Alternatives, Tradeoff (text-scan limits), Reversal cost, Provenance (what was read and which tests ran). Write for an outside reader with no person, machine or email names.",
+    "Add to docs/decision-links.toml, after the D158->D162 link (ends at line 199) and before the D08 [[governs]] comment, `[[link]]` older=\"D160\" newer=\"D163\" status=\"amended\" with `line` from `Grep -n 'Amends D160' docs/decisions.md` and a comment like its neighbours. No D08 link unless a D08 path was edited.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked -p athena-testkit -p athena-agent`, `cargo test --locked -p athena-core`, `cargo test --locked -p athena-cli`, `cargo test --locked -p xtask`, and the full `cargo test --locked`. There is no external service step."
+  ],
+  "risks": [
+    {
+      "risk": "The wrapper rule flags a legitimate test call (a read-only toggle, a shared name used by an unrelated fn).",
+      "mitigation": "Raw-call and write-bit-expression tests, identifier-boundary matching, pub-only cross-file wrappers and skipping athena-testkit/src. Fixtures pin the write-bit toggle, the one-letter name and the private-not-flagged case, and the real-tree test shows the result. A hit is fixed or given a documented EXEMPT entry, never silently loosened."
+    },
+    {
+      "risk": "The chmod rule misses a split form or flags a policy string or helper script body.",
+      "mitigation": "The rule needs the word chmod plus a command-building marker on the same line, a quoted \"-c\", and skips whole write_executable( calls. Fixtures cover a policy array, `git -c`, and a multi-line helper call. D163's Tradeoff states the text-scan limits (a script held in a variable and passed later is not seen)."
+    },
+    {
+      "risk": "The retry masks a real fault or slows a failing run.",
+      "mitigation": "At most 20 attempts of 50 ms (about 1 s), only on libc::ETXTBSY; the last error is returned unchanged; other errors return at once. Unit tests pin the bound and the pass-through."
+    },
+    {
+      "risk": "A re-used Command whose stdio or pre_exec settings are consumed on a failed spawn (run_check sets stdout/stderr files and isolate()).",
+      "mitigation": "A std Command can be spawned again after a failed spawn and keeps its settings, including a Stdio::from(File) set before the first spawn. The producer builds `let mut cmd` first and wraps only the final spawn/output/status in the closure; the compiler and the existing tests check it. checks.rs keeps its per-error note."
+    },
+    {
+      "risk": "Wrong line number or order in the new link, or a malformed entry, fails backtest or DecisionEntries.",
+      "mitigation": "D163 is appended last so earlier lines do not shift; the link goes after line 199 of the links file; the producer reads the link line from Grep -n 'Amends D160' docs/decisions.md after the final edit and runs the backtest, mirrors and decisions tests."
+    },
+    {
+      "risk": "Making athena-core import athena_agent::procs for a helper adds coupling.",
+      "mitigation": "Both crates already depend on athena-agent, and retry_busy is a plain fn with no other state. The producer confirms with cargo build before the tests."
+    },
+    {
+      "risk": "The introspection record records/introspections/2026-11/20261106-104005-m047.json is not in the planner's copy, so its proposed_request was not checked.",
+      "mitigation": "The reading is based on the request text and the code. The producer must not edit the record, and D163 cites the request, not the record."
+    },
+    {
+      "risk": "A refusal_corpus case is expected for any matching rule, but the scan is a test lint, not an admission rule.",
+      "mitigation": "The tree scan, the stress test (0 busy files through the helper) and the scan's ban on in-process writes keep the window closed; the retry is a second layer."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "scan rule `violations` and new `violations_with` (wrapper call, chmod argument)",
+      "dependent": "crates/athena-testkit/tests/no_in_process_exec_writes.rs tree scan over crates/*/{src,tests} and xtask/{src,tests}",
+      "kind": "rule",
+      "test": "cargo test --locked -p athena-testkit --test no_in_process_exec_writes (new fixtures plus the real-tree test)",
+      "reason": null
+    },
+    {
+      "name": "EXEMPT list (slot_exec.rs entry removed)",
+      "dependent": "every_exemption_still_exists_and_still_has_a_hit in the same file (lines 178-190)",
+      "kind": "rule",
+      "test": "every_exemption_still_exists_and_still_has_a_hit passes with two entries; slot_exec.rs has no flagged line after the conversion",
+      "reason": null
+    },
+    {
+      "name": "retry_busy moves from claude.rs to procs.rs as pub, with retry_busy_with",
+      "dependent": "crates/athena-agent/src/claude.rs callers at lines 89 (claude_version) and 340 (driver spawn) and the claude.rs stand-in tests",
+      "kind": "code",
+      "test": "existing claude.rs tests that run a stand-in through both sites, plus new retry_busy_with tests in procs.rs",
+      "reason": null
+    },
+    {
+      "name": "run_check spawn retries on ETXTBSY",
+      "dependent": "crates/athena-core/src/checks.rs run_check (spawn at line 456) and its callers; test at checks.rs:1003 that runs a fake cargo in-process",
+      "kind": "code",
+      "test": "the existing checks.rs tests (including the fake-cargo test at line 1003): cargo test --locked -p athena-core checks; spawn errors other than ETXTBSY still produce the `could not start` note (lines 456-476)",
+      "reason": null
+    },
+    {
+      "name": "BinaryChecker::check retries on ETXTBSY",
+      "dependent": "crates/athena-core/src/reading.rs BinaryChecker::check (line 4679) and the tests at 9855-9889 that use stub_binary",
+      "kind": "code",
+      "test": "replay_binary_checker_runs_a_build_from_its_path_alone_and_parses_its_line and the sibling stub tests: cargo test --locked -p athena-core reading; the `running ... check-reading` context message is unchanged",
+      "reason": null
+    },
+    {
+      "name": "GhCli::gh retries on ETXTBSY",
+      "dependent": "crates/athena-core/src/gh/transport.rs GhCli::gh (line 23); crates/athena-cli/tests/reconcile.rs:134 gh stand-in; all Runner callers",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli --test reconcile and cargo test --locked -p athena-core gh; a non-busy failure still maps to GhFailure",
+      "reason": null
+    },
+    {
+      "name": "run_bounded spawn retries on ETXTBSY",
+      "dependent": "crates/athena-core/src/run/mod.rs run_bounded (line 362) and its callers at lines 2426 and 2436; run/tests.rs",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core run; the Err(e.to_string()) mapping for other spawn errors is unchanged",
+      "reason": null
+    },
+    {
+      "name": "real-cargo status in slot_exec::run retries on ETXTBSY",
+      "dependent": "crates/athena-cli/src/slot_exec.rs line 92 and crates/athena-cli/tests/slot_exec.rs (fake cargo)",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/slot_exec.rs and the slot_exec unit tests, including the 0o644 case in the_real_cargo_is_the_first_executable_on_the_path; a non-busy error still prints 'cargo: running ...' and returns EXIT_NOT_FOUND",
+      "reason": null
+    },
+    {
+      "name": "slot_exec.rs test helper `script` converted",
+      "dependent": "slot_exec.rs unit tests at lines 126-146 that call script(.., 0o644/0o755); PermissionsExt import still used by find_program (line 118)",
+      "kind": "code",
+      "test": "the_real_cargo_is_the_first_executable_on_the_path",
+      "reason": null
+    },
+    {
+      "name": "xtask `found` and `check_credentials` retry on ETXTBSY",
+      "dependent": "xtask/src/main.rs lines 139 and 761, the stand_in_claude tests (line 833), xtask/tests/policy.rs and ci_shards.rs",
+      "kind": "code",
+      "test": "cargo test --locked -p xtask (new retry tests plus existing stand-in tests)",
+      "reason": null
+    },
+    {
+      "name": "non-stand-in permission call sites (unchanged)",
+      "dependent": "toolconfig.rs set_executable (15-20), xtask set_executable (807-822), git/snapshot.rs set_mode and set_write_bits, pin.rs set_writable, core/snapshot.rs write-bit toggle",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-testkit --test no_in_process_exec_writes",
+      "reason": "Unchanged. They set repository file modes, installed tool binaries or write bits, not test stand-ins. The wrapper rule exempts the write-bit ones by their `| 0o200` / `& !0o222` expressions; the private ones are in production regions and have no test-region call (Grep of snapshot.rs shows set_mode only at line 248). The real-tree scan test confirms."
+    },
+    {
+      "name": "D08-governed paths (athena-git snapshot.rs, athena-core run/candidate.rs)",
+      "dependent": "docs/decisions.md D08 and the [[governs]] D08 paths in docs/decision-links.toml, checked by crates/athena-cli/src/decisions.rs",
+      "kind": "rule",
+      "test": "cargo test --locked -p athena-cli --test backtest",
+      "reason": "Neither file is edited (run/mod.rs is not a governed path), so the governs rule does not fire."
+    },
+    {
+      "name": "decision log numbering, line numbers, append-only",
+      "dependent": "docs/decision-links.toml links, athena-cli backtest test, mirror rules AppendOnly and DecisionEntries in crates/athena-core/src/mirrors.rs",
+      "kind": "rule",
+      "test": "cargo test --locked -p athena-cli --test backtest --test mirrors; the new link line equals the 'Amends D160' line from Grep -n, and sits after the line-4514 D158->D162 link",
+      "reason": null
+    },
+    {
+      "name": "CHANGELOG [Unreleased] section",
+      "dependent": "crates/athena-cli/src/decisions.rs:511-531 the_root_cause_is_named_in_the_changelog_and_the_log (splits CHANGELOG.md on '\\n## [' and needs D156's ROOT_CAUSE sentence in the Unreleased section)",
+      "kind": "rule",
+      "test": "cargo test --locked -p athena-cli --lib decisions; the new entry is inserted without editing any existing Unreleased text",
+      "reason": null
+    },
+    {
+      "name": "CHANGELOG entry and D163 text",
+      "dependent": "boundary-words scan in xtask/tests/policy.rs over CHANGELOG.md and D163",
+      "kind": "rule",
+      "test": "cargo test --locked -p xtask --test policy",
+      "reason": null
+    },
+    {
+      "name": "test units on disk",
+      "dependent": "xtask/shard-timings.txt via the TimingUnits mirror rule and xtask/tests/ci_shards.rs",
+      "kind": "rule",
+      "test": "cargo test --locked -p xtask --test ci_shards",
+      "reason": "No file is added under tests/ and no test target is added; the new tests sit inside existing targets (procs.rs, xtask main.rs, the scan file)."
+    },
+    {
+      "name": "athena-testkit lib.rs doc comment (doc only)",
+      "dependent": "crates/athena-testkit/src/lib.rs and its callers across the workspace",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-testkit",
+      "reason": "Only the doc comment changes; the helper signature and behavior stay."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the new Fixed entry at the top of [Unreleased] in CHANGELOG.md and check its first sentence, then run the existing root-cause reader so the Unreleased section still parses.",
+      "command": "cargo test --locked -p athena-cli --lib decisions",
+      "observes": "Grep -n 'while a write handle' CHANGELOG.md finds the new entry, whose first sentence says an executable is written and run in the same process while a write handle or forked child still holds it; the rest names the helper, the widened scan, the retry sites and D163. the_root_cause_is_named_in_the_changelog_and_the_log (decisions.rs:511) still passes because no existing Unreleased text was changed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read D163 and compare its site table with a fresh Grep for set_permissions|from_mode|set_mode|set_executable|chmod|\\.mode\\( over crates/*/{src,tests} and xtask; the decision-log mirror rules need the Provenance bullet.",
+      "command": "cargo test --locked -p athena-cli --test backtest --test mirrors",
+      "observes": "Every Grep hit has a row marked converted (slot_exec.rs test helper), retried (the run sites), or non-stand-in/exempt (toolconfig.rs, pin.rs, core/snapshot.rs, git/snapshot.rs, xtask set_executable, policy.rs and cap-change lib.rs string inputs, stand_in_stress.rs, the scan file, the helper); the tests pass.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Run the real-tree scan, which applies the widened rules to every file, then Grep the primitives.",
+      "command": "cargo test --locked -p athena-testkit --test no_in_process_exec_writes",
+      "observes": "no_in_process_exec_writes and every_exemption_still_exists_and_still_has_a_hit pass with EXEMPT holding two entries (the scan file and the stress control). Grep for the five primitives shows only the helper, those two exemptions, and the documented non-stand-in production uses.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Grep retry_busy at each run site, and run the retry unit tests, including a kernel-level one: a stand-in written with write_executable is held open for writing by the test, a thread releases it after about 100 ms, and retry_busy(|| Command::new(&path).status()) succeeds.",
+      "command": "cargo test --locked -p athena-agent -p xtask busy",
+      "observes": "retry_busy is called in claude.rs (2 sites), checks.rs run_check, reading.rs BinaryChecker::check, gh/transport.rs GhCli::gh, run/mod.rs run_bounded, slot_exec.rs, and xtask found and check_credentials. Tests show success after N busy errors, a stop at the 20-attempt bound with the busy error returned, an immediate return on any other error, and success after a real held-open file is released.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the new fixture tests in the scan file.",
+      "command": "Grep -n 'fn .*wrapper\\|fn .*chmod\\|fn .*helper' crates/athena-testkit/tests/no_in_process_exec_writes.rs",
+      "observes": "Fixtures for a pub wrapper above #[cfg(test)] called from test code; a test-only wrapper and its call; a cross-file pub wrapper through violations_with with the same fn private not flagged; a one-letter wrapper `t` where only the true call is flagged; `sh -c` with a chmod string; .arg(\"chmod\"); .args([\"-c\", \"chmod +x t\"]); the split `Command::new(` then `\"chmod\"`; and not-flagged fixtures for a single-line and a multi-line write_executable call (script line mentions chmod), a 0o222 write-bit toggle fn, a `git -c` shell string, and a policy-style `[\"chmod +x src/lib.rs\"]` array.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the whole testkit package. The fixtures are literal strings passed to the scan; the tree test passes the repository's own files.",
+      "command": "cargo test --locked -p athena-testkit",
+      "observes": "The wrapper and chmod fixtures return the expected (line, reason) hits; the helper, multi-line helper, write-bit and policy-array fixtures return none; the real-tree test passes; the stress test's helper variant meets 0 busy files.",
+      "fails_without": "Without wrapper detection, the wrapper-call, test-only-wrapper, cross-file and one-letter fixtures get an empty hit list and fail their assertions. Without the chmod rule, the shell-string, .arg, .args and split-Command fixtures fail. If the rules over-reached, the helper, multi-line helper, write-bit, `git -c` and policy-array fixtures (asserted empty) and the real-tree test would fail.",
+      "seam": "Production entry points: `violations_with(rel, text, shared)` and `violations(rel, text)` in crates/athena-testkit/tests/no_in_process_exec_writes.rs, plus `tree()` for the real files. `violations` and `tree` exist today (read at lines 73 and 127); `violations_with` and the wrapper collector are added by plan steps 6-8. Fixtures are literal strings passed as arguments; there is no double, the scan is the logic under test."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the full workspace suite, as the Athena test check does.",
+      "command": "cargo test --locked",
+      "observes": "All packages pass, including stand_in_stress, the exemption-staleness test, athena-cli backtest, mirrors and decisions tests, xtask policy and shard tests, slot_exec unit and integration tests (including the 0o644 case), the checks.rs run_check tests that run a fake cargo, the reading.rs stub_binary tests, and the claude.rs tests that run a stand-in through the retried sites.",
+      "fails_without": "Without the slot_exec.rs helper conversion, dropping its EXEMPT entry makes the scan test fail on that file. Without the procs retry_busy being pub, claude.rs, checks.rs, reading.rs, transport.rs, run/mod.rs and slot_exec.rs do not compile. A retry that swallowed non-busy errors would fail the retry unit tests, and one that never stopped would fail the bound test.",
+      "seam": "Production entry points: `athena_agent::procs::retry_busy` through claude_version and the driver spawn, `checks::run_check`, `BinaryChecker::check`, `GhCli::gh`, `run_bounded`, `slot_exec::run`, and xtask `found`. Existing tests drive them with stand-ins written by athena_testkit::write_executable (claude.rs tests, checks.rs:1003, reading.rs:9857, tests/slot_exec.rs, reconcile.rs:134, xtask main.rs:835); that seam exists today. The bound is unit-tested through `retry_busy_with` (added by plan step 2) with a closure that only counts calls and returns io::Error::from_raw_os_error(libc::ETXTBSY) N times; the retry loop is not in the closure."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the two Athena checks on the whole workspace after `cargo fmt --all`.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Exit 0 with no diagnostics; `cargo fmt --all --check` is also clean.",
+      "fails_without": "An unformatted edit fails fmt --check; a leftover private retry_busy in claude.rs, an unused import (Duration, libc) or a function left unused after the move fails clippy -D warnings; an unused PermissionsExt import after the slot_exec.rs conversion fails clippy.",
+      "seam": "The checks themselves are the entry point: cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check over the workspace, with the repository's lint configuration as-is and no double. The seam exists today; the plan edits only code the checks already cover."
+    },
+    {
+      "criterion": 9,
+      "method": "Confirm neither D08-governed path is in the diff, then run the decision-log tests that check the D160 link.",
+      "command": "git diff --stat",
+      "observes": "crates/athena-git/src/snapshot.rs and crates/athena-core/src/run/candidate.rs do not appear (run/mod.rs is not a D08 path), so no D08 entry or link is needed; D163 says so. `cargo test --locked -p athena-cli --test backtest` passes with the new D160->D163 link at the line of 'Amends D160', placed after the D158->D162 link. If a D08 path was edited after all, D163 gains an 'Amends D08' line and a [[link]] older D08 newer D163.",
+      "fails_without": null
+    },
+    {
+      "criterion": 10,
+      "method": "Run the real-tree scan under the widened rules and read the count D163 states.",
+      "command": "cargo test --locked -p athena-testkit --test no_in_process_exec_writes",
+      "observes": "Zero flagged lines outside EXEMPT, so 0 current files are newly refused. This is an expectation from a Grep read (the word chmod appears only in policy.rs string inputs, cap-change lib.rs:175 and the testkit helper); only the run settles it. D163 states 0% newly refused over the current tree and that no past readings are replayed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 11,
+      "method": "Review the changed-file list and run the suite.",
+      "command": "git diff --stat",
+      "observes": "Only CHANGELOG.md, the scan file, docs/decisions.md, docs/decision-links.toml, xtask/src/main.rs, and the Rust files with a retry or conversion (procs.rs, claude.rs, checks.rs, reading.rs, gh/transport.rs, run/mod.rs, slot_exec.rs) plus a doc line in athena-testkit/src/lib.rs change. No athena.toml, defaults.toml, workflow, Cargo.toml or records/ change. The retry changes only the outcome of a run that failed with ETXTBSY.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: The brief's deliverable list does not include checks.rs, reading.rs, gh/transport.rs, run/mod.rs or procs.rs, but criterion 4 (retry at each run site) needs them. This plan edits them with one-line retries and no Cargo.toml change; say if you want that narrowed."
+  ],
+  "producer_section_sha256": "46955fafee41e5e654832e9e8808065fda846774d5aa7f06d81aaa90ff037d69"
+}

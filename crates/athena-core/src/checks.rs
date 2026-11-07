@@ -453,7 +453,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
     isolate(&mut cmd);
-    let mut child = match cmd.spawn() {
+    let mut child = match athena_agent::procs::retry_busy(|| cmd.spawn()) {
         Ok(child) => child,
         Err(e) => {
             return Ok(CheckRun {

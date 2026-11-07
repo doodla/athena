@@ -420,6 +420,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- An executable is written and run in the same process while a write handle or forked child still holds it, and
+  `exec` of a file that any process holds open for writing fails with "Text file busy" (`ETXTBSY`). That is the
+  root cause of the flaky test failures that four earlier jobs each guarded only at the last symptom they saw: a
+  helper, a call-site scan keyed to three function names, a retry in one test. This change closes the cause at
+  every writer found by searching `set_permissions`, `from_mode`, `set_mode`, `set_executable` and `chmod`. The
+  last in-process stand-in writer, the `script` helper in the `crates/athena-cli/src/slot_exec.rs` unit tests,
+  now goes through `athena_testkit::write_executable` (a file that must not be executable is written with
+  `std::fs::write`, which needs no mode change). The scan `no_in_process_exec_writes` now also flags a call to
+  a function that sets an execute bit (a wrapper, found by its body and matched by name in the same file, or in
+  the same crate when it is `pub`) and an external `chmod` handed to `sh -c`, `.arg(`, `.args(` or a split
+  `Command::new(`, with fixtures that fail on each shape and pass on the helper. Production code that runs a
+  file it was just handed retries briefly: `athena_agent::procs::retry_busy` (20 retries, 50 ms apart, only on
+  `ETXTBSY`) moved there from `claude.rs` and now wraps the run in `checks::run_check`,
+  `BinaryChecker::check`, `GhCli::gh`, `run_bounded` and the real-cargo status in `slot_exec`; `xtask` keeps a
+  std-only copy for the tool version check and `check_credentials`. The write-bit toggles in `pin.rs`, the core
+  and git snapshots, the `0o755` setters in `toolconfig.rs` and `xtask`, and the `0o600` private files in
+  `claude.rs` write no stand-in and are unchanged. D163 lists every site.
+
 - Flaky "Text file busy" (`ETXTBSY`) failures in tests that write an executable stand-in and run it. Root cause:
   executable stand-ins were written in-process, with no single helper and no mechanical enumeration of the write
   sites, so each new test could reintroduce the race (a fork in another test thread copies the write handle) and

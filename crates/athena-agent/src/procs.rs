@@ -91,6 +91,42 @@ pub fn isolate(cmd: &mut Command) {
     sys::set_parent_death_signal(cmd);
 }
 
+/// How many times [`retry_busy`] runs the operation again after a busy error.
+const BUSY_RETRIES: u32 = 20;
+/// How long [`retry_busy`] waits between attempts.
+const BUSY_PAUSE: Duration = Duration::from_millis(50);
+
+/// Runs `op`, which executes a program, and runs it again while it fails because the program file is busy
+/// (`ETXTBSY`), at most `attempts` more times with `pause` between runs. Any other error, and the busy error
+/// once the bound is reached, is returned unchanged.
+///
+/// The cause is a file written and executed in one process while a write handle to it, or a child forked
+/// by another thread that copied the handle, still holds it open. The window closes when the holder execs
+/// or exits, so a short wait is enough. This is the second layer beside `athena_testkit::write_executable`,
+/// which avoids the window for test stand-ins; this one covers production code that runs a file it was
+/// just handed.
+pub fn retry_busy_with<T>(
+    attempts: u32,
+    pause: Duration,
+    mut op: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut retries = 0;
+    loop {
+        match op() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && retries < attempts => {
+                retries += 1;
+                std::thread::sleep(pause);
+            }
+            other => return other,
+        }
+    }
+}
+
+/// [`retry_busy_with`] with the bound used at every run site: 20 retries, 50 ms apart (about one second).
+pub fn retry_busy<T>(op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    retry_busy_with(BUSY_RETRIES, BUSY_PAUSE, op)
+}
+
 /// Whether any process of group `pgid` is alive.
 pub fn group_alive(pgid: i32) -> bool {
     signal_group(pgid, 0)
@@ -421,6 +457,78 @@ mod tests {
         cmd.arg("30");
         isolate(&mut cmd);
         cmd.spawn().unwrap()
+    }
+
+    fn busy() -> std::io::Error {
+        std::io::Error::from_raw_os_error(libc::ETXTBSY)
+    }
+
+    #[test]
+    fn retry_busy_returns_ok_on_first_try() {
+        let mut calls = 0;
+        let out = retry_busy_with(3, Duration::ZERO, || {
+            calls += 1;
+            Ok(7)
+        });
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_busy_succeeds_after_busy_errors() {
+        let mut calls = 0;
+        let out = retry_busy_with(5, Duration::ZERO, || {
+            calls += 1;
+            if calls <= 3 { Err(busy()) } else { Ok(calls) }
+        });
+        assert_eq!(out.unwrap(), 4);
+    }
+
+    #[test]
+    fn retry_busy_stops_at_the_bound() {
+        let mut calls = 0;
+        let out: std::io::Result<()> = retry_busy_with(20, Duration::ZERO, || {
+            calls += 1;
+            Err(busy())
+        });
+        assert_eq!(out.unwrap_err().raw_os_error(), Some(libc::ETXTBSY));
+        assert_eq!(calls, 21, "one run plus 20 retries");
+    }
+
+    #[test]
+    fn retry_busy_passes_other_errors_through() {
+        let mut calls = 0;
+        let out: std::io::Result<()> = retry_busy_with(20, Duration::ZERO, || {
+            calls += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+        assert_eq!(out.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_busy_succeeds_once_a_held_file_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool");
+        athena_testkit::write_executable(&path, "#!/bin/sh\nexit 0\n");
+        // A plain write handle on the file makes exec fail with ETXTBSY until it is dropped.
+        let held = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let first = Command::new(&path).status();
+        assert_eq!(
+            first.unwrap_err().raw_os_error(),
+            Some(libc::ETXTBSY),
+            "the held file must be busy, or this test proves nothing"
+        );
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+        });
+        let status = retry_busy(|| Command::new(&path).status()).unwrap();
+        releaser.join().unwrap();
+        assert!(status.success());
     }
 
     #[test]
