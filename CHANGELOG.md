@@ -9,6 +9,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A guaranteed drain turn for Athena's own improvement requests, and the plan and report lines that show it.
+  Root cause: the plan ordered by priority alone, and a person marks requests urgent or high freely, so a request
+  from the Steward or from Hestia's reviews, which names a cause, sorted behind them and rarely ran (5 of 32
+  Steward requests filed 4 to 6 Nov ran). `Plan::build_improving` (`athena_core::plan`), which `Drain::prepare`
+  now calls in place of `Plan::build_capped`, walks the order once and lets at most two other items run in a
+  row while a ready improvement request is queued: the best ranked one moves into the place that is due. It must
+  be in the order (its reading passed, none of goal, rung or acceptance is missing) and every dependency of it in
+  the order must already be dispatched or stand before that place; a request that fails either is skipped. A moved
+  request is a group of its own, `Plan::priority_violations` does not report a moved request as a priority
+  contradiction, and the drain counts its dispatches so each replan keeps the gap. The requests found are
+  (`athena_core::hestia::improvement_of`, by recorded links and not by title): open requests on the `steward`
+  channel (`steward::improvement_requests`), the open request that cites a repeated cause's introspections (the
+  error review's; a request of a person that cites them counts too), the `request_job` of a recorded throughput
+  proposal, and the open request holding a `Spec requirement: <id>` line (the spec review's). The throughput
+  slowdown request is not covered: no record links it. A cause recorded in three or more distinct jobs
+  (`REPEAT_URGENT_JOBS`) makes its request urgent, in memory only: the raise is made before `[priority_caps]`, so
+  a full urgent tier can demote it again, and a priority a person set is never changed. The filing threshold of
+  two jobs (`hestia::REPEAT_JOBS`), the text Hestia and the Steward file, and the caps are unchanged. `athena plan`
+  prints a `turn` line for each item that takes the turn and a `promoted` line for each raised request (with the
+  demotion that followed, if any); the drain report (`Report::improvement_turns`, shown by `athena drain`) lists
+  each improvement request that took its turn, with the dispatch number. The `Steps` trait gains a default
+  method `improvement`; the JSON of `athena plan` gains `turns` and `promoted` when they are not empty, and the
+  drain report's JSON gains `improvement_turns`.
 - `athena retry <job>` and `athena ask "try again on <job>"` accept a stale job (D159, which reverses
   alternative (d) of D10, because stale landings now recur with parallel jobs). The retry reads the candidate commit
   from the stale job's `candidate` record and merges it onto the branch tip with a three-way merge from the

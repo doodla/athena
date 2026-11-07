@@ -516,8 +516,10 @@ pub fn land_pr(report: &athena_core::gh::PrReport) -> String {
 
 /// What `athena plan` prints: the order, the parallel groups, each planned item's goal, rung, acceptance, open
 /// questions, dependencies and touched paths, then the items held back with the reason (a `flagged` line for an
-/// incomplete plan, a `held` line for a dependency that was rejected or failed with no landed retry). With
-/// nothing open it says so.
+/// incomplete plan, a `held` line for a dependency that was rejected or failed with no landed retry). A `turn`
+/// line names each item that takes the guaranteed improvement turn, and a `promoted` line each improvement
+/// request raised to urgent (with the demotion that followed, if the urgent tier was full). With nothing open
+/// it says so.
 pub fn plan(report: &crate::drain::PlanReport) -> String {
     let mut out = String::new();
     if report.entries.is_empty() {
@@ -558,6 +560,47 @@ pub fn plan(report: &crate::drain::PlanReport) -> String {
             out,
             "cyclic      {} wait on each other",
             p.cyclic.join(", ")
+        );
+    }
+    let title_of = |id: &str| {
+        report
+            .entries
+            .iter()
+            .find(|e| e.id == id)
+            .map_or("", |e| e.title.as_str())
+    };
+    for t in &p.promoted {
+        let _ = write!(
+            out,
+            "promoted    {} · {}: cause recorded in {} jobs, raised from {} to urgent",
+            t.id,
+            title_of(&t.id),
+            t.jobs,
+            t.from.as_str()
+        );
+        if let Some(d) = p.demoted.iter().find(|d| d.id == t.id) {
+            let _ = write!(
+                out,
+                "; then demoted to {}: the {} tier was over its cap of {}",
+                d.to.as_str(),
+                d.from.as_str(),
+                d.cap
+            );
+        }
+        out.push('\n');
+    }
+    for t in &p.turns {
+        let _ = writeln!(
+            out,
+            "turn        {} · {} takes the improvement turn at dispatch {} ({})",
+            t.id,
+            title_of(&t.id),
+            t.position,
+            if t.moved {
+                "moved up from a later place: one dispatch in three is Athena's own"
+            } else {
+                "already stood there"
+            }
         );
     }
     let entry_lines = |out: &mut String, e: &athena_core::plan::PlanEntry| {
@@ -613,7 +656,8 @@ pub fn plan(report: &crate::drain::PlanReport) -> String {
 }
 
 /// What `athena drain` prints: why it stopped, each job and whether it landed, the money, the rating against
-/// the target and whether it was taken after a landing, and what is still queued or waiting for a person.
+/// the target and whether it was taken after a landing, an `improvement` line for each item that took the
+/// guaranteed improvement turn, and what is still queued or waiting for a person.
 pub fn drain(report: &crate::drain::Report) -> String {
     let mut out = format!(
         "stopped     {}: {}\n",
@@ -723,6 +767,13 @@ pub fn drain(report: &crate::drain::Report) -> String {
             "plan        group sizes {}; unplanned {}",
             if sizes.is_empty() { "none" } else { &sizes },
             report.unplanned
+        );
+    }
+    for t in &report.improvement_turns {
+        let _ = writeln!(
+            out,
+            "improvement {} · {} took the improvement turn at dispatch {}",
+            t.job, t.title, t.dispatch
         );
     }
     for r in &report.refused {
@@ -1869,6 +1920,151 @@ mod tests {
             reruns,
             failing_test: test.map(str::to_string),
             warnings: Vec::new(),
+        }
+    }
+
+    fn plan_entry(id: &str, title: &str) -> athena_core::plan::PlanEntry {
+        athena_core::plan::PlanEntry::bare(id, title)
+    }
+
+    fn drain_report() -> crate::drain::Report {
+        crate::drain::Report {
+            stop: crate::drain::Stop::QueueEmpty,
+            jobs: Vec::new(),
+            spent_usd: 0.0,
+            budget_usd: 5.0,
+            target_rating: 4,
+            landed: 0,
+            page_unchanged: true,
+            outcome_changed: false,
+            rating: None,
+            held_back: None,
+            queued: Vec::new(),
+            waiting: Vec::new(),
+            plan_groups: Vec::new(),
+            plan_group_sizes: Vec::new(),
+            unplanned: 0,
+            refused: Vec::new(),
+            notes: Vec::new(),
+            rebuild_output: None,
+            restart: None,
+            rebases: Default::default(),
+            improvement_turns: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_plan_names_each_item_that_takes_the_improvement_turn_and_each_promotion() {
+        use athena_core::plan::{Demotion, ImprovementTurn, Plan, Priority, RepeatPromotion};
+        let mut plan = Plan {
+            order: vec!["u1".into(), "u2".into(), "s1".into(), "h1".into()],
+            groups: vec![
+                vec!["u1".into(), "u2".into()],
+                vec!["s1".into()],
+                vec!["h1".into()],
+            ],
+            ..Plan::default()
+        };
+        let shown = |plan: &Plan| {
+            plan_text(crate::drain::PlanReport {
+                entries: vec![
+                    plan_entry("u1", "Person one"),
+                    plan_entry("u2", "Person two"),
+                    plan_entry("s1", "Steward fix"),
+                    plan_entry("h1", "Hestia fix"),
+                ],
+                plan: plan.clone(),
+                spent_usd: 0.0,
+                notes: Vec::new(),
+            })
+        };
+        // Nothing takes a turn and nothing is promoted: neither line is printed.
+        let plain = shown(&plan);
+        assert!(
+            !plain.contains("turn  ") && !plain.contains("promoted"),
+            "{plain}"
+        );
+
+        plan.turns = vec![ImprovementTurn {
+            id: "s1".into(),
+            position: 3,
+            moved: true,
+        }];
+        plan.promoted = vec![RepeatPromotion {
+            id: "h1".into(),
+            jobs: 3,
+            from: Priority::Normal,
+        }];
+        let text = shown(&plan);
+        let turn = text.lines().find(|l| l.starts_with("turn ")).expect(&text);
+        assert!(
+            turn.contains("s1 · Steward fix takes the improvement turn at dispatch 3"),
+            "{turn}"
+        );
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.starts_with("turn ") && l.contains("h1"))
+        );
+        let promoted = text
+            .lines()
+            .find(|l| l.starts_with("promoted "))
+            .expect(&text);
+        assert!(
+            promoted.contains(
+                "h1 · Hestia fix: cause recorded in 3 jobs, raised from normal to urgent"
+            ),
+            "{promoted}"
+        );
+        assert!(!promoted.contains("demoted"), "{promoted}");
+
+        // A full urgent tier demoted the raised request again: the same line says so.
+        plan.demoted = vec![Demotion {
+            id: "h1".into(),
+            from: Priority::Urgent,
+            to: Priority::High,
+            cap: 3,
+        }];
+        let text = shown(&plan);
+        let promoted = text
+            .lines()
+            .find(|l| l.starts_with("promoted "))
+            .expect(&text);
+        assert!(
+            promoted.contains("then demoted to high: the urgent tier was over its cap of 3"),
+            "{promoted}"
+        );
+    }
+
+    fn plan_text(report: crate::drain::PlanReport) -> String {
+        plan(&report)
+    }
+
+    #[test]
+    fn the_drain_report_lists_the_items_that_took_the_improvement_turn() {
+        let mut report = drain_report();
+        let none = drain(&report);
+        assert!(!none.contains("improvement"), "{none}");
+        report.improvement_turns = vec![
+            crate::drain::ImprovementTaken {
+                job: "20261107-000000-aaaa".into(),
+                title: "Steward fix".into(),
+                dispatch: 3,
+                moved: true,
+            },
+            crate::drain::ImprovementTaken {
+                job: "20261107-000000-bbbb".into(),
+                title: "Hestia fix".into(),
+                dispatch: 6,
+                moved: false,
+            },
+        ];
+        let text = drain(&report);
+        for line in [
+            "improvement 20261107-000000-aaaa · Steward fix took the improvement turn at dispatch 3",
+            "improvement 20261107-000000-bbbb · Hestia fix took the improvement turn at dispatch 6",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line:?} not in\n{text}");
         }
     }
 

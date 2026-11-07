@@ -284,6 +284,13 @@ request whose own words leave the plan incomplete is read first (within the budg
 reading. An item whose plan still lacks a goal, a rung or acceptance is not worked and is reported with the \
 reason. `athena plan` prints this plan without working anything.
 
+Improvement turn: requests of Athena's own (the steward's, and Hestia's: the error review's request for a repeated \
+cause, the throughput design request and the spec review's request) are guaranteed a turn. While one is ready, \
+at most two other items run before it, however many requests a person marked urgent or high; it must have a \
+complete plan and no unmet dependency, and `athena plan` prints a `turn` line for each. A request whose cause is \
+recorded in three or more distinct jobs is raised to urgent for the plan (a `promoted` line), unless a person set \
+its priority; the raise is made before `[priority_caps]` apply. The report has an `improvement` line for each turn taken.
+
 One drain runs per repository. It writes its pid file (`drain.pid` in the state directory) when it starts and \
 removes it when it ends, and a second `athena drain` while one is running is refused. It also refuses to start, \
 and dispatches nothing, when this build is older than the landed code (the message says to run ./setup.sh). To see, stop or restart a drain use `athena drain-status`, `athena drain-stop --wait` \
@@ -310,7 +317,10 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
     /// call, capped by `[budget] reader_usd` each and by --budget in all, with no run reserved); `--budget 0` reads
     /// nothing. A request it reads stays queued for `athena drain`. At most `[priority_caps]` items (default 3
     /// urgent, 10 high) keep their tier: the rest are demoted one tier for this plan only, each reported on a
-    /// `note` line, and an item whose priority a person set with `athena priority` is never demoted.
+    /// `note` line, and an item whose priority a person set with `athena priority` is never demoted. Requests of
+    /// Athena's own (the steward's and Hestia's) get a guaranteed turn, at least one dispatch in three while one is
+    /// ready: a `turn` line names each item that takes it, and a `promoted` line each request raised to urgent
+    /// because its cause is recorded in three or more distinct jobs.
     Plan {
         /// The most to spend reading unread requests, in US dollars.
         #[arg(long, value_name = "USD", default_value_t = 2.0, value_parser = parse_read_budget)]
