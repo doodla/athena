@@ -1,0 +1,226 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261107-031917-r96w",
+  "n": 1,
+  "at": "2026-11-07T04:47:49.56200169Z",
+  "invocation_seq": 1,
+  "base_commit": "c94c0c14c4d0c262b5db8cc4942a2b986d083580",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Stop retrying a failing line and queue one diagnosis job",
+  "summary": "When a line of work (as grouped by the scope guard) has two attempts that did not land, the drain stops retrying it and queues exactly one diagnosis job. That job reads every attempt, assigns each failure one of five categories, and queues one matching follow-up. Jobs record their line, and `athena status` lists open lines with attempt count and state. The audience is the operator, who wants fewer wasted retries.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All code and tests are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Tests cover the drain, diagnosis output and status; cargo test and clippy must pass."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuse the existing group_lines grouping instead of building a new one."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run cargo test for retry, diagnosis and status behavior."
+    },
+    {
+      "id": "thrash-stop",
+      "how": "This request implements that default for the drain."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced in the drain by code, not by prose."
+    },
+    {
+      "id": "small",
+      "how": "One focused change on the existing line machinery."
+    },
+    {
+      "id": "strangers",
+      "how": "Briefs, doc comments and CHANGELOG are written for an outside reader."
+    },
+    {
+      "id": "verified",
+      "how": "Status and drain behavior are exercised by tests."
+    },
+    {
+      "id": "no-empty-success",
+      "how": "The tests assert exactly one diagnosis job is queued, not merely that no retry happened."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/scope_guard.rs. group_lines joins retry_of and same_text_as links and line_attempts gathers a line's AttemptRecords. Verdict has Accepted, Rejected, Failed and Environment. Athena::line_pause and line_flag are called from run/mod.rs and by the drain, which implements a Driver trait (the retry, paused and flagged hooks) in crates/athena-cli/src/drain.rs. The drain's decision after an item's last failed attempt is the entry point to change, and line grouping is reused rather than rebuilt. Also read crates/athena-core/src/status.rs, which will list open lines, and crates/athena-context/prompts/ and briefs.rs, outputs.rs, where role briefs and output schemas live.",
+    "Code survey: attempts that did not land are Rejected or Failed; Environment stops do not count as failures for this rule, matching the scope guard's existing treatment. The property is measured directly by drain tests that count retries and queued diagnosis jobs against a fake driver, not through a stand-in.",
+    "Code survey: a line's identity is stored on the job record as a new line field, derived with group_lines. If that field is added to a record under crates/athena-data, the records validation allow-list, AnyRecord and the round-trip test (check_record_file) must accept it. Old records without the field must still load.",
+    "A new prompt file under crates/athena-context/prompts/ and an output schema in outputs.rs are added. The prompt token budgets are tight: a new role composes only contract plus its own frame, and contract has 24 tokens left, so the shared contract, reader, and verifier prompts are not edited.",
+    "The diagnosis job is a new role. Its structured output holds one category per attempt (defect, requirement too strict or impossible, flaky test or environment, bad request, collision with another landing) and exactly one follow-up (corrected request, rule change, flaky-test fix, or retry on new code), plus its reasoning.",
+    "Governance files (athena.toml, defaults.toml, workflows) are not changed. The rule is code, not configuration; the two-attempt threshold is a constant."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test`: a drain test shows a line with two attempts that did not land is not retried and gets exactly one diagnosis job, even when the drain runs again.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test shows the diagnosis output names a category from the five for each attempt on the line and queues exactly one follow-up, and rejects output with a missing category or two follow-ups.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a drain test shows a line with one failed attempt is retried as today.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test shows `athena status` output, text and JSON if supported, lists each open line with its attempt count and state, including a line waiting on diagnosis.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test shows a retry or re-ask of a request gets the same line value as the request it repeats, using the scope guard's group_lines, and old records without the field still load.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`, `cargo clippy` and `cargo fmt --check`: all pass. The diff adds no second line-grouping implementation, so Grep finds group_lines used by the drain and status.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new diagnosis brief under crates/athena-context/prompts/ states the five failure categories and the four follow-ups, and tells the role to record its reasoning. It is written for an outside reader, and composed prompt sets stay within their token budgets.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has entries for line recording, the stop-and-diagnose rule, the diagnosis role and the status display, and nothing the diff does not do.",
+      "kind": "content"
+    },
+    {
+      "text": "Environment-cause stops do not count toward the two-attempt rule, and the rule is described as such in a doc comment or the changelog.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-context/prompts/diagnosis.md",
+      "action": "create",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    }
+  ],
+  "out_of_scope": [
+    "Automatically executing the follow-up's content, such as rewriting rules or fixing flaky tests (the diagnosis job only queues the follow-up)",
+    "Changing the scope guard's signals T1 to T5 or their thresholds",
+    "Editing athena.toml, defaults.toml or workflows",
+    "Backfilling line values on existing job records",
+    "Editing the shared contract, reader or verifier prompts"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 1.0,
+        "p50": 2.6,
+        "p90": 6.0
+      },
+      "wall_time_s": {
+        "p10": 1200.0,
+        "p50": 3000.0,
+        "p90": 6500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6712328767123288,
+      "p_user_intervenes": 0.07999999999999999,
+      "cost_usd": {
+        "p10": 0.5596960745156966,
+        "p50": 1.3847153,
+        "p90": 4.463796489141954
+      },
+      "wall_time_s": {
+        "p10": 564.9767798012699,
+        "p50": 2046.7180039121095,
+        "p90": 4306.878127267
+      }
+    }
+  },
+  "departures": "Larger than the reference: it touches the drain, a new role with brief and schema, record shape, status and tests across several crates, so cost and time are higher and pass probability lower.",
+  "urgent_reason": "Cuts redo-work retries: ten lines took three or more attempts and wasted about $73.",
+  "hard_reason": "Changes the drain's retry rule (a gate that holds work) and the run pipeline by adding a new job role, so a mistake is costly.",
+  "producer_effort": "high"
+}
