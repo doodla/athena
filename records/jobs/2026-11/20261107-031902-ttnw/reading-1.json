@@ -1,0 +1,182 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261107-031902-ttnw",
+  "n": 1,
+  "at": "2026-11-07T03:23:29.764149766Z",
+  "invocation_seq": 1,
+  "base_commit": "866561c6c83313cd5dc29e881a74fbbfd2bef69f",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Give Steward and Hestia requests a guaranteed one-in-three drain turn",
+  "summary": "Change the drain's ordering so at least one in every three dispatches is a Steward- or Hestia-sourced improvement request (when queued and its reading passes), and a request whose cause recurs in three or more distinct jobs counts as urgent. The plan and drain report show which items took the improvement turn. Audience: the maintainer reviewing plan and drain output.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests for each rule; cargo test and clippy must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that exercise ordering and display output."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome checked is that improvement requests get dispatched, shown by the ordering tests."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to ordering, planning and display."
+    },
+    {
+      "id": "root-cause",
+      "how": "The ordering rule is fixed at the plan sort rather than by raising individual requests' priority."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs the named cargo commands."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and CHANGELOG written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/plan.rs (PlanEntry, Priority, Plan::build_with, Plan::build_capped, which orders by effective priority, then rung, then age, with person-set items protected from caps), crates/athena-cli/src/drain.rs (plan_entry, priority_caps, PlanReport, the drain loop), crates/athena-cli/src/display.rs (plan() prints the PlanReport), crates/athena-core/src/hestia.rs (REPEAT_JOBS, cause_key, repeated_causes, root_cause_request) and crates/athena-core/src/steward.rs. The entry point is the drain's plan build; ordering runs after the reading check (missing() and held items), so only requests whose reading passes can take the turn.",
+    "Existing code: extend crates/athena-core/src/plan.rs (PlanEntry, Plan) and reuse crates/athena-core/src/hestia.rs repeated_causes and cause_key for the three-distinct-jobs rule; the existing repeat threshold there is two jobs, so a separate threshold of three is added for the urgent promotion rather than changing it.",
+    "No record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are unaffected. No refusal rule is added: the change reorders work and refuses no readings, so no refusal-rate figure is needed.",
+    "Improvement requests are identified by their recorded source (Steward or Hestia) on the request, set at filing; the producer finds the existing field or adds a minimal marker on PlanEntry. The promotion to urgent is a derived in-memory priority, not written to records, and a person-set priority is never lowered.",
+    "The turn is a slot rule: in each window of three consecutive dispatches in plan order, if the window has no improvement item and one is ready (dependencies met), the best-ranked improvement item moves into the window. Dependencies and disjoint groups are still respected.",
+    "No athena.toml, defaults.toml or workflow change is needed; the one-in-three ratio is a constant in code."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-core`: a new test queues six person-filed urgent requests and two Steward requests, builds the plan, and asserts the first three dispatched items include at least one Steward request.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a new test gives a Hestia request whose failure class appears in introspections of three distinct jobs and asserts it is ordered as urgent; a companion case with two distinct jobs asserts it is not promoted.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a new test with no Steward or Hestia requests queued asserts the plan order is identical to the order before the change, and the existing plan tests still pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli`: a test of the `athena plan` output (display::plan or the CLI drain test) asserts it names each item that takes the improvement turn, and that the drain report lists them.",
+      "kind": "behavior"
+    },
+    {
+      "text": "An improvement request whose reading fails (missing goal, rung or acceptance) or whose dependency is unmet is not given a turn; a test or the diff in plan.rs shows the turn is taken only from ready, passing entries.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` and `cargo test`: all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the guaranteed improvement turn, the three-job urgent promotion and the plan and report display, and each claim matches the diff, with nothing claimed beyond it.",
+      "kind": "content"
+    },
+    {
+      "text": "The changed files are limited to the ordering and planning code, the plan display, tests and CHANGELOG.md, with no change to athena.toml or defaults.toml.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "p": 0.92
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    }
+  ],
+  "out_of_scope": [
+    "Changing the existing two-job repeat threshold in hestia.rs for filing root-cause requests",
+    "Changing how the Steward or Hestia file requests or what they say",
+    "Changing priority caps ([priority_caps]) or person-set priority semantics",
+    "Editing athena.toml, defaults.toml or workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2400.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6704805491990846,
+      "p_user_intervenes": 0.08016528925619834,
+      "cost_usd": {
+        "p10": 0.5594588369790886,
+        "p50": 1.383289616067662,
+        "p90": 4.4331531246342095
+      },
+      "wall_time_s": {
+        "p10": 564.9196939436684,
+        "p50": 2039.3932710680006,
+        "p90": 4255.945279813461
+      }
+    }
+  },
+  "departures": "Higher cost and time than the reference: the change touches the plan sort, drain wiring, display and several tests in large files (drain.rs is over 4,600 lines), and pass probability is lower because the rule interacts with caps and groups.",
+  "hard_reason": "It changes the drain's ordering and the plan pipeline, deciding which jobs run, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
