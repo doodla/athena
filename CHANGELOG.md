@@ -9,6 +9,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A reading check for delivery requests, `reading::check_outcome_state`, run as a `step!` in `refusing_check`
+  right after `check_governance_coverage`. Root cause: a delivery verb (publish, deploy, share, release) was
+  read as a narrow deliverable, and reading acceptance had no check against the state the user observes, so
+  "Publish a first explainer page" was accepted with criteria that said only that a page file exists. The check
+  refuses a reading when the request uses one of the four verbs as a verb (at the start of a sentence, line or
+  list part such as `2)`, `(a)`, `1.`, `-` or `*`, or after `and`, `please`, `can you`, `want to` and similar)
+  with a delivery object near it (a page, site, docs, report, a version such as `v1`, a destination such as
+  `crates.io`, an audience such as the team), unless a criterion of kind behavior holds a whole-word state phrase
+  (a reachable URL, a served page, an HTTP 200 answer, a downloadable release) or every detected verb is named
+  as a whole word, or in its `-ing` form, in `out_of_scope`. A content criterion that mentions a state does not
+  pass, because a Grep on a file can meet it. `release notes`, `share button`, `shared helpers`, a lock or an
+  HTTP client are not delivery. Scope, measured by `delivery_verb_replay_over_the_cited_jobs` over the recorded
+  request text of the three cited jobs: the check covers 1 of the 3 cited jobs, 20261014-082328-g6vy. The other
+  two, 20261014-174815-7bf8 (a ladder of requirements) and 20261017-173508-0wtc (an ontology decision), contain
+  no delivery verb, are another class (figurative or structural terms that need a glossary) and are not caught.
+  This check refuses more readings; the higher refusal rate is intended: expected 5% of newly refused readings.
+  The 5% is an estimate, not a measurement; the only count is that 29 of the 1045 recorded requests contain one
+  of the four words anywhere, most as the noun "share". The existing governance tests and the corpus case
+  `brand-word-and-placeholder-are-not-repo-paths` gained a behavior criterion that names a served state. The
+  reader prompt and its rules are unchanged (the reader learns of the check from the refusal text on its
+  re-read), as recorded in D161.
 - Planner and critic prompts now require landing, history-check and attribution rules to be derived from every
   commit shape the real branch holds. Root cause: such rules were derived from the happy-path commit shape, not
   from the full set of shapes, and demonstrated on an unrealistic fixture; introspections 20261024-154443-51wt,

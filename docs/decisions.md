@@ -4452,3 +4452,53 @@ should replace those estimates with its figures.
 - **Reversal cost:** Low; move the helper back, delete the crate and the scan.
 - **Provenance:** Read: D08, D156, D157, `crates/athena-git/src/snapshot.rs`. Measured: the stress test, 0 busy
   files over 800 helper cycles and a nonzero count for the in-process control.
+
+## D161 · A delivery request needs a behavior criterion that names a state the user observes, or the delivery out of scope; the check covers 1 of the 3 cited jobs
+
+- **Case:** Job 20261014-082328-g6vy asked "Publish a first explainer page on how firstmate handles work." and the
+  accepted reading said only that a page file exists. Reading acceptance read the delivery verb as a narrow
+  deliverable and had no check against the state the user observes (a page someone can reach). Three jobs were
+  cited as one class. Replaying their recorded request text through the gate (test
+  `delivery_verb_replay_over_the_cited_jobs`) shows the class is two: 20261014-082328-g6vy holds a delivery
+  verb; 20261014-174815-7bf8 (a ladder of requirements) and 20261017-173508-0wtc (an ontology decision) hold none.
+  An earlier attempt claimed all three; that was wrong.
+- **Decision:** `reading::check_outcome_state` is a `step!` in `refusing_check`, after `check_governance_coverage`
+  and before `check_boundary_and_repo_files`. Scope: it covers 1 of the 3 cited jobs. The other two are another
+  class, figurative or structural terms that need a glossary; they are not caught and are not touched here. It
+  skips a reading with no capability, a question, or no deliverable. A verb is `publish`, `deploy`, `share` or
+  `release`, at the start of a segment (a sentence, a line, a list part such as `2)`, `(a)`, `1.`, `-`, `*`) or
+  after `and`, `then`, `please`, `also`, `should`, `can you`, `could you`, `would you`, `want to`, `need to`,
+  `like to`, `going to`. It needs a delivery object within five words in the same segment: a page, site, docs,
+  guide, report or similar, a version token such as `v1`, a destination such as `crates.io` or `production`, or an
+  audience such as the team; or a pronoun (`it`, `them`) when such an object came earlier in the segment. A crate,
+  package, binary, app, image or artifact is not an object by itself, and a following word such as `notes` or
+  `button` makes the verb a noun, so "release the lock", "share the HTTP client", "share the parsing code between
+  crates" and "add release notes" pass untouched. The reading passes when a criterion of kind behavior holds a
+  whole-word state phrase (reachable, is served, HTTP 200, downloadable and similar), or when every detected verb
+  or its `-ing` form is a whole word in an out_of_scope item. A content criterion with a state phrase does not
+  pass, since a Grep on a file can meet it and that is the misread again. `url`, `tag`, `link`, `page`, `can open`,
+  `serves` and a bare `available at` are not state phrases, because file-only criteria use them. The out_of_scope
+  match is by whole word, unlike the substring match the governance check uses for paths, so "Changes to shared
+  helpers" and "Release notes are unchanged" do not put a delivery out of scope. The check is placed after the
+  governance check because that refusal names the missing workflow, the more specific repair, and the corpus case
+  `delivery-request-naming-a-workflow-fails-governance-first` pins the order; it reads only the reading and the
+  request, so it sits before the checks that compare files. There is no reader rule: the reader brief is at 1997
+  of 2000 tokens and the six reading rules are fixed, so the reader learns of the check from the refusal text on
+  its one re-read, which is the cost.
+- **Alternatives:** Add a reader rule or a prompt line: no budget, and out of scope here. Match out_of_scope by
+  substring as the governance check does: it accepts "Changes to shared helpers" and "Release notes are unchanged". Accept a state
+  phrase in any criterion kind: lets a file-only content criterion pass by wording. Detect the verb anywhere or by
+  substring: refuses "a share button" and "the release process". Check in the verifier: it sees the problem only
+  after the producer has run. A general glossary or figurative-term check: the other class, a separate job.
+- **Tradeoff:** More readings are refused; the higher refusal rate is intended, and the check applies only to
+  requests with a delivery verb whose reading names no observable state. The expected share is 5% of newly refused
+  readings, an estimate and not a measurement; the one count taken is that 29 of the 1045 recorded requests contain
+  one of the four words anywhere, most as the noun "share". Limits: other verbs (ship, launch, upload), a verb in a
+  comma list or as a gerund start, an object outside the lists, `reachable` said of a file, and a false refusal for
+  a technical use with a visible object ("release the page lock"). A code-class delivery reading with a behavior
+  criterion also needs the code survey the existing check asks for.
+- **Reversal cost:** Low; delete the step line, the function and its constants, and the corpus cases.
+- **Provenance:** Read: `crates/athena-core/src/reading.rs` (`refusing_check`, `check_governance_coverage`,
+  `governance_is_covered`), `crates/athena-core/tests/refusal_corpus.rs`, the recorded request text of jobs
+  20261014-082328-g6vy, 20261014-174815-7bf8 and 20261017-173508-0wtc. Measured: the replay test, 1 of the 3 cited
+  requests refused. Counted: 29 of 1045 request records hold a delivery word.
