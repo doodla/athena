@@ -440,6 +440,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The producer brief no longer tells the producer to run `cargo test -p athena-cli --test mirrors` before it
+  finishes (`MIRROR_CHECK_INSTRUCTION` is now `MIRROR_CHECK_NOTE` in `crates/athena-context/src/briefs.rs`; the
+  "Files kept by hand" section keeps the two facts and names no command). Root cause of the producer stage
+  growing from 12.7 to 23.5 minutes per landed job: the instruction made every producer, on every job, compile
+  most of the workspace in a cold test build inside its own invocation, for a drift the producer loop already
+  finds in-process after each report and the configured test check already finds at verification. Stage reporting,
+  thresholds, timeouts and slot settings are unchanged. The cause, the other candidates and what the next
+  throughput review should show are in `docs/design/producer-slowdown.md`. The D158 sentence "The producer brief
+  gains a short note to run the target" is superseded by this change; the append-only log is not edited.
 - An open earlier throughput design request no longer stops the throughput review. The review runs, asks the
   model, records the proposal, and notes the open request in the record and in `THROUGHPUT.md`; four of seven runs
   on 4 to 6 Nov did nothing for this reason. A proposal recorded without a design request has `request_job` unset.
