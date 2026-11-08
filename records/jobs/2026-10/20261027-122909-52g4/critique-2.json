@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-122909-52g4",
+  "round": 2,
+  "at": "2026-11-08T19:33:51.040973642Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/store.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/store.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "A retry closes its predecessor's PR only when it consumed a kept seed. Retries that start fresh leave the kept-open PR orphaned, which is the reported symptom.",
+      "evidence": "consumed_resume is set only inside resume_candidate (run/mod.rs:800). It is reached only when resume_seed returns a seed, and resume_seed returns None as soon as any non-records file changed since the job's base (run/mod.rs:554-556). timeout_seed does the same for timed_out jobs (run/mod.rs:919+). On a branch where main moves, a retry of an environment-failed or timed_out job therefore usually re-plans from scratch with consumed_resume=None and ctx.resume=None, and the KeepOpen PR is never closed. consumed_resume is also set for stale merges (run/mod.rs:669, 800), which is a different relation. The code already reads the general relation in one place: `crate::reading::retried_job(records, request)` (reading/retry.rs:201), used by stale_seed and timeout_seed (run/mod.rs:579, 887) and by job_history and retries_by_job. Fix: Find the predecessor with retried_job on the closing job's request text (ctx.job.request), whether or not a seed was used. Keep the Blocked skip and the 'no pull-request.json, no call' guard. Add a run test where a non-records commit lands between the first go and the retry, so the retry starts fresh, and assert that the predecessor's PR is still closed once.",
+      "location": "Decision 2 and Step 7 (predecessor close keyed on closing.consumed_resume / ctx.resume)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list omits crates/athena-cli/tests/drain.rs, which uses EarlyFake and runs a retry flow that will now pass through close_predecessor_pr.",
+      "evidence": "drain.rs:2768-2850: GateRun holds `Rc<athena_core::test_support::EarlyFake>`, builds it with `EarlyFake::new(|| 0)`, installs it through `install_github_fakes` with origin https://github.com/owner/repo, then calls `athena.retry(...)` and `go` on the retry, asserting it lands. That retry consumes a resume seed, so the new predecessor hook runs. It should be a no-op because the held job has no pull-request.json, but nothing in the plan states or tests that. The test_support.rs fixture at line 753 also holds an EarlyFake. The list names only test_support.rs and gh/tests.rs as EarlyFake/FakeHost readers. Fix: Add a dependents entry for crates/athena-cli/tests/drain.rs (gate_run and assert_a_retry_with_space_runs_the_checks) and for install_github_fakes. Cover it with `cargo test -p athena-cli --test drain`, and state that a held predecessor has no pull-request.json, so the hook makes no call.",
+      "location": "Dependents (PrHost / EarlyFake entry) and Step 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The fixture gives both PRs the number #7 and shares one branch head across both jobs, so 'the retry's own PR gets no close' cannot be shown by number.",
+      "evidence": "EarlyFake::open_pr always returns Ok(7) (test_support.rs:423-428). Every non-CI branch shares one `head` cell (test_support.rs:277, head_of at 358-364). With one fake across both gos, the retry's early push sees the first job's head on its own new branch, and both PRs are #7. Fix: Use a fresh EarlyFake for the retry's go, or give EarlyFake an increasing PR counter (7, then 8). Assert exactly one close of #7 whose comment names both job ids, and no comment or close on #8.",
+      "location": "Demonstration for criterion 3, `a_retry_closes_the_pull_request_its_predecessor_left_open`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan admits that nothing needs the old PR open for a retry, yet it keeps environment-failed and timed_out PRs open with no end unless a retry runs. That outcome is not put to the user.",
+      "evidence": "In Decision 2's rejected option (a), the plan says closing would not harm the resume, which reads local state, not the PR. open_early_pr loads links only for the new job (early.rs:292-295). A job that is never retried keeps its 'not landing' PR open indefinitely, so part of the reported 10-of-14 stays. Fix: State in §5.9 that a kept-open PR closes only when a retry of the job closes, and that a job never retried keeps it open. Add an open question asking whether the user wants final closure for all non-landing outcomes, since the request's keep-open clause is conditional ('if it must stay open for a retry').",
+      "location": "Decision 2 (KeepOpen) and Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Reusing the create-pr tag leaves the enum's doc comment wrong, and in the settle path the tag is never recorded anyway.",
+      "evidence": "athena-data/src/records/core.rs:21 documents CreatePr as 'Opening a pull request.' early_pr_to builds `GhClient::new(&runner, ...)`, whose log is None (client.rs:460-467), so a refused close in this path writes no HostError record. Signals parse any HostOperation from config (watcher.rs:80-86), so a future create-pr signal would also count refused closes. Fix: Either update the CreatePr doc comment in records/core.rs to 'any pull-request write' (one line, an unlisted file), or state in §5.9 that the settle client carries no host-error log, so no record is tagged. Pick one and say which.",
+      "location": "Decision 4 (log close/comment under HostOperation::CreatePr)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code in the snapshot (Read and Grep only; nothing was run). Most of what it names exists and behaves as it says. open_early_pr runs at run/mod.rs:1931, before the checks and the verifier, and stores PrLink #N. close_dispatched and land_or_block call settle_resume_marks at close.rs:155 and 433. job_of ends in `_ => None` and Records::from_parts calls `.expect` on it (store.rs:342, 431-434), so the unlisted store.rs edit is needed. JobRecords::add has a catch-all. GhClient::api builds `api --method M path -f k=v`. EarlyFake returns PR #7. Closing over REST, recording the number in a new job-level record, and wiring the step once in close_dispatched are sound and sit where the fault starts. The main problem is how a retry finds its predecessor's PR. The plan keys this on whether the retry consumed a kept seed (`closing.consumed_resume`, `ctx.resume`), not on the retry relation the code already has (`retried_job`). In an active repository the seed is usually refused, so the kept-open PR is still orphaned: the very symptom reported. The dependents list also omits the athena-cli drain tests, which use EarlyFake and run a retry-then-go flow through the new hook. Smaller points: the retry demonstration's fixture cannot tell the two PRs apart, the plan does not say that kept-open PRs of jobs never retried stay open, and the CreatePr doc comment goes stale. Verdict: revise."
+}

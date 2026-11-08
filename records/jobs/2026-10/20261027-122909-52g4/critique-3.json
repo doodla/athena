@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-122909-52g4",
+  "round": 3,
+  "at": "2026-11-08T19:41:02.926287462Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/store.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/store.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Keeping a PR open 'for a retry' is a stand-in: no code path reuses the old PR, so unretried environment-failed PRs stay open for good.",
+      "evidence": "open_early_pr loads a link only for the job being run (early.rs:292-295), so a retry always opens its own PR and never reuses its predecessor's. The resume reads local state (resume_seed, run/mod.rs:533-563). So no rejected or failed PR is actually needed by a retry. Keeping it open serves only criterion 3. An environment-failed job that is never retried keeps its PR open for good, which is part of the reported 10-of-14. Fix: Keep the open question, but in §5.9 say plainly that no code path reuses the old PR, so 'must stay open for a retry' is a policy choice and not something the code needs. Say the simpler alternative (close everything at once, mark nothing) removes the predecessor hook entirely if the user picks it.",
+      "location": "Decision 2 / Open question 2 (keep-open disposition for timed_out and environment-failed)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The no-PR-link case is shown only through the no-origin guard, not with a GitHub origin and a failed open.",
+      "evidence": "The case of a job with no PR link is exercised only with no GitHub origin. In that case github_repository() returning None stops the call before the link is ever looked at (early.rs:405, 428). The claim 'Without the link guard a no-origin job would call the host' does not hold. A GitHub origin where opening the PR failed is not tested, yet EarlyFake already has `fail_open` (test_support.rs:280, 425). Fix: Add a ci_run case with Some(GITHUB), FAILS_ON_EDIT and `|f| f.fail_open.set(true)`. Assert the state is Rejected, pr_calls is empty and there is no pull-request.json at HEAD.",
+      "location": "Demonstrations, criterion 8 (`no_github_origin_means_no_pull_request_calls_and_no_record`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The predecessor lookup loads all records on every close, and in land_or_block it makes host calls while holding the repository lock.",
+      "evidence": "close_predecessor_pr calls Records::load(&self.git, HEAD) on every job close, even when the request is not a retry. In land_or_block it runs while `_lock = self.state.lock_repository()` is held (close.rs:257, kept to the end of the function). So the comment and PATCH calls, with retries on transient failures, block other jobs from taking the lock. Fix: Parse the request with retry_reference first and return before loading Records when it is not a retry. In land_or_block, make the host calls after the lock is released (for example, return the predecessor to close and settle it after the function ends), or say in §5.9 why holding the lock is acceptable.",
+      "location": "Step 4 / Step 7 (close_predecessor_pr in close_dispatched and land_or_block)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A verified job that the gate refuses ends Failed but gets no PR record, no mark and no close, and no later retry closes its PR.",
+      "evidence": "The request says 'When a job ends rejected or failed … record the PR number'. A verified job whose landing commit the gate refuses ends Failed, with an early PR open. Under this plan it gets no pull-request.json, no comment and no close. Its retry does not close it either, because pr_disposition(Failed, non-environment) is Close, not KeepOpen. So that PR is orphaned with nothing recording it. Fix: Keep the open question, but at least write the pull-request record in that branch's closing files so the job's records name its PR, as the request asks. Or state in §5.9 that this gap is deliberate and that such PRs stay open and unrecorded.",
+      "location": "Decision 3 / Open question 1 (gate-refused Failed branch, close.rs:332-363)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Comment and close calls are tagged create-pr; a future logged caller would record them under the wrong operation.",
+      "evidence": "HostOperation is a persisted list (records/core.rs), and CreatePr's doc reads 'Opening a pull request'. Today no logged client calls close_pr. A future caller with a logged GhClient would tag a refused close as create-pr. Fix: In the doc comments of PrHost::comment_pr and close_pr, say they are tagged create-pr and that a logged caller needs a new operation first.",
+      "location": "Decision 4 (comment_pr/close_pr logged under HostOperation::CreatePr)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan relies on and found it where the plan says, with the behaviour it describes. The early PR opens at verification start, before the checks (run/mod.rs:1927-1931), so a rejected job's PR exists by close time. The early link is saved with pr_number (early.rs:311-323), and the state-dir copy is removed by clean_job at close.rs:151. settle_resume_marks is called at close.rs:155 and 433. retried_job (reading/retry.rs:201) follows the 'try again on <job>' text that Athena::retry writes (reading.rs:1158). store.rs job_of ends in `_ => None`, and from_parts calls `.expect` on it (store.rs:342, 433), so the one-line store.rs edit is needed; I weighed Athena's finding and agree it is justified. GhClient::new has no log (client.rs:460-467). FakeRunner (gh/tests.rs:64) and EarlyFake with fail_open/fail_ci (test_support.rs:275) are real seams. All five PrHost implementors are listed, and athena-cli implements none. The new record is not in the gate's CLOSING list (invariant.rs:241-246), so landing classification does not change. The demonstrations drive production entry points (Athena::go through ci_run, settle_pr, GhClient::close_pr over FakeRunner). Each would fail without the behaviour; the fresh-start retry test specifically guards against the round-2 fault. The dependents list matches what I found by Grep. The remaining points are minor: the keep-open case is a stand-in, because a retry never reuses its predecessor's PR (already an open question); the no-link case is shown only through the no-origin guard; there is an extra full records load on every close; and the gate-refused Failed job gets neither a record nor a mark. No blocker or major finding."
+}
