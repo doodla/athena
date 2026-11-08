@@ -117,6 +117,12 @@ pub struct Finished {
     pub verification: Option<Verification>,
 }
 
+/// The start of the reason of a job that ended with an error after its Dispatch commit (see
+/// [`Athena::close_after_error`]). It starts with [`crate::disk::ENVIRONMENT_PREFIX`], so the error is read as
+/// a stop of the environment and not as a failure of the work.
+const ERROR_AFTER_DISPATCH: &str =
+    "environment: stopped by an error after dispatch, before the job closed";
+
 /// Everything a dispatched job accumulates before its closing commit.
 struct Closing {
     files: Vec<NewFile>,
@@ -1297,43 +1303,104 @@ impl Athena {
         // Job planning (docs/design/job-planning.md): one accepted round, before the producer. The round
         // seeds the closing with its invocations, plan and critique, so the producer's invocation is
         // numbered after them and the budget check below counts what planning cost (review F1).
-        if let Some(seed) = resume_from {
-            let run = self.resume_candidate(&ctx, &accepted, seed, Closing::new());
-            return self.finish_dispatched(&ctx, run);
-        }
-        let mut closing = Closing::new();
-        // What the producer is sent is the stored brief with the placeholder replaced by the real path.
-        let mut producer_prompt = brief.replace(&evidence_stored, &evidence_path);
-        if planned {
-            let seed = planning_resume_seed(records, request_text).map(|s| PlanRevision {
-                previous: s.plan,
-                findings: s.findings,
-                resumed_from: Some(s.job),
-            });
-            let Some(section) =
-                self.plan_round(&ctx, &accepted, &check_views, &mut closing, seed)?
-            else {
-                return self.close_dispatched(&ctx, closing);
-            };
-            producer_prompt = producer_prompt_with_plan(&producer_prompt, &section);
-            let spent = ctx.spent(&closing);
-            if let Err(e) = self.preflight(&jc, spent, ReserveStage::Run) {
-                self.stop_planning(&ctx, &mut closing, &format!("{e}"));
-                return self.close_dispatched(&ctx, closing);
+        // From here on the Dispatch commit exists. An error that leaves this function without a closing
+        // record would leave the job dispatched with no outcome, so it goes through `close_after_error`.
+        let after_dispatch = || -> Result<GoResult> {
+            if let Some(seed) = resume_from {
+                let run = self.resume_candidate(&ctx, &accepted, seed, Closing::new());
+                return self.finish_dispatched(&ctx, run);
             }
+            let mut closing = Closing::new();
+            // What the producer is sent is the stored brief with the placeholder replaced by the real path.
+            let mut producer_prompt = brief.replace(&evidence_stored, &evidence_path);
+            if planned {
+                let seed = planning_resume_seed(records, request_text).map(|s| PlanRevision {
+                    previous: s.plan,
+                    findings: s.findings,
+                    resumed_from: Some(s.job),
+                });
+                let Some(section) =
+                    self.plan_round(&ctx, &accepted, &check_views, &mut closing, seed)?
+                else {
+                    return self.close_dispatched(&ctx, closing);
+                };
+                producer_prompt = producer_prompt_with_plan(&producer_prompt, &section);
+                let spent = ctx.spent(&closing);
+                if let Err(e) = self.preflight(&jc, spent, ReserveStage::Run) {
+                    self.stop_planning(&ctx, &mut closing, &format!("{e}"));
+                    return self.close_dispatched(&ctx, closing);
+                }
+            }
+            // The decisions that govern the files the plan and the deliverables expect to change, so the
+            // producer reconciles them the first time. It is added to the prompt only: the stored brief and
+            // its hash are the ones committed at dispatch.
+            producer_prompt = producer_prompt_with_governing(
+                &producer_prompt,
+                &self.governing_decisions(
+                    &ctx.prediction,
+                    &planned_paths(closing.plans.last(), &accepted),
+                ),
+            );
+            let run = self.produce_and_verify(&ctx, &producer_prompt, &accepted, closing);
+            self.finish_dispatched(&ctx, run)
+        };
+        match after_dispatch() {
+            Err(error) => self.close_after_error(&ctx, error),
+            done => done,
         }
-        // The decisions that govern the files the plan and the deliverables expect to change, so the
-        // producer reconciles them the first time. It is added to the prompt only: the stored brief and its
-        // hash are the ones committed at dispatch.
-        producer_prompt = producer_prompt_with_governing(
-            &producer_prompt,
-            &self.governing_decisions(
-                &ctx.prediction,
-                &planned_paths(closing.plans.last(), &accepted),
-            ),
-        );
-        let run = self.produce_and_verify(&ctx, &producer_prompt, &accepted, closing);
-        self.finish_dispatched(&ctx, run)
+    }
+
+    /// Ends a job whose run returned an error after the Dispatch commit with no closing record: failed, with
+    /// an `environment:` reason ([`crate::disk::ENVIRONMENT_PREFIX`]). That prefix makes
+    /// [`crate::disk::StopCause::of`] read it as a stop of the environment, so the scope guard does not count
+    /// it against the work and `athena retry` may resume it. The invocations that left a trace are booked
+    /// ([`Athena::recover_traces`]); no producer is synthesized.
+    ///
+    /// The original error is returned, and nothing is closed, when the error is a deliberate hold (low disk,
+    /// waiting for a slot, budget), the kill switch is on, the job has a resume mark, or the job is no longer
+    /// dispatched at `HEAD` (it already has an outcome, so a second one must not be written).
+    fn close_after_error(&self, ctx: &RunContext<'_>, error: anyhow::Error) -> Result<GoResult> {
+        let hold = error.downcast_ref::<crate::disk::LowDisk>().is_some()
+            || error.downcast_ref::<crate::disk::SlotWait>().is_some()
+            || error
+                .downcast_ref::<crate::reading::BudgetShort>()
+                .is_some();
+        if hold || self.state.registry().stopped() || self.state.read_resume(ctx.id()).is_some() {
+            return Err(error);
+        }
+        let dispatched = self
+            .head()
+            .and_then(|head| Records::load(&self.git, &head))
+            .map(|records| {
+                records
+                    .jobs
+                    .get(ctx.id().as_str())
+                    .is_some_and(|j| j.state() == JobState::Dispatched)
+            });
+        if !matches!(dispatched, Ok(true)) {
+            return Err(error);
+        }
+        let reason = format!("{ERROR_AFTER_DISPATCH}: {error:#}");
+        let reason = ctx
+            .redactor
+            .redact(&reason)
+            .unwrap_or_else(|_| format!("{ERROR_AFTER_DISPATCH}: the error text was withheld"));
+        let mut closing = Closing::new();
+        closing.happened = self.failure(ctx, &reason);
+        closing.happened.verification_passed = None;
+        if let Ok((_, invocations)) = self.recover_traces(ctx.job, &ctx.jc.config) {
+            let committed: BTreeSet<u32> = ctx.job.invocations.iter().map(|i| i.seq).collect();
+            closing.new_invocations = invocations
+                .into_iter()
+                .filter(|i| !committed.contains(&i.seq))
+                .collect();
+        }
+        match self.close_dispatched(ctx, closing) {
+            Ok(done) => Ok(done),
+            Err(second) => Err(error.context(format!(
+                "the job could not be closed after this error either: {second:#}"
+            ))),
+        }
     }
 
     /// Closes a job whose run can have pushed its CI branch (the resume path and the produce-and-verify

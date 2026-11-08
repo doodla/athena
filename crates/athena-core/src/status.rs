@@ -886,9 +886,22 @@ impl Athena {
         self.state.registry().entries().iter().any(|e| e.job == job)
     }
 
+    /// Whether any process works on `job`: one of the registry, or one that holds the job's lock (a run in
+    /// another athena process that is not in the registry yet, or no longer). A dispatched job for which
+    /// this is false was interrupted and has no outcome. [`Athena::running`] stays registry-only, because a
+    /// run holds its own job lock when it asks.
+    pub fn has_process(&self, job: &str) -> bool {
+        self.running(job)
+            || athena_data::JobId::parse(job).is_ok_and(|id| self.state.job_lock_held(&id))
+    }
+
     fn state_name(&self, job: &JobRecords) -> String {
         match job.state() {
-            JobState::Dispatched if self.running(job.id().as_str()) => "running".into(),
+            JobState::Dispatched
+                if self.running(job.id().as_str()) || self.state.job_lock_held(job.id()) =>
+            {
+                "running".into()
+            }
             JobState::Dispatched => "interrupted".into(),
             other => other.name().into(),
         }

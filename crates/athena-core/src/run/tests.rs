@@ -1837,6 +1837,161 @@ mod produce_and_verify_order_tests {
         (proposal.job, finished)
     }
 
+    /// `inner` with a fault at the first planner call: a regular file stands where the job's live record
+    /// directory belongs, so the planner's record cannot be written and the run returns an error after the
+    /// Dispatch commit and before the producer. It needs no file mode, so it holds for root. With `stop`, the
+    /// kill switch is set at the same moment.
+    fn failing_at_the_planner_record(
+        inner: athena_agent::fake::Script,
+        state_root: std::path::PathBuf,
+        stop: bool,
+    ) -> athena_agent::fake::Script {
+        Box::new(move |spec: &AgentInvocation| {
+            if spec.role == Role::Planner {
+                let live = state_root.join("jobs").join(&spec.job).join("live");
+                std::fs::create_dir_all(&live).unwrap();
+                // The reader's record is already committed; its live copy makes room for the file.
+                let _ = std::fs::remove_dir_all(live.join("records"));
+                std::fs::write(live.join("records"), "in the way").unwrap();
+                if stop {
+                    let stop_file = crate::state::StateDir::new(state_root.clone())
+                        .registry()
+                        .stop_file()
+                        .to_path_buf();
+                    std::fs::create_dir_all(stop_file.parent().unwrap()).unwrap();
+                    std::fs::write(&stop_file, "").unwrap();
+                }
+            }
+            inner(spec)
+        })
+    }
+
+    /// An Athena with planning on whose first planner call fails as `failing_at_the_planner_record` says.
+    fn athena_failing_after_dispatch(
+        repo: &tempfile::TempDir,
+        state: &tempfile::TempDir,
+        stop: bool,
+    ) -> Athena {
+        let script = failing_at_the_planner_record(
+            planning_script(
+                vec![good_plan()],
+                vec![accepting_critique()],
+                Calls::default(),
+            ),
+            state.path().join("repo"),
+            stop,
+        );
+        athena_with(
+            repo,
+            state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        )
+    }
+
+    #[test]
+    fn an_error_after_dispatch_closes_the_job_failed_with_an_environment_reason() {
+        let repo = repo_with_planning(1);
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_failing_after_dispatch(&repo, &state, false);
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+                .expect("the error after dispatch ends the job; it is not an error of `go`"),
+        );
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            done.reason.starts_with(ERROR_AFTER_DISPATCH),
+            "{}",
+            done.reason
+        );
+        assert!(ERROR_AFTER_DISPATCH.starts_with(crate::disk::ENVIRONMENT_PREFIX));
+        // A stop of the environment: not counted against the work, and a retry may resume it.
+        assert!(crate::disk::is_environment_reason(&done.reason));
+        assert_eq!(
+            crate::disk::StopCause::of(&done.reason),
+            crate::disk::StopCause::OtherEnvironment
+        );
+        assert!(crate::disk::resumable_stop(
+            JobState::Closed(OutcomeState::Failed),
+            Some(&done.reason)
+        ));
+        // The job has its dispatch record and brief, an outcome, and no producer invocation.
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = &records.jobs[proposal.job.as_str()];
+        assert_eq!(job.state(), JobState::Closed(OutcomeState::Failed));
+        assert!(job.job.is_some());
+        assert_eq!(job.outcome.as_ref().unwrap().reason, done.reason);
+        assert!(!job.invocations.iter().any(|i| i.role == Role::Producer));
+        assert!(
+            athena
+                .git
+                .show_file(
+                    &athena.head().unwrap(),
+                    &format!("{}/brief-producer.md", proposal.job.dir())
+                )
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn recover_traces_books_what_left_a_trace_and_synthesizes_nothing() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = records.jobs[proposal.job.as_str()].clone();
+        let config = JobConfig::at(&athena.git, &athena.head().unwrap())
+            .unwrap()
+            .config;
+        let committed = job.invocations.len();
+        // No trace beyond what is committed: nothing new, and no missing producer.
+        let (files, invocations) = athena.recover_traces(&job, &config).unwrap();
+        assert!(files.is_empty());
+        assert_eq!(invocations.len(), committed);
+        // A usage file of an invocation whose process died is booked at its lower bound.
+        let seq = job.next_seq();
+        let partial = crate::invocation::PartialUsage {
+            seq,
+            role: "planner".into(),
+            model: "m".into(),
+            cap_usd: 0.5,
+            timeout_s: 60,
+            ..Default::default()
+        };
+        let path = athena.state.partial_usage_file(&proposal.job, seq);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string(&partial).unwrap()).unwrap();
+        let (files, invocations) = athena.recover_traces(&job, &config).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(invocations.len(), committed + 1);
+        assert!(
+            invocations
+                .iter()
+                .any(|i| i.seq == seq && i.role == Role::Planner)
+        );
+        assert!(!invocations.iter().any(|i| i.role == Role::Producer));
+    }
+
+    #[test]
+    fn an_error_after_dispatch_with_the_kill_switch_on_leaves_the_job_dispatched() {
+        let repo = repo_with_planning(1);
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_failing_after_dispatch(&repo, &state, true);
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+            .expect_err("a stopped run is not closed by the error path");
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = &records.jobs[proposal.job.as_str()];
+        assert_eq!(job.state(), JobState::Dispatched);
+        assert!(job.outcome.is_none());
+    }
+
     #[test]
     fn replay_holds_over_threshold_rejects_the_job_and_records_the_list() {
         let repo = repo();

@@ -110,12 +110,20 @@
 //!   from `athena correct` is not held back). Only a request that was declined, is running, or has ended,
 //!   and one on another channel, is also left out ([`athena_core::steward::queued_work`]).
 //! - **An interrupted job is retried.** A job that was dispatched, has no closing record and has no process
-//!   working on it (a machine restart killed it) is listed as work like a queued request, on a drained
-//!   channel only ([`athena_core::steward::interrupted_work`]). Its first attempt is `athena retry`, which
-//!   reads the request again as a new job; that job is then run. The interrupted job is left as it is, but a
-//!   job that a retry already names is not listed again. A job whose process is still running is never listed.
+//!   working on it (a machine restart killed it) is listed as work like a queued request, on any channel
+//!   ([`athena_core::steward::interrupted_work`]). Its first attempt is `athena retry`, which
+//!   reads the request again as a new job; that job is then run. A job that a retry still stands for is not
+//!   listed again (a retry that was dropped or abandoned does not stand). A job with a process (one in the
+//!   registry, or one that holds the job lock: [`athena_core::Athena::has_process`]) is never listed.
 //!   A job held for low disk space after its candidate was built (see "Low disk holds a job") is listed the
 //!   same way, so the next pass resumes it with no one running `athena retry`.
+//! - **No dispatched job is passed over without an outcome or a note.** Before the queue is read, an
+//!   interrupted original whose retry has ended is closed with a reason that names the retry ("re-queued as
+//!   <retry>, which ended <state>"), and a dispatched job with no request record is closed. After the queue was
+//!   worked, the same is done again, and every dispatched job that still has no outcome and no process gets a
+//!   `held <job>: <reason>` note (job limit, budget, stop, hold marker, or a retry that has not ended), unless the
+//!   run already named it. This is [`Steps::settle_interrupted`] ([`athena_core::steward::settle_interrupted`]).
+//!   An interrupted item's incomplete plan entry is not used: its retry reads the request again.
 //! - **The in-flight table.** The real steps keep a local file, `in-flight.json` in the state directory, with
 //!   one row per job being worked: job id, stage and worktree ([`InFlight`]). The stage is reported by the run
 //!   itself where it enters a stage (`athena_core::state::StageSink`, called by `Athena::go_with_stages`):
@@ -574,6 +582,15 @@ pub trait Steps {
     /// work trees and candidates. It is asked at the start of the drain and before each run, so interrupted jobs
     /// do not hold the disk. The default removes nothing, as for steps that have no state directory.
     fn reclaim_interrupted(&self) {}
+    /// Settles the dispatched jobs that have no outcome and no process, so the drain never moves past one
+    /// without a resume, a close or a stated reason ([`athena_core::steward::settle_interrupted`]). It is asked
+    /// at the start of the drain (`final_pass` false: it only closes originals whose retry has ended) and after
+    /// the queue was worked (`final_pass` true: it also names every job still left, except those in `reported`,
+    /// which the drain has already named). Returns one note per job. The default settles nothing, as for steps
+    /// that have no records.
+    fn settle_interrupted(&self, _final_pass: bool, _reported: &BTreeSet<String>) -> Vec<String> {
+        Vec::new()
+    }
     fn land(&self, job: &str) -> Landing;
     /// Why the configuration at the branch head cannot be read, asked only right after a [`Landing::Landed`].
     /// The configuration was readable when the run started, so a landing that makes it unreadable has brought
@@ -1467,6 +1484,18 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         }
     }
 
+    /// The ids of the items and jobs this run has already named: those it passed over, and every job it
+    /// started with the item it worked on.
+    fn reported_jobs(&self) -> BTreeSet<String> {
+        let st = self.st();
+        let mut ids = st.passed_over.clone();
+        for line in &st.jobs {
+            ids.insert(line.item.clone());
+            ids.insert(line.job.clone());
+        }
+        ids
+    }
+
     /// Logs that the planned item `id` is not worked, with the reason: one line per item per run.
     fn pass_over(&self, id: &str, reason: &str) {
         let first = self.st().passed_over.insert(id.to_string());
@@ -2196,6 +2225,21 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 ));
             }
             self.remember_reading(&id, view.items[idx].read, &view.plan[pos], refusal.as_ref());
+        }
+        // An interrupted item is worked by `athena retry`, which reads the request again, so an incomplete plan
+        // entry (a request of another channel has no `Files:` line, say) must not keep it from being worked.
+        for item in view.items.iter().filter(|i| i.interrupted) {
+            if let Some(pos) = view
+                .plan
+                .iter()
+                .position(|e| e.id == item.job && !e.missing().is_empty())
+            {
+                view.plan.remove(pos);
+                self.note_once(format!(
+                    "item {} was interrupted; its retry reads the request again, so its incomplete plan entry is not used",
+                    item.job
+                ));
+            }
         }
         // A paused item is held back, and so is everything that depends on it, as `Plan::build_with` holds the
         // dependents of an item it holds: a dependency on an id outside the entries would count as met.
@@ -2953,6 +2997,10 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     let limits = d.limits;
     // Interrupted jobs' build directories first: they are the disk a run would otherwise need.
     steps.reclaim_interrupted();
+    // A dispatched job with no outcome whose retry has ended is closed first, so the queue does not list it.
+    for line in steps.settle_interrupted(false, &BTreeSet::new()) {
+        d.note(line);
+    }
     // Before the queue is read, so a request the backfill queues is worked in this drain.
     for line in steps.review_passes() {
         d.ui.line(&line);
@@ -3078,6 +3126,11 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         }
     }
     d.sweep(&view, &plan, &wave);
+    // The drain does not end past a dispatched job that has no outcome and no process without saying why: an
+    // original whose retry ended is closed, and any other is named, unless this run already named it.
+    for line in steps.settle_interrupted(true, &d.reported_jobs()) {
+        d.note(line);
+    }
     let plan = first_plan;
     let mut st = d.st();
     // A reading made ahead that no job used (the run ended first) was paid for; say so.
@@ -4209,7 +4262,7 @@ impl Steps for RealSteps<'_> {
         // process is gone counts as interrupted.
         self.athena.state.registry().reap();
         items.extend(
-            steward::interrupted_work(&records, &|j| self.athena.running(j))
+            steward::interrupted_work(&records, &|j| self.athena.has_process(j))
                 .into_iter()
                 .map(|w| Item {
                     interrupted: true,
@@ -4358,6 +4411,43 @@ impl Steps for RealSteps<'_> {
     fn reclaim_interrupted(&self) {
         self.athena.state.registry().reap();
         self.athena.reclaim_interrupted(self.ui);
+    }
+
+    fn settle_interrupted(&self, final_pass: bool, reported: &BTreeSet<String>) -> Vec<String> {
+        self.athena.state.registry().reap();
+        let records = match self.records() {
+            Ok(records) => records,
+            Err(error) => {
+                return vec![format!(
+                    "dispatched jobs with no outcome could not be checked: {error:#}"
+                )];
+            }
+        };
+        let held = |job: &str| {
+            let id = athena_data::JobId::parse(job).ok()?;
+            athena_core::disk::read_any_hold(&self.athena.state, &id).map(|h| h.text())
+        };
+        let mut lines = Vec::new();
+        for settlement in steward::settle_interrupted(
+            &records,
+            &|j| self.athena.has_process(j),
+            &held,
+            final_pass,
+            reported,
+        ) {
+            match settlement {
+                steward::Settlement::Close { job, why } => {
+                    match self.athena.close(&job, &why, self.ui) {
+                        Ok(_) => lines.push(format!("closed {job}: {why}")),
+                        Err(error) => lines.push(format!("could not close {job}: {error:#}")),
+                    }
+                }
+                steward::Settlement::Hold { job, why } => {
+                    lines.push(format!("held {job}: {why}"));
+                }
+            }
+        }
+        lines
     }
 
     fn run(&self, job: &str) -> Run {

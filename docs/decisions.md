@@ -4802,3 +4802,55 @@ should replace those estimates with its figures.
   (`accept_request`), `crates/athena-core/src/run/tests.rs`, and the two introspections' proposed preventions.
   Measured: unit and corpus cases that call `refusing_check` and assert the refusing check by name. Not measured: the
   share of past readings newly refused; the loop replay records it at verification.
+
+## D167 · A dispatched job with no outcome is resumed or closed with a reason, on any channel; a run that errors after dispatch closes failed with an `environment:` reason; the drain names every job it leaves
+
+- **Case:** Six jobs dispatched on 2026-10-27 (20261026-232359-msh3, 20261026-232423-hvyb, 20261027-054148-g63s,
+  20261027-123701-77zh, 20261027-054206-w1y3, 20261027-054209-z7sj) had a job record and a producer brief, no
+  producer invocation and no outcome, while later jobs were dispatched and finished past them. Two origins, both in
+  code. (1) `Athena::dispatch` commits the job record and brief, and any later `?` returned an error with no
+  closing record; the drain read that as a run with no outcome and moved on. (2) `steward::interrupted_work`
+  listed an interrupted job only for the drained channels (D104) and hid every job that any later request named
+  as a retry, whatever became of that retry, so a job on another channel, or one whose retry was dropped, was never
+  listed, retried or closed. Nothing closed an original once its retry had ended.
+- **Decision:** (a) `interrupted_work` lists every dispatched job with no process, on any channel, and leaves out
+  only a job that `reading::retries_by_job` says still has a standing retry. This replaces the interrupted-job
+  sentence of D104; the drained-channel rule of D104 stays for queued requests (`queued_work`). Liveness is one
+  signal, `Athena::has_process`: a registry entry or a held job lock. (b) A run that returns an error after the
+  Dispatch commit closes the job `failed` through `close_dispatched` with a reason that starts with the existing
+  `environment:` prefix, so the one classifier (`StopCause::of`) reads it as a stop of the environment: the scope
+  guard does not count it, `athena retry` may resume it, and the drain does not end its run on it. It does not do so
+  for a deliberate hold (low disk, waiting for a slot, budget), with the kill switch on, with a resume mark, or when
+  the job is no longer dispatched at `HEAD`. Only the invocations that left a trace are booked
+  (`Athena::recover_traces`); no producer is made up. (c) `steward::settle_interrupted`, asked by the drain through
+  `Steps::settle_interrupted` before the queue is read and after the queue was worked: an original whose standing
+  retry has ended (followed through interrupted retries) is closed with "re-queued as <retry>, which ended
+  <state>", and a job with no request record is closed. After the queue was worked, any other dispatched job with no
+  outcome and no process gets a `held <job>: <reason>` note, once, unless the run already named it. (d) An
+  interrupted item's incomplete plan entry is dropped, since its retry reads the request again.
+- **Alternatives:** Close every error after dispatch: a hold or a kept candidate is resumable. Close with an
+  unprefixed reason: the classifier reads it as a failure of the work, the guard counts it and can pause the line.
+  Close as abandoned: `athena retry` refuses an abandoned job. Registry-only liveness without the channel filter: it
+  retries a job that another process runs, because a run holds its job lock for the whole of `dispatch`. Remove the
+  channel filter from `queued_work` too: a queued request of another channel may belong to another consumer. Close
+  every dispatched job without a standing retry at the end of the drain: discards resumable work. A new outcome
+  kind: touches the data crate, the gate and the round-trip tests for no behavior.
+- **Tradeoff:** The first drain on a build with this change lists old dispatched jobs of every channel and retries
+  them, within the job limit, the budget and two attempts per item. The jobs to leave alone must be closed with a
+  reason by a person first (`athena close <job> --why ...`; `athena retry <job>` re-queues one); the final pass then
+  names every job it did not reach. A genuine fault of the work that raises an error after dispatch is classed as a
+  stop of the environment and is not counted by the scope guard; its reason keeps the error text. The settled
+  original is closed through `Athena::close`, which books a missing producer at its cap for a job with no trace.
+- **Reversal cost:** Low. Restore the channel filter and the `retried` set in `interrupted_work`, remove
+  `settle_interrupted`, its hook and the two drain calls, `close_after_error` and the closure around the section of
+  `dispatch` after the Dispatch commit, and `has_process`. `recover_traces` can stay as the split of
+  `recover_interrupted`. Nothing recorded depends on the change except the closing records it wrote.
+- **Provenance:** Read: `crates/athena-core/src/steward.rs` (`interrupted_work`, `queued_work`),
+  `crates/athena-core/src/run/mod.rs` (`dispatch`, `finish_dispatched`), `crates/athena-core/src/run/close.rs`,
+  `crates/athena-core/src/manage.rs` (`close_with`, `recover_interrupted`), `crates/athena-core/src/status.rs`
+  (`scan_jobs`, `state_name`), `crates/athena-core/src/reading/retry.rs` (`retries_by_job`),
+  `crates/athena-core/src/disk.rs` (`StopCause`, `resumable_stop`) and `crates/athena-cli/src/drain.rs`. Measured:
+  the new unit tests in `steward.rs` and `run/tests.rs`, and the drain tests in `crates/athena-cli/tests/drain.rs`
+  that stop a job before the producer, run a drain and check the outcome or the note. Not measured: how many other
+  dispatched jobs with no outcome the live records hold, and what stopped each of the six; the records were not in
+  the producer's copy.

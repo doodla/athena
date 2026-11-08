@@ -440,31 +440,26 @@ pub fn queued_work(records: &Records) -> Vec<QueuedWork> {
     found.into_iter().map(|(_, work)| work).collect()
 }
 
-/// The jobs of the drained channels that were interrupted (for example by a restart): dispatched, with no
-/// closing record and no process working on them (`running` says which are), oldest first. Drain retries
-/// them. A job that a later request already retries ("try again on <job>") is left out, so it is retried
-/// once. A job on any other channel is left alone.
-pub fn interrupted_work(records: &Records, running: &dyn Fn(&str) -> bool) -> Vec<QueuedWork> {
-    let retried: BTreeSet<String> = records
-        .jobs
-        .values()
-        .filter_map(|j| crate::reading::retried_job(records, &j.request.as_ref()?.text))
-        .map(|id| id.as_str().to_string())
-        .collect();
+/// The jobs that were interrupted (for example by a restart): dispatched, with no closing record and no
+/// process working on them (`live` says which have one), on any channel, oldest first. Drain retries them.
+/// A dispatched job with no process belongs to nobody, so the channel of its request does not matter (a
+/// queued request on another channel may belong to another consumer, and [`queued_work`] keeps leaving it
+/// alone). A job that a later request still retries ("try again on <job>", see
+/// [`crate::reading::retries_by_job`]) is left out, so it is retried once; a retry that was dropped or
+/// abandoned does not stand, so the job is listed again.
+pub fn interrupted_work(records: &Records, live: &dyn Fn(&str) -> bool) -> Vec<QueuedWork> {
+    let retries = crate::reading::retries_by_job(records);
     let mut found: Vec<(Timestamp, QueuedWork)> = records
         .jobs
         .values()
         .filter_map(|j| {
             if j.state() != JobState::Dispatched
-                || running(j.id().as_str())
-                || retried.contains(j.id().as_str())
+                || live(j.id().as_str())
+                || retries.contains_key(j.id().as_str())
             {
                 return None;
             }
-            let request = j
-                .request
-                .as_ref()
-                .filter(|r| DRAINED_CHANNELS.contains(&r.channel.as_str()))?;
+            let request = j.request.as_ref()?;
             Some((
                 request.received_at,
                 QueuedWork {
@@ -477,6 +472,129 @@ pub fn interrupted_work(records: &Records, running: &dyn Fn(&str) -> bool) -> Ve
         .collect();
     found.sort_by(|a, b| (a.0, a.1.job.as_str()).cmp(&(b.0, b.1.job.as_str())));
     found.into_iter().map(|(_, work)| work).collect()
+}
+
+/// The start of the reason a settled original is closed with: "re-queued as <retry>, which ended <state>".
+/// `hestia.rs` recognises a close that starts with this text (after `closed: `) as Athena's own and not a
+/// person's, so the text must stay in step with its `REQUEUE_CLOSE_REASON`.
+pub const SETTLE_REASON_PREFIX: &str = "re-queued as ";
+
+/// What the drain does about a dispatched job that has no outcome and no process, found by
+/// [`settle_interrupted`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Settlement {
+    /// Close the job with `why` (`athena close`).
+    Close { job: String, why: String },
+    /// Leave the job dispatched and say why in the drain's notes.
+    Hold { job: String, why: String },
+}
+
+/// The longest chain of interrupted retries [`settle_interrupted`] follows.
+const SETTLE_DEPTH: usize = 16;
+
+/// What to do about every dispatched job that has no outcome and no process (`live` says which have one), so
+/// that the drain never moves past one without a resume, a close or a stated reason. `held` gives the text of
+/// a hold marker (low disk, waiting for a slot) for a job.
+///
+/// - A job with no request record cannot be retried: closed, in both passes.
+/// - A job whose standing retry ([`crate::reading::retries_by_job`]) has ended, followed through retries that
+///   were interrupted too: every interrupted job of the chain is closed with the retry that carried its work
+///   forward, in both passes. The retry holds the work now.
+/// - Only when `final_pass` (the drain has worked the queue): every other such job gets a [`Settlement::Hold`]
+///   with a reason (held by a marker, its retry not ended, or not reached in this drain), except a job in
+///   `reported`, which the drain already named.
+///
+/// The start of a drain never holds: the queue it is about to work is the next step for those jobs.
+pub fn settle_interrupted(
+    records: &Records,
+    live: &dyn Fn(&str) -> bool,
+    held: &dyn Fn(&str) -> Option<String>,
+    final_pass: bool,
+    reported: &BTreeSet<String>,
+) -> Vec<Settlement> {
+    let retries = crate::reading::retries_by_job(records);
+    let interrupted = |id: &str| {
+        records
+            .jobs
+            .get(id)
+            .is_some_and(|j| j.state() == JobState::Dispatched && !live(id))
+    };
+    let mut ids: Vec<&str> = records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| j.state() == JobState::Dispatched && !live(j.id().as_str()))
+        .map(|j| j.id().as_str())
+        .collect();
+    ids.sort();
+    let mut out = Vec::new();
+    let mut settled: BTreeSet<&str> = BTreeSet::new();
+    for id in ids {
+        if settled.contains(id) {
+            continue;
+        }
+        let job = &records.jobs[id];
+        if job.request.is_none() {
+            settled.insert(id);
+            out.push(Settlement::Close {
+                job: id.to_string(),
+                why: "dispatched with no request record; it cannot be retried".into(),
+            });
+            continue;
+        }
+        let hold = |why: String| Settlement::Hold {
+            job: id.to_string(),
+            why: format!(
+                "{why}; `athena retry {id}` resumes it, `athena close {id} --why ...` closes it"
+            ),
+        };
+        let Some(first) = retries.get(id) else {
+            if final_pass && !reported.contains(id) {
+                out.push(hold(match held(id) {
+                    Some(text) => format!("dispatched with no outcome and no process; {text}"),
+                    None => "dispatched with no outcome and no process; not worked in this drain (job limit, budget, stop, or its retry could not be read)".into(),
+                }));
+            }
+            continue;
+        };
+        // Follow the retries that were interrupted too.
+        let mut chain: Vec<&str> = vec![id];
+        let mut last = first.as_str();
+        while chain.len() < SETTLE_DEPTH && interrupted(last) && retries.contains_key(last) {
+            chain.push(last);
+            last = retries[last].as_str();
+        }
+        let Some(end) = records.jobs.get(last) else {
+            continue;
+        };
+        match end.state() {
+            JobState::Closed(state) => {
+                for member in chain {
+                    if settled.insert(member) {
+                        let retry = retries[member].as_str();
+                        let ended = if retry == last {
+                            state.as_str()
+                        } else {
+                            "interrupted too"
+                        };
+                        out.push(Settlement::Close {
+                            job: member.to_string(),
+                            why: format!("{SETTLE_REASON_PREFIX}{retry}, which ended {ended}"),
+                        });
+                    }
+                }
+            }
+            _ if live(last) => {}
+            other => {
+                if final_pass && !reported.contains(id) {
+                    out.push(hold(format!(
+                        "dispatched with no outcome and no process; its retry {last} is {} and has not ended",
+                        other.name()
+                    )));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The jobs that a work decision records as approved and that are still in state proposed: read, waiting for
@@ -2518,5 +2636,271 @@ mod tests {
         release.send(()).unwrap();
         finished.recv().unwrap();
         wait_for_background();
+    }
+
+    // ---- interrupted jobs: listing and settling ----
+
+    const J_A: &str = "20261027-054148-aaaa";
+    const J_B: &str = "20261027-054206-bbbb";
+    const J_C: &str = "20261027-054209-cccc";
+
+    /// What a test job looks like: its id, the channel and text of its request (`None`: no request record),
+    /// whether it was dispatched, and its outcome if it has one.
+    struct Spec {
+        id: &'static str,
+        channel: Option<&'static str>,
+        text: String,
+        dispatched: bool,
+        outcome: Option<OutcomeState>,
+    }
+
+    fn spec(id: &'static str, channel: &'static str, outcome: Option<OutcomeState>) -> Spec {
+        Spec {
+            id,
+            channel: Some(channel),
+            text: format!("Do {id}."),
+            dispatched: true,
+            outcome,
+        }
+    }
+
+    fn retry_of(id: &'static str, target: &str, outcome: Option<OutcomeState>) -> Spec {
+        Spec {
+            text: format!("try again on {target}"),
+            ..spec(id, USER_QUEUE_CHANNEL, outcome)
+        }
+    }
+
+    fn records_of(specs: Vec<Spec>) -> Records {
+        let mut records = Records::default();
+        for s in specs {
+            let job = JobId::parse(s.id).unwrap();
+            let at: Timestamp = "2026-10-27T12:00:00Z".parse().unwrap();
+            let dispatched = s.dispatched.then(|| {
+                serde_json::from_value(serde_json::json!({
+                    "id": s.id, "kind": "request", "title": "t", "class_of_work": null,
+                    "capability": null, "accepted_reading": null, "accepted_by": null,
+                    "owner": { "role": "producer", "capability": null, "model": null, "note": null },
+                    "verifier_model": null, "caps": null, "base_commit": null, "config_sha256": null,
+                    "defaults_sha256": null, "athena": null, "driver": null, "brief_sha256": null,
+                    "dispatched_at": null, "request_path": null, "request_sha256": null, "cost": null,
+                    "tokens": null, "note": null, "pin": null
+                }))
+                .unwrap()
+            });
+            records.jobs.insert(
+                s.id.to_string(),
+                JobRecords {
+                    id: Some(job.clone()),
+                    request: s.channel.map(|channel| Request {
+                        job: job.clone(),
+                        text: s.text.clone(),
+                        received_at: at,
+                        channel: channel.into(),
+                    }),
+                    job: dispatched,
+                    outcome: s.outcome.map(|state| athena_data::records::Outcome {
+                        job: job.clone(),
+                        state,
+                        reason: "ended".into(),
+                        at,
+                        totals: None,
+                        branch: None,
+                        base_commit: None,
+                        candidate_commit: None,
+                        after_blocked: false,
+                        through_commit: None,
+                    }),
+                    ..Default::default()
+                },
+            );
+        }
+        records
+    }
+
+    fn nobody(_: &str) -> bool {
+        false
+    }
+
+    fn no_hold(_: &str) -> Option<String> {
+        None
+    }
+
+    fn ids(work: &[QueuedWork]) -> Vec<&str> {
+        work.iter().map(|w| w.job.as_str()).collect()
+    }
+
+    fn settle(records: &Records, final_pass: bool) -> Vec<Settlement> {
+        settle_interrupted(records, &nobody, &no_hold, final_pass, &BTreeSet::new())
+    }
+
+    #[test]
+    fn interrupted_work_lists_a_dispatched_job_on_any_channel() {
+        let records = records_of(vec![
+            spec(J_A, "web", None),
+            spec(J_B, REQUEST_CHANNEL, None),
+            spec(J_C, USER_QUEUE_CHANNEL, Some(OutcomeState::Landed)),
+        ]);
+        assert_eq!(ids(&interrupted_work(&records, &nobody)), [J_A, J_B]);
+        // A job a process works on is left alone, whatever its channel.
+        assert_eq!(
+            ids(&interrupted_work(&records, &|id| id == J_A)),
+            [J_B],
+            "a live job is not listed"
+        );
+    }
+
+    #[test]
+    fn interrupted_work_lists_a_job_again_when_its_retry_was_dropped() {
+        let records = records_of(vec![
+            spec(J_A, "web", None),
+            retry_of(J_B, J_A, Some(OutcomeState::Abandoned)),
+        ]);
+        assert_eq!(ids(&interrupted_work(&records, &nobody)), [J_A]);
+        // A retry that stands (here: still dispatched) hides the original.
+        let records = records_of(vec![spec(J_A, "web", None), retry_of(J_B, J_A, None)]);
+        assert_eq!(
+            ids(&interrupted_work(&records, &|id| id == J_B)),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn queued_work_still_leaves_other_channels_alone() {
+        let mut records = records_of(vec![spec(J_A, "web", None)]);
+        let job = records.jobs.get_mut(J_A).unwrap();
+        job.job = None;
+        assert_eq!(job.state(), JobState::Queued);
+        assert!(queued_work(&records).is_empty());
+    }
+
+    #[test]
+    fn settle_closes_a_job_with_no_request_record_in_both_passes() {
+        let mut s = spec(J_A, "web", None);
+        s.channel = None;
+        let records = records_of(vec![s]);
+        for final_pass in [false, true] {
+            let out = settle(&records, final_pass);
+            assert!(
+                matches!(&out[..], [Settlement::Close { job, why }] if job == J_A && why.contains("no request record")),
+                "{out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn settle_holds_a_job_with_no_retry_only_at_the_final_pass() {
+        let records = records_of(vec![spec(J_A, "web", None)]);
+        assert!(
+            settle(&records, false).is_empty(),
+            "the start pass never holds"
+        );
+        let out = settle(&records, true);
+        let [Settlement::Hold { job, why }] = &out[..] else {
+            panic!("{out:?}");
+        };
+        assert_eq!(job, J_A);
+        assert!(why.contains(&format!("athena retry {J_A}")), "{why}");
+        assert!(why.contains("not worked in this drain"), "{why}");
+        // A job the drain already named gets no second line.
+        let reported: BTreeSet<String> = [J_A.to_string()].into();
+        assert!(settle_interrupted(&records, &nobody, &no_hold, true, &reported).is_empty());
+    }
+
+    #[test]
+    fn settle_names_the_hold_marker_of_a_held_job() {
+        let records = records_of(vec![spec(J_A, "web", None)]);
+        let held = |id: &str| (id == J_A).then(|| "held for low disk".to_string());
+        let out = settle_interrupted(&records, &nobody, &held, true, &BTreeSet::new());
+        let [Settlement::Hold { why, .. }] = &out[..] else {
+            panic!("{out:?}");
+        };
+        assert!(why.contains("held for low disk"), "{why}");
+        assert!(settle_interrupted(&records, &nobody, &held, false, &BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn settle_closes_an_original_whose_retry_ended() {
+        let records = records_of(vec![
+            spec(J_A, "web", None),
+            retry_of(J_B, J_A, Some(OutcomeState::Landed)),
+        ]);
+        for final_pass in [false, true] {
+            assert_eq!(
+                settle(&records, final_pass),
+                vec![Settlement::Close {
+                    job: J_A.into(),
+                    why: format!("re-queued as {J_B}, which ended landed"),
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn settle_follows_a_chain_of_interrupted_retries() {
+        let records = records_of(vec![
+            spec(J_A, "web", None),
+            retry_of(J_B, J_A, None),
+            retry_of(J_C, J_B, Some(OutcomeState::Failed)),
+        ]);
+        let out = settle(&records, false);
+        assert_eq!(
+            out,
+            vec![
+                Settlement::Close {
+                    job: J_A.into(),
+                    why: format!("re-queued as {J_B}, which ended interrupted too"),
+                },
+                Settlement::Close {
+                    job: J_B.into(),
+                    why: format!("re-queued as {J_C}, which ended failed"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn settle_holds_an_original_whose_retry_is_open_only_at_the_final_pass() {
+        let mut open = retry_of(J_B, J_A, None);
+        open.dispatched = false;
+        let records = records_of(vec![spec(J_A, "web", None), open]);
+        assert!(settle(&records, false).is_empty());
+        let out = settle(&records, true);
+        let [Settlement::Hold { job, why }] = &out[..] else {
+            panic!("{out:?}");
+        };
+        assert_eq!(job, J_A);
+        assert!(why.contains(J_B) && why.contains("has not ended"), "{why}");
+    }
+
+    #[test]
+    fn settle_gives_a_dropped_retry_nothing_at_the_start_pass() {
+        let records = records_of(vec![
+            spec(J_A, "web", None),
+            retry_of(J_B, J_A, Some(OutcomeState::Abandoned)),
+        ]);
+        assert!(settle(&records, false).is_empty());
+    }
+
+    #[test]
+    fn settle_leaves_a_job_with_a_process_alone() {
+        let records = records_of(vec![spec(J_A, "web", None)]);
+        let live = |id: &str| id == J_A;
+        for final_pass in [false, true] {
+            assert!(
+                settle_interrupted(&records, &live, &no_hold, final_pass, &BTreeSet::new())
+                    .is_empty()
+            );
+        }
+        // A retry with a process hides nothing and holds nothing either.
+        let records = records_of(vec![spec(J_A, "web", None), retry_of(J_B, J_A, None)]);
+        let live = |id: &str| id == J_B;
+        assert!(settle_interrupted(&records, &live, &no_hold, true, &BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn settle_reason_starts_with_the_requeue_prefix() {
+        // hestia.rs reads a close that starts with "closed: re-queued as " as Athena's own.
+        assert_eq!(SETTLE_REASON_PREFIX, "re-queued as ");
     }
 }

@@ -108,6 +108,11 @@ struct Stub {
     /// Which queued items are Athena's own improvement requests (the Steward's and Hestia's), and how many
     /// distinct jobs record the cause each addresses; none when not set.
     improvement: Improvement,
+    /// What `settle_interrupted` returns at the start of the drain and at the end, and each call it got:
+    /// whether it was the final pass, and the ids the drain had already named.
+    settle_start: Vec<&'static str>,
+    settle_end: Vec<&'static str>,
+    settled: RefCell<Vec<(bool, BTreeSet<String>)>>,
 }
 
 impl Stub {
@@ -163,6 +168,17 @@ impl Steps for Stub {
     }
     fn stop_requested(&self) -> bool {
         self.stop.get()
+    }
+    fn settle_interrupted(&self, final_pass: bool, reported: &BTreeSet<String>) -> Vec<String> {
+        self.settled
+            .borrow_mut()
+            .push((final_pass, reported.clone()));
+        let lines = if final_pass {
+            &self.settle_end
+        } else {
+            &self.settle_start
+        };
+        lines.iter().map(|l| l.to_string()).collect()
     }
     fn paused(&self, jobs: &[String]) -> Vec<(String, String)> {
         let configured = self
@@ -5090,6 +5106,66 @@ fn an_interrupted_job_is_retried_first_and_then_run() {
     assert_eq!(report.landed, 1);
 }
 
+#[test]
+fn drain_works_an_interrupted_item_whose_plan_entry_is_incomplete() {
+    // A request of another channel has no goal or acceptance in its words. The interrupted item's retry reads
+    // the request again, so the incomplete entry must not keep it from being worked.
+    let stub = Stub {
+        interrupted: vec!["a"],
+        plan: vec![PlanEntry::bare("a", "title of a")],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1]),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    assert_eq!(
+        stub.log(),
+        ["reread a", "run a-retry", "land a-retry", "rate"]
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("retry reads the request again")),
+        "{:?}",
+        report.notes
+    );
+    assert_eq!(report.landed, 1);
+}
+
+#[test]
+fn drain_notes_what_settling_interrupted_jobs_did() {
+    let stub = Stub {
+        items: vec!["a"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1]),
+        settle_start: vec!["closed old: re-queued as new, which ended landed"],
+        settle_end: vec!["held z: dispatched with no outcome and no process"],
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    assert!(
+        report
+            .notes
+            .contains(&"closed old: re-queued as new, which ended landed".to_string()),
+        "{:?}",
+        report.notes
+    );
+    assert!(
+        report
+            .notes
+            .contains(&"held z: dispatched with no outcome and no process".to_string()),
+        "{:?}",
+        report.notes
+    );
+    // The start pass knows nothing of the run yet; the final pass is told what the run already named.
+    let calls = stub.settled.borrow();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0], (false, BTreeSet::new()));
+    assert!(calls[1].0);
+    assert!(calls[1].1.contains("a"), "{:?}", calls[1].1);
+}
+
 /// A script that kills the producer while `kill` is set, so a job's run is cut short.
 fn killing_producer(kill: Arc<std::sync::atomic::AtomicBool>) -> Script {
     let base = rated_scenario().script();
@@ -5118,8 +5194,36 @@ fn interrupt(fx: &Fixture, athena: &Athena, job: &str) {
     panic!("the job never was dispatched without an outcome");
 }
 
+/// What a stopped job must show before a drain: dispatched (its job record and producer brief are committed),
+/// no producer invocation and no outcome.
+fn assert_stopped_before_the_producer(fx: &Fixture, job: &str) {
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let record = &records.jobs[job];
+    assert_eq!(record.state(), JobState::Dispatched, "{job}");
+    assert!(record.job.is_some() && record.outcome.is_none(), "{job}");
+    assert!(
+        !record.invocations.iter().any(|i| i.role == Role::Producer),
+        "{job} has no producer invocation"
+    );
+    let brief = format!("{}/brief-producer.md", record.id().dir());
+    assert!(
+        fx.git.show_file(&fx.head(), &brief).unwrap().is_some(),
+        "{job} has its producer brief"
+    );
+}
+
+/// The notes of a report that name `job` as held.
+fn held_notes<'a>(report: &'a drain::Report, job: &str) -> Vec<&'a String> {
+    let prefix = format!("held {job}:");
+    report
+        .notes
+        .iter()
+        .filter(|n| n.starts_with(&prefix))
+        .collect()
+}
+
 #[test]
-fn drain_lists_and_retries_an_interrupted_job_and_leaves_one_on_another_channel_alone() {
+fn drain_resumes_an_interrupted_job_on_any_channel() {
     let fx = Fixture::new();
     let kill = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let athena = fx.athena(killing_producer(kill.clone()));
@@ -5129,6 +5233,8 @@ fn drain_lists_and_retries_an_interrupted_job_and_leaves_one_on_another_channel_
     interrupt(&fx, &athena, &cli);
     interrupt(&fx, &athena, &web);
     kill.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_stopped_before_the_producer(&fx, &cli);
+    assert_stopped_before_the_producer(&fx, &web);
 
     let lander = RecordingLander::default();
     let steps = real_steps(&athena, &lander);
@@ -5138,27 +5244,279 @@ fn drain_lists_and_retries_an_interrupted_job_and_leaves_one_on_another_channel_
         .iter()
         .map(|i| (i.job.as_str(), i.interrupted))
         .collect();
-    assert_eq!(listed, [(cli.as_str(), true)], "only the drained channel");
-
-    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
-    assert_eq!(report.stop, Stop::TargetMet, "{}", display::drain(&report));
-    assert_eq!(report.jobs.len(), 1, "{}", display::drain(&report));
-    let line = &report.jobs[0];
-    assert_eq!(line.item, cli);
-    assert_ne!(line.job, cli, "the retry is a new job");
-    assert_eq!(line.outcome, "passed");
-    assert_eq!(report.landed, 1);
-    let records = Records::load(&fx.git, &fx.head()).unwrap();
-    let request = records.jobs[line.job.as_str()].request.as_ref().unwrap();
-    assert_eq!(request.text, format!("try again on {cli}"));
     assert_eq!(
-        records.jobs[&web].state(),
-        JobState::Dispatched,
-        "left alone"
+        listed,
+        [(cli.as_str(), true), (web.as_str(), true)],
+        "a dispatched job with no process is listed whatever its channel"
     );
 
-    // The retry is recorded, so the interrupted job is not listed (and retried) again.
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    let text = display::drain(&report);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    // Each is either resumed (a retry ran and the original is closed with that retry named) or named in a
+    // note as held, with a reason; none is passed over in silence.
+    let mut resumed = 0;
+    for job in [&cli, &web] {
+        match records.jobs[job.as_str()].state() {
+            JobState::Closed(_) => {
+                resumed += 1;
+                let reason = &records.jobs[job.as_str()].outcome.as_ref().unwrap().reason;
+                assert!(
+                    reason.starts_with("closed: re-queued as "),
+                    "{reason}\n{text}"
+                );
+                let line = report.jobs.iter().find(|l| l.item == *job).expect(&text);
+                assert_ne!(line.job, *job, "the retry is a new job");
+                assert!(reason.contains(&line.job), "{reason}");
+            }
+            state => {
+                // Not reached before the run ended: the drain lists it as still queued.
+                assert_eq!(state, JobState::Dispatched);
+                assert!(report.queued.iter().any(|i| i.job == *job), "{text}");
+            }
+        }
+    }
+    assert!(resumed >= 1, "{text}");
+    assert_eq!(report.landed, resumed, "{text}");
+}
+
+#[test]
+fn a_drain_with_a_job_limit_names_the_interrupted_job_it_did_not_reach() {
+    let fx = Fixture::new();
+    let kill = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let athena = fx.athena(killing_producer(kill.clone()));
+    let (first, _) = athena.queue(FIRST).unwrap();
+    let first = first.as_str().to_string();
+    let second = request_on(&athena, "web", SECOND);
+    interrupt(&fx, &athena, &first);
+    interrupt(&fx, &athena, &second);
+    kill.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    let mut small = limits(100.0);
+    small.max_jobs = 1;
+    let report = drain::drain(&steps, small, &Quiet).unwrap();
+    let text = display::drain(&report);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    // The first is retried and its original closed with the retry named; the second is Dispatched, and the
+    // drain names it as still queued and says why it stopped.
+    assert!(
+        matches!(records.jobs[&first].state(), JobState::Closed(_)),
+        "{text}"
+    );
+    assert_eq!(
+        records.jobs[&second].state(),
+        JobState::Dispatched,
+        "{text}"
+    );
+    assert!(report.queued.iter().any(|i| i.job == second), "{text}");
+    assert!(
+        held_notes(&report, &second).is_empty(),
+        "named once, as queued: {:?}",
+        report.notes
+    );
+    assert!(held_notes(&report, &first).is_empty(), "{:?}", report.notes);
+}
+
+#[test]
+fn a_run_that_errors_after_dispatch_ends_with_an_outcome_in_the_same_drain() {
+    // Planning is on. The first planner call finds a regular file where the job's live record directory
+    // belongs, so the run returns an error after the Dispatch commit and before the producer (no file mode is
+    // involved, so it holds for root).
+    let config = format!(
+        "{}\n[job_plan]\nenabled = true\nplanner_usd = 0.75\ncritic_usd = 0.75\nmax_rounds = 1\n",
+        test_config()
+    );
+    let fx = Fixture::with_config(&config);
+    let inner = Scenario::default().script();
+    let script: Script = Box::new(move |spec| {
+        if spec.role == Role::Planner {
+            let live = spec.workdir.parent().expect("job dir").join("live");
+            std::fs::create_dir_all(&live).unwrap();
+            let _ = std::fs::remove_dir_all(live.join("records"));
+            std::fs::write(live.join("records"), "in the way").unwrap();
+        }
+        inner(spec)
+    });
+    let athena = fx.athena(script);
+    let (item, _) = athena.queue(FIRST).unwrap();
+    let item = item.as_str().to_string();
+
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    let text = display::drain(&report);
+    // No job is left dispatched: every one of them ended with an outcome in this drain.
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    for job in records.request_jobs() {
+        assert!(
+            matches!(job.state(), JobState::Closed(_)),
+            "{} is {:?}\n{text}",
+            job.id(),
+            job.state()
+        );
+    }
+    // The run's own outcome is a failure with a reason of the environment, which a retry may resume and
+    // which the scope guard does not count against the work.
+    let failed: Vec<&JobRecords> = records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| j.state() == JobState::Closed(OutcomeState::Failed))
+        .collect();
+    assert!(!failed.is_empty() && failed.len() <= 2, "{text}");
+    for job in &failed {
+        let reason = &job.outcome.as_ref().unwrap().reason;
+        assert!(
+            reason.starts_with("environment: stopped by an error after dispatch"),
+            "{reason}"
+        );
+        assert!(!job.invocations.iter().any(|i| i.role == Role::Producer));
+    }
+    assert!(report.jobs.iter().all(|l| l.outcome == "failed"), "{text}");
+    assert_eq!(report.landed, 0, "{text}");
+    // Nothing is paused or flagged for the line, and a second drain has nothing to dispatch.
+    assert!(steps.paused(std::slice::from_ref(&item)).is_empty());
+    assert!(steps.flagged(std::slice::from_ref(&item)).is_empty());
+    let second = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    assert!(second.jobs.is_empty(), "{}", display::drain(&second));
+}
+
+#[test]
+fn an_interrupted_job_whose_retry_is_open_on_another_channel_is_named_as_held() {
+    let fx = Fixture::new();
+    let kill = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let athena = fx.athena(killing_producer(kill.clone()));
+    let job = request_on(&athena, "web", FIRST);
+    interrupt(&fx, &athena, &job);
+    kill.store(false, std::sync::atomic::Ordering::SeqCst);
+    // A retry that the drain does not work (a request of another channel) and that has not ended.
+    let retry = request_on(&athena, "web", &format!("try again on {job}"));
+    assert_stopped_before_the_producer(&fx, &job);
+
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
     assert!(steps.queue().unwrap().items.is_empty());
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].state(), JobState::Dispatched);
+    let held = held_notes(&report, &job);
+    assert_eq!(held.len(), 1, "{:?}", report.notes);
+    assert!(
+        held[0].contains(&retry) && held[0].contains("has not ended"),
+        "{held:?}"
+    );
+    assert!(held[0].contains(&format!("athena retry {job}")), "{held:?}");
+}
+
+#[test]
+fn an_interrupted_job_whose_retry_was_dropped_is_listed_and_resumed_again() {
+    let fx = Fixture::new();
+    let kill = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let athena = fx.athena(killing_producer(kill.clone()));
+    let job = request_on(&athena, "web", FIRST);
+    interrupt(&fx, &athena, &job);
+    kill.store(false, std::sync::atomic::Ordering::SeqCst);
+    let retry = request_on(&athena, "web", &format!("try again on {job}"));
+    athena.close(&retry, "not wanted", &Quiet).unwrap();
+
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    let listed: Vec<String> = steps
+        .queue()
+        .unwrap()
+        .items
+        .iter()
+        .map(|i| i.job.clone())
+        .collect();
+    assert_eq!(
+        listed,
+        std::slice::from_ref(&job),
+        "a dropped retry does not hide the job"
+    );
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    let text = display::drain(&report);
+    assert!(report.jobs.iter().any(|l| l.item == job), "{text}");
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert!(
+        matches!(records.jobs[&job].state(), JobState::Closed(_)),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_dispatched_job_whose_lock_another_process_holds_is_left_alone() {
+    let fx = Fixture::new();
+    let kill = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let athena = fx.athena(killing_producer(kill.clone()));
+    let job = request_on(&athena, "web", FIRST);
+    interrupt(&fx, &athena, &job);
+    kill.store(false, std::sync::atomic::Ordering::SeqCst);
+    // Another athena process runs it: it holds the job lock, but is not in the registry.
+    let id = athena_data::JobId::parse(&job).unwrap();
+    let _lock = athena.state.try_lock_job(&id).unwrap().expect("free");
+    assert!(!athena.running(&job));
+    assert!(athena.has_process(&job));
+
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    assert!(steps.queue().unwrap().items.is_empty(), "not listed");
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    assert!(report.jobs.is_empty(), "{}", display::drain(&report));
+    assert!(held_notes(&report, &job).is_empty(), "{:?}", report.notes);
+    assert!(
+        !report.notes.iter().any(|n| n.contains(&job)),
+        "{:?}",
+        report.notes
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].state(), JobState::Dispatched);
+    // `athena status` shows it as running, not as interrupted.
+    let view = athena.status().unwrap();
+    let line = view.open.iter().find(|l| l.id == job).expect("listed");
+    assert_eq!(line.state, "running");
+}
+
+#[test]
+fn status_lists_every_dispatched_job_with_no_outcome_whatever_its_channel() {
+    let fx = Fixture::new();
+    let kill = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let athena = fx.athena(killing_producer(kill.clone()));
+    let (cli, _) = athena.queue(FIRST).unwrap();
+    let cli = cli.as_str().to_string();
+    let web = request_on(&athena, "web", SECOND);
+    interrupt(&fx, &athena, &cli);
+    interrupt(&fx, &athena, &web);
+    kill.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_stopped_before_the_producer(&fx, &cli);
+    assert_stopped_before_the_producer(&fx, &web);
+
+    let view = athena.status().unwrap();
+    let text = display::status(&view);
+    for job in [&cli, &web] {
+        let line = view
+            .open
+            .iter()
+            .find(|l| l.id == *job)
+            .unwrap_or_else(|| panic!("{job} is not open work:\n{text}"));
+        assert_eq!(line.state, "interrupted");
+        assert!(text.contains(job.as_str()), "{text}");
+        assert!(
+            text.contains(&format!("athena retry {job}")),
+            "a next step for {job}:\n{text}"
+        );
+    }
+
+    // After a drain, the original that was resumed is closed with its retry named, so it is not open work.
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    let view = athena.status().unwrap();
+    assert!(
+        !view.open.iter().any(|l| l.id == cli),
+        "{}",
+        display::status(&view)
+    );
 }
 
 /// A process id that is not running: a child that has exited, in its own process group.
@@ -8797,15 +9155,20 @@ fn per_job_worktree_a_start_clears_what_a_killed_run_left() {
 fn per_job_worktree_a_run_that_ends_in_an_error_still_removes_both_directories() {
     let fx = Fixture::new();
     let run = run_watched(&fx, Scenario::default(), false, true);
+    // The error after dispatch ends the job: failed, with a reason of the environment that a retry may resume.
+    let finished = run.finished();
+    assert_eq!(finished.state, OutcomeState::Failed, "{}", finished.reason);
     assert!(
-        run.result.is_err(),
-        "the run ends in an error, not a closed job"
+        finished
+            .reason
+            .starts_with("environment: stopped by an error after dispatch"),
+        "{}",
+        finished.reason
     );
     assert_eq!(run.starts.lock().unwrap().len(), 1, "the producer ran once");
     run.assert_both_gone();
-    // The job was not closed: it is dispatched and waits for a retry.
     let records = Records::load(&fx.git, &fx.head()).unwrap();
-    assert!(records.jobs[run.job.as_str()].outcome.is_none());
+    assert!(records.jobs[run.job.as_str()].outcome.is_some());
 }
 
 /// A job another process is running: a worktree on disk and the job lock held. Keep the returned lock
