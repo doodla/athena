@@ -41,7 +41,9 @@ use crate::Result;
 use athena_data::RecordId;
 use athena_data::history::{Checkpoint, HistoryRecord, Landing, LandingIntent};
 use athena_git::Git;
-use athena_git::records_branch::{self, Change, RECORDS_REF, RecordsTip, RecordsWriter};
+use athena_git::records_branch::{
+    self, Change, RECORDS_BRANCH, RECORDS_REF, RecordsTip, RecordsWriter,
+};
 use jiff::{SignedDuration, Timestamp};
 use std::time::Instant;
 
@@ -495,20 +497,33 @@ impl Mode {
 pub struct Options {
     pub mode: Mode,
     /// Whether a passing run may write a checkpoint. False in CI and for a read-only run: the check then
-    /// never touches the records branch.
+    /// never touches the records branch or the remote.
     pub write_checkpoint: bool,
     /// The check version a checkpoint must carry to be trusted, and the one a new checkpoint records.
     pub version: String,
+    /// The git remote whose records branch a new checkpoint is pushed to.
+    pub remote: String,
 }
 
+/// The remote a checkpoint is pushed to unless [`Options::with_remote`] says otherwise. It is the remote
+/// that landing publishes its records to.
+pub const DEFAULT_REMOTE: &str = "origin";
+
 impl Options {
-    /// `mode`, with the current [`CHECK_VERSION`].
+    /// `mode`, with the current [`CHECK_VERSION`] and the [`DEFAULT_REMOTE`].
     pub fn new(mode: Mode, write_checkpoint: bool) -> Self {
         Options {
             mode,
             write_checkpoint,
             version: CHECK_VERSION.to_string(),
+            remote: DEFAULT_REMOTE.to_string(),
         }
+    }
+
+    /// The same options, pushing any checkpoint to `remote`.
+    pub fn with_remote(mut self, remote: impl Into<String>) -> Self {
+        self.remote = remote.into();
+        self
     }
 }
 
@@ -579,7 +594,9 @@ fn read_newest_checkpoint(
 ///
 /// A checkpoint is written only when the run passed with no pending commit, writing is allowed, the records
 /// tip was read from the local branch, and something new was judged (or the run was a full replay). It is
-/// appended to the local records branch only; this function never pushes.
+/// pushed to the records branch on `options.remote` (compare-and-swap, with retry), so CI and every other
+/// clone find it; a run that cannot publish it reports `checkpoint_error` and keeps its verdict. A run that
+/// does not write a checkpoint never touches the records branch or the remote.
 pub fn run_check(
     git: &Git,
     main_tip: &str,
@@ -704,7 +721,7 @@ pub fn run_check(
                     .to_string(),
             );
         } else {
-            match write_checkpoint(git, main_tip, tip, now, &options.version) {
+            match write_checkpoint(git, &options.remote, main_tip, tip, now, &options.version) {
                 Ok(cp) => checkpoint_written = Some(cp),
                 Err(error) => checkpoint_error = Some(error),
             }
@@ -723,14 +740,38 @@ pub fn run_check(
     })
 }
 
-/// Appends a checkpoint to the local records branch with the records writer.
+/// Publishes a checkpoint to the records branch on `remote` with the records writer.
+///
+/// The writer first resets the local records branch to the remote tip, so a local branch that is ahead of
+/// the remote would silently lose its extra commits, and the checkpoint's `records_sha` would name a commit
+/// the remote never had. This function therefore refuses (and writes nothing) unless `records_sha`, the tip
+/// the check judged, is already on the remote's records branch. A remote that has moved on since is fine:
+/// the checkpoint is built on the newer tip and the next incremental run judges the records in between.
+///
+/// The commit is pushed with a compare-and-swap guard and rebuilt on the new remote tip when the push
+/// loses a race ([`RecordsWriter::append_to_remote`]). The local branch moves to the new commit only after
+/// the push succeeded, so a failed push leaves both the remote and the local branch as they were.
 fn write_checkpoint(
     git: &Git,
+    remote: &str,
     main_sha: &str,
     records_sha: &str,
     now: Timestamp,
     version: &str,
 ) -> std::result::Result<Checkpoint, String> {
+    let remote_tip = git
+        .fetch_remote_branch(remote, RECORDS_BRANCH)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("{remote} has no {RECORDS_BRANCH} branch; push it first"))?;
+    if !git
+        .is_ancestor(records_sha, &remote_tip)
+        .map_err(|e| e.to_string())?
+    {
+        return Err(format!(
+            "the records tip this check judged ({records_sha}) is not on {remote}'s {RECORDS_BRANCH}; \
+             push or fetch the records branch first"
+        ));
+    }
     let checkpoint = Checkpoint {
         id: RecordId::generate(now),
         created_at: now,
@@ -741,12 +782,14 @@ fn write_checkpoint(
     let json = serde_json::to_string(&HistoryRecord::Checkpoint(checkpoint.clone()))
         .map_err(|e| e.to_string())?;
     RecordsWriter::new(git)
-        .append(
+        .append_to_remote(
+            remote,
             "checkpoint",
             &[Change::put(
                 format!("{CHECKPOINT_DIR}/{}.json", checkpoint.id),
                 json,
             )],
+            &[],
         )
         .map_err(|e| e.to_string())?;
     Ok(checkpoint)
@@ -1078,6 +1121,63 @@ mod tests {
         Options::new(Mode::Incremental, true)
     }
 
+    /// A bare repository standing in for the remote.
+    fn bare_remote() -> (tempfile::TempDir, Git) {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = Git::isolated(dir.path());
+        bare.run(["init", "-q", "--bare", "-b", "main"]).unwrap();
+        (dir, bare)
+    }
+
+    /// Makes `bare` the `origin` of `git`.
+    fn set_origin(git: &Git, bare: &Git) {
+        let url = bare.dir().to_str().unwrap().to_string();
+        git.run(["remote", "add", "origin", &url]).unwrap();
+    }
+
+    /// Gives `git` a new bare `origin`.
+    fn add_remote(git: &Git) -> (tempfile::TempDir, Git) {
+        let (dir, bare) = bare_remote();
+        set_origin(git, &bare);
+        (dir, bare)
+    }
+
+    /// A second clone of the same remote, as another writer would hold.
+    fn rival_of(bare: &Git) -> (tempfile::TempDir, Git) {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        set_origin(&git, bare);
+        (dir, git)
+    }
+
+    /// What the remote's records branch holds.
+    fn remote_tip(bare: &Git) -> Option<String> {
+        bare.rev_parse(RECORDS_REF).unwrap()
+    }
+
+    /// Pushes the local records branch to `origin` with a plain, non-forced push: test setup that stands for
+    /// the landings and intents having reached the remote before a check runs.
+    fn publish(git: &Git) {
+        git.push_branch("origin", RECORDS_BRANCH, &records_tip(git))
+            .unwrap();
+    }
+
+    /// Publishes the records the test wrote, then runs the check as `athena check --attribution` would.
+    fn checked(git: &Git, main: &str, options: &Options) -> RunReport {
+        publish(git);
+        run_check(git, main, now(), options).unwrap()
+    }
+
+    /// The checkpoint `cp` as `tip` holds it, read from `repo`.
+    fn stored_checkpoint(repo: &Git, tip: &str, cp: &Checkpoint) -> Option<Checkpoint> {
+        let bytes = repo
+            .show_file(tip, &format!("{CHECKPOINT_DIR}/{}.json", cp.id))
+            .unwrap()?;
+        match HistoryRecord::parse(&String::from_utf8(bytes).unwrap()).unwrap() {
+            HistoryRecord::Checkpoint(read) => Some(read),
+            other => panic!("{other:?}"),
+        }
+    }
+
     fn put_checkpoint(git: &Git, name: &str, main_sha: &str, version: &str) {
         let cp = Checkpoint {
             id: rid(900),
@@ -1096,10 +1196,11 @@ mod tests {
     #[test]
     fn incremental_run_judges_only_new_commits() {
         let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let (_bare_dir, _bare) = add_remote(&git);
         for n in 1..=3 {
             land(&dir, &git, n);
         }
-        let first = run_check(&git, &head(&git), now(), &incremental()).unwrap();
+        let first = checked(&git, &head(&git), &incremental());
         assert!(first.report.passed(), "{:?}", first.report.findings);
         assert_eq!(first.mode, Mode::FullReplay, "no checkpoint yet");
         assert!(
@@ -1114,7 +1215,7 @@ mod tests {
 
         land(&dir, &git, 4);
         land(&dir, &git, 5);
-        let second = run_check(&git, &head(&git), now(), &incremental()).unwrap();
+        let second = checked(&git, &head(&git), &incremental());
         assert!(second.report.passed(), "{:?}", second.report.findings);
         assert_eq!(second.mode, Mode::Incremental);
         assert_eq!(second.started_from, Some(written));
@@ -1138,6 +1239,7 @@ mod tests {
     #[test]
     fn intent_before_checkpoint_landing_after_passes() {
         let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let (_bare_dir, _bare) = add_remote(&git);
         let _ = land(&dir, &git, 1);
         let two = land(&dir, &git, 2);
         // Commit 3 is merged and its intent was written, but its landing is not yet.
@@ -1146,11 +1248,11 @@ mod tests {
         let i = intent(rid(6), T0, &git.tree_of(&three).unwrap(), &two);
         put_intent(&git, &i);
         // The checkpoint is written at commit 2, after the intent and before the landing.
-        let at_two = run_check(&git, &two, now(), &incremental()).unwrap();
+        let at_two = checked(&git, &two, &incremental());
         assert!(at_two.checkpoint_written.is_some());
         put_landing(&git, rid(7), &three, &i.id);
 
-        let run = run_check(&git, &three, now(), &incremental()).unwrap();
+        let run = checked(&git, &three, &incremental());
         assert_eq!(run.mode, Mode::Incremental);
         assert!(run.report.passed(), "{:?}", run.report.findings);
         assert_eq!(run.commits_judged(), 1);
@@ -1210,20 +1312,20 @@ mod tests {
     #[test]
     fn check_version_change_forces_full_replay() {
         let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let (_bare_dir, _bare) = add_remote(&git);
         for n in 1..=3 {
             land(&dir, &git, n);
         }
         let mut old = incremental();
         old.version = "attribution-check/0".to_string();
         assert!(
-            run_check(&git, &head(&git), now(), &old)
-                .unwrap()
+            checked(&git, &head(&git), &old)
                 .checkpoint_written
                 .is_some()
         );
         land(&dir, &git, 4);
 
-        let run = run_check(&git, &head(&git), now(), &incremental()).unwrap();
+        let run = checked(&git, &head(&git), &incremental());
         assert_eq!(run.requested, Mode::Incremental);
         assert_eq!(run.mode, Mode::FullReplay);
         let why = run.fallback_reason.clone().unwrap();
@@ -1237,7 +1339,7 @@ mod tests {
             run.checkpoint_written.unwrap().verifier_version,
             CHECK_VERSION
         );
-        let next = run_check(&git, &head(&git), now(), &incremental()).unwrap();
+        let next = checked(&git, &head(&git), &incremental());
         assert_eq!(next.mode, Mode::Incremental);
     }
 
@@ -1271,10 +1373,11 @@ mod tests {
     #[test]
     fn passing_check_writes_checkpoint() {
         let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let (_bare_dir, bare) = add_remote(&git);
         land(&dir, &git, 1);
         let main = land(&dir, &git, 2);
         let before = records_tip(&git);
-        let run = run_check(&git, &main, now(), &incremental()).unwrap();
+        let run = checked(&git, &main, &incremental());
         let cp = run.checkpoint_written.clone().unwrap();
         assert_eq!(cp.main_sha, main);
         assert_eq!(cp.records_sha, before);
@@ -1299,22 +1402,246 @@ mod tests {
         assert_eq!((again.commits_judged(), again.records_judged()), (0, 0));
         assert!(again.checkpoint_written.is_none());
         assert_eq!(records_tip(&git), tip);
+        assert_eq!(remote_tip(&bare).as_deref(), Some(tip.as_str()));
+    }
+
+    #[test]
+    fn checkpoint_reaches_the_remote_records_branch() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let (_bare_dir, bare) = add_remote(&git);
+        land(&dir, &git, 1);
+        let main = land(&dir, &git, 2);
+        publish(&git);
+        let published = records_tip(&git);
+        assert_eq!(remote_tip(&bare).as_deref(), Some(published.as_str()));
+
+        let run = run_check(&git, &main, now(), &incremental()).unwrap();
+        assert!(run.report.passed(), "{:?}", run.report.findings);
+        assert!(run.checkpoint_error.is_none(), "{:?}", run.checkpoint_error);
+        let cp = run.checkpoint_written.clone().unwrap();
+
+        // Read from the bare remote, not from the local ref.
+        let on_remote = remote_tip(&bare).unwrap();
+        assert_ne!(on_remote, published, "the remote branch moved");
+        assert_eq!(bare.parents(&on_remote).unwrap(), vec![published.clone()]);
+        let stored = stored_checkpoint(&bare, &on_remote, &cp)
+            .expect("the checkpoint file is on the remote records branch");
+        assert_eq!(stored, cp);
+        assert_eq!(stored.main_sha, main);
+        assert_eq!(stored.records_sha, published);
+        assert_eq!(
+            records_tip(&git),
+            on_remote,
+            "the local branch follows the remote"
+        );
+    }
+
+    #[test]
+    fn a_later_landing_fast_forwards_past_the_remote_checkpoint() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let (_bare_dir, bare) = add_remote(&git);
+        land(&dir, &git, 1);
+        let main = land(&dir, &git, 2);
+        let run = checked(&git, &main, &incremental());
+        let cp = run.checkpoint_written.clone().unwrap();
+        let checkpoint_commit = remote_tip(&bare).unwrap();
+        assert!(stored_checkpoint(&bare, &checkpoint_commit, &cp).is_some());
+
+        // A landing written the way landing writes it: on the remote tip, then pushed. Its sync resets a
+        // local branch that holds anything the remote does not.
+        let landing = Landing {
+            id: rid(100),
+            created_at: ts(T0),
+            pr_number: 3,
+            head_sha: "1".repeat(40),
+            host_commit: main.clone(),
+            merge_method: MergeMethod::Squash,
+            commits: Vec::new(),
+            intent: rid(99),
+        };
+        let json = serde_json::to_string(&HistoryRecord::Landing(landing)).unwrap();
+        let new_tip = RecordsWriter::new(&git)
+            .append_to_remote(
+                "origin",
+                "landing",
+                &[Change::put(format!("{LANDING_DIR}/later.json"), json)],
+                &[],
+            )
+            .unwrap();
+
+        let remote_now = remote_tip(&bare).unwrap();
+        assert_eq!(remote_now, new_tip);
+        assert_eq!(
+            bare.parents(&remote_now).unwrap(),
+            vec![checkpoint_commit.clone()]
+        );
+        assert!(bare.is_ancestor(&checkpoint_commit, &remote_now).unwrap());
+        assert!(
+            stored_checkpoint(&bare, &remote_now, &cp).is_some(),
+            "the checkpoint is still on the remote after the landing"
+        );
+        assert_eq!(records_tip(&git), remote_now, "nothing was reset");
+        assert_eq!(
+            records_branch::audit_history(&bare, &remote_now).unwrap(),
+            vec![],
+            "the remote branch only fast-forwards"
+        );
+    }
+
+    #[test]
+    fn ci_incremental_run_from_the_remote_checkpoint_judges_only_later_commits() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let (_bare_dir, bare) = add_remote(&git);
+        for n in 1..=3 {
+            land(&dir, &git, n);
+        }
+        let third = head(&git);
+        let run = checked(&git, &third, &incremental());
+        let cp = run.checkpoint_written.clone().unwrap();
+        land(&dir, &git, 4);
+        land(&dir, &git, 5);
+        publish(&git);
+        let tip = remote_tip(&bare).unwrap();
+
+        // CI's fresh state: only the remote's records branch, fetched into the local ref.
+        let ci_state = |git: &Git| {
+            git.run(["update-ref", "-d", RECORDS_REF]).unwrap();
+            git.run(["update-ref", "-d", RECORDS_TRACKING_REF]).unwrap();
+            git.run(["fetch", "-q", "origin", "athena/records:athena/records"])
+                .unwrap();
+        };
+        ci_state(&git);
+        assert_eq!(records_tip(&git), tip);
+
+        let ci = run_check(
+            &git,
+            &head(&git),
+            now(),
+            &Options::new(Mode::Incremental, false),
+        )
+        .unwrap();
+        assert!(ci.report.passed(), "{:?}", ci.report.findings);
+        assert_eq!(ci.mode, Mode::Incremental);
+        assert!(ci.fallback_reason.is_none(), "{:?}", ci.fallback_reason);
+        assert_eq!(ci.started_from, Some(cp.clone()));
+        assert_eq!(ci.started_from.as_ref().unwrap().main_sha, third);
+        // Two landings: two commits and four records. The checkpoint is not counted.
+        assert_eq!((ci.commits_judged(), ci.records_judged()), (2, 4));
+        assert_eq!(remote_tip(&bare).unwrap(), tip, "CI writes nothing");
+
+        // Control: the same five landings and the same CI steps, but no checkpoint was ever pushed.
+        let (dir2, git2) = repo(&[("a.txt", "a\n")]);
+        let (_bare_dir2, _bare2) = add_remote(&git2);
+        for n in 1..=5 {
+            land(&dir2, &git2, n);
+        }
+        publish(&git2);
+        ci_state(&git2);
+        let replay = run_check(
+            &git2,
+            &head(&git2),
+            now(),
+            &Options::new(Mode::Incremental, false),
+        )
+        .unwrap();
+        assert_eq!(replay.mode, Mode::FullReplay);
+        assert!(
+            replay
+                .fallback_reason
+                .as_deref()
+                .unwrap()
+                .contains("no checkpoint")
+        );
+        assert_eq!(replay.commits_judged(), 5);
+    }
+
+    #[test]
+    fn checkpoint_lands_on_a_remote_that_moved_ahead_of_the_checked_tip() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let (_bare_dir, bare) = add_remote(&git);
+        land(&dir, &git, 1);
+        let main = land(&dir, &git, 2);
+        publish(&git);
+        let judged = records_tip(&git);
+
+        // Another clone writes a record to the remote after this one last synced.
+        let (_rival_dir, rival) = rival_of(&bare);
+        let rival_tip = RecordsWriter::new(&rival)
+            .append_to_remote("origin", "rival", &[Change::put("rival/x.json", "r")], &[])
+            .unwrap();
+        assert_eq!(remote_tip(&bare).as_deref(), Some(rival_tip.as_str()));
+        assert_eq!(records_tip(&git), judged, "this clone has not seen it yet");
+
+        let run = run_check(&git, &main, now(), &incremental()).unwrap();
+        assert!(run.report.passed(), "{:?}", run.report.findings);
+        assert!(run.checkpoint_error.is_none(), "{:?}", run.checkpoint_error);
+        let cp = run.checkpoint_written.clone().unwrap();
+        assert_eq!(cp.records_sha, judged, "it names the tip that was judged");
+
+        let on_remote = remote_tip(&bare).unwrap();
+        assert_eq!(bare.parents(&on_remote).unwrap(), vec![rival_tip]);
+        assert!(stored_checkpoint(&bare, &on_remote, &cp).is_some());
+        assert!(
+            bare.show_file(&on_remote, "rival/x.json")
+                .unwrap()
+                .is_some(),
+            "the other writer's record is kept"
+        );
+        assert_eq!(records_tip(&git), on_remote);
+    }
+
+    #[test]
+    fn a_records_tip_the_remote_lacks_gets_no_checkpoint_and_nothing_is_lost() {
+        let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let (_bare_dir, bare) = add_remote(&git);
+        land(&dir, &git, 1);
+        let main = land(&dir, &git, 2);
+
+        // The remote has no records branch at all.
+        let run = run_check(&git, &main, now(), &incremental()).unwrap();
+        assert!(run.report.passed(), "{:?}", run.report.findings);
+        assert!(run.checkpoint_written.is_none());
+        let why = run.checkpoint_error.unwrap();
+        assert!(why.contains("no athena/records"), "{why}");
+        assert_eq!(remote_tip(&bare), None);
+
+        // The remote has the branch, but not the commits this clone judged: only its first commit.
+        let first = git
+            .run(["rev-list", "--max-parents=0", RECORDS_REF])
+            .unwrap();
+        git.push_branch("origin", RECORDS_BRANCH, first.trim())
+            .unwrap();
+        let remote_before = remote_tip(&bare);
+        let local_before = records_tip(&git);
+        let run = run_check(&git, &main, now(), &incremental()).unwrap();
+        assert!(run.report.passed(), "{:?}", run.report.findings);
+        assert!(run.checkpoint_written.is_none());
+        let why = run.checkpoint_error.unwrap();
+        assert!(why.contains("is not on origin"), "{why}");
+        assert_eq!(remote_tip(&bare), remote_before, "the remote is untouched");
+        assert_eq!(
+            records_tip(&git),
+            local_before,
+            "the unpushed local records are not reset away"
+        );
     }
 
     #[test]
     fn full_replay_ignores_checkpoints_and_read_only_never_writes() {
         let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let (_bare_dir, bare) = add_remote(&git);
         for n in 1..=3 {
             land(&dir, &git, n);
         }
         assert!(
-            run_check(&git, &head(&git), now(), &incremental())
-                .unwrap()
+            checked(&git, &head(&git), &incremental())
                 .checkpoint_written
                 .is_some()
         );
         land(&dir, &git, 4);
+        publish(&git);
         let before = records_tip(&git);
+        let remote_before = remote_tip(&bare);
 
         let read_only_full = run_check(
             &git,
@@ -1357,46 +1684,42 @@ mod tests {
             assert!(run.checkpoint_written.is_none() && run.checkpoint_error.is_none());
         }
         assert_eq!(records_tip(&git), before, "a read-only run never writes");
+        assert_eq!(remote_tip(&bare), remote_before, "nor does it push");
     }
 
     #[test]
     fn checkpoint_write_failure_keeps_verdict() {
         let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let (bare_dir, bare) = add_remote(&git);
         land(&dir, &git, 1);
+        publish(&git);
         let before = records_tip(&git);
-        // A lock on the records ref makes every update fail.
-        let lock = git
-            .common_dir()
-            .unwrap()
-            .join("refs/heads/athena/records.lock");
-        std::fs::write(&lock, "").unwrap();
+        // Reads from the remote still work, but every push to it fails and the remote does not move.
+        let missing = bare_dir.path().join("no-such-remote");
+        git.run(["config", "remote.origin.pushurl", missing.to_str().unwrap()])
+            .unwrap();
         let run = run_check(&git, &head(&git), now(), &incremental()).unwrap();
         assert!(run.report.passed(), "the verdict does not change");
         assert!(run.checkpoint_written.is_none());
         assert!(run.checkpoint_error.is_some());
-        std::fs::remove_file(&lock).unwrap();
+        assert_eq!(remote_tip(&bare).as_deref(), Some(before.as_str()));
         assert_eq!(records_tip(&git), before);
     }
 
     #[test]
     fn timing_on_synthetic_200_landings() {
         let (dir, git) = repo(&[("a.txt", "a\n")]);
+        let (_bare_dir, _bare) = add_remote(&git);
         for n in 1..=200 {
             land(&dir, &git, n);
         }
-        let full = run_check(
-            &git,
-            &head(&git),
-            now(),
-            &Options::new(Mode::FullReplay, true),
-        )
-        .unwrap();
+        let full = checked(&git, &head(&git), &Options::new(Mode::FullReplay, true));
         assert!(full.report.passed(), "{:?}", full.report.findings);
         assert_eq!((full.commits_judged(), full.records_judged()), (200, 400));
         assert!(full.checkpoint_written.is_some());
 
         land(&dir, &git, 201);
-        let inc = run_check(&git, &head(&git), now(), &incremental()).unwrap();
+        let inc = checked(&git, &head(&git), &incremental());
         assert!(inc.report.passed(), "{:?}", inc.report.findings);
         assert_eq!(inc.mode, Mode::Incremental);
         assert_eq!((inc.commits_judged(), inc.records_judged()), (1, 2));

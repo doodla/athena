@@ -489,6 +489,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Attribution checkpoints are now pushed to the remote `athena/records` branch. `athena check --attribution` on
+  main and `athena land` wrote the checkpoint commit to the local records branch only, and the next write to
+  the records branch (a landing, which first resets the local branch to the remote tip) dropped it, so CI never
+  found a checkpoint and replayed in full every time. The checkpoint now goes through the same writer as
+  landing records, `RecordsWriter::append_to_remote`: built on the remote tip, pushed with a compare-and-swap
+  guard, and rebuilt and retried when another writer moves the branch first. Later landings then fast-forward
+  past it, and CI's incremental run judges only the commits and records after it. A check refuses to write a
+  checkpoint, and reports `checkpoint_error`, when the records tip it judged is not yet on `origin` (the
+  writer's reset would otherwise discard those records and the checkpoint would name a commit the remote lacks)
+  or when the push fails; the verdict and exit code are unchanged. `Options` gains a `remote` field, `origin`
+  by default. Checkpoints written locally before this change were already dropped and are not recovered; the
+  next passing check on main writes a new one.
 - A race in the test `status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain`: its stand-in
   drain exited at the stop file, so on a busy machine it could be gone before the waiting `stop_and_wait` call
   looked. The stand-in now also waits for a release file, made once that call has seen it running. A new test
