@@ -1,0 +1,411 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261108-023645-456v",
+  "round": 2,
+  "at": "2026-11-08T02:50:21.928012609Z",
+  "invocation_seq": 4,
+  "approach": "Records are append-only (records.rs header, D06; gate Rule::AppendOnly), so a merge cannot edit class B's file. A merge is a NEW `athena.failure-class/1` record with status `merged` that names the retired class (`merged_from`) and the surviving class (`merged_into`). In athena-data, `ClassStatus` gains `Merged { merged_into, merged_from }` (an old `\"proposed\"` string still parses), `FailureClass` gains `validate()` and `merged_into_class()`, and a `ClassMerges` type gives `resolve`, `is_retired` and `live_target` with cycle-safe chain following; `ClassMerges::of` does no sorting when the list holds no merge record. One shared rule, `introspect::class_named(classes, merges, name)`, finds the live class whose normalised name equals a given name (live or retired classes, merge records skipped). Both class-creation paths use it: `apply_answer` in introspect.rs (reuse instead of minting) and `Athena::review` in review.rs (`--new-class` refused with a pointer to the live class; `--class` refuses a merge record's id and a retired id, naming the target). Every reader that lists or counts classes reads through `ClassMerges`: registry reads (introspect.rs `read_records`, labeled.rs `read_inputs`) list only live classes and map case rows and labels to the target in memory; hestia `class_of`, the producer brief's `class_summaries`, `recurrence_vote` and `proposals::generate` resolve ids before comparing. `Athena::merge_classes(from, into)` is the library entry that checks and commits a merge record. No CLI command is added and the 158 existing records are not rewritten; both are marked design. The docs say plainly that creation-time reuse catches only names equal after normalising; differently worded duplicates still need a merge record.",
+  "decisions": [
+    {
+      "choice": "A merge is a new append-only FailureClass record (status merged, with merged_into and merged_from, fresh id), not an edit of the retired class's file. Readers fold the records into a retired-to-target map. If two merge records retire the same class, the earliest by (at, id) wins; merge_classes cannot write a cycle because its target must be live and not retired.",
+      "reason": "records.rs:4 says a record is written once and never modified (D06); the gate's AppendOnly rule refuses a modified records/ file. A new record keeps history and still meets criterion 3's 'FailureClass with status merged and merged_into'. In a merge record, `proposed_by` is copied from the retired class only to keep the struct's shape; no introspection proposed the merge. The field's doc comment (introspection.rs line 304), defaults-loop.md 3.4 and D166 say so (answers finding 7). docs/records.md is not edited: line 107 is the class-label row and the file has no failure-class status text, so there is nothing to update (answers finding 4).",
+      "rejected": [
+        {
+          "option": "Rewrite class B's record with status merged",
+          "why": "The gate refuses it and it breaks the records branch rule."
+        },
+        {
+          "option": "A new record kind athena.class-merge/1",
+          "why": "More surface (AnyRecord arm, path, schema, docs) and criterion 3 names a FailureClass with status merged."
+        },
+        {
+          "option": "A mutable alias file under the repository",
+          "why": "defaults-loop.md 3.4 says the registry is a record store, not a file Athena edits."
+        }
+      ]
+    },
+    {
+      "choice": "Model the status as a data variant: `ClassStatus::Merged { merged_into: RecordId, merged_from: RecordId }` (JSON `\"status\": {\"merged\": {...}}`), not optional fields on FailureClass. `\"proposed\"` still deserializes as the unit variant. ClassStatus loses Copy.",
+      "reason": "FailureClass struct literals appear in about ten files outside the deliverables (review.rs, proposals.rs, briefs.rs tests, cli tests); new fields would force edits in all of them. The variant makes 'merged without a target' unrepresentable. The code uses ClassStatus only as `ClassStatus::Proposed` and in assert_eq.",
+      "rejected": [
+        {
+          "option": "Optional merged_into and merged_from fields with skip_serializing_if",
+          "why": "Edits every FailureClass literal outside the job and allows an inconsistent record that needs a validate rule."
+        },
+        {
+          "option": "Unit variant Merged plus one optional merged_into field",
+          "why": "Still touches all literals, and merged_from is still needed to say which class is retired."
+        }
+      ]
+    },
+    {
+      "choice": "Dedupe at creation through one shared helper `introspect::class_named(classes, merges, name) -> Option<RecordId>`: normalise both names with the existing `normalise`, skip merge records and empty normalised names, take the earliest match by (at, id), return its live target. `apply_answer` (model answer `new`) and `Athena::review` (`--new-class`) both call it. Introspect's `Records` keeps `all_classes: Vec<FailureClass>` and `merges: ClassMerges` and calls the helper on demand; no separate alias map.",
+      "reason": "Creation is where the duplicates come from, and there are two creation paths (introspect.rs line ~1602 and review.rs line 287). The critic's finding 5 is right: review.rs compared names with `to_lowercase()`, a different rule, so 'Stale cache!' passed review while introspect would reuse 'stale cache'. One helper means one rule, enforced by code not prompt (user default 'mechanism').",
+      "rejected": [
+        {
+          "option": "Periodic clustering of the registry by a model",
+          "why": "Costs tokens on every sweep, is nondeterministic, can merge unlike classes, and defaults-loop.md line 753 lists Jev pairwise merging as not decided. It can follow later using the merge record."
+        },
+        {
+          "option": "Tell the model in the prompt not to duplicate",
+          "why": "Prose only; the prompt has near-zero token headroom and prompt edits are out of scope."
+        },
+        {
+          "option": "Match by description or word overlap",
+          "why": "No measured threshold; risks merging different causes. Exact normalised name is a rule that can be tested."
+        },
+        {
+          "option": "A manual-only merge with no creation check",
+          "why": "Leaves the fault unfixed at its source; every new duplicate would need a person."
+        },
+        {
+          "option": "Change only introspect.rs and leave review.rs on its own rule",
+          "why": "Leaves a second creation path that mints duplicates the first path would reuse."
+        }
+      ]
+    },
+    {
+      "choice": "Be honest about reach: creation-time reuse catches only names equal after `normalise` (lower case, alphanumeric words). Model-written names for one cause often differ in wording, so differently worded duplicates still need a merge record. defaults-loop.md 3.4, the CHANGELOG entry and the D166 Tradeoff say this and name the follow-ups as design: count collisions with a backtest over the records branch, and add a user merge command.",
+      "reason": "normalise (introspect.rs line 856) only lower-cases and splits into words. The 158-class problem is not claimed fixed; criterion 1 asks only for the normalised-name case (answers finding 6).",
+      "rejected": [
+        {
+          "option": "Claim the 158-class problem is fixed",
+          "why": "Not measurable here (records/ absent) and probably false for differently worded names."
+        }
+      ]
+    },
+    {
+      "choice": "Resolve merges at read time, in memory. Registry reads list only live classes; case rows, labels and Jev choices map to the target. No record is rewritten. `ClassMerges::of` returns an empty map without sorting when there is no merge record; hestia `repeated_causes` builds it once and passes it to a private `class_of`, and `cause_key` (public) builds its own.",
+      "reason": "Keeps records append-only and lets the 158 existing records stand. The empty-map fast path and the once-per-call build answer finding 8: no per-introspection re-sort.",
+      "rejected": [
+        {
+          "option": "Rewrite historical introspections to the target",
+          "why": "Violates append-only and the out-of-scope line on existing records."
+        },
+        {
+          "option": "Cache the map on store Records",
+          "why": "store.rs is not a deliverable and the cost is small."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the three other readers of `store::Records.classes` in scope, each a few lines: briefs.rs `class_summaries`, evidence_labels.rs `recurrence_vote`, proposals.rs `generate`; plus review.rs. They are outside the brief's deliverable list, and that is deliberate (answers findings 1, 2, 3 and 5).",
+      "reason": "Once merge records are in `store::Records.classes`, an unchanged briefs.rs would list a merge record as a class with zero cases in the producer brief and keep B and A apart; recurrence_vote and proposals would keep comparing raw ids and split a merged cause; review.rs would accept a merge record's id as a class and apply a second, weaker name rule. These are consequences of the change, not extra work, and a smaller list would ship visible regressions. Each edit is covered by a named test.",
+      "rejected": [
+        {
+          "option": "Restrict to the nine listed deliverables and name the rest as follow-ups",
+          "why": "Leaves the producer brief showing merge records as classes and recurrence split, which is the fault the brief names."
+        },
+        {
+          "option": "Filter merge records out in store.rs so other readers never see them",
+          "why": "store.rs is also outside the list, and readers still need the retired-to-target map, so it only moves the edit."
+        }
+      ]
+    },
+    {
+      "choice": "Add `Athena::merge_classes(from, into)` (library only) and no CLI command.",
+      "reason": "The criteria need the merge path to exist and be tested. crates/athena-cli/src/main.rs is not a deliverable and the brief allows the CLI only if small. Docs mark the command as design.",
+      "rejected": [
+        {
+          "option": "A new athena subcommand now",
+          "why": "Outside the deliverable list; adds help text, argument parsing and tests for the same mechanism."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records/introspection.rs",
+      "action": "modify",
+      "purpose": "`ClassStatus` gains `Merged { merged_into, merged_from }`, drops Copy. Add `FailureClass::validate`, `FailureClass::merged_into_class`, `ClassMerges` (`of`, `resolve`, `is_retired`, `live_target`) and `live_classes`. Doc comment on `proposed_by`: for a merge record it is the retired class's and no introspection proposed the merge. Update 'Only proposed is written by code'.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Replace the `FailureClass(c) if c.name.trim().is_empty()` arm (~line 1192) with `c.validate()`. Add round-trip, old-proposed, invalid and ClassMerges tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Add shared `class_named` beside `normalise`. `Records` gains `all_classes` and `merges`; `read_records` lists live classes only and resolves `CaseRow.failure_class`. `apply_answer` reuses a class on a normalised-name match. Add `Athena::merge_classes`. Unit tests for criteria 1 and 2.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "`class_of` resolves ids through a `ClassMerges` built once per `repeated_causes` call so merged classes share one `class:<id>` key. Merged-class recurrence test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/labeled.rs",
+      "action": "modify",
+      "purpose": "`read_inputs` reads FailureClass records, lists live classes, and maps label classes, introspection classes and Jev choice/probabilities to the target in memory. Test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/review.rs",
+      "action": "modify",
+      "purpose": "`Verdict::Class` refuses a merge record's id and a retired id (naming the live target); `Verdict::NewClass` uses `class_named` instead of `to_lowercase` equality. Outside the brief's list, needed because review is the second class-creation path (critic finding 5).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "`class_summaries`: skip merge records and retired classes, count a case under the class its id resolves to. Outside the brief's list: without it the producer brief shows merge records as classes. Test beside the two existing ones.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/evidence_labels.rs",
+      "action": "modify",
+      "purpose": "`recurrence_vote`: compare classes after resolving through `ClassMerges::of(&records.classes)`. Outside the brief's list: otherwise a merged cause counts as two classes. Test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/proposals.rs",
+      "action": "modify",
+      "purpose": "`generate`: resolve `p.failure_class` through `records.merges` for the open-proposal and decision checks (~lines 288, 296). Outside the brief's list: otherwise a pending proposal for B does not block one for A. Test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "purpose": "End-to-end tests `a_new_class_named_like_a_live_class_reuses_it` and `merging_a_class_counts_its_cases_under_the_target` (with merge_classes refusals and a clean `check_history`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/review.rs",
+      "action": "modify",
+      "purpose": "End-to-end review test for the refusals (merge-record id, retired id, punctuation-different duplicate name) with live-class controls. Outside the brief's list, covers the review.rs edit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/defaults-loop.md",
+      "action": "modify",
+      "purpose": "Section 3.4: creation-time reuse in both creation paths, the merge record, read-time resolution, narrow reach, the 158 classes not rewritten, `proposed_by` meaning; mark the CLI command, collision backtest, model clustering and migration as design.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append `## D166 · ...` (criterion 6).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "`[Unreleased]` `### Added` entry: merge status, creation-time reuse (narrow reach stated), read-time resolution, review check; existing classes untouched; CLI command is design.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "athena-data introspection.rs: change `ClassStatus` to `{ Proposed, Merged { merged_into: RecordId, merged_from: RecordId } }` with `rename_all = \"kebab-case\"`, drop Copy. Add `FailureClass::validate` (empty name refused; merged_into == merged_from refused) and `FailureClass::merged_into_class(&self, into, id, at)` (copies the retired name, description 'Merged into <into name>', proposed_by copied from the retired class). Add `ClassMerges { into: BTreeMap<RecordId, RecordId> }` deriving Debug, Clone, Default: `of(&[FailureClass])` (merge records only; return empty without sorting when there are none; otherwise sort by (at, id) and `entry().or_insert`), `resolve(&RecordId)` (bounded by map length so a cycle ends), `is_retired`, `live_target(&self, classes, id) -> Option<RecordId>` and `live_classes`. Doc comment on `proposed_by` as described.",
+    "athena-data records.rs: use `c.validate()` in the validation match. Add tests: merged record round trip with `check_record_file`, old `proposed` JSON parses, invalid merged records refused, ClassMerges chain/cycle/earliest-wins/no-merge/live_target. Run `cargo test -p athena-data`.",
+    "introspect.rs: add `pub fn class_named(classes: &[FailureClass], merges: &ClassMerges, name: &str) -> Option<RecordId>` beside `normalise` (skip merge records and empty normalised names, earliest by (at, id), return the live target) with unit tests. `Records` gains `all_classes: Vec<FailureClass>` and `merges: ClassMerges`. Rewrite `read_records` to read `failure-classes` first, compute `merges`, set `classes` to live ClassRows sorted by id, and resolve `CaseRow.failure_class` through `merges`.",
+    "introspect.rs `apply_answer`: before the earlier-case loop compute `reused` (answer is `new` and `class_named` over the boundary-reworded new name hits) and set `class_id` to `reused` or to the parsed answer id resolved through `past.merges`; in the class branch set `record.failure_class = Some(reused)`, leave `new_class` false, return None, print one ui line. Keep every failure path as it is.",
+    "introspect.rs: add `Athena::merge_classes(&self, from: &RecordId, into: &RecordId) -> Result<FailureClass>`: `Records::load` at head; bail if from == into, either id unknown, either a merge record, or either already retired; build the record with `merged_into_class` and a fresh id (loop on `has_record_id`); `commit_records` with an `Athena-Record` trailer and subject 'Merge failure class ...'. Add the unit tests for criteria 1 and 2 with the existing helpers.",
+    "hestia.rs: change private `class_of` to take `&ClassMerges`; `repeated_causes` builds the map once and passes it; `cause_key` builds its own (cheap when no merge record). Return the live target for the record's class and for Jev's choice. Add the merged recurrence test beside the class tests (helpers `class`, `put`, `records` exist).",
+    "labeled.rs `read_inputs`: collect FailureClass values, compute merges, fill `inputs.classes` with live rows, then map `labels[].class`, `introspections[].failure_class` and `jev.class` (choice plus summed probabilities) to targets in memory. Add the test.",
+    "review.rs: in `Verdict::Class`, bail on a merge-record id ('is a merge record, not a class') and on a retired id ('was merged into <target>; use --class <target>'); in `Verdict::NewClass`, replace the `to_lowercase` comparison with `class_named` and keep the existing message pointing at the live class.",
+    "briefs.rs `class_summaries`, evidence_labels.rs `recurrence_vote` and proposals.rs `generate`: apply `ClassMerges` as in the files list, each with a test.",
+    "crates/athena-cli/tests/introspection.rs: add the two end-to-end tests (reuse by same name in a different case; merge then a third event sees one registry entry, keeps both earlier cases, `check_history` clean, and `merge_classes` refuses self-merge, unknown id, retired target, merge-record id). crates/athena-cli/tests/review.rs: add the review refusal test with live-class controls.",
+    "Docs: defaults-loop.md section 3.4, the D166 entry at the end of decisions.md, the CHANGELOG `[Unreleased]` `### Added` entry, all stating the narrow reach, the untouched 158 classes, the `proposed_by` meaning and the design-only parts. No personal data, no banned words.",
+    "Run `cargo fmt --all`, then `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-core --test refusal_corpus` and `cargo test -p xtask --test policy`; fix before finishing."
+  ],
+  "risks": [
+    {
+      "risk": "Two introspections running at once both read the registry before either commits and both mint the same new name, giving one duplicate.",
+      "mitigation": "The check runs against the registry read at the start of each introspection, so later events dedupe against earlier ones; a rare same-moment pair is left for a merge record. Stated in the D166 Tradeoff."
+    },
+    {
+      "risk": "ClassStatus loses Copy and gains a data variant; a use not seen (a copy of the field, a non-exhaustive match) fails to compile.",
+      "mitigation": "A workspace grep showed only `ClassStatus::Proposed` constructions and one assert_eq; `cargo clippy --all-targets` and `cargo test` in criterion 4 catch the rest."
+    },
+    {
+      "risk": "A request created for the retired class's id or name before the merge is no longer matched by hestia `mentions` once the cause key becomes the target's key, so a duplicate root-cause request could be queued.",
+      "mitigation": "`addressing_request` matches by cited introspection ids, which stay in the merged group, so the common case is covered. The text-only gap is listed in the D166 Tradeoff; the follow-up is for `mentions` to test every id that resolves to the target."
+    },
+    {
+      "risk": "Name matching merges or reuses classes that differ only in punctuation or case but mean different things.",
+      "mitigation": "The rule is exact equality after `normalise`, the notion of equal text the code already uses for causes; the description is not compared; the earliest class wins deterministically."
+    },
+    {
+      "risk": "The rule catches few real duplicates, because the model words one cause differently each time, and readers may take the 158-class problem as fixed.",
+      "mitigation": "Docs, CHANGELOG and D166 say plainly that only names equal after normalising are reused; the follow-ups (collision backtest over the records branch, user merge command) are named as design."
+    },
+    {
+      "risk": "An older binary reads a records branch holding a merge record and fails to parse it.",
+      "mitigation": "No code path writes a merge until this change has landed; drain rebuilds into the new binary after landing Athena's own code (D140). Stated in dependents."
+    },
+    {
+      "risk": "No user command, so the merge path is unused in production until one is added.",
+      "mitigation": "Marked design in the changelog and section 3.4, and put to the user in an open question. `merge_classes` is tested end to end so a later command is thin."
+    },
+    {
+      "risk": "Scope is wider than the nine listed deliverables (review.rs, briefs.rs, evidence_labels.rs, proposals.rs, cli review test), which risks a producer run that is too large.",
+      "mitigation": "Each extra edit is a few lines using the same `ClassMerges` or `class_named` helper, added after the core steps; each has a named test and a stated consequence if left out. The job brief's own deliverables are done first."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Records.classes lists live classes only; CaseRow.failure_class is the resolved target; new fields all_classes and merges",
+      "dependent": "crates/athena-core/src/introspect.rs `read_records` (callers: `Athena::introspect`, proposals.rs ~557, crates/athena-cli/src/backtest.rs ~526, tests in introspect.rs ~2172/2197 and proposals.rs ~765-927)",
+      "kind": "code",
+      "test": "With no merge record every id resolves to itself, so output equals today's; covered by the existing `relax_and_remove_introspections_make_no_default_proposal`, `cargo test -p athena-cli --test backtest`, and the new merge tests.",
+      "reason": null
+    },
+    {
+      "name": "registry as shown to the model and Jev",
+      "dependent": "crates/athena-core/src/introspect.rs `jev_questions` / `ask_jev` / `user_prompt`",
+      "kind": "code",
+      "test": "cli test `merging_a_class_counts_its_cases_under_the_target` asserts the prompt's class_registry holds only the live class; the existing key-shape test `an_earlier_case_is_matched_ids_not_passed_in_are_dropped_and_only_listed_fields_are_sent` still checks the keys of a registry entry.",
+      "reason": null
+    },
+    {
+      "name": "recurrence grouping key `class:<id>`",
+      "dependent": "crates/athena-core/src/hestia.rs `class_of` (callers `cause_key` line 283, `repeated_causes` lines 363 and 384; hestia.rs ~2524 calls `cause_key`; `mentions` reads `cause.key`)",
+      "kind": "code",
+      "test": "New hestia.rs merged-class test (one repeated cause across B and A). The existing hestia tests keep `ClassStatus::Proposed`, so keys are unchanged. `mentions` still matches the target's id and name; a request that only names the retired id is not matched (listed in risks).",
+      "reason": null
+    },
+    {
+      "name": "labeled-set class ids and the registry passed to the overlap reference",
+      "dependent": "crates/athena-core/src/labeled.rs `read_inputs` (callers labeled.rs ~852, crates/athena-cli/tests/review.rs, tests/labeled.rs ~401); `Inputs` keeps its three fields",
+      "kind": "code",
+      "test": "New labeled.rs test with a merge record; existing `a_failure_class_record_in_the_fixture_is_a_valid_registry_entry` and the cli review tests that count `inputs.classes.len()` with proposed classes only. evidence_labels.rs:971 builds `Inputs` by literal; its fields do not change.",
+      "reason": null
+    },
+    {
+      "name": "store::Records.classes now includes merge records and retired classes: the class summaries in the producer brief",
+      "dependent": "crates/athena-context/src/briefs.rs `class_summaries` (caller crates/athena-core/src/run/mod.rs ~1195)",
+      "kind": "code",
+      "test": "The two existing class_summaries tests stay green; a new case merges B into A and expects one summary with summed cases and distinct jobs, and no summary for the merge record. Producer brief size is unchanged for unmerged data, so the producer budget line in docs/system-facts.md is unaffected.",
+      "reason": null
+    },
+    {
+      "name": "same-class comparison for the recurrence evidence label",
+      "dependent": "crates/athena-core/src/evidence_labels.rs `recurrence_vote` (lines ~209, 249, 266; callers in `derive`)",
+      "kind": "code",
+      "test": "Existing evidence_labels tests use ids that never merge; a new test records the later case in the merge target and still counts it as recurrence.",
+      "reason": null
+    },
+    {
+      "name": "grouping of cases by class and the pending/decided proposal check",
+      "dependent": "crates/athena-core/src/proposals.rs `generate` (lines ~274-313)",
+      "kind": "code",
+      "test": "New proposals test: a pending proposal for B blocks a new proposal for A after the merge; existing tests use unmerged classes.",
+      "reason": null
+    },
+    {
+      "name": "class existence and name checks at review time (creation path 2)",
+      "dependent": "crates/athena-core/src/review.rs `Athena::review`, `Verdict::Class` (line 268) and `Verdict::NewClass` (line 277); `shown` / `class_text` look up names by id",
+      "kind": "code",
+      "test": "New cli review test `review_refuses_a_merge_record_and_a_retired_class_and_a_renamed_duplicate` (tests/review.rs); existing review tests use proposed classes and distinct names so they pass unchanged. `class_text` and `shown` find the class by id, so a retired class still shows its own name.",
+      "reason": null
+    },
+    {
+      "name": "validation of an `athena.failure-class/1` file",
+      "dependent": "crates/athena-data/src/records.rs `AnyRecord::parse` / `check_record_file` and the gate's ValidRecords rule (athena-gate)",
+      "kind": "rule",
+      "test": "New records.rs tests (round trip, old proposed record, invalid merged records). The 158 existing records have status `proposed` and no other new field, so they validate as before.",
+      "reason": null
+    },
+    {
+      "name": "records are append-only",
+      "dependent": "crates/athena-gate/src/lib.rs Rule::AppendOnly; docs/design/records-history.md",
+      "kind": "rule",
+      "test": "The cli merge test ends with `athena.check_history().unwrap().violations.is_empty()`, as the existing test near introspection.rs 378 does. The merge writes a new file under records/failure-classes/ and never touches an existing one; `merge_classes` goes through `commit_records`, which gates its own commit.",
+      "reason": null
+    },
+    {
+      "name": "unknown `merged` status variant for an older binary",
+      "dependent": "The Athena build installed on the machine that runs drain",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Only `merge_classes`, which no command calls yet, writes a merged record, and drain rebuilds and re-executes after landing Athena's own code (D140), so a merged record cannot exist before the new binary does."
+    },
+    {
+      "name": "decisions that govern changed paths",
+      "dependent": "docs/decision-links.toml `[[governs]]` (D156)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The only governed decision is D08, for crates/athena-git/src/snapshot.rs and crates/athena-core/src/run/candidate.rs; this plan touches neither."
+    },
+    {
+      "name": "prompt-set token budgets",
+      "dependent": "docs/system-facts.md budget lines (`system_facts_budgets_match_computed`, crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt file or brief template text is edited; only code and docs outside the prompt sets change."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two tests. (a) Unit test in introspect.rs `a_new_class_answer_naming_a_live_class_reuses_it`: write one live class with `put_class`, read it with `read_records(dir)`, then call `Athena::apply_answer` with `boundary_answer(\"reviewer\")` whose new-class name differs from the class only in case and punctuation (\"the REVIEWER is not told!\"). Further cases: a name equal to a retired class's name returns the live target; a name empty after normalising does not match and still creates a class; a name that differs in a word creates a new class (control). (b) End-to-end test in crates/athena-cli/tests/introspection.rs `a_new_class_named_like_a_live_class_reuses_it`: two `intervene` events whose scripted model replies `reply(\"new\", ...)` with the same class name in different case.",
+      "command": "cargo test -p athena-core introspect && cargo test -p athena-cli --test introspection a_new_class",
+      "observes": "(a) apply_answer returns None (no class to write), the record's failure_class equals the existing id, new_class is false, status is Recorded; the retired-name case returns the live target; the different-wording and empty-name cases return Some(FailureClass) (so the rule is exact equality only). (b) After the second event `Records::load(...).classes.len() == 1`, both introspections carry the same failure_class, only the first has new_class, and the diff between the two heads has no `records/failure-classes/` path.",
+      "fails_without": "Without the dedupe, apply_answer returns Some(FailureClass) with a fresh id and new_class true, and the end-to-end registry holds 2 records, so both tests fail.",
+      "seam": "Production entry points `Athena::apply_answer` (private; called from in-module tests the way the existing `an_introspection_with_a_boundary_word_is_written_without_it` does) and `Athena::intervene`. Fixtures `athena_with(None)`, `boundary_answer`, `put_class`, `read_records(dir)` in introspect.rs tests, and the scripted `Model` plus `Fixture` in the cli test: all exist today (read at introspect.rs ~1826-2138 and introspection.rs 35-170). The matching is the production `class_named` helper that step 3 adds, called inside apply_answer; no double holds it."
+    },
+    {
+      "criterion": 2,
+      "method": "Tests with `merge` in the name. (a) introspect.rs `a_merged_class_is_listed_once_and_its_cases_count_under_the_target`: put classes A and B and a case in each; assert 2 live classes; build the merge record with the production `FailureClass::merged_into_class` and `put_record` it; assert `read_records` has 1 live class, every CaseRow resolves to A, and an `apply_answer` that names A and lists B's case in earlier_cases (also in passed_cases) keeps it with no dropped id; the same answer naming B resolves to A; control: before the merge record exists, the same answer drops B's case. (b) hestia.rs: introspections in B and A from different jobs share `cause_key` `class:<A>` and give one `repeated_causes` group of 2 jobs once the merge record is in the store Records. (c) labeled.rs: `read_inputs` on a tempdir with the merge record maps B's label and a Jev choice B to A with probabilities summed; `build(...)` rows target A. (d) cli test `merging_a_class_counts_its_cases_under_the_target`: two classes made by the scripted model, `athena.merge_classes(b, a)`, then a third event whose prompt `class_registry` has one entry and whose answer lists both earlier cases, kept with dropped_ids empty, and `check_history` clean. (e) `merge_classes` refuses self-merge, unknown id, retired source or target, merge-record id. (f) review: cli review test `review_refuses_a_merge_record_and_a_retired_class_and_a_renamed_duplicate`: `--class <merge-record-id>` and `--class <retired id>` are refused naming the live target (control: the same `--class` on a live class succeeds), and `--new-class \"Stale cache!\"` is refused with a pointer to the live class 'stale cache' while a differently worded name succeeds. (g) ClassMerges unit tests: chain B->C->A, cycle ends, earliest merge wins, no-merge fast path. (h) briefs.rs `class_summaries`, evidence_labels `recurrence_vote` and proposals `generate` each get a merged-class case.",
+      "command": "cargo test -p athena-core && cargo test -p athena-context && cargo test -p athena-cli --test introspection --test review",
+      "observes": "Live class count falls from 2 to 1 (store record count is 3). B's cases count under A in earlier-case selection, recurrence grouping, labeled rows, class summaries, the recurrence label and proposals. merge_classes and review refuse the cases listed.",
+      "fails_without": "Without resolution the registry still lists B (2 classes), B's case is dropped as not in the class, the two introspections get different cause keys (no repeated cause), labeled rows keep label B, review accepts a merge record's id as a class, and 'Stale cache!' passes review.",
+      "seam": "Production entry points `read_records`, `Athena::apply_answer`, `Athena::merge_classes`, `Athena::review`, `hestia::cause_key` / `repeated_causes` (through `class_of`), `labeled::read_inputs` and `build`, `briefs::class_summaries`, `evidence_labels::recurrence_vote`, `proposals::generate`. Fixtures are tempdir record files via `put_class` / `put_case` / `put_record` (exist in introspect.rs tests), `put` / `class(n,name)` helpers in hestia.rs tests (exist near 2976-3050), the labeled.rs tempdir test near 1372 (exists), the briefs.rs class_summaries tests near 2994 and 3048 (exist), and `Fixture` with `class_record` in the cli review test (exists, tests/review.rs 47) and the scripted model in the cli introspection test (exists). The merge record is built by the production `FailureClass::merged_into_class` that step 1 adds; no double holds merge logic."
+    },
+    {
+      "criterion": 3,
+      "method": "New tests in records.rs: `a_merged_failure_class_has_a_path_a_schema_and_round_trips` builds a Merged FailureClass, serialises with `to_json`, parses with `AnyRecord::parse`, runs `check_record_file(&canonical_path, bytes)`. `an_old_proposed_failure_class_still_parses` parses the literal JSON an old record has (`\"status\": \"proposed\"`) through `check_record_file`. `merged_failure_class_validation`: merged_into equal to merged_from, and an empty name, are refused as RecordError::Invalid. ClassMerges tests sit beside them.",
+      "command": "cargo test -p athena-data",
+      "observes": "The merged record equals itself after the round trip and is accepted at its canonical path; the proposed record parses unchanged; the invalid ones return Invalid.",
+      "fails_without": "Without the Merged variant the merged JSON fails to parse (unknown variant); without the validate arm the self-merge record is accepted.",
+      "seam": "Production entry points `AnyRecord::to_json`, `AnyRecord::parse`, `check_record_file` (exist, records.rs ~1366). Fixtures: a struct literal and an inline JSON string. The validate arm is added in records.rs by step 2."
+    },
+    {
+      "criterion": 4,
+      "method": "The three checks Athena runs, whole workspace, plus the refusal-corpus test as a regression. The rule added is a class-name match on model output and a review name check, not a parser, stem list, stop list or reading check, so no refusal_corpus.rs case maps to it and I cite none. The corpus run guards `cause_key`, which feeds generated root-cause requests (refusal_corpus.rs ~686-777 use introspections with failure_class None). Input forms of the new rule and the test that covers each: case difference, punctuation, extra spacing, boundary-reworded name, retired class's name, empty-after-normalising name, different wording (control) in the criterion 1 tests; `--new-class` with punctuation and case difference, merge-record id and retired id for `--class` in the criterion 2 review test; two existing live classes with equal normalised names pick the earliest by (at, id) in a `class_named` unit test.",
+      "command": "cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --all --check && cargo test -p athena-core --test refusal_corpus",
+      "observes": "All pass.",
+      "fails_without": "A missed consumer fails the build: the ClassStatus change removes Copy and adds a variant, so any non-exhaustive match or copy use fails to compile; an unformatted file or a clippy warning fails the other commands.",
+      "seam": "cargo itself. Existing `FailureClass { status: ClassStatus::Proposed, .. }` literals compile unchanged because no field is added."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff. defaults-loop.md section 3.4 gets a paragraph: creation (introspection and review) reuses a live or retired class with the same normalised name; a merge is an appended failure-class record with status merged naming the retired and surviving class; readers count a merged class under its target; `Athena::merge_classes` is built; creation-time reuse catches only names equal after normalising, so differently worded duplicates still need a merge record; the existing 158 classes are not rewritten by this change; a CLI merge command, a backtest counting collisions over the records branch, model-based clustering and the migration of existing classes are design (not built); a merge record's `proposed_by` is the retired class's and does not mean an introspection proposed the merge. The CHANGELOG `[Unreleased]` `### Added` entry says the same. The policy test scans the new text for banned words and personal data.",
+      "command": "git diff -- docs/design/defaults-loop.md CHANGELOG.md && cargo test -p xtask --test policy",
+      "observes": "The statements (merge behavior, narrow reach, 158 classes not rewritten, unbuilt parts marked design) are present and the scan passes.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff for `## D166 · ...`, appended at the end of docs/decisions.md, one greater than D165 (the last entry, near line 4697). It has Case, Decision, Alternatives (periodic model clustering; manual-only merge; edit the record in place; description similarity; prompt instruction), Tradeoff (names the narrow reach and the same-moment duplicate), Reversal cost and Provenance, written like D165. The decision-entry rule (id one greater, Provenance present, append-only against the base) is applied by Athena's mirror check on the finished diff; the mirrors unit tests run on their own fixtures and do not check this entry, so they are not cited as evidence.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "The entry exists with the dedupe-plus-merge-status decision and the two named alternatives (periodic model clustering, manual-only merge) with reasons.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: Do you want an `athena` subcommand to merge two classes in a later job? This plan adds only the library function `Athena::merge_classes` (main.rs is not on the deliverable list), so today a merge is written by code or by hand.",
+    "User: When the 158 existing classes are merged in a later job, who picks the surviving class of each duplicate group: you from a list, or a rule such as the oldest id?",
+    "Host: How many live classes on the records branch have equal normalised names? records/ is not in the snapshot, so the number of duplicates the creation rule would have prevented cannot be read here."
+  ],
+  "producer_section_sha256": "6073d2465cf3a7698c423c57bc42a85229c4227e2ada9145c7d99d090b1485cf"
+}
