@@ -469,6 +469,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `crates/athena-core/src/reading.rs` is split into submodules under `reading/` (`retry`, `topics`, `checks`,
+  `outcome`, `terms`, `surveys`, `replay`) to bring it under the code-health size limits. Every item is moved
+  unchanged, apart from visibility and the shared imports, and is re-exported, so paths under
+  `crate::reading` stay the same.
 - `crates/athena-data/src/records.rs` is split into submodules under `records/` (`core`, `introspection`,
   `work`, `throughput`, `plan`) to bring it under the code-health size limits. Every item is moved unchanged
   and re-exported, so all `athena_data::records::*` paths, serde formats and schemas are the same.
