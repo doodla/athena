@@ -1027,12 +1027,14 @@ pub struct Resolution {
 }
 
 mod core;
+mod design_surface;
 mod introspection;
 mod plan;
 mod throughput;
 mod work;
 
 pub use self::core::*;
+pub use self::design_surface::*;
 pub use self::introspection::*;
 pub use self::plan::*;
 pub use self::throughput::*;
@@ -1115,6 +1117,8 @@ pub enum AnyRecord {
     ThroughputReview(Box<ThroughputReview>),
     #[serde(rename = "athena.build-measurement/1")]
     BuildMeasurement(Box<BuildMeasurement>),
+    #[serde(rename = "athena.design-surface/1")]
+    DesignSurface(Box<DesignSurface>),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -1205,6 +1209,7 @@ impl AnyRecord {
             AnyRecord::Replay(r) => r.validate().map_err(invalid)?,
             AnyRecord::ThroughputReview(r) => r.validate().map_err(invalid)?,
             AnyRecord::BuildMeasurement(r) => r.validate().map_err(invalid)?,
+            AnyRecord::DesignSurface(r) => r.validate().map_err(invalid)?,
             AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -1314,6 +1319,9 @@ impl AnyRecord {
             AnyRecord::BuildMeasurement(r) => {
                 format!("records/build-measurements/{}/{}.json", r.id.month(), r.id)
             }
+            AnyRecord::DesignSurface(r) => {
+                format!("records/design-surface/{}/{}.json", r.id.month(), r.id)
+            }
         }
     }
 
@@ -1354,6 +1362,7 @@ impl AnyRecord {
             AnyRecord::CodeHealthBaseline(_) => CODE_HEALTH_BASELINE_SCHEMA,
             AnyRecord::ThroughputReview(_) => THROUGHPUT_REVIEW_SCHEMA,
             AnyRecord::BuildMeasurement(_) => BUILD_MEASUREMENT_SCHEMA,
+            AnyRecord::DesignSurface(_) => DESIGN_SURFACE_SCHEMA,
         }
     }
 }
@@ -2476,6 +2485,39 @@ mod tests {
             Some(&baseline)
         );
         assert!(CodeHealthBaseline::latest(&[]).is_none());
+    }
+
+    #[test]
+    fn a_design_surface_has_a_path_a_schema_and_round_trips() {
+        let mut inventory = SurfaceInventory::default();
+        inventory.commands.insert("ask".into(), "visible".into());
+        let surface = DesignSurface {
+            id: RecordId::parse("20261026-090000-5abc").unwrap(),
+            at: ts(),
+            commit: "0123456789abcdef0123456789abcdef01234567".into(),
+            inventory,
+        };
+        let record = AnyRecord::DesignSurface(Box::new(surface.clone()));
+        assert_eq!(record.schema(), "athena.design-surface/1");
+        assert_eq!(
+            record.canonical_path(),
+            "records/design-surface/2026-10/20261026-090000-5abc.json"
+        );
+        let json = record.to_json();
+        let parsed = AnyRecord::parse(&record.canonical_path(), json.as_bytes()).unwrap();
+        assert_eq!(parsed, record);
+        assert!(check_record_file(&record.canonical_path(), json.as_bytes()).is_ok());
+        assert_eq!(
+            DesignSurface::latest(std::slice::from_ref(&surface)),
+            Some(&surface)
+        );
+        assert!(DesignSurface::latest(&[]).is_none());
+        let mut short = surface.clone();
+        short.commit = "abc".into();
+        assert!(short.validate().is_err());
+        let mut empty = surface;
+        empty.inventory = SurfaceInventory::default();
+        assert!(empty.validate().is_err());
     }
 
     fn throughput_review_with(id: &str) -> ThroughputReview {

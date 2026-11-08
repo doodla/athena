@@ -61,6 +61,7 @@ records/
   audits/<YYYY-MM>/<id>.json         athena.audit/1
   hestia-sweeps/<YYYY-MM>/<id>.json  athena.hestia-sweep/1
   code-health/<YYYY-MM>/<id>.json    athena.code-health-baseline/1
+  design-surface/<YYYY-MM>/<id>.json athena.design-surface/1
 ```
 
 Ids are `YYYYMMDD-HHMMSS-xxxx`: UTC time, then four Crockford base32 characters. They sort by time and give
@@ -108,6 +109,7 @@ Every record has a `schema` field naming its type and version.
 | `athena.role/1` | A role, as recorded (`docs/design/roles-and-ladder.md`). `name` (lowercase letters, digits, hyphens), `version` (starts at 1; a change is a new record with the next version, and the file is `<name>-<version>.json`), `at`, `goal` (one line), `prompt` (short and stable), `cadence_tasks` (the role runs after this many finished tasks since its last run), `highest_rung` (the highest rung of the requirements ladder it may change itself: `defaults-conventions` for the steward). The steward writes its own definition the first time it runs |
 | `athena.work-item/1` | Work a role queued. `id`, `at`, `role`, `kind` (`blind-spot`, `repeated-failure`, or `proposal`), `key` (stable for the same finding, so it is not queued twice), `title`, `rung` (the ladder rung it concerns: `owner-goals`, `brief-requirements`, `design-decisions`, `defaults-conventions`, or `implementation`), `source` and `evidence`. Both are references, each a `kind` (`job`, `path`, or `commit`) and a `value`; no data is copied. A blind spot's `source` is the data the role could not read. Every kind but a blind spot cites at least one piece of evidence |
 | `athena.audience-rating/1` | How a reader of one kind rated a shipped page (`docs/design/audience-role.md`). `id`, `at`, `target` (the page's URL), `audience` (such as `newcomer`), `rating` (a whole number from 1 to 5; anything else is refused), `findings` (each `text` and `source`, the passage or heading that is its evidence; a finding with no source is refused). Ratings are never edited; the latest by `(at, id)` is current. A rating of 2 or lower also queues a `proposal` work item that cites the rating's path. `athena audience` writes one, with the role's `athena.role/1` record and its invocation record, in one records commit |
+| `athena.design-surface/1` | The inventory of Athena's design surface at one commit, kept so a later review can compare against it. `id`, `at`, `commit` (the full 40-character commit the inventory was computed at), `inventory`. See "The design-surface record" below |
 | `athena.defaults-proposal/1` | Append-only: a proposed change to `defaults.toml`, which is a record and never an edit. `record` (this record's id, which names the file), `at`, `id` (the default's id), `kind` (`add` or `amend`), `statement`, `applies_to`, `version` (`from`, and `to` = `from + 1`), `sources` (each an `introspection` id with its `intervention`, `job` and `at`; at least three distinct jobs when code writes it), `failure_class`, `status` (`pending`, `accepted` with the `job` that applies it, `rejected` with a `reason`, or `withdrawn`), `candidate_sha256` (the hash of the full candidate `defaults.toml` that passed `DefaultsModel::parse`), `notes`. A status change is a new record with the same `id`; the latest by `(at, record)` is current. Assumptions, signals and evidence probabilities need Jev and are not fields yet |
 
 An abridged invocation record:
@@ -170,6 +172,35 @@ A retry brief carries every blocker and major finding of the retried job's final
 you must address" block: in the seeded retry (which also lists all findings) and in a retry that starts from
 the base. Findings have no resolved state, so none is left out for having been fixed in a later round; the
 producer sees all of them and checks each against the code.
+
+### The design-surface record
+
+`athena.design-surface/1` answers one question: is Athena's design settling? It holds a deterministic
+inventory of the surface Athena offers, computed by code with no model call, at one commit. The file is
+`records/design-surface/<YYYY-MM>/<id>.json`, written once and never edited; the newest by `(at, id)` is the
+latest.
+
+Fields: `id`, `at`, `commit` (40 hexadecimal characters; the inventory was read from that commit's tree, never
+from a working tree), and `inventory`, an object with six kinds. Each kind maps an item's name to a short
+detail, and every kind is sorted by name, so the same commit always gives the same bytes:
+
+| Kind | Name | Detail | Read from |
+|---|---|---|---|
+| `commands` | `ask`, `hestia sweep` | `visible` or `hidden` | the clap definitions in `crates/athena-cli/src/main.rs` |
+| `flags` | `ask --yes`, `go <job>` | the field's type, plus `required` | the same definitions: each `#[arg(long)]` flag, and each positional argument |
+| `config_keys` | `budget`, `budget.job_usd` | `section`, or the key's type | the config structs in `crates/athena-data/src/config.rs`, from `Config` down |
+| `record_schemas` | `athena.candidate` | the versions, such as `1,2` | the `AnyRecord` serde renames in `crates/athena-data/src/records.rs` |
+| `roles` | `steward` | the version | the `RoleDefinition` values in `crates/athena-data/src/roles.rs` |
+| `crates` | `athena-core` | the directory | the workspace `Cargo.toml` members |
+
+To compare across commits, read the latest recorded inventory and compute the inventory at the commit to judge,
+then call `athena_core::design_surface::diff(&recorded.inventory, &now)`. A name on one side only is added or
+removed; a name on both with a different detail is changed (a record schema that moves from version 1 to 2 is
+one changed item, its detail going from `1` to `2`). The result lists added, removed and changed items for each
+kind and totals them (`added`, `removed`, `changed`, `total`). When a whole `athena.toml` section is added or
+removed it is one item: its keys are folded into it, and its detail says how many (`section (2 keys)`).
+`Athena::record_design_surface(commit, now)` computes and commits the record. There is no command for it yet,
+because a new command would itself change the surface being measured.
 
 ## Following a job from a commit
 

@@ -1,0 +1,167 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261108-063602-h7je",
+  "n": 1,
+  "at": "2026-11-08T06:36:30.920246225Z",
+  "invocation_seq": 1,
+  "base_commit": "397bd1f55c0d178d9dcc1ba1fc493814d78fa5c5",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Split drain.rs into child modules to get under 1500 production lines",
+  "summary": "Retry of job 20261026-144234-bz4e: the earlier request's 1798-line figure was stale; drain.rs now has about 4585 production lines (first test module at line 4586). Split it into several child modules (lifecycle, real_steps, lander, engine) so drain.rs ends under 1500 production lines, with no behavior change. Audience: the code-health gate and maintainers.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust module moves."
+    },
+    {
+      "id": "tested",
+      "how": "cargo test, clippy and fmt criteria."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the measured line count and that tests still pass, not only that files exist."
+    },
+    {
+      "id": "small",
+      "how": "One focused split with no logic change."
+    },
+    {
+      "id": "root-cause",
+      "how": "Re-measure the file instead of trusting the stale figure."
+    },
+    {
+      "id": "strangers",
+      "how": "Modules are named by responsibility."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261026-144234-bz4e is addressed: its blocker (drain.rs still ~4013 production lines) is fixed by moving four groups, not one; its major finding (stale figure, no re-measure) is fixed by requiring the producer to measure production lines of drain.rs before and after and report both numbers; its minor CHANGELOG finding is fixed by wording the entry only after the measured result is true. Its candidate files are all kept as deliverables: CHANGELOG.md, drain.rs, drain/lifecycle.rs (the lifecycle move itself was sound and is redone). main.rs was in its scope but is not expected to change, since drain re-exports keep paths stable.",
+    "Code survey: read crates/athena-cli/src/drain.rs top-level items. Production code runs to line 4585; test modules start at 4586 (batches_tests, tests, in_flight_tests, read_ahead_tests, landing_queue_tests). Groups by line: lifecycle (PidRecord..RealLifecycle, 3457-4027, ~570 lines); RealSteps and its Steps impl (4028-4585, ~560); Lander/PrLander/PlanReport and study helpers (3199-3456, ~260); the Drain engine (State, Carry, LandingQueue, Drain, ItemEnd, RunStep and impls, 1181-3198, ~2000); data types and the Steps trait (288-1180, ~900 incl. InFlight and Report). Callers in main.rs and display.rs use crate::drain paths, so glob or explicit re-exports must keep those paths. Tests use super::*, so private items moved out need pub(super) visibility and re-import in drain.rs.",
+    "Target math: 4585 minus lifecycle, real_steps, lander and engine (about 3390 lines) leaves roughly 1200 production lines in drain.rs, under 1500. If the engine move proves not cleanly separable, the producer moves the next largest cohesive group (for example InFlight/Report types) instead, and reports the measured number.",
+    "Measuring production lines: test modules (#[cfg(test)] mod blocks) are excluded, as code_health::measure_source does. The producer measures with that tool or by counting lines before the first #[cfg(test)] module, in each new file as well, and every new file must stay under 1500 lines too, since the limit is per file with 5 landings a week.",
+    "Child modules live under crates/athena-cli/src/drain/ and are declared in drain.rs with mod and pub use re-exports. Moves only; no function body logic changes.",
+    "Governance: athena.toml code-health limits are not changed; no governance file is a deliverable."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Production lines of crates/athena-cli/src/drain.rs (everything before the first #[cfg(test)] module) are fewer than 1500. Check by Grep for '^#\\[cfg\\(test\\)\\]' with line numbers in drain.rs and reading the first match; the line before it is the production line count.",
+      "kind": "content"
+    },
+    {
+      "text": "New files under crates/athena-cli/src/drain/ (at least lifecycle.rs, real_steps.rs, lander.rs, engine.rs) each have fewer than 1500 production lines, checked by Grep for line numbers of the first #[cfg(test)] or the file length via Read.",
+      "kind": "content"
+    },
+    {
+      "text": "The diff (git diff) only moves code, adds mod and re-export lines, and adjusts imports or visibility such as pub(super). No function body logic changes, and crate::drain public paths used by main.rs and display.rs (guarded, DrainState, StopOutcome, RestartOutcome and others) remain exported from drain.",
+      "kind": "content"
+    },
+    {
+      "text": "No test is deleted, ignored or edited beyond import paths: the #[cfg(test)] modules stay in drain.rs (or move with their code) with the same test function names. Check with git diff and Grep for '#\\[test\\]' counts before and after.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry under Changed that describes the split and states only what is true after the measurement (drain.rs under 1500 production lines).",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli`: it passes with the same number of tests as before the change (outcome check: drain behavior is unchanged).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets -- -D warnings` (clean) and `cargo fmt --check` (passes).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo build`: the whole workspace compiles, so main.rs and display.rs callers need no edits.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "crates/athena-cli/src/drain/lifecycle.rs",
+      "action": "create",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/drain/real_steps.rs",
+      "action": "create",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/src/drain/lander.rs",
+      "action": "create",
+      "p": 0.75
+    },
+    {
+      "path": "crates/athena-cli/src/drain/engine.rs",
+      "action": "create",
+      "p": 0.75
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Any behavior change or logic refactor of the drain engine",
+    "Changes to athena.toml code-health limits or other governance files",
+    "Splitting other files such as display.rs or main.rs",
+    "Adding the proposed reading-time size-measurement check to Athena itself"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 1.0,
+        "p50": 2.6,
+        "p90": 6.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2700.0,
+        "p90": 6000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6710239651416122,
+      "p_user_intervenes": 0.0762278978388998,
+      "cost_usd": {
+        "p10": 0.5623139354736411,
+        "p50": 1.4780460000000002,
+        "p90": 4.755934010667724
+      },
+      "wall_time_s": {
+        "p10": 569.6055806988737,
+        "p50": 2103.609475143514,
+        "p90": 4314.865233263222
+      }
+    }
+  },
+  "departures": "Large mechanical move of ~3400 lines across four new modules with visibility fixes for tests; costs and risk exceed the reference."
+}

@@ -1,0 +1,180 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261026-144234-bz4e",
+  "candidate_commit": "611c2254b62757950e23ebf251316f345d1c4fc1",
+  "verified_fingerprint": "sha256:e55956639f666e5ac619c4a127d6c39dc376f49c4ba133e6503c326a65a99bd4",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42454246094 for 611c2254b62757950e23ebf251316f345d1c4fc1",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42454246094 for 611c2254b62757950e23ebf251316f345d1c4fc1",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42454246094 for 611c2254b62757950e23ebf251316f345d1c4fc1",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 3,
+  "criteria": [
+    {
+      "criterion": "crates/athena-cli/src/drain.rs has fewer than 1500 production lines (test modules excluded), and a new crates/athena-cli/src/drain/lifecycle.rs holds the moved code. Check with `ls` and by reading both files.",
+      "kind": "content",
+      "met": false,
+      "evidence": "lifecycle.rs exists (583 lines) and holds the moved code. But drain.rs does not meet the limit. Read shows it is 6522 lines long, and grep finds exactly five #[cfg(test)] modules. measure_source counts each module's range from its first attribute (the doc comment counts) to its closing brace: 4010–4064, 4066–5125, 5127–5232, 5234–6197 and 6199–6522, 2509 lines in all. That leaves about 4013 production lines (my count from those line positions), well above 1500. Lines 1–4009 alone are all production code.",
+      "commands": [
+        "ls -l crates/athena-cli/src/drain.rs crates/athena-cli/src/drain/lifecycle.rs"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The diff only moves code, re-exports it and adjusts visibility or imports. No function bodies change in logic, and public paths such as crate::drain::guarded, DrainState, StopOutcome and RestartOutcome are still exported from drain. Check with `git diff`.",
+      "kind": "content",
+      "met": true,
+      "evidence": "In drain.rs, 578 lines are removed and replaced by `mod lifecycle; pub use lifecycle::*;`. Comparing the old drain.rs with the new lifecycle.rs, only 12 lines are new. They are the //! module header, the `use` lines, and `pub(super)` added to linux_marker and ps_marker, which drain.rs tests call. Every function body is otherwise identical. The glob re-export keeps every pub item available at its drain:: path.",
+      "commands": [
+        "git diff HEAD~1 -- CHANGELOG.md crates/athena-cli/src/drain.rs",
+        "git diff --numstat --minimal HEAD~1:crates/athena-cli/src/drain.rs HEAD:crates/athena-cli/src/drain/lifecycle.rs",
+        "git diff --numstat --patience HEAD~1:crates/athena-cli/src/drain.rs HEAD:crates/athena-cli/src/drain/lifecycle.rs"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "`cargo test -p athena-cli` passes, with the same tests present as before the change and none deleted or ignored. This is the outcome check: the drain behavior is unchanged.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded check (CI run 42454246094 for 611c2254) shows `cargo test --locked` passed. The diff touches no test module: the only drain.rs hunk is at line 3432, which is production code, and the tests at 4530–4538 that use linux_marker and ps_marker still compile because those helpers are now pub(super).",
+      "commands": [
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "`cargo clippy --all-targets -- -D warnings` is clean and `cargo fmt --check` passes.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Both passed in Athena's recorded checks (CI run 42454246094 for 611c2254).",
+      "commands": [
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo fmt --all --check"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "`cargo build` succeeds for the whole workspace, so main.rs and display.rs callers compile without edits.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Finished the dev profile with no errors. main.rs and display.rs are not in the diff.",
+      "commands": [
+        "cargo build --workspace"
+      ],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "drain.rs is still about 4013 production lines, far above the 1500 limit it breached and above the 2000 absolute limit, so the structural pass does not reach its goal.",
+      "evidence": "In the candidate, drain.rs is 6522 lines, and its #[cfg(test)] modules span 4010–4064, 4066–5125, 5127–5232, 5234–6197 and 6199–6522. code_health::measure_source counts production lines as total lines minus those ranges, which gives about 4013 (my count). The change removed a net 575 lines from a file of about 4588 production lines. Code health will flag the file again on the next landing.",
+      "location": "crates/athena-cli/src/drain.rs",
+      "source": "verifier"
+    },
+    {
+      "severity": "major",
+      "summary": "The request's line count was stale, and neither the reading nor the producer re-measured the file before planning or finishing the split.",
+      "evidence": "The request was queued on 2026-10-26 with 1798 lines. The current file has production code through line 4009. The reading's fallback ('the target is below 1500 production lines in drain.rs') was not acted on. A sounder approach is to measure the file first (measure_source, or the status code-health table) and pick enough cohesive groups to clear the limit.",
+      "location": "crates/athena-cli/src/drain.rs",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "The CHANGELOG says the split brings the file under the code-health size limits, which is not true.",
+      "evidence": "The CHANGELOG.md line added under 'Changed' says the move is 'to bring the file under the code-health size limits', but drain.rs is still about 4013 production lines.",
+      "location": "CHANGELOG.md:456",
+      "source": "verifier"
+    },
+    {
+      "severity": "major",
+      "summary": "The reading does not match the request, so passing criteria do not show the request was met",
+      "evidence": "The reading took the request's figure of 1798 production lines as current and planned to move one section (from about line 3412 to the end of the production code). In this tree, drain.rs's production code runs to line 4009 before the first test module, so it has about 4588 production lines by the code-health measure, not 1798. The figure was measured when the request was queued on 2026-10-26. The reading should have re-measured the file and planned a split big enough to get under 1500. That means moving several cohesive groups (for example PrLander, the study_*/model_contradictions helpers, the in-flight table and the landing queue), not just the lifecycle block.",
+      "location": null,
+      "source": "athena"
+    }
+  ],
+  "request_reading_mismatch": "The reading took the request's figure of 1798 production lines as current and planned to move one section (from about line 3412 to the end of the production code). In this tree, drain.rs's production code runs to line 4009 before the first test module, so it has about 4588 production lines by the code-health measure, not 1798. The figure was measured when the request was queued on 2026-10-26. The reading should have re-measured the file and planned a split big enough to get under 1500. That means moving several cohesive groups (for example PrLander, the study_*/model_contradictions helpers, the in-flight table and the landing queue), not just the lifecycle block.",
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the reading misread the request",
+    "the verifier's verdict is fail",
+    "1 of 5 criteria unmet",
+    "3 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "The move itself is clean. It shifts the pid-file, stop, restart and RealLifecycle section, unchanged, from drain.rs into a new drain/lifecycle.rs. It re-exports that code with `pub use lifecycle::*`, widens two test-used helpers to pub(super), and adds a CHANGELOG entry. The workspace builds, and the recorded fmt, clippy and test runs passed. But it does not achieve the goal the request and criterion 1 set. I counted drain.rs's production lines the way code_health::measure_source counts them (total lines minus the #[cfg(test)] module ranges). The new drain.rs has 6522 lines, and its five test modules fill lines 4010–4064, 4066–5125, 5127–5232, 5234–6197 and 6199–6522, which leaves about 4013 production lines (my count from reading those line positions). That is far over the 1500 busy limit, and over the 2000 absolute limit too. Before the change it was about 4588. The \"1798\" in the request was measured when the request was queued on 2026-10-26, and the file has grown a lot since then. The producer moved one 578-line block and never re-measured. The reading's own fallback was to move more cohesive groups until drain.rs is under 1500, and it was not followed. So drain.rs stays over its limits, and code health will raise the same structural pass again."
+}
