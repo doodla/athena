@@ -1,0 +1,158 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261108-224527-qhtc",
+  "n": 1,
+  "at": "2026-11-08T22:45:48.292066175Z",
+  "invocation_seq": 1,
+  "base_commit": "5578f6b45919cf30a763e5c760267cc72b3530e3",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make both snapshot locks attempt a write at every path",
+  "summary": "Retry of job 20261027-054321-rxa7 (failed in planning; no candidate kept). Fix the class in both copies of the two-place-probe lock, `Snapshot::lock` in athena-git and `lock` in athena-core's snapshot.rs, via one shared routine that attempts a write at every path and names the writable one. The audience is the Athena operator, who should not get verdicts voided by a partly locked snapshot.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus fmt, clippy and test criteria."
+    },
+    {
+      "id": "root-cause",
+      "how": "Both lock copies fixed via one shared routine."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests attempt real writes, as root too."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criteria check a partly locked snapshot is refused."
+    },
+    {
+      "id": "small",
+      "how": "Two source files plus CHANGELOG."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-git/src/snapshot.rs (Snapshot::lock line 161, probe_write line 182, set_write_bits, set_immutable) and crates/athena-core/src/snapshot.rs (lock line 133, probe_write line 155); both probe only a root file and one other file. Callers: crates/athena-core/src/run/verification.rs already turns a lock error into Incomplete before the verifier runs; that stays unchanged. No records or data files are added, so no record validation is touched.",
+    "Job 20261027-054321-rxa7 failed at plan critique round 1 with no candidate, so nothing is kept; its findings are addressed: (a) the second copy in athena-core is fixed here; (b) tests bind root by building the partial lock with immutable/attempted-write or an injected writable path, not mode bits alone; (c) a no-leftover-probe check is made on the real lock then unlock path; (d) the error distinguishes 'accepted a write' from 'could not be checked'; (e) the CHANGELOG states only what the diff does and does not blame earlier jobs.",
+    "Shared routine: `writable_paths` is a pub function in athena-git (athena-core depends on athena-git) that both locks call; athena-core's probe_write is deleted.",
+    "The suite may run as root, so tests must use an attempted write and fail against the old two-place probe.",
+    "Verification.rs, run_pin_tests.rs and the rerun policy are dropped from scope unless a compile fix needs them; the earlier-listed deliverables there are not kept as planned changes."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-git`: a new test leaves one nested path (e.g. .git/objects) writable in an otherwise locked tree, constructed so it binds root too (attempted write or injected writable path, not mode bits alone), and asserts `Snapshot::lock` returns an error naming exactly that path. It fails against the old two-place probe.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a new test in crates/athena-core/src/snapshot.rs does the same for the evidence-snapshot `lock`, asserting the error names the nested writable path, and it fails against the old probe when run as root.",
+      "kind": "behavior"
+    },
+    {
+      "text": "crates/athena-core/src/snapshot.rs `lock` calls the shared athena-git routine, and its own `probe_write` is deleted (Grep finds no `fn probe_write` there); athena-git's `lock` uses the same routine over every directory and file including .git.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-git`: a test shows that after a successful `lock()` then `unlock()` no `.athena-lock-probe` file exists anywhere in the tree and the work-tree tree hash equals its value before the lock.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-git`: a test shows the lock error text differs between a path that accepted a write and a path that could not be checked (e.g. 'could not be listed').",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-git` and `cargo test -p athena-core`: existing tests still pass, including `a_locked_snapshot_refuses_edits_and_commits_and_keeps_head_and_tree` and the snapshot-change rerun tests in run_pin_tests.rs.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md [Unreleased] has an entry stating that both locks now attempt a write at every path and fail naming the writable one; it does not assert that the earlier two-place probe caused jobs 20261015-031159-xx7n or 20261015-033631-x3a1.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`; all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing the rerun-once policy or tree comparison in verification.rs beyond surfacing a lock failure",
+    "Hashing gitignored files such as target/",
+    "studies/firstmate-work-handling/*, xtask/src/site.rs, docs/design/explainer-site.md (earlier candidate changes dropped)",
+    "records/, governance files (athena.toml, defaults.toml, workflows) and prompts"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 2000.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6784968684759917,
+      "p_user_intervenes": 0.07293233082706767,
+      "cost_usd": {
+        "p10": 0.5691927293010134,
+        "p50": 1.4729476067643412,
+        "p90": 4.853794235734452
+      },
+      "wall_time_s": {
+        "p10": 566.8970291972157,
+        "p50": 2108.2309901530007,
+        "p90": 4324.414107135321
+      }
+    }
+  },
+  "departures": "Two crates and root-binding tests add some difficulty over the reference.",
+  "hard_reason": "Changes the lock rule that can refuse a verification run, and so the gate that judges other jobs.",
+  "producer_effort": "high"
+}
