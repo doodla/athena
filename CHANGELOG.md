@@ -469,6 +469,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `crates/athena-core/src/status.rs` is split into modules and `Athena::status` is shortened. The throughput,
+  waste and check-duration code moved to `status/throughput.rs`, and the planning cost, keep rule, later-harm
+  and producer-settings code to `status/planning.rs`; both are re-exported, so every `crate::status::` path
+  and the status output are unchanged. `status` (268 lines) is now about 130 lines and delegates the job loop
+  and the next-step lines to private helpers. Production lines in `status.rs` (total minus `#[cfg(test)]`
+  modules): about 2452 before, 1219 after.
 - `run` in `crates/athena-cli/src/main.rs` (549 lines, over the 200-line function limit) is now a thin
   dispatcher. The body of each subcommand moved into its own function in the new `crates/athena-cli/src/commands.rs`.
   Output, exit codes and the clap definitions are unchanged.
