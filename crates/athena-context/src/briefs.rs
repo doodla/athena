@@ -683,6 +683,7 @@ pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&s
     }
     evidence_section(&mut out, evidence);
     let _ = writeln!(out, "## What the verifier sees\n\n{VERIFIER_VISIBILITY}\n");
+    let _ = writeln!(out, "{}", checkable_evidence_section());
     criteria_check_section(&mut out, &inputs.reading);
     let _ = writeln!(out, "{}", unchanged_files_section());
     let _ = writeln!(
@@ -734,6 +735,18 @@ pub fn replay_send_back_section(replay: &ReplayView, limit_percent: usize) -> St
         );
     }
     out
+}
+
+/// The producer brief's rule that evidence be checkable by the verifier: a test in the change, or a file the
+/// deliverables or criteria name, and an honest `unmet` for a criterion only the report could show.
+fn checkable_evidence_section() -> String {
+    format!(
+        "## Make your evidence checkable\n\n{CHECKABLE_CRITERIA_RULE} Prefer a test in your change that shows the \
+         property. Add a new file for evidence only when a deliverable or a criterion names it. Your report is still \
+         where you state what you ran or read; the rule only means the verifier does not rely on it. If a criterion \
+         can be shown only from your report, report it unmet and begin its evidence with `not checkable by the \
+         verifier`; do not invent a file.\n"
+    )
 }
 
 /// The evidence prefix a producer uses for a criterion only Athena's recorded checks (fmt, clippy, the
@@ -1064,6 +1077,11 @@ Commit hashes made during verification do not exist in the real history, so neve
 made during verification in code, docs, or design-revision text (BRIEF.md included); describe the content \
 instead. The one exception is the pinned instance: when the brief has a \"Pinned source\" section, cite its \
 url, ref and SHA as given.";
+
+/// The rule both the reader brief and the producer brief state: a criterion the verifier can only check
+/// from the producer's report or change description cannot be checked, because the verifier never sees them.
+const CHECKABLE_CRITERIA_RULE: &str = "Every acceptance criterion must be checkable from the snapshot, the diff or the commands \
+the verifier runs, never from the producer's report or change description, which the verifier does not see.";
 
 /// What the core shows the verifier of the candidate: built from git, never from the producer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2423,6 +2441,11 @@ pub fn reader_brief(inputs: &ReaderInputs) -> String {
         let _ = writeln!(out, "- {rule}");
     }
     let _ = writeln!(out, "\n{CODE_SURVEY_GUIDE}\n");
+    let _ = writeln!(
+        out,
+        "# Checkable criteria\n\n{CHECKABLE_CRITERIA_RULE} Write each criterion so its check names a file, a diff line or a command \
+         the verifier can run (listed under What the verifier can run when given).\n"
+    );
     if !inputs.verifier_can_run.is_empty() {
         let _ = writeln!(
             out,
@@ -2727,6 +2750,30 @@ mod tests {
         assert!(brief.contains("do not exist in the real history"));
         assert!(brief.contains("never pin or cite a commit hash made during verification"));
         assert!(brief.contains("cite its url, ref and SHA as given"));
+    }
+
+    #[test]
+    fn producer_brief_requires_checkable_evidence_in_the_snapshot() {
+        let brief = producer_brief(&producer_inputs(None));
+        let heading = brief
+            .find("## Make your evidence checkable")
+            .expect("the producer brief has a checkable evidence section");
+        let (_, section) = brief.split_once("## Make your evidence checkable").unwrap();
+        let section = section.split("\n## ").next().unwrap();
+        for needle in [
+            "checkable from the snapshot, the diff or the commands the verifier runs",
+            "producer's report or change description",
+            "a test in your change",
+            "only when a deliverable or a criterion names it",
+            "Your report is still where you state what you ran or read",
+            "report it unmet",
+            "not checkable by the verifier",
+        ] {
+            assert!(section.contains(needle), "missing wording: {needle}");
+        }
+        assert!(!section.contains("you commit"), "{section}");
+        assert!(heading < brief.find("## criteria_check: copy the line").unwrap());
+        assert!(brief.contains(LEFT_TO_ATHENA));
     }
 
     fn pin() -> PinnedRepo {
@@ -4591,6 +4638,31 @@ mod tests {
         let section = section.split("\n# ").next().unwrap();
         assert!(section.contains("never the producer's report"), "{section}");
         assert!(section.contains("is refused"), "{section}");
+    }
+
+    #[test]
+    fn the_reader_brief_requires_criteria_checkable_from_the_snapshot() {
+        let brief = reader_brief(&reader_inputs(&reading()));
+        let heading = brief
+            .find("# Checkable criteria")
+            .expect("the reader brief has a checkable criteria section");
+        let (_, section) = brief.split_once("# Checkable criteria").unwrap();
+        let section = section.split("\n# ").next().unwrap();
+        assert!(
+            section.contains(
+                "checkable from the snapshot, the diff or the commands the verifier runs"
+            ),
+            "{section}"
+        );
+        assert!(
+            section.contains("producer's report or change description"),
+            "{section}"
+        );
+        assert!(
+            section.contains("names a file, a diff line or a command the verifier can run"),
+            "{section}"
+        );
+        assert!(heading < brief.find("# What the verifier can run").unwrap());
     }
 
     #[test]

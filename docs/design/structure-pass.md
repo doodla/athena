@@ -214,26 +214,33 @@ from `run/mod.rs`. The caller search found no call to `gh::land_pr` from the mov
 
 ## 5. How each move is shown to change nothing
 
-The rules below apply to every job. A job fails if any item is not met.
+The rules below apply to every job. A job fails if any item is not met. The verifier sees only the candidate
+diff in a fresh snapshot, never the producer's report or change description, so no item rests on either: each
+proof is something in the snapshot (the committed code and tests) or a command the verifier reruns.
 
 1. **Same tests, unedited.** `cargo test --locked` passes. `git diff -U0` over every test module, and over
    `crates/*/tests/`, shows no line removed or added except `use` lines (and, in G1 only, the guard constant
    described in 5.2). For G1-G7 and R1-R8 the test modules
    stay in `mod.rs`, so no test line changes at all.
-2. **Same test list.** `cargo test --locked -p athena-core -- --list` gives the same names before and after (the
-   job records the count in its report). A test that disappears or is renamed fails the job. Only G8 and R9
+2. **Same test list.** The verifier reruns `cargo test --locked -p athena-core -- --list` on the candidate. Item 1's
+   diff check (no test line added or removed except `use` lines) shows that the names are unchanged, so no count
+   is stored. A test that disappears or is renamed fails the job. Only G8 and R9
    change names, and they compare after removing the module prefix.
 3. **Moved text is the same text.** `git diff -M --color-moved=zebra` (or `--color-moved-ws=ignore-all-space`
-   for re-indented bodies) shows the moved blocks as moved. Any line not marked moved is listed in the job's
-   report with its reason; the only expected ones are `mod`, `use`, `pub use` and visibility lines.
+   for re-indented bodies) shows the moved blocks as moved. The verifier reads that diff: every line not marked
+   moved is a `mod`, `use`, `pub use` or visibility line, or one of the edits this section names: the
+   `Flow::Stop` and seam-struct lines of the R5-R8 bullets below, and, in G1, the guard constant and the D87/D88
+   `paths` of 5.2. Any other unmoved line fails the job.
 4. **Public paths unchanged.** `mod.rs` re-exports each moved public and `pub(crate)` item. No file outside the
    `gh/` or `run/` directory changes: `git diff --stat` lists only those paths, `CHANGELOG.md`, and the code-health
    or design docs a job is asked to update. Compilation of `athena-cli` and `athena-core` tests is the proof that
    a path still resolves.
-5. **Caller check.** The job's report lists the Grep for each moved name's old path (for example
-   `gh::GhClient`, `gh::land_pr`, `run::send_back_text`) over `crates/`, with the file count before and after.
-   The counts must be equal, and every hit still compiles. For a moved name used by a trait impl in a test (the
-   fake hosts implementing `PrHost`), the job names the test.
+5. **Caller check.** The proof is in the snapshot, not in the report. Every hit of each moved name's old path
+   (for example `gh::GhClient`, `gh::land_pr`, `run::send_back_text`) over `crates/` is compiled and run by the
+   committed tests (`cargo test --locked`), and the fake hosts implementing `PrHost` are covered by the test
+   named in 5.1. The verifier reruns the Grep for each old path over `crates/` on the candidate and reads
+   `git diff -U0 -- crates/`, which must show no line holding an old path removed or added outside moved
+   blocks; that makes the before and after counts equal by construction, so no count is stored in a report.
 6. **Lints.** `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` are clean. No
    `#[allow]` is added.
 7. **No other change.** No change to a config, workflow, default or documentation file other than a `CHANGELOG.md`
@@ -248,9 +255,11 @@ The rules below apply to every job. A job fails if any item is not met.
 
 For R5-R8, which change control flow, two more checks apply:
 
-- The job's report places each early `return Ok(closing)` of the old function beside the `Flow::Stop` that
-  replaced it, with the old and new line numbers. A missing pair fails the job.
-- The job's report lists every local that crossed a seam and the field that carries it now.
+- The verifier reads `git diff` for each early `return Ok(closing)` removed from the old function and the
+  `Flow::Stop` added in its place; the two counts are equal. A removed return with no added `Flow::Stop` fails
+  the job.
+- Every local that crossed a seam is a named field of the struct added in the diff, and the diff shows the
+  field read where the local was.
 
 ### 5.2 Path literals that name `gh.rs`, and the one planned test edit that is not an import
 
@@ -261,8 +270,10 @@ The other hits (`routing.rs` comment, and fixture strings in `code_health.rs`, `
 - `crates/athena-core/src/introspect.rs` lines 148 and 191 list `crates/athena-core/src/gh.rs` as the `paths` of
   decision headers D87 and D88 (production code). G1 must make these name the directory
   (`crates/athena-core/src/gh/`) or add the new files, and the job must first read how `paths` is matched
-  (exact or prefix) and show a test that a landing touching a moved file still selects D87 and D88. If the match is
-  exact, this is a behaviour edge a rename can silently change, so it is the most important caller check of G1.
+  (exact or prefix). The existing test `a_landing_touching_a_file_under_gh_selects_d87_and_d88` shows that a
+  landing touching a file under `gh/` still selects D87 and D88; the verifier runs it by name on the candidate,
+  and no new test is asked for. If the match is exact, this is a behaviour edge a rename can silently change, so
+  it is the most important caller check of G1.
 - `crates/athena-core/tests/external_calls_guard.rs`, described next.
 
 `crates/athena-core/tests/external_calls_guard.rs` allows `Command::new("gh")` in exactly one file, by exact path
@@ -272,8 +283,9 @@ the existing test fails. The proposed edit is the smallest one: compare with the
 "imports only" rule on purpose, and it needs the owner's approval before G1 is queued. Its proof is behavioural,
 not wiring: with the edit in place, the test still fails when a `Command::new("gh")` line is added to any file
 outside `gh/` (the guard's own self-tests, which build a violating file list, cover that), and it passes with
-the call in `gh/transport.rs`. The job's report shows both runs. No other test depends on the path
-(see the list above; the job repeats the Grep to confirm). For R1, `run.rs` has no production path literal, only the
+the call in `gh/transport.rs`. Both are in the committed self-tests of `external_calls_guard.rs`, which the
+verifier runs on the candidate. No other test depends on the path (see the list above; the verifier reruns the
+Grep to confirm). For R1, `run.rs` has no production path literal, only the
 fixtures above.
 
 ### 5.1 Per-job proof summary
@@ -291,7 +303,7 @@ fixtures above.
 | R0 | the new test fails when `closing.baseline` is set after the producer instead of before |
 | R2 | `left_to_athena_tests`; Grep `run::(unmet_criteria|left_to_athena|send_back_text)` unchanged |
 | R3, R4 | existing `run`-level tests and `run_pin_tests.rs`; Grep `run::` of the moved names unchanged |
-| R5-R8 | all existing tests; R0's ordering test if approved; the early-return pairing described above |
+| R5-R8 | all existing tests; R0's ordering test if approved; the early-return pairing read in the diff, as described above |
 
 ## 6. Risks and what a job does about them
 

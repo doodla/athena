@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-011638-5h3e",
+  "round": 1,
+  "at": "2026-11-08T10:42:55.882790203Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Item 2 of section 5 also keeps its evidence in the report, and the plan does not rewrite it",
+      "evidence": "Item 2 reads: \"`cargo test --locked -p athena-core -- --list` gives the same names before and after (the job records the count in its report)\". Step 7 and Decision 4 list only item 3, item 5, the two R5-R8 bullets and the 5.2 sentence. Criterion 3 requires that a Grep for `report` in section 5 finds no requirement whose evidence lives only in a report, so this line would fail it. Fix: Add item 2 to step 7 and Decision 4. Make the test list checkable from the snapshot: the verifier reruns `--list` on the candidate, and the base list is a committed file or is compared with the names in the diff. Then re-Grep all of section 5 (lines 215-294) for `report` and handle every hit.",
+      "location": "Plan step 7 / Decision 4; docs/design/structure-pass.md:223-224",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The new item 5 suggests a docs/ note, which items 4 and 7 of the same section forbid, and a note with a 'before' count is still the producer's claim",
+      "evidence": "Step 7 says the caller-check Grep counts go in \"a file or test in the snapshot (for example a `caller_check` test or a note under `docs/`)\". Item 4 says `git diff --stat` may list only gh/ or run/ paths, CHANGELOG.md and docs the job is asked to update. Item 7 says \"No change to a config, workflow, default or documentation file other than a CHANGELOG.md line and a pointer in this design doc\". A structure-pass job that followed the new item 5 would fail items 4 and 7. A committed note that states a 'before' count is also just the producer's word in another file; the verifier cannot recheck the base count from the candidate snapshot. Fix: Require the caller check as something the verifier can rerun. Option one: a test under the moved module's tests that names each old path (for example `use crate::gh::GhClient;`), so it compiles only if the old path still resolves. Option two: the verifier reruns the old-path Grep on the candidate, and the diff shows no hit removed. Drop the docs/ note option, or update items 4 and 7 in the same edit to allow exactly the evidence file the new item 5 asks for.",
+      "location": "Plan step 7 (item 5 rewrite); docs/design/structure-pass.md:229-232, 239-240",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The producer-brief instruction will make producers add stray evidence files to candidates in every job",
+      "evidence": "The proposed text tells every producer: \"Where a criterion needs proof that is not in the diff (a count, a list of callers, a before/after run), put it in the snapshot as a file or test you commit\". This brief goes to every job (producer_brief_with_evidence, briefs.rs:626). Many readings have file-scope criteria such as this job's criterion 6, plus deliverable lists that unchanged_files_section (briefs.rs:770) and scope checks compare against. A producer that adds a counts or notes file to satisfy one criterion breaks the file-scope criterion. That is a broad rule with obvious false positives. Fix: Narrow the instruction. Prefer a test that shows the property. Allow a new file only when a deliverable or criterion names it. When a criterion can be shown only from the report, the producer should say in its criteria_check entry that the verifier cannot check it, not invent a file. Add a test assertion for that wording.",
+      "location": "Plan step 4 (checkable_evidence_section text); Decision 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The producer text says 'a file or test you commit', but producers do not commit",
+      "evidence": "The producer brief's working-directory text (briefs.rs:656-657) says \"Your edits become the candidate.\" Athena owns commits, so telling the producer to commit contradicts that text and may prompt git commit attempts. Fix: Write \"a file or test in your change\" (or \"in the candidate\"), and assert that phrase in the test.",
+      "location": "Plan step 4 and step 6 (asserted phrase `a file or test you commit`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The reader section points at 'the list below', which is printed only when verifier_can_run is non-empty",
+      "evidence": "Step 3 adds \"Write each criterion so the check names a file, a diff line or a command from the list below.\" The `# What the verifier can run` block, which holds that list, renders only when `!inputs.verifier_can_run.is_empty()`. The plan itself says it chose a separate section so that the rule always shows. Fix: Reword so the sentence does not depend on the list, for example \"a command the verifier can run (listed under What the verifier can run when given)\". Or keep only the rule sentence.",
+      "location": "Plan step 3; briefs.rs:2426",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The 5.1 summary table row for R5-R8 points at the early-return pairing, so it must match the rewritten bullets",
+      "evidence": "The R5-R8 row reads \"the early-return pairing described above\". Step 7 moves that pairing from the report into a committed file or test, but the plan does not mention this row. Fix: After the rewrite, check that row 294 still describes where the pairing lives, for example 'the early-return pairing test'.",
+      "location": "docs/design/structure-pass.md:294",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against briefs.rs (reader_brief at 2256, READING_RULES at 2228, the CODE_SURVEY_GUIDE and verifier-can-run block at 2421-2438, producer_brief_with_evidence at 626-693, criteria_check_section at 746, and the tests at 4476, 4523 and 4588) and against docs/design/structure-pass.md section 5 (lines 215-294). The brief side holds up. Putting the reader rule under its own `# ` heading after CODE_SURVEY_GUIDE leaves the rules-section tests unchanged, because they slice at \"\\n# \". The 4588 test still reads the same section. The only callers outside briefs.rs (reading.rs:567, reading.rs:3297, run/mod.rs:1150) do not parse the new text. Both brief tests call the real entry points and would fail without the new text. The doc side has gaps, so the verdict is revise. (1) The plan misses item 2 of section 5 (\"the job records the count in its report\", line 224), so criterion 3 would fail. (2) The new item 5 suggests \"a note under docs/\", which items 4 and 7 of the same section forbid. A note that records a \"before\" count is also still the producer's own claim, not something the verifier can recheck. (3) The new producer section tells every producer, in every job, to commit evidence files. That pushes stray note files into candidates, which conflicts with file-scope criteria. Smaller issues: producers do not commit, and the reader text points at \"the list below\", a list that is printed only when the verifier has commands."
+}

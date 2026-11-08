@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The reader and producer briefs require every acceptance criterion to be checkable from the snapshot, the diff
+  or the commands the verifier runs, never from the producer's report or change description. Section 5 of
+  `docs/design/structure-pass.md` now puts its proofs in the snapshot or in commands the verifier reruns.
 - `athena check --host-rules`: the read-only check of the host rules (GET requests only). It reports whether
   force pushes and deletion are forbidden on `athena/records` and whether branches must be up to date before
   merging on `main`, and exits 2 when a required rule is not in force or cannot be read.
