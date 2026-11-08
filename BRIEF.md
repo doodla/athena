@@ -1089,3 +1089,34 @@ It should become demonstrably less likely to make the same kind of mistake again
 ### 2026-10-26: Written for agents
 
 * Everything is for agents. So Athena should architect to be context efficient in what it writes, and some role should own the craft there
+
+### 2026-11-04: Lift budgets; who owns cost
+
+* I think lift budgets for now if they're causing so many issues. Anyone in the pantheon responsible for budgeting?
+* Relay note: per-stage spending caps were raised (job cap $50). Demeter (sustainability) owns cost but only as the cost half of Artemis's scope guard.
+
+### 2026-11-05: Decisions page
+
+* It's garbo. I don't have a sense of what I'm deciding
+* Relay note: a decision put to Sri must say plainly what is being decided, the options, and what each costs.
+
+### 2026-11-05: Local speed and parallel work, not GitHub
+
+* Stop banging the GitHub drum for now. 10mins for a change is fine for now. Focus on making local stuff smarter, more parallel. If dynamic workflows can run 50 agents, we should be Able to too
+
+### 2026-11-06: Athena must recognize and fix its own thrash
+
+* I don't want the design handed to Athena. I want systems in place that recognize it and fix it within Athena itself. That's kinda the whole point here. Learn and improve. I swear I feel like it's already in the brief
+* Relay note: a review found Athena's improvement loop could see and diagnose thrash but not act on it. Sri approved four loop changes: a guaranteed turn for Athena's own fixes, stop and diagnose repeated failures, allow concluding a check is wrong, and measure wasted work. The operator stopped re-wording, splitting or re-queuing failed requests by hand.
+
+### 2026-11-07: Sri's requests reach Athena word for word
+
+* Honestly, dunno if you could really mimic a lazy user.
+* Relay note: agreed rule. When Sri asks for something Athena should build, the operator passes Sri's exact words to Athena and adds nothing, then reports what Athena did with them. Where Athena gets it wrong, that is logged so it learns. Container restarts are handled by hand ("Restarts are inevitable").
+
+### 2026-11-08: Lessons into knowledge, follow-through, better skills, the study
+
+* Lessons become checks, not knowledge. They created 158 separate failure classes that are never merged.
+* I saw the diagnose job die. Dunno what the problem is, don't care. Just that it wasn't figured out. Who knows what the method was like. We need better skills
+* I'm wondering if we get other sessions going and you coordinate with them to split out what is worked on. Everyday, people come up with new skills and there are new papers on how to work with agents. I feel we should do something with those.
+* Relay note: a clean-room review (8 Nov) found the study about 5% done with study work near zero for three weeks, lessons turned into checks (279 of 465 introspections) rather than defaults or skills, no skills at all, and paused or abandoned work with no owner. Sri approved: the study comes back into focus; lessons become knowledge; paused and failed work is followed through. Parallel sessions and an outside-knowledge loop come later.
