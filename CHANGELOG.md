@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Two written defaults, `pinned-versions` and `explicit-tool-paths`, in `defaults.toml`, so the reader stops
+  asking about version pins and check tool paths. Pins such as `claude_version` stay exact and are bumped by
+  one explicit command that any mismatch refusal names; a check never relies on inherited environment or
+  ambient tools, the runner passes each tool path, and a check that can use a preferred tool or a fallback
+  records which one it used (a silent fallback is a defect). Both are prose-only; no mechanism enforces them
+  yet. The reader renders only each statement's first sentence, so five one-sentence defaults (buy-first,
+  tested, public, verified, lazy-requests) were split after their first clause to keep the reader set within
+  its 2,000-token budget (1990 after, 1997 before); `docs/system-facts.md` records the new figure. The test
+  `the_reader_defaults_context_includes_the_version_pin_and_tool_path_policies` checks the rendered context.
 - Crate reach facts and a test-placement reading rule. Root cause: a reading and a plan placed a test in a
   crate that cannot import the code under test (xtask is binary-only, with no library target), and nothing
   they read said which crates have libraries or may depend on which, so it was found late and fixed by hand.

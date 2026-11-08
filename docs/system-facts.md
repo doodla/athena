@@ -19,7 +19,7 @@ whole. Each fact names its source. Where the source is a request and not code, t
   value; update the line, never the budget, to fix it. Line form: `- budget <set>: <size> of <budget>`.
   Source: `BudgetSet::budget` in `crates/athena-context/src/lib.rs`; `crates/athena-cli/tests/budgets.rs`.
   - budget contract: 326 of 350
-  - budget reader: 1997 of 2000
+  - budget reader: 1990 of 2000
   - budget producer: 1257 of 1300
   - budget verifier: 1298 of 1300
   - budget planner: 1217 of 1300
