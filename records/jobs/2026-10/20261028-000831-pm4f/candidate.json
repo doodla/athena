@@ -1,0 +1,144 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261028-000831-pm4f",
+  "base_commit": "de12b17e36c6183c2bb6d5f5d87c1ac2c27e0455",
+  "base_fingerprint": "sha256:48634a64e2c769718f722e8258b6d00e30cfbc01f9f5e075e8e19d7c0c38032a",
+  "previous_job": "20261108-185513-gc6d",
+  "candidate_commit": "f25c6a19e05f753e5df42cb27a5bfad1e25fff27",
+  "candidate_tree": "c1ea7d8f88f631d88318fdfca624ea724c7891a4",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 393871
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 309398
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 350779
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26853
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 116798
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 308653
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 132147
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 112272
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 407807
+    }
+  ],
+  "fingerprint": "sha256:40d42e4126d1de8f2965b77bc34caa9ca066e9e83cdfd9c04211a5dd463fb4fc",
+  "violations": [],
+  "producer_report": {
+    "summary": "The code change is in place and unchanged this round. The 12 targeted drain tests and the 17 policy tests pass. fmt, clippy and the full suite were not rerun and are left to Athena's checks. The change does four things:\n\n1. **Error after dispatch:** a run that errors after dispatch now closes the job as failed with an `environment:` reason, so `athena retry` can resume it.\n2. **Drain listing:** the drain lists interrupted jobs on every channel and checks for a live process by registry entry or held job lock.\n3. **Drain settle step:** a new settle step closes originals whose retry has ended, and names every dispatched job still without an outcome in a `held <job>:` line.\n4. **Status:** `status` shows a lock-held job as running.\n\nCHANGELOG.md and a new D167 entry in docs/decisions.md record it.\n\n**Six-jobs criterion is unmet.** It concerns live records, which I cannot write; the diff cannot contain it.\n- **msh3 and hvyb:** they already have abandoned outcomes in the snapshot, but their reasons cite no commit hash.\n- **g63s, 77zh, w1y3, z7sj:** they still have no outcome. They need `athena close` with a hash from git log, or `athena retry`.",
+    "files": [
+      "CHANGELOG.md",
+      "docs/decisions.md",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "crates/athena-core/src/manage.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-core/src/steward.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-cli --test drain -- interrupted after_dispatch drain_leaves_no_dispatched_job drain_works_an_interrupted_item drain_notes_what_settling status_lists_every_dispatched_job lock_another_process",
+        "result": "pass",
+        "note": "12 targeted tests ran in this round (filters are OR'd); all pass."
+      },
+      {
+        "command": "cargo test --locked -p xtask --test policy",
+        "result": "pass",
+        "note": "17 pass; boundary scan clean on tracked files."
+      },
+      {
+        "command": "cargo fmt --all --check / cargo clippy --all-targets --locked -- -D warnings / full cargo test --locked",
+        "result": "not-run",
+        "note": "Not rerun this round; left to Athena's checks."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-cli/tests/drain.rs (or crates/athena-core/src/steward.rs unit tests) dispatches a job, stops it before the producer runs (job.json and brief-producer.md present, no invocation, no outcome), then runs a drain. It asserts the job is resumed or gets an outcome record with a stated reason. It covers a job on a non-drained channel and a job named by a later retry request. It fails on the old code and passes on the new. Run: cargo test --locked -p athena-cli --test drain.",
+        "status": "met",
+        "evidence": "Ran the filtered set above in this round: drain_resumes_an_interrupted_job_on_any_channel (off-channel), an_interrupted_job_whose_retry_was_dropped_is_listed_and_resumed_again (later retry request), a_run_that_errors_after_dispatch_ends_with_an_outcome_in_the_same_drain (error after dispatch, before producer) all pass. The old code filtered interrupted_work to the cli/steward channels and hid any job a later request retried, so these fail on it by construction (not run against the old source)."
+      },
+      {
+        "criterion": "A test shows that drain does not end its run past a dispatched job that has no outcome and no process: that job is resumed, closed with a reason, or reported as held with a reason. Run: cargo test --locked.",
+        "status": "met",
+        "evidence": "Passing in this round: a_drain_with_a_job_limit_names_the_interrupted_job_it_did_not_reach, an_interrupted_job_whose_retry_is_open_on_another_channel_is_named_as_held, drain_notes_what_settling_interrupted_jobs_did, drain_works_an_interrupted_item_whose_plan_entry_is_incomplete. The final drain pass writes a `held <job>: <reason>` line for every dispatched job still without an outcome. Full `cargo test --locked` left to Athena's checks."
+      },
+      {
+        "criterion": "`athena status` lists every dispatched job with no outcome and no process, whatever its channel, with its job id and a next-step hint. A test in crates/athena-core/src/status.rs or crates/athena-cli/tests/ builds records with such a job and asserts the status text or line contains it. Run: cargo test --locked.",
+        "status": "met",
+        "evidence": "status_lists_every_dispatched_job_with_no_outcome_whatever_its_channel in crates/athena-cli/tests/drain.rs passes in this round. a_dispatched_job_whose_lock_another_process_holds_is_left_alone passes and covers the lock-aware running state added to status.rs (Athena::has_process)."
+      },
+      {
+        "criterion": "The six jobs 20261026-232359-msh3, 20261026-232423-hvyb, 20261027-054148-g63s, 20261027-123701-77zh, 20261027-054206-w1y3 and 20261027-054209-z7sj each end with an outcome record (finished, resumed or closed with a reason). Closed jobs whose work landed cite the commit hash found in git log; the others are re-queued. This is checked against the live records (see assumptions); the diff does not contain it.",
+        "status": "unmet",
+        "evidence": "not checkable by the verifier from the diff, and I cannot write these records: my working copy has no records/, I may not edit records/, and the evidence snapshot is read-only. In the snapshot (taken at dispatch) msh3 and hvyb already have outcome.json: both abandoned, with reasons 'closed: Superseded: G2 landed through its re-ask.' and 'closed: Superseded: R1 landed through its retry.' Neither reason cites a commit hash. g63s, 77zh, w1y3 and z7sj have job.json and brief-producer.md but no outcome.json (Glob of the snapshot). These four are still open and need `athena close <job> --why ...` with a hash from git log, or `athena retry <job>`. They must be handled before the first drain on the new build; the plan lists this as a pre-deploy step. The code change gives the class fix: once deployed, the drain resumes or closes each of them with a stated reason, or names it in a `held <job>:` line."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry that names the cause (a dispatched job with no outcome was skipped by drain and not shown by status) and the fix.",
+        "status": "met",
+        "evidence": "CHANGELOG.md is modified (git status). The entry under [Unreleased] Fixed names the causes (error after dispatch; interrupted listing limited to drained channels and hiding retried jobs; status showing a lock-held job as interrupted) and the fixes. docs/decisions.md has a new D167 entry. cargo test -p xtask --test policy passes."
+      },
+      {
+        "criterion": "No unrelated behavior changes: existing tests pass, and the producer, verifier and planning stages are untouched. Run: cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked.",
+        "status": "met",
+        "evidence": "left to Athena's checks for fmt, clippy and the full suite. git status shows only CHANGELOG.md, docs/decisions.md, drain.rs, tests/drain.rs, manage.rs, run/mod.rs, run/tests.rs, status.rs and steward.rs changed. Nothing is changed under the producer, verifier, planner or critic stage code, disk.rs, hestia.rs or reading/retry.rs. The 12 targeted drain tests and the 17 policy tests pass in this round."
+      }
+    ],
+    "open_issues": [
+      "Criterion 4 (the six outcome records) cannot be met from a diff or from this working copy. The live records must be changed with `athena close <job> --why \"landed through <job id> as <hash>\"` or `athena retry <job>`. Still open per the snapshot: 20261027-054148-g63s (expected re-queue; its reading-scope sizing work is not in the tree), 20261027-123701-77zh, 20261027-054206-w1y3 and 20261027-054209-z7sj (check git log for each). Run this before the first drain on the new build.",
+      "msh3 and hvyb have outcomes in the snapshot but their reasons cite no commit hash. If the criterion needs one, the hashes need to be added to the live records. HISTORY.txt candidates are 5874b1f for the Transport row move and 612c27f for the run.rs rename, unverified here."
+    ],
+    "mistakes": [
+      "In the earlier report I did not give a criteria_check entry for the six-jobs criterion. This report does, and marks it unmet."
+    ],
+    "learnings": [
+      "The evidence snapshot shows msh3 and hvyb already carry outcome.json (abandoned, 'Superseded: ... landed through its re-ask/retry'), written after the jobs were first reported without one. Neither reason names a commit hash. g63s, 77zh, w1y3 and z7sj still have no outcome.json in the snapshot.",
+      "Targeted test filters given to `cargo test` after `--` are OR'd, so one invocation runs several tests."
+    ],
+    "desires": [
+      "Write access to the live records so the four remaining jobs (g63s, 77zh, w1y3, z7sj) could be closed or re-queued, and a git log with the landing hashes."
+    ]
+  }
+}

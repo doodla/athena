@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-000831-pm4f",
+  "round": 4,
+  "at": "2026-11-08T21:34:21.111474337Z",
+  "invocation_seq": 10,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/manage.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/manage.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The error close writes a `failed` reason that the existing stop classifier reads as a failure of the work. As a result the scope guard counts it, it can pause the line, and the job's resume mark is spent, even though the code already has the one classifier meant for stops that say nothing about the work.",
+      "evidence": "disk.rs:405-406 defines `ENVIRONMENT_PREFIX = \"environment:\"`. disk.rs:441-447 says `StopCause` is 'the one place that says which closing reasons are stops of the environment'. It also records that an unprefixed stop 'counted as a failure of the work, raised the retry, cost and time signals and paused the line, and the pause was never checked again'. scope_guard.rs:544-555 (`verdict_of`) turns `Failed` with an environment reason into `Verdict::Environment` and anything else into `Verdict::Failed`. run/mod.rs:871 (`settle_resume_marks`) keeps the job's own resume mark only for an environment reason. disk.rs:522-525 (`resumable_stop`) lets `athena retry` resume only an environment failure. The plan's reason, `stopped by an error after dispatch, before the job closed: …`, starts with neither prefix, so `StopCause::of` returns `Work`. An error that escapes `dispatch` after the commit is by definition not a verdict on the work, because work failures close through `close_dispatched` normally. The cited `stop_planning` precedent is a budget decision, not an infrastructure error. Fix: Write the reason with the existing prefix, for example `environment: stopped by an error after dispatch, before the job closed: <redacted error>`. `StopCause::of` then classifies it as `OtherEnvironment` with no edit to disk.rs. Add to the core test that `crate::disk::is_environment_reason(&done.reason)` holds. Make the drain test assert that the line is neither paused nor flagged after two such errors, instead of relying on the scope guard as a bound. Update the risk and drop the matching open question, or keep it only for the failed-vs-abandoned choice.",
+      "location": "Decision 3 / Step 5 (close_after_error reason text); Risks 'An infrastructure error counts as a failed job…'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan reverses a documented rule and adds two new lifecycle rules (error close, settle step) but records them only in CHANGELOG and the drain module doc. The repository's practice is a D-entry in docs/decisions.md.",
+      "evidence": "docs/decisions.md:2395-2412 (D104) records the drained-channel rule and how to reverse it, and CHANGELOG.md:2932-2936 records 'on the drained channels only' for interrupted jobs. The low-disk decision at docs/decisions.md:3881-3894 records why a stop of the environment must not become a finished failed attempt. The plan's error close and settle step change these rules without a decision record. Fix: Add a short D-entry: case, decision, alternatives, reversal cost, provenance. It should supersede the interrupted-job part of the drained-channel rule and state the error-close and settle rules. If docs/ is out of scope for this job, name the entry as follow-up work in the CHANGELOG line.",
+      "location": "Decisions 6-7 and Files (no docs/decisions.md entry)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The final settle repeats a `held <job>` line for disk- or slot-held jobs that the drain already reports as held, and the start settle adds a `held` line for every original with an open retry on every drain, which adds noise to drain reports.",
+      "evidence": "drain.rs:4408-4412 already maps LowDisk and SlotWait to `held: true`, and `ItemEnd::Held` produces its own note. Rule (1) adds a second line for the same job at both settle passes, and rule (3) 'open → Hold' fires on every drain until the retry closes. Fix: Emit Hold lines only at `final_pass == true`, and skip jobs the drain already reported as held in this run (track them in `Drain` state). Alternatively, de-duplicate with `note_once`.",
+      "location": "Decision 7 rule (5) and Step 8 (final-pass settle notes)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The sentence on the Dispatched-at-HEAD guard contains a long self-contradicting parenthetical about a test that 'is not available'. It is hard to read.",
+      "evidence": "'…the test that makes the closing already committed (a script-free core test that calls `close_after_error` on a closed job through `go` with a second Err injected after `finish_dispatched` is not available, so this one is covered by the explicit unit test…) would write a second outcome.' Fix: Replace it with one sentence: 'Without the Dispatched-at-HEAD check, the unit test that calls `close_after_error` on a job already closed at HEAD writes a second outcome.'",
+      "location": "Demonstrations, Criterion 1 'Fails without the behavior' (parenthetical on the Dispatched-at-HEAD check)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the plan against the snapshot code, and its references check out. `Athena::dispatch` commits the job record and brief at run/mod.rs:1249-1257, and `finish_dispatched` closes only on Ok (1342-1345). `interrupted_work` filters by `DRAINED_CHANNELS` at steward.rs:467 and hides any retried job at 448-460. `retries_by_job` drops unrun retries (reading/retry.rs:246-268). `StateDir::job_lock_held` is a probe that creates no lock file (state.rs:153). `Athena::close` takes the job lock and checks only the registry (manage.rs:96, 145-157), and `recover_interrupted` splits cleanly at manage.rs:279/280. The planted-`records` trigger works: `write_live` fails at invocation.rs:260 before `sink.finish()`, so the partial-usage file survives for `recover_traces`, and `collect` (state.rs:565) reads a stray file without error. The cli-crate fixture `Fixture::with_config` with a `[job_plan]` block exists (job_plan.rs:84-88). `drain_with` hook points exist (drain.rs:2955, 2964, 3080), and the hestia prefix is at hestia.rs:342-356. The demonstrations use real seams and each would fail without its behavior. The dependents list matches the readers I found. One soundness problem remains. The new error close records every non-hold error after dispatch as a failure of the work. The codebase has one classifier for exactly this case, `disk::StopCause` with `ENVIRONMENT_PREFIX`. Its doc records that this mistake once paused lines that were never checked again. The plan should use that prefix instead of leaving it as an open question. The other findings are minor."
+}

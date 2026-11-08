@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-000831-pm4f",
+  "round": 3,
+  "at": "2026-11-08T21:27:23.307894292Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/manage.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/manage.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/hestia.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/hestia.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The six closes happen after merge, but the first drain on the new build already retries every old interrupted job, the six included.",
+      "evidence": "The new `interrupted_work` lists every Dispatched job with no registry entry and no held lock, on any channel, unless `retries_by_job` (reading/retry.rs:246-268) finds a standing 'try again on <job>' retry. The reading says msh3 and hvyb landed through a re-ask and a retry; a re-ask is not a retry for `retries_by_job`, so these jobs are listed and retried again. Old jobs on other channels (the web channel, and so on) are also listed for the first time. Their number is unknown because records/ is absent. Step 12 runs only 'after merge' and checks `athena status` first, but nothing stops a drain from running before it. `athena close` already works today on a dispatched job with no process (manage.rs:145-157), so the new build is not needed for these closes. Fix: Order the operator step before the new build first drains. List the dispatched jobs with no outcome now, with today's `athena status` (scan_jobs already lists all of them as interrupted). With today's `athena close`, close each of the six whose work landed (citing the hash from git log), plus any old job the drain should not resurrect. Then deploy. State this order in the steps and the risks, and say what the operator does if the list is long.",
+      "location": "Step 12 / Demonstration for criterion 4; decision 6 (channel filter dropped)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No end-to-end test can fail if the error close books a producer that never ran.",
+      "evidence": "`recover_interrupted` adds the missing producer only when there is no planner, critic or producer invocation (manage.rs:282-285). In the planning-on core test a planner invocation is recovered, so neither path would add one. In the planning-off case the plan names no way to raise an error after dispatch and before the producer starts. Planting the blocking file at the producer role lets the producer run, and its partial-usage file is left behind (`sink.finish()` is skipped when `write_live` errors, invocation.rs:259-261). Recovery then books a real producer record, so again neither path adds a missing one. Fix: Name a hook that fails after the Dispatch commit and before the producer starts with planning off (for example a failing producer snapshot or worktree), and assert that no Missing producer is booked. Otherwise drop the 'fails without' claim and say only the `recover_traces` unit test covers it.",
+      "location": "Decision 3; Demonstration for criterion 1 ('With recover_interrupted used on the error path the planning-off test finds a phantom producer'); step 8 `an_error_after_dispatch_with_planning_off_books_no_phantom_producer`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The drain error test cannot check the stopped state before the drain, and its producer does run.",
+      "evidence": "Criterion 1 asks for a job stopped before the producer runs. In this test the job is dispatched, the producer runs, and the job is closed, all inside one drain, so there is no moment before the drain when it is stopped with no outcome. The producer-role trigger also lets the producer run before `write_live` fails. Fix: Use a planner-role trigger with planning on in the Fixture, so the drain-level error happens before the producer. Reword the 'assert before the drain' step so it applies only to the tests built with `interrupt` and with the held lock.",
+      "location": "Step 9 `a_run_that_errors_after_dispatch_ends_with_an_outcome_in_the_same_drain`; 'In each real-steps test assert before the drain...'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The error close does not check that the job is still Dispatched before it writes a second closing.",
+      "evidence": "The wrapper covers `finish_dispatched`, which takes in `close_dispatched` and `land_or_block` (close.rs:8-168, 244-460). Today no `?` follows their commit, but the guard depends on that by accident. A later edit that returns Err after a closing or blocked commit would make `close_after_error` commit a second, failed outcome. Fix: In `close_after_error`, reload the records at HEAD and return the original error when the job is no longer Dispatched. Add this as a fifth skip condition.",
+      "location": "Step 4 `close_after_error`",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The name clashes with existing 'in flight' terms that mean other things.",
+      "evidence": "drain.rs already has `Steps::in_flight` (the in-flight table, line 675). disk.rs has `in_flight_limit`. state.rs:169 `other_jobs_in_flight` means 'lock held and a work tree present', which differs from the plan's 'registry entry or lock held'. Fix: Use a distinct name, such as `Athena::has_process` or `Athena::live`.",
+      "location": "Decision 1 `Athena::in_flight`",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly and puts both fixes where the faults start, which I confirmed in the code. First, `finish_dispatched` closes a job only when the run succeeds (run/mod.rs:1342-1345), so an error after the Dispatch commit leaves the job with no outcome. Second, `interrupted_work` keeps only the drained channels and hides any job that a later request names as a retry (steward.rs:447-467). The liveness rule (a registry entry or a held job lock), the shared `retries_by_job`, the pure settle function behind a defaulted `Steps` hook, and the split of `recover_traces` from the missing-producer synthesis are sound, and the dependents list matches what Grep finds. One major problem remains: the rollout. Once the new build drains, it retries every old dispatched job with no outcome on any channel, and every job whose retry was dropped. That includes the six named jobs, and two of them (msh3, hvyb) already landed through a re-ask that `retries_by_job` does not link. The plan closes them only after merge, so a drain in between would pay to redo landed work and would close them with a re-queue reason instead of the commit hash. Smaller gaps: the test meant to catch a booked producer that never ran cannot fail without the fix; the drain error test does not stop the job before the producer; the error close does not check that the job is still dispatched; and the name `Athena::in_flight` clashes with existing in-flight terms."
+}
