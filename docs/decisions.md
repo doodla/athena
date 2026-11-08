@@ -4747,3 +4747,36 @@ should replace those estimates with its figures.
   20261014-082328-g6vy, 20261014-174815-7bf8 and 20261017-173508-0wtc (g6vy by `check_outcome_state`, 7bf8 and 0wtc by
   `check_defined_terms`), and the accepted and refused `ambiguous-name-*` cases built with the real generators. Not
   measured: the share of past readings newly refused; the loop replay records it at verification.
+
+## D166 · The change verifier, study verifier and study producer prompt sets are trimmed to at most 1200 tokens; no rule changes
+
+- **Decision:** Prompt text was shortened in five prompt files so that the change verifier, the study verifier and the
+  study producer each sit at most 1200 estimated tokens, 100 under the 1300 budget, which is unchanged. Measured with
+  `cargo test --locked -p athena-cli --test budgets -- --nocapture`: change verifier 1298 to 1154, study verifier
+  1296 to 1195, study producer 1257 to 1194, change producer 1154 to 1129. Removed or merged, by file:
+  - `crates/athena-context/prompts/verifier.md`: the sentence "Athena already ran the checks."; the separate bullet
+    "records/, private files, and history are absent by design", merged into the snapshot bullet as its closing
+    sentence "Their absence is not a finding."; the scope bullet, merged into the harm bullet as one sentence; the
+    wording of the criteria bullet, shortened with the same two instructions.
+  - `crates/athena-context/prompts/producer.md`: the bullet "You may run the brief's other checks; Athena reruns
+    them."; the last bullet's wording, shortened.
+  - `crates/athena-cap-change/prompts/verifier.md`: the sentences "Build output goes to the CARGO_TARGET_DIR Athena
+    sets." and "\"cargo test passes\" is met by citing the record."; the sentence on exercising new behavior with
+    targeted commands; the rest was merged into a second paragraph.
+  - `crates/athena-cap-study/prompts/verifier.md`: "and the graph checks of the model" with the list of rule names
+    before it; "do not trust the producer's summary"; item 2 shortened.
+  - `crates/athena-cap-study/prompts/producer.md`: the clause that code validates the study before it is published;
+    "matching the sources"; shorter wording of four bullets.
+  - The five snapshot phrases at `crates/athena-context/src/lib.rs` lines 534 to 538 stay verbatim in
+    `crates/athena-context/prompts/verifier.md`; an earlier attempt removed them and the test
+    `the_verifier_frame_limits_snapshot_runs_to_the_snapshot` failed.
+  - `docs/system-facts.md`: budget producer 1257 to 1194, budget verifier 1298 to 1195.
+  - `crates/athena-context/prompts/contract.md` and `crates/athena-cap-change/prompts/producer.md` are unchanged.
+- **Alternatives:** Raise the budgets: out of scope, and it removes the headroom the budgets exist to keep. Cut the
+  snapshot clause: the test above pins it. Cut the planner or critic prompts: not part of this request.
+- **Tradeoff:** Shorter prompts leave more to the brief and the capability sections. No instruction was added or
+  changed in meaning. The producer prompt no longer says it may run the brief's other checks.
+- **Reversal cost:** Low. Restore the removed sentences from the diff and the two lines of `docs/system-facts.md`.
+- **Provenance:** Read: the diff of this change and the frame tests in `crates/athena-context/src/lib.rs`. Measured:
+  the sizes above, from the budgets test; `cargo test --locked -p athena-context --lib` passed with 122 tests,
+  including the snapshot test. No claim is made here about what any brief says.

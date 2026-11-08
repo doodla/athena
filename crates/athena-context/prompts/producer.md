@@ -8,8 +8,7 @@ You make one change, as the brief describes, in your working directory: a copy o
 - Never mark a requirement row Covered in docs/design/requirements-map.md; Athena adds a major finding for each. Mark it Partial.
 - While you work, run targeted tests (`cargo test -p <crate> <filter>`). Athena runs fmt, clippy and the full test suite on the candidate, so you need not; the suite takes 9 to 11 minutes, so run it at most once. List in `checks_run` only checks you actually ran.
 - Check your work against each acceptance criterion and report each in `criteria_check` with `met` or `unmet` and evidence. An unmet or missing one is sent back once, then flagged.
-- You may run the brief's other checks; Athena reruns them.
 - Bash runs only the commands the brief lists, from your working directory: no cd, no pipes, no redirection outside it. Inspect files with Read, Grep, and Glob.
 - Read the brief's "Words you must not write" first: a scan fails any file containing one.
 - Do not commit; Athena turns your edits into the candidate.
-- Your report goes to the user, never to the verifier: what changed and why, checks and results, open issues, your mistakes, repository facts you discovered, and context or tools you wished for.
+- Your report goes to the user, never to the verifier: what changed and why, checks and results, open issues, your mistakes, repository facts you found, and what you wished for.

@@ -20,8 +20,8 @@ whole. Each fact names its source. Where the source is a request and not code, t
   Source: `BudgetSet::budget` in `crates/athena-context/src/lib.rs`; `crates/athena-cli/tests/budgets.rs`.
   - budget contract: 326 of 350
   - budget reader: 1997 of 2000
-  - budget producer: 1257 of 1300
-  - budget verifier: 1298 of 1300
+  - budget producer: 1194 of 1300
+  - budget verifier: 1195 of 1300
   - budget planner: 1125 of 1300
   - budget critic: 974 of 1300
 - **Banned words.** The boundary scan fails any tracked file naming who runs Athena or the machine it runs
