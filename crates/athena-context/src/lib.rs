@@ -461,6 +461,23 @@ mod tests {
     }
 
     #[test]
+    fn reader_names_the_github_actions_cache_branch_scoping_for_ci_work() {
+        // Guidance only: the reader frame tells readings to state the cache scope as a criterion.
+        for wording in [
+            "CI caching or CI speed",
+            "in an acceptance criterion how the GitHub Actions cache is scoped by branch",
+            "base branch and the default branch",
+            "never sibling branches",
+            "caches are invisible to the default branch",
+        ] {
+            assert!(
+                READER_FRAME.text.contains(wording),
+                "reader frame lacks: {wording}"
+            );
+        }
+    }
+
+    #[test]
     fn external_service_calls_need_a_named_state_and_a_wait() {
         // Guidance only: the frames tell the planner to name the state and the critic to reject without it.
         for wording in [

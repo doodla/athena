@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The reader prompt now tells readings that touch CI caching or CI speed to state how the GitHub Actions cache
+  is scoped by branch (own branch, base branch and default branch only) in an acceptance criterion; a test in
+  `athena-context` checks the wording, and a few existing words were trimmed to stay within the reader budget.
 - Per-gate counters, the `relax` and `remove` prevention kinds, and Hestia's review of a gate
   (`crates/athena-core/src/gate_counts.rs`, `docs/design/defaults-loop.md` section 3.8). A gate is a failed check
   of a rejected job, the verifier when no check failed, or an admission rule that ended a rejected or failed job.
