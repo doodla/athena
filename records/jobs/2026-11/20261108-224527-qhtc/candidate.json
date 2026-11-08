@@ -1,0 +1,151 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261108-224527-qhtc",
+  "base_commit": "609a766e3452026d4e6df63cd791bd5b8f107454",
+  "base_fingerprint": "sha256:eaa8ec5562e99c2311e4e33b781c010e0d4b7c38e7ac76f0b05d3d77a9ee6228",
+  "previous_job": "20261027-054318-cgxc",
+  "candidate_commit": "86c97ff498079b016106d90fef218e6cac34488a",
+  "candidate_tree": "9d5cf5a12a0e8cbca6c115ba855d590a629b31bb",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 392745
+    },
+    {
+      "path": "crates/athena-core/src/snapshot.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 17914
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 46655
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5428
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 403735
+    }
+  ],
+  "fingerprint": "sha256:c53d075421e90073238f5ea9861f94849eab58f1e3c86ac783f2c4df12d461b3",
+  "violations": [],
+  "producer_report": {
+    "summary": "Both snapshot locks (Snapshot::lock in athena-git, lock in athena-core) now call one shared routine, athena_git::snapshot::writable_paths. It attempts a real write at every directory (creates and removes .athena-lock-probe) and every regular file (opens for append), root and .git included, symlinks skipped. Findings split into `accepted` (write worked) and `unchecked` (could not be tried: not listable, not a regular file, other error). WriteFindings::refusal builds the error with separate wording for each and paths relative to the root. A lock with any finding is undone and refused. Both old two-place probe_write functions are gone. Each lock is split into a private lock_with(.., after_apply) test seam; the public lock passes a no-op. Tests use the real unlock_dir on one empty leaf directory so they bind root. Added a CHANGELOG Fixed entry, and a decision entry D167 with a decision-links.toml link, because D08 governs athena-git's snapshot.rs. verification.rs and run_pin_tests.rs were left unchanged (out of scope per the reading; they need no compile fix).",
+    "files": [
+      "crates/athena-git/src/snapshot.rs",
+      "crates/athena-core/src/snapshot.rs",
+      "CHANGELOG.md",
+      "docs/decisions.md",
+      "docs/decision-links.toml"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-git snapshot",
+        "result": "pass",
+        "note": "18 tests, including the four new ones"
+      },
+      {
+        "command": "cargo test --locked -p athena-core snapshot",
+        "result": "pass",
+        "note": "13 tests incl. the new evidence-lock test and the run_pin_tests rerun tests"
+      },
+      {
+        "command": "cargo test --locked -q -p athena-git -p athena-core",
+        "result": "pass",
+        "note": "1229 passed, 1 ignored (core); athena-git all pass"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked -p xtask --test policy",
+        "result": "pass",
+        "note": "banned-word scan, 17 tests"
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test mirrors",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked -p athena-cli decision",
+        "result": "pass",
+        "note": "decision log and link checks, 14 tests"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-git`: a new test leaves one nested path (e.g. .git/objects) writable in an otherwise locked tree, constructed so it binds root too (attempted write or injected writable path, not mode bits alone), and asserts `Snapshot::lock` returns an error naming exactly that path. It fails against the old two-place probe.",
+        "status": "met",
+        "evidence": "a_lock_with_one_nested_path_left_writable_is_refused_naming_it passes: creates .git/objects/leaf, locks for real, reopens that one leaf with the real unlock_dir via the lock_with hook, asserts the Refused text contains `.git/objects/leaf` with exactly two backticks. The old probe (root file + .git/HEAD) would see only locked paths, so lock_with would return Ok and expect_err would panic. Ran as root here."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core`: a new test in crates/athena-core/src/snapshot.rs does the same for the evidence-snapshot `lock`, asserting the error names the nested writable path, and it fails against the old probe when run as root.",
+        "status": "met",
+        "evidence": "an_evidence_lock_with_one_nested_path_left_writable_is_refused_naming_it passes in cargo test -p athena-core: reopens records/a/leaf with the real unlock_dir after the lock, asserts 'evidence snapshot lock does not hold' and `records/a/leaf` with two backticks. The old probe tried only the root and history.json so it would pass the lock."
+      },
+      {
+        "criterion": "crates/athena-core/src/snapshot.rs `lock` calls the shared athena-git routine, and its own `probe_write` is deleted (Grep finds no `fn probe_write` there); athena-git's `lock` uses the same routine over every directory and file including .git.",
+        "status": "met",
+        "evidence": "Grep for `fn probe_write` under crates/ finds 0 matches. core lock_with calls athena_git::snapshot::writable_paths(dir); Snapshot::lock_with calls writable_paths(&self.dir). Test writable_paths_tries_a_write_at_every_directory_and_file asserts the accepted list holds the root, .git, .git/objects, .git/HEAD and src/main.rs."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-git`: a test shows that after a successful `lock()` then `unlock()` no `.athena-lock-probe` file exists anywhere in the tree and the work-tree tree hash equals its value before the lock.",
+        "status": "met",
+        "evidence": "a_lock_then_unlock_leaves_no_probe_file_and_the_tree_unchanged passes: real lock() then unlock(), walks the whole tree including .git for LOCK_PROBE, compares work_tree_tree() with the earlier value; repeats after writable_paths on the unlocked tree."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-git`: a test shows the lock error text differs between a path that accepted a write and a path that could not be checked (e.g. 'could not be listed').",
+        "status": "met",
+        "evidence": "the_lock_error_text_differs_for_an_accepted_write_and_an_unchecked_path passes: a writable file gives 'a write was accepted at `file.txt`' without 'could not be checked'; a Unix socket gives 'could not be checked: `sock` (not a regular file)'; the two texts differ. The 'could not be listed' wording exists in the code but cannot be forced as root, so the socket case is used."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-git` and `cargo test -p athena-core`: existing tests still pass, including `a_locked_snapshot_refuses_edits_and_commits_and_keeps_head_and_tree` and the snapshot-change rerun tests in run_pin_tests.rs.",
+        "status": "met",
+        "evidence": "cargo test --locked -q -p athena-git -p athena-core: all pass (1229 passed, 1 ignored in core, 0 failed); a_locked_snapshot_refuses_edits_and_commits_and_keeps_head_and_tree ok in the athena-git run; the run_pin_tests rerun tests ok in the athena-core run."
+      },
+      {
+        "criterion": "CHANGELOG.md [Unreleased] has an entry stating that both locks now attempt a write at every path and fail naming the writable one; it does not assert that the earlier two-place probe caused jobs 20261015-031159-xx7n or 20261015-033631-x3a1.",
+        "status": "met",
+        "evidence": "Read the new first bullet under [Unreleased] / ### Fixed in CHANGELOG.md: states both locks attempt a write at every directory and file and fail naming the path that accepted it; it names neither job id."
+      },
+      {
+        "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`; all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran cargo fmt --all --check and cargo clippy --all-targets --locked -- -D warnings (both clean) and the athena-git, athena-core, xtask policy and athena-cli mirrors/decision tests (all pass); I did not run the full workspace cargo test."
+      }
+    ],
+    "open_issues": [
+      "The 'could not be listed' error text is built in code but has no direct test, because root can list any directory; the socket case covers the unchecked path in general.",
+      "A special file (socket, fifo, device) anywhere in a snapshot now fails the lock. Git checkout never writes such files, so this is the fail-closed choice.",
+      "The new tests were not run against the old source; the failing-before claim rests on the code (the old probe checked only the root and one file)."
+    ],
+    "mistakes": [],
+    "learnings": [
+      "D08 governs crates/athena-git/src/snapshot.rs, so a change there needs a new docs/decisions.md entry plus a [[link]] in docs/decision-links.toml whose `line` is the line of the 'Amends D08' phrase in the new entry.",
+      "As root, a directory cannot be made unlistable, so the 'could not be listed' wording cannot be tested; a Unix socket exercises the unchecked path.",
+      "unlock_dir on a single nested leaf clears chattr +i there, so it makes a clean seam for reopening exactly one path under a locked parent."
+    ],
+    "desires": [
+      "A way to run the new tests against the old source to show they fail there; I argued it from the code instead."
+    ]
+  }
+}

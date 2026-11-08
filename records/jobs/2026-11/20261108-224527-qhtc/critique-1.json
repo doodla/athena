@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261108-224527-qhtc",
+  "round": 1,
+  "at": "2026-11-08T22:52:19.677637621Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The diff commands print nothing in the verifier's snapshot.",
+      "evidence": "crates/athena-git/src/snapshot.rs lines 92-95: a BaseAndCandidate snapshot commits the candidate with commit_all, so the work tree matches the index. `git diff -- <path>` shows unstaged changes only and so prints nothing. Fix: Use `git diff HEAD~1 HEAD -- <files>`, or have the verifier Grep for `fn probe_write` and read the CHANGELOG [Unreleased] Fixed section directly.",
+      "location": "Demonstrations, criteria 3 and 7 (`git diff -- crates/...`, `git diff -- CHANGELOG.md`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The socket test locks a temp directory, may set chattr +i as root, and never unlocks it.",
+      "evidence": "The plan runs `set_tree_writable(false)` and a best-effort `set_immutable` on the temp directory and says nothing about unlocking. TempDir's drop ignores errors, so as root with chattr working an immutable directory is left in /tmp after each run. The existing tests always unlock (snapshot.rs line 810; athena-core's Unlock guard). Fix: Wrap the directory in a guard that calls `unlock_dir`, or drop the lock step, since the socket is reported as unchecked whether or not the directory is locked.",
+      "location": "Demonstration criterion 5, part two (socket test)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new error gives paths relative to the snapshot and drops the absolute directory that the old message named.",
+      "evidence": "The old messages interpolate `self.dir.display()` and `dir.display()` (athena-git snapshot.rs line 170, athena-core snapshot.rs line 142). The new format names relative paths only, with `.` for the root, so the operator cannot tell which snapshot directory leaked. Fix: Name the root directory once in the message, e.g. `{what} lock does not hold in {root}: ...`, and keep the relative paths for the findings.",
+      "location": "Plan step 1, refusal text format",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A candidate that commits a file named `.athena-lock-probe` would make every lock of that tree fail as unchecked.",
+      "evidence": "create_new returns AlreadyExists, which the plan records as unchecked. The verifier snapshot holds the candidate's tracked files. Fix: Optional: note the reserved name in the doc comment, or word the AlreadyExists reason so the cause is clear.",
+      "location": "Plan step 1, AlreadyExists classified as unchecked",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes the fault where it starts: both copies of the two-place probe (athena-git snapshot.rs lines 182-197 and athena-core snapshot.rs lines 155-169) are replaced by one shared `writable_paths` routine in athena-git. athena-core already depends on athena-git (snapshot.rs line 150 calls `athena_git::snapshot::unlock_dir`). The seam is real: the private `lock_with` hook runs after the real chmod and chattr steps and before the real probe, and the tests reopen one leaf with the real `unlock_dir`, which clears chattr +i. So the criterion 1 and 2 tests bind root and would fail against the old probe. The plan's dependents list matches what Grep finds: verification.rs:241, run/mod.rs:1133, status.rs:2811 and 2847, cli tests/status_snapshot.rs:65, pin.rs:226 and run_pin_tests.rs:737. Nothing reads the old error text, and only the two old probes name `.athena-lock-probe`. The toolchain is 1.97, so ErrorKind::ReadOnlyFilesystem is available. Classifying special files as unchecked is fail-closed and gives no false refusals on these snapshots, which hold only git checkouts, record blobs and copied pin files. Leaving verification.rs and run_pin_tests.rs unchanged follows the accepted reading. No athena.toml field is added, no external service is called, and the work fits one producer run. Three minor issues remain: the criterion 3 and 7 diff commands print nothing in the verifier's committed snapshot, the socket test may leave an immutable temp directory as root, and the new error text no longer names the snapshot directory."
+}
