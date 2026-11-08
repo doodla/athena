@@ -1,0 +1,30 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261108-151802-8q0g",
+  "at": "2026-11-08T15:18:02.837612061Z",
+  "trigger": "intervention",
+  "job": null,
+  "intervention": "20261108-151750-mvmd",
+  "class_of_work": "other",
+  "category": "other",
+  "what_happened": "The the person running Athena reported a pattern from the drain log on 7-8 Nov. Five jobs finished their work but went stale because another job running at the same time landed a change to governed files first. The latest was the retry of the two new defaults.toml entries, which went stale after the verifier-rule landing. The spend on each stale job is lost unless it is retried. Jobs that edit governed files keep being run side by side. The the person running Athena did not fix it by hand. They reported it so Athena's own loop can decide between serializing such jobs and re-checking a stale change on top of the new base.",
+  "failure_class": "20261108-151816-2cd4",
+  "new_class": true,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "The planner groups jobs for parallel running by dependency only. It does not look at which files each job will change, so two jobs that touch governed files are treated as independent. Staleness is only found when a job tries to land. Athena has no path to carry verified work onto a new base, so a stale job can only be retried in full. Work that finished and passed is therefore thrown away because of an ordering problem, not because of any fault in the work.",
+  "prevention_kind": "design-change",
+  "prevention": "Two protections together would prevent the whole class. First, the plan should compare the expected file sets of jobs. Jobs that touch the same governed files should not start together, and drain should run them in sequence. Second, when a finished job is stale against the new main and the files that changed under it do not overlap its own diff, Athena should move the work onto the new base and re-run only the checks and verifier. It should then land it, instead of discarding the spend. If the files do overlap, Athena should retry from the new base automatically, with the original request kept.",
+  "proposed_request": "Stop finished jobs from going stale when jobs that edit governed files run at the same time. Outcome: (1) When drain picks jobs to run together, it does not start two jobs whose expected changed files include the same governed file. Instead it runs them one after the other. Expected files come from the plan or reading deliverables. (2) When a verified job is found stale because main moved, Athena moves its change onto the new main. If the files changed on main do not overlap the job's own changes, it re-runs the checks and verifier on the new base and lands it without a full retry. If they overlap, it queues one retry from the new base that keeps the original request, and shows that retry in the queue. Acceptance: a test with two jobs that both edit a governed file shows they never run together at max_concurrency > 1 and that the serial path (max_concurrency = 1) behaves the same. A second test with a stale job and a non-overlapping main change shows it lands after re-verification with no new producer run. A third test with an overlapping change shows exactly one retry queued with the original goal. Test on a realistic branch history, not a hand-built one. Keep the existing parallel and serial landing paths working.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.1031422,
+    "input_tokens": 2,
+    "output_tokens": 1214
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}
