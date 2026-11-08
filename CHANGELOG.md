@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Two defaults for the reader: `pinned-versions` (config version pins such as `claude_version` stay exact, are
+  bumped only by `cargo run -p xtask -- repin`, and a mismatch refusal names that command) and
+  `explicit-tool-paths` (no inherited environment or ambient tools, explicit tool paths, output records which
+  tool ran, a silent fallback is a defect). Both are prose-only. Root cause of the earlier failed attempt: the
+  reader renders only the first sentence of each default, so each rule is written as one sentence, and the
+  existing defaults are left untouched (a budgets test pins their rendered lines). The reader prompt budget
+  rises from 2000 to 2200 tokens (the set was 1997 of 2000 before and is 2189 after, estimated at
+  ceil(bytes/3)), the smallest multiple of 50 that fits; no other budget changes. `docs/system-facts.md`,
+  `docs/design/context-engineer.md` and the figure in `run_pin_tests.rs` follow. The reader would otherwise
+  keep asking about version pins, tool paths and silent fallback.
 - Crate reach facts and a test-placement reading rule. Root cause: a reading and a plan placed a test in a
   crate that cannot import the code under test (xtask is binary-only, with no library target), and nothing
   they read said which crates have libraries or may depend on which, so it was found late and fixed by hand.

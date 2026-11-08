@@ -446,6 +446,71 @@ fn the_reader_headroom_rows_equal_the_budget_figures_and_name_shared_files() {
 }
 
 #[test]
+fn the_reader_context_carries_the_whole_version_pin_and_tool_path_rules() {
+    // The reader sees only each default's first sentence, so the rendered text itself must hold every half.
+    let rendered = defaults().render();
+    let line = |id: &str| {
+        rendered
+            .lines()
+            .find(|l| l.starts_with(&format!("- {id} [")))
+            .unwrap_or_else(|| panic!("the reader context has no line for {id}:\n{rendered}"))
+            .to_string()
+    };
+    let pins = line("pinned-versions");
+    for phrase in [
+        "claude_version",
+        "never float",
+        "xtask -- repin",
+        "refusal",
+        "prose-only",
+    ] {
+        assert!(pins.contains(phrase), "{phrase} missing from: {pins}");
+    }
+    let paths = line("explicit-tool-paths");
+    for phrase in [
+        "inherited environment",
+        "ambient tools",
+        "explicit",
+        "records whether the preferred tool or the fallback ran",
+        "silent fallback is a defect",
+        "prose-only",
+    ] {
+        assert!(paths.contains(phrase), "{phrase} missing from: {paths}");
+    }
+}
+
+#[test]
+fn existing_defaults_render_exactly_as_before() {
+    // The reader budget was raised instead of splitting or trimming defaults, so each earlier line is pinned.
+    let rendered = defaults().render();
+    let before = [
+        "- rust [code, build, tests]: All code is Rust.",
+        "- strangers [*]: Code, commits, docs, and records are written for an outside reader.",
+        "- evidence [docs, design, records]: Claims cite their sources, and numbers are measured or labeled as estimates.",
+        "- buy-first [code, build]: Adopt good, maintained tools and crates before building; build only for needs they don't meet, and record the call.",
+        "- tested [code, tests, build]: Every module has passing tests; cargo test passes and clippy is clean.",
+        "- public [*]: Everything committed is public: no secrets, credentials, or personal data, and transcripts are redacted.",
+        "- small [*]: Prefer one focused change; size is a design choice, not a wish list.",
+        "- verified [*]: Done means independently verified, and user-facing behavior is verified by exercising it.",
+        "- designed [design, code]: Significant designs are written down with alternatives and reviewed before they are built.",
+        "- lazy-requests [*]: Requests are short; recover hidden requirements from the repository before asking.",
+        "- mechanism [code, config, build]: Rules that matter are enforced by mechanism, or explicitly marked prose-only.",
+        "- root-cause [*]: Fix the root cause, not the symptom or the one instance that surfaced.",
+        "- behavior-evidence [*]: Acceptance criteria must check the requested behavior happening, not that types, files or wiring exist.",
+        "- outcome-check [*]: The outcome is the check behind the work, not the activity done.",
+        "- no-empty-success [*]: An empty queue or finished list never counts as success on its own.",
+        "- thrash-stop [*]: If the same item fails twice in a loop, the loop stops and reports thrashing.",
+    ];
+    let lines: Vec<&str> = rendered.lines().collect();
+    for expected in before {
+        assert!(
+            lines.contains(&expected),
+            "rendered line changed or missing: {expected}"
+        );
+    }
+}
+
+#[test]
 fn an_over_budget_role_set_fails() {
     // M18 (blocks): an over-budget role set fails. Moving rules between components escapes nothing.
     let padding =

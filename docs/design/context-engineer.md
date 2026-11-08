@@ -51,7 +51,7 @@ available here, so it is not measured in this design.
 | `gh.rs` size | 5,276 lines | Measured at the base commit, `crates/athena-core/src/gh.rs`; the request says 5,276 |
 | `produce_and_verify` | 737 lines, `run.rs` lines 1527 to 2263 | Measured at base from the `fn` line to its closing brace; the request says 724, so the function grew or was counted differently |
 | Decision log | 3,261 lines at base, 3,231 in the request | Measured at base, `docs/decisions.md`; D129 and later entries explain the difference |
-| Reader prompt | 1997 of 2000 (99.85%) | `docs/system-facts.md` line `budget reader: 1997 of 2000`, checked by `system_facts_budgets_match_computed` |
+| Reader prompt | 2189 of 2200 (99.50%) | `docs/system-facts.md` line `budget reader: 2189 of 2200`, checked by `system_facts_budgets_match_computed` |
 | Other budgets | contract 326 of 350, producer 1257 of 1300, verifier 1298 of 1300, planner 788 of 1300, critic 742 of 1300 | Same file |
 | Critics finding missed callers in `gh.rs` and `produce_and_verify` | not counted | Stated by the request, not measured here |
 | 7 retries that lost an earlier verifier's findings | 7 jobs | Stated by the request, not measured here |
