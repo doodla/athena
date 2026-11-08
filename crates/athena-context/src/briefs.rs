@@ -144,6 +144,24 @@ const TEST_ONLY_WINDOW: usize = 2;
 /// the job is not checked against a list of allowed paths; a false match would reject a correct diff,
 /// so the matcher errs toward not matching.
 pub fn limits_changed_files(text: &str) -> bool {
+    change_limit(text).is_some()
+}
+
+/// What a criterion that limits which files may change allows: the words of the clause that matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeLimit {
+    /// True for "no other file changed" and "production unchanged", which name no list of allowed files.
+    pub bare: bool,
+    /// The lowercase words that say what may change: the words between `outside` and the change word for
+    /// "no file outside X changed", between `only` and `may` for "only X may change", and every word of the
+    /// criterion for "test-only change". Empty when `bare`.
+    pub allowed: Vec<String>,
+}
+
+/// The first limit of [`limits_changed_files`] that `text` states, with the words that say what may
+/// change. This is the one matcher: enforcement (`limiting_criterion`) and the reading gate both read it,
+/// so the gate cannot read a sentence differently from the check that builds the allowed list.
+pub fn change_limit(text: &str) -> Option<ChangeLimit> {
     // A word is a run of non-space characters with punctuation trimmed from its ends, so a path such as
     // `crates/a.rs` counts as one word; a hyphen separates words, so "test-only" is "test only".
     let lower = text.to_lowercase().replace('-', " ");
@@ -158,6 +176,11 @@ pub fn limits_changed_files(text: &str) -> bool {
     let within = |from: usize, window: usize, test: &dyn Fn(&str) -> bool| -> Option<usize> {
         (from..words.len().min(from + window)).find(|&j| test(words[j]))
     };
+    let owned = |slice: &[&str]| -> Vec<String> { slice.iter().map(|w| w.to_string()).collect() };
+    let bare = || ChangeLimit {
+        bare: true,
+        allowed: Vec::new(),
+    };
     for (i, word) in words.iter().enumerate() {
         match *word {
             "no" => {
@@ -165,9 +188,12 @@ pub fn limits_changed_files(text: &str) -> bool {
                 if matches!(next, Some("file" | "files")) {
                     // "no file outside X changed"
                     if let Some(o) = within(i + 2, OUTSIDE_WINDOW, &|w| w == "outside")
-                        && within(o + 1, CHANGED_WINDOW, &is_change).is_some()
+                        && let Some(c) = within(o + 1, CHANGED_WINDOW, &is_change)
                     {
-                        return true;
+                        return Some(ChangeLimit {
+                            bare: false,
+                            allowed: owned(&words[o + 1..c]),
+                        });
                     }
                 } else if next == Some("other")
                     && matches!(words.get(i + 2).copied(), Some("file" | "files"))
@@ -177,7 +203,7 @@ pub fn limits_changed_files(text: &str) -> bool {
                     .is_some()
                 {
                     // "no other file changed"
-                    return true;
+                    return Some(bare());
                 }
             }
             "only" => {
@@ -188,7 +214,10 @@ pub fn limits_changed_files(text: &str) -> bool {
                         || (rest.first().copied() == Some("be")
                             && matches!(rest.get(1).copied(), Some("changed" | "modified")));
                     if may_change {
-                        return true;
+                        return Some(ChangeLimit {
+                            bare: false,
+                            allowed: owned(&words[i + 1..m]),
+                        });
                     }
                 }
                 // "test-only change", "tests-only diff": the hyphen was flattened to a space.
@@ -199,7 +228,10 @@ pub fn limits_changed_files(text: &str) -> bool {
                     })
                     .is_some()
                 {
-                    return true;
+                    return Some(ChangeLimit {
+                        bare: false,
+                        allowed: owned(&words),
+                    });
                 }
             }
             "production" => {
@@ -212,13 +244,13 @@ pub fn limits_changed_files(text: &str) -> bool {
                     j += 1;
                 }
                 if words.get(j).copied() == Some("unchanged") {
-                    return true;
+                    return Some(bare());
                 }
             }
             _ => {}
         }
     }
-    false
+    None
 }
 
 /// A check Athena will run, by name and command.
@@ -2249,7 +2281,7 @@ pub const READING_RULES_HEADING: &str = "# Reading rules";
 /// Each rule a reading must pass, one short line each. A line gives the check that enforces it; a reading
 /// that breaks a checked rule is refused and read again once, with the refusal as a correction. A line
 /// ending `(prose only)` has no check and causes no refusal.
-pub const READING_RULES: [&str; 10] = [
+pub const READING_RULES: [&str; 11] = [
     "Previous result: a retry or follow-up names each earlier job, says how its result is addressed, lists deliverables and out_of_scope, and lists or excludes the files it changed (`check_prior_result_and_scope`).",
     "Criteria evidence: each criterion rests on a command, Grep or file the verifier can check, never the producer's report (`check_criteria_evidence`).",
     "Governance files: list one as a deliverable and name it in a criterion when the request names it or a deliverable implies it, or name it in out_of_scope (`check_governance_coverage`).",
@@ -2257,6 +2289,7 @@ pub const READING_RULES: [&str; 10] = [
     "Design: an `Existing code:` assumption names crates/ or docs/ paths the job does not create; a criterion needs an existing code section that reuses or extends them (`check_design_existing_code`).",
     "Environment: a CI workflow, a push, PR or pull request, or a records-branch or history read needs an `Environment:` assumption: site, read/write permissions, data reached (`check_environment_reach`).",
     "Terms: define each structural term the request uses (ladder, rung, tier, layer) in a `Term ladder: <meaning>` assumption; a quoted or cited mention needs none (`check_defined_terms`).",
+    "Scope limit: a limiting criterion lists CHANGELOG.md or says `the deliverables`; a config deliverable needs `Consumers: <deliverable paths>` or `Consumers: none found` (`check_scope_limit`).",
     "Valid reading: class, capability and producer model from the closed lists; a decline gives a reason; a capability needs a criterion; forecasts are valid (`build_reading`).",
     "Test placement: put each test in a crate that can import the code under test; xtask has no library target, so test it in `xtask/tests/` or unit tests in `xtask/src/` (prose only).",
     "Enabled roles: brief content targets only the roles listed under Enabled roles; a role not listed gets no new content (prose only).",
@@ -4586,11 +4619,18 @@ mod tests {
             "check_design_existing_code",
             "check_environment_reach",
             "check_defined_terms",
+            "check_scope_limit",
             "build_reading",
         ] {
             assert!(section.contains(check), "no rule for {check}:\n{section}");
         }
-        assert_eq!(READING_RULES.len(), 10);
+        assert_eq!(READING_RULES.len(), 11);
+        assert!(
+            lines.iter().any(|l| l.contains("`Consumers:")
+                && l.contains("CHANGELOG.md")
+                && l.contains("`check_scope_limit`")),
+            "no rule line names Consumers:, CHANGELOG.md and its check:\n{section}"
+        );
         assert!(
             lines
                 .iter()
@@ -4622,9 +4662,10 @@ mod tests {
                     && l.contains("`check_design_existing_code`")),
             "no rule line names Existing code: and its check:\n{section}"
         );
-        // The section adds little to the brief: ten rule lines and the code survey guide paragraph. The
-        // section was about 2540 bytes with eight rules and measured 2718 with the ninth.
-        assert!(section.len() < 2900, "{} bytes", section.len());
+        // The section adds little to the brief: eleven rule lines and the code survey guide paragraph. The
+        // section was about 2540 bytes with eight rules, measured 2718 with the ninth and 3045 with the
+        // eleventh.
+        assert!(section.len() < 3150, "{} bytes", section.len());
     }
 
     #[test]
@@ -5213,6 +5254,61 @@ mod tests {
             "",
         ] {
             assert!(!limits_changed_files(text), "should not limit: {text}");
+        }
+    }
+
+    #[test]
+    fn change_limit_reports_the_allowed_words() {
+        let words = |list: &[&str]| list.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let named = |text: &str| change_limit(text).unwrap_or_else(|| panic!("no limit: {text}"));
+        // "only X may change": the words between `only` and `may`.
+        let limit = named("Only docs/x.md and CHANGELOG.md may change, keeping one entry");
+        assert!(!limit.bare);
+        assert_eq!(limit.allowed, words(&["docs/x.md", "and", "changelog.md"]));
+        assert_eq!(
+            named("Only crates/a.rs may be changed").allowed,
+            words(&["crates/a.rs"])
+        );
+        // "no file outside X changed": the words between `outside` and the change word.
+        let limit = named("No file outside docs/x.md and CHANGELOG.md changed");
+        assert!(!limit.bare);
+        assert_eq!(limit.allowed, words(&["docs/x.md", "and", "changelog.md"]));
+        // An unmatched earlier `only` does not open the span.
+        assert_eq!(
+            named("Only maybe tidy things; no file outside docs/x.md changed").allowed,
+            words(&["docs/x.md"])
+        );
+        // "test-only change": every word.
+        let limit = named("Test-only change");
+        assert!(!limit.bare);
+        assert_eq!(limit.allowed, words(&["test", "only", "change"]));
+        // The bare forms name no list.
+        for text in [
+            "No other file is changed",
+            "No other file is changed beyond formatting",
+            "Production code is unchanged",
+        ] {
+            let limit = named(text);
+            assert!(limit.bare && limit.allowed.is_empty(), "{text}");
+        }
+        assert_eq!(change_limit("The helper is test-only"), None);
+        // The wrapper agrees with the matcher on the phrases of the matcher tests.
+        for text in [
+            "No file outside crates/athena-core/ changed",
+            "no files outside the two directories are modified in the diff",
+            "Only crates/a.rs and README.md may be changed",
+            "test-only, production unchanged",
+            "a tests-only diff",
+            "Do one change and touch no other file.",
+            "the helper is test-only",
+            "Only the verifier decides the verdict",
+            "",
+        ] {
+            assert_eq!(
+                limits_changed_files(text),
+                change_limit(text).is_some(),
+                "{text}"
+            );
         }
     }
 
