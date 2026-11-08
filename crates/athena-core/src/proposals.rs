@@ -173,10 +173,11 @@ pub fn validate(
             _ => {}
         }
     }
-    if open(&records.proposals)
-        .iter()
-        .any(|o| o.id == p.id && o.failure_class != p.failure_class && o.record != p.record)
-    {
+    // A class that was merged into another is the other (`Records::merges`).
+    let class = records.merges.resolve(&p.failure_class);
+    if open(&records.proposals).iter().any(|o| {
+        o.id == p.id && records.merges.resolve(&o.failure_class) != class && o.record != p.record
+    }) {
         problems.push(format!(
             "default id {:?} is used by a pending proposal",
             p.id
@@ -195,7 +196,7 @@ pub fn validate(
             continue;
         };
         if case.job.as_deref() != Some(source.job.as_str())
-            || case.failure_class != p.failure_class.as_str()
+            || case.failure_class != class.as_str()
             || at_of(case) != Some(source.at)
         {
             problems.push(format!(
@@ -283,9 +284,12 @@ pub fn generate(
         let Ok(class_id) = RecordId::parse(class) else {
             continue;
         };
+        // A proposal made for a class that was merged into this one is a proposal for this class.
+        let is_class = |p: &&ProposalRecord| records.merges.resolve(&p.failure_class) == class_id;
         if open(&records.proposals)
             .iter()
-            .any(|p| p.failure_class == class_id)
+            .copied()
+            .any(|p| is_class(&p))
         {
             continue;
         }
@@ -293,7 +297,7 @@ pub fn generate(
         let decided = records
             .proposals
             .iter()
-            .filter(|p| p.failure_class == class_id)
+            .filter(is_class)
             .filter(|p| {
                 matches!(
                     p.status,
@@ -906,6 +910,55 @@ mod tests {
                 .unwrap_err()
                 .iter()
                 .any(|m| m.contains("already exists"))
+        );
+    }
+
+    #[test]
+    fn a_pending_proposal_for_a_merged_class_blocks_a_proposal_for_its_target() {
+        const RETIRED: &str = "20261001-000000-c002";
+        let dir = fixture();
+        write_class(dir.path(), RETIRED, "Other name");
+        for day in [2, 3, 4] {
+            write_case(dir.path(), RETIRED, day, 1, day);
+        }
+        let generated = run(dir.path(), &Starts::new());
+        let [for_retired] = generated.proposals.as_slice() else {
+            panic!("one proposal, got {:?}", generated.proposals)
+        };
+        assert_eq!(for_retired.failure_class.as_str(), RETIRED);
+        write_record(
+            dir.path(),
+            &AnyRecord::DefaultsProposal(Box::new(for_retired.clone())),
+        );
+        for day in [5, 6, 7] {
+            write_case(dir.path(), CLASS, day, 1, day);
+        }
+        // Two classes: the pending proposal for the retired one does not block the other.
+        let separate = run(dir.path(), &Starts::new());
+        let [for_target] = separate.proposals.as_slice() else {
+            panic!("one proposal, got {:?}", separate.proposals)
+        };
+        assert_eq!(for_target.failure_class.as_str(), CLASS);
+
+        // Merged: the six cases are one class, and its pending proposal is the retired class's.
+        let class = |id: &str, name: &str| FailureClass {
+            id: RecordId::parse(id).unwrap(),
+            at: ts("2026-10-01T00:00:00Z"),
+            name: name.into(),
+            description: "A new field has no reader.".into(),
+            status: ClassStatus::Proposed,
+            proposed_by: rid(1, 1),
+        };
+        let merge = class(RETIRED, "Other name").merged_into_class(
+            &class(CLASS, "Field with no use"),
+            rid(21, 9),
+            ts("2026-10-21T00:00:00Z"),
+        );
+        write_record(dir.path(), &AnyRecord::FailureClass(merge));
+        let merged = run(dir.path(), &Starts::new());
+        assert!(
+            merged.proposals.is_empty() && merged.refusals.is_empty(),
+            "{merged:?}"
         );
     }
 

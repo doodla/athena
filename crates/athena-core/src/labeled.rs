@@ -31,7 +31,8 @@
 use crate::Athena;
 use crate::introspect::{ClassRow, JEV_NEW_OPTION, month_files};
 use anyhow::{Result, bail};
-use athena_data::records::{AnyRecord, ClassLabel, IntrospectionRecord, Labeler};
+use athena_data::RecordId;
+use athena_data::records::{AnyRecord, ClassLabel, ClassMerges, IntrospectionRecord, Labeler};
 use jiff::Timestamp;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -83,17 +84,44 @@ pub fn read_inputs(root: &Path) -> Result<Inputs> {
             _ => bail!("{path}: not an athena.class-label/1 record"),
         }
     }
+    let mut registry = Vec::new();
     for (path, bytes) in month_files(root, "failure-classes")? {
         match AnyRecord::parse(&path, &bytes)? {
-            AnyRecord::FailureClass(c) => inputs.classes.push(ClassRow {
-                id: c.id.to_string(),
-                name: c.name,
-                description: c.description,
-            }),
+            AnyRecord::FailureClass(c) => registry.push(c),
             _ => bail!("{path}: not an athena.failure-class/1 record"),
         }
     }
-    inputs.classes.sort_by(|a, b| a.id.cmp(&b.id));
+    registry.sort_by(|a, b| a.id.cmp(&b.id));
+    // A class that was merged into another is the other: the registry lists live classes only, and the
+    // classes in labels and in Jev's stored answers are mapped to their targets. Nothing is rewritten.
+    let merges = ClassMerges::of(&registry);
+    inputs.classes = merges
+        .live_classes(&registry)
+        .into_iter()
+        .map(|c| ClassRow {
+            id: c.id.to_string(),
+            name: c.name.clone(),
+            description: c.description.clone(),
+        })
+        .collect();
+    for label in &mut inputs.labels {
+        label.class = label.class.as_ref().map(|c| merges.resolve(c));
+    }
+    for i in &mut inputs.introspections {
+        i.failure_class = i.failure_class.as_ref().map(|c| merges.resolve(c));
+        if let Some(answer) = i.jev.as_mut().and_then(|jev| jev.class.as_mut()) {
+            let resolve = |option: &str| {
+                RecordId::parse(option)
+                    .map_or_else(|_| option.to_string(), |id| merges.resolve(&id).to_string())
+            };
+            answer.choice = resolve(&answer.choice);
+            let mut summed = BTreeMap::new();
+            for (option, probability) in std::mem::take(&mut answer.probabilities) {
+                *summed.entry(resolve(&option)).or_insert(0.0) += probability;
+            }
+            answer.probabilities = summed;
+        }
+    }
     Ok(inputs)
 }
 
@@ -1391,5 +1419,57 @@ mod tests {
                 .classes
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_merged_class_is_read_as_its_target_in_the_registry_labels_and_jevs_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let class = |id: &str, name: &str| FailureClass {
+            id: RecordId::parse(id).unwrap(),
+            at: at(0),
+            name: name.into(),
+            description: "A new field has no reader.".into(),
+            status: ClassStatus::Proposed,
+            proposed_by: rid(0, 1),
+        };
+        let (a, b) = (class(A, "Field with no use"), class(B, "Missing test"));
+        let merge = b.merged_into_class(&a, rid(9, 3), at(9));
+        let mut i = introspection(5, "A field has no reader.", Some(jev_says(B, 0.6, 0.5)));
+        i.failure_class = Some(RecordId::parse(B).unwrap());
+        for record in [
+            AnyRecord::FailureClass(a),
+            AnyRecord::FailureClass(b),
+            AnyRecord::Introspection(Box::new(i)),
+            AnyRecord::ClassLabel(label(5, Some(B), Labeler::Person, None)),
+        ] {
+            let path = dir.path().join(record.canonical_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, record.to_json()).unwrap();
+        }
+        // Before the merge: two classes, the label and Jev's choice name B.
+        let before = read_inputs(dir.path()).unwrap();
+        assert_eq!(before.classes.len(), 2);
+        assert_eq!(before.labels[0].class, Some(RecordId::parse(B).unwrap()));
+        let row = &build(&before).rows[0];
+        assert_eq!((row.target(), row.jev_choice.as_str()), (B, B));
+
+        let record = AnyRecord::FailureClass(merge);
+        let path = dir.path().join(record.canonical_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, record.to_json()).unwrap();
+        let after = read_inputs(dir.path()).unwrap();
+        assert_eq!(after.classes, classes()[..1], "one live class");
+        assert_eq!(after.labels[0].class, Some(RecordId::parse(A).unwrap()));
+        assert_eq!(
+            after.introspections[0].failure_class,
+            Some(RecordId::parse(A).unwrap())
+        );
+        let set = build(&after);
+        assert_eq!(set.rows.len(), 1);
+        let row = &set.rows[0];
+        assert_eq!((row.target(), row.jev_choice.as_str()), (A, A));
+        assert!(!row.jev_probabilities.contains_key(B));
+        assert!((row.jev_probabilities[A] - 0.8).abs() < 1e-9, "{row:?}");
+        assert!((row.jev_probabilities[JEV_NEW_OPTION] - 0.2).abs() < 1e-9);
     }
 }

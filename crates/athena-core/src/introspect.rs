@@ -48,7 +48,7 @@ use athena_agent::env::{EnvSpec, Side};
 use athena_agent::{AgentInvocation, NoSink};
 use athena_context::briefs::plain_boundary_text;
 use athena_data::records::{
-    AnyRecord, CONTEXT_PREVENTION_OUTCOMES, ClassStatus, FailureClass, HostError,
+    AnyRecord, CONTEXT_PREVENTION_OUTCOMES, ClassMerges, ClassStatus, FailureClass, HostError,
     INTROSPECTION_PROSE_FIELDS, INTROSPECTION_SCHEMA, InterventionCategory, IntrospectionEvidence,
     IntrospectionJev, IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger,
     JevClassAnswer, JevContextAnswer, OutcomeState, PreventionKind, ProposalRecord, Role,
@@ -269,8 +269,13 @@ pub struct Records {
     pub derived_host_errors: Vec<HostError>,
     /// Recorded introspections (a failed one has no class and is not a case), oldest first.
     pub cases: Vec<CaseRow>,
-    /// The class registry, oldest first.
+    /// The live class registry, by id: no merge record and no class that was merged into another. A case's
+    /// `failure_class` is already resolved to its live class.
     pub classes: Vec<ClassRow>,
+    /// Every failure-class record as written, merge records included, by id. Creation checks names against it.
+    pub all_classes: Vec<FailureClass>,
+    /// The merges among `all_classes`.
+    pub merges: ClassMerges,
     /// For each case (by introspection id), the intervention its event recorded, if it has one.
     pub case_interventions: BTreeMap<String, String>,
     /// Every `athena.defaults-proposal/1` record, oldest first (`crate::proposals`).
@@ -386,6 +391,25 @@ pub fn read_records(root: &Path) -> Result<Records> {
     records
         .derived_host_errors
         .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+    // The registry is read before the cases: a case counts under the live class its class was merged into.
+    for (path, bytes) in month_files(root, "failure-classes")? {
+        match AnyRecord::parse(&path, &bytes)? {
+            AnyRecord::FailureClass(c) => records.all_classes.push(c),
+            _ => anyhow::bail!("{path}: not an athena.failure-class/1 record"),
+        }
+    }
+    records.all_classes.sort_by(|a, b| a.id.cmp(&b.id));
+    records.merges = ClassMerges::of(&records.all_classes);
+    records.classes = records
+        .merges
+        .live_classes(&records.all_classes)
+        .into_iter()
+        .map(|c| ClassRow {
+            id: c.id.to_string(),
+            name: c.name.clone(),
+            description: c.description.clone(),
+        })
+        .collect();
     for (path, bytes) in month_files(root, "introspections")? {
         match AnyRecord::parse(&path, &bytes)? {
             AnyRecord::Introspection(i) => {
@@ -410,7 +434,7 @@ pub fn read_records(root: &Path) -> Result<Records> {
                         class_of_work: i.class_of_work.clone(),
                         category: i.category.clone(),
                         what: what.lines().next().unwrap_or("").to_string(),
-                        failure_class: class.to_string(),
+                        failure_class: records.merges.resolve(class).to_string(),
                         cause: cause.to_string(),
                     });
                 }
@@ -421,17 +445,6 @@ pub fn read_records(root: &Path) -> Result<Records> {
     records
         .cases
         .sort_by(|a, b| (&a.at, &a.id).cmp(&(&b.at, &b.id)));
-    for (path, bytes) in month_files(root, "failure-classes")? {
-        match AnyRecord::parse(&path, &bytes)? {
-            AnyRecord::FailureClass(c) => records.classes.push(ClassRow {
-                id: c.id.to_string(),
-                name: c.name,
-                description: c.description,
-            }),
-            _ => anyhow::bail!("{path}: not an athena.failure-class/1 record"),
-        }
-    }
-    records.classes.sort_by(|a, b| a.id.cmp(&b.id));
     for (path, bytes) in month_files(root, "defaults-proposals")? {
         match AnyRecord::parse(&path, &bytes)? {
             AnyRecord::DefaultsProposal(p) => records.proposals.push(*p),
@@ -859,6 +872,23 @@ pub fn normalise(text: &str) -> String {
         .map(str::to_lowercase)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The live class that a new class named `name` would duplicate: the class whose normalised name equals
+/// `name` normalised. A merge record is not a class and is skipped; a class that was merged into another
+/// stands for its target. A name with no words matches nothing. If two classes share the name, the earliest by
+/// time, then id, counts. Only names equal after normalising match: a differently worded name for the same
+/// cause is not caught here and needs a merge record.
+pub fn class_named(classes: &[FailureClass], merges: &ClassMerges, name: &str) -> Option<RecordId> {
+    let wanted = normalise(name);
+    if wanted.is_empty() {
+        return None;
+    }
+    classes
+        .iter()
+        .filter(|c| !c.is_merge() && normalise(&c.name) == wanted)
+        .min_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)))
+        .and_then(|c| merges.live_target(classes, &c.id))
 }
 
 /// `text` with any boundary word reworded, for the model's own words that Athena copies into a failure
@@ -1543,8 +1573,21 @@ impl Athena {
         record.prevention = Some(text[2].clone());
         record.proposed_request = Some(text[3].clone());
         record.prevention_kind = Some(kind);
-        // Ids the model returned that code did not pass in are dropped and logged, not repaired.
-        let class_id = RecordId::parse(&answer.failure_class).ok();
+        // A new class whose normalised name an existing class already has is that class, not a second one. A
+        // name that cannot be reworded is left to the failure below.
+        let reused = match (&answer.new_class, answer.failure_class == "new") {
+            (Some(new), true) => plain_boundary_text(new.name.trim())
+                .ok()
+                .and_then(|name| class_named(&past.all_classes, &past.merges, &name)),
+            _ => None,
+        };
+        // Ids the model returned that code did not pass in are dropped and logged, not repaired. A class that
+        // was merged into another counts as the other.
+        let class_id = reused.clone().or_else(|| {
+            RecordId::parse(&answer.failure_class)
+                .ok()
+                .map(|id| past.merges.resolve(&id))
+        });
         let class_known = class_id
             .as_ref()
             .is_some_and(|c| past.classes.iter().any(|row| row.id == c.as_str()));
@@ -1593,17 +1636,24 @@ impl Athena {
                             return None;
                         }
                     };
-                    let class = FailureClass {
-                        id: RecordId::generate(crate::now()),
-                        at: crate::now(),
-                        name,
-                        description,
-                        status: ClassStatus::Proposed,
-                        proposed_by: record.id.clone(),
-                    };
-                    record.failure_class = Some(class.id.clone());
-                    record.new_class = true;
-                    added = Some(class);
+                    if let Some(existing) = reused {
+                        ui.line(&format!(
+                            "introspect reused class {existing}: the new class {name:?} has its name"
+                        ));
+                        record.failure_class = Some(existing);
+                    } else {
+                        let class = FailureClass {
+                            id: RecordId::generate(crate::now()),
+                            at: crate::now(),
+                            name,
+                            description,
+                            status: ClassStatus::Proposed,
+                            proposed_by: record.id.clone(),
+                        };
+                        record.failure_class = Some(class.id.clone());
+                        record.new_class = true;
+                        added = Some(class);
+                    }
                 }
                 _ => {
                     record.failure = Some("the model chose a new class without naming it".into());
@@ -1621,6 +1671,49 @@ impl Athena {
         }
         record.status = IntrospectionStatus::Recorded;
         added
+    }
+
+    /// Merges failure class `from` into class `into`: commits a merge record, a new `athena.failure-class/1`
+    /// record with status `merged`. Records are append-only, so the retired class's file is not touched; readers
+    /// count the cases of `from` under `into` from then on. Both must be live classes, and they must differ.
+    pub fn merge_classes(&self, from: &RecordId, into: &RecordId) -> Result<FailureClass> {
+        anyhow::ensure!(from != into, "a class cannot be merged into itself");
+        let known = GitRecords::load(&self.git, &self.head()?)?;
+        let merges = ClassMerges::of(&known.classes);
+        let find = |id: &RecordId, role: &str| -> Result<&FailureClass> {
+            let class = known
+                .classes
+                .iter()
+                .find(|c| &c.id == id)
+                .with_context(|| format!("no failure class {id} to merge {role}"))?;
+            anyhow::ensure!(
+                !class.is_merge(),
+                "{id} is a merge record, not a class; merge {role} a live class"
+            );
+            anyhow::ensure!(
+                !merges.is_retired(id),
+                "class {id} was already merged into {}",
+                merges.resolve(id)
+            );
+            Ok(class)
+        };
+        let source = find(from, "from")?;
+        let target = find(into, "into")?;
+        let mut id = RecordId::generate(crate::now());
+        while known.has_record_id(&id) {
+            id = RecordId::generate(crate::now());
+        }
+        let merge = source.merged_into_class(target, id, crate::now());
+        let record = AnyRecord::FailureClass(merge.clone());
+        let path = record.canonical_path();
+        let subject = format!("Merge failure class {} into {}", source.name, target.name);
+        let body = "Two classes name one cause. Readers count the cases of the retired class under the class it \
+                    was merged into; the retired class's own record is not changed.";
+        self.commit_records(
+            &[NewFile::record(&record)],
+            &message(&subject, body, &[("Athena-Record", path)]),
+        )?;
+        Ok(merge)
     }
 
     fn introspection_spec(
@@ -2330,6 +2423,216 @@ mod tests {
     fn normalising_ignores_case_punctuation_and_spacing() {
         assert_eq!(normalise("The  job FAILED, twice."), "the job failed twice");
         assert_eq!(normalise("  "), "");
+    }
+
+    // -------------------------------------------------------------------------------------------------
+    // Class reuse and merges.
+
+    const CLASS_A: &str = "20261001-000000-c0a1";
+    const CLASS_B: &str = "20261001-000000-c0b2";
+
+    fn class_value(id: &str, at: &str, name: &str) -> FailureClass {
+        FailureClass {
+            id: RecordId::parse(id).unwrap(),
+            at: at.parse().unwrap(),
+            name: name.into(),
+            description: "d".into(),
+            status: ClassStatus::Proposed,
+            proposed_by: RecordId::parse("20261001-000000-1abc").unwrap(),
+        }
+    }
+
+    /// Writes the merge record that retires class `from` into class `into`, as `merge_classes` builds it.
+    fn put_merge(root: &Path, from: (&str, &str), into: (&str, &str)) -> FailureClass {
+        let from = class_value(from.0, "2026-10-01T00:00:00Z", from.1);
+        let into = class_value(into.0, "2026-10-01T00:00:00Z", into.1);
+        let merge = from.merged_into_class(
+            &into,
+            RecordId::parse("20261020-000000-9abc").unwrap(),
+            "2026-10-20T00:00:00Z".parse().unwrap(),
+        );
+        put_record(root, &AnyRecord::FailureClass(merge.clone()));
+        merge
+    }
+
+    /// Applies `answer` to a new record over the registry read from `root`; the cases passed in are all of
+    /// the registry's cases.
+    fn apply_over(root: &Path, answer: Answer) -> (IntrospectionRecord, Option<FailureClass>) {
+        let (_dir, _state, athena) = athena_with(None);
+        let config = athena_data::Config::parse(include_str!("../../../athena.toml")).unwrap();
+        let redactor = athena.redactor(&config, None).unwrap();
+        let past = read_records(root).unwrap();
+        let passed: Vec<String> = past.cases.iter().map(|c| c.id.clone()).collect();
+        let mut record = blank_record();
+        let added = athena.apply_answer(
+            &mut record,
+            answer,
+            &past,
+            &passed,
+            &[],
+            &[],
+            &redactor,
+            &crate::Quiet,
+        );
+        (record, added)
+    }
+
+    fn new_class_answer(name: &str) -> Answer {
+        let mut answer = boundary_answer("reviewer");
+        answer.new_class.as_mut().unwrap().name = name.into();
+        answer
+    }
+
+    #[test]
+    fn a_new_class_answer_naming_a_live_class_reuses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        put_class(dir.path(), CLASS_A, "the REVIEWER is not told!");
+        let before = read_records(dir.path()).unwrap();
+        assert_eq!(before.classes.len(), 1);
+
+        // Case, punctuation and spacing differ; the normalised names are equal.
+        let (record, added) = apply_over(dir.path(), boundary_answer("reviewer"));
+        assert!(added.is_none(), "no class is added: {added:?}");
+        assert_eq!(
+            record.status,
+            IntrospectionStatus::Recorded,
+            "{:?}",
+            record.failure
+        );
+        assert_eq!(
+            record.failure_class,
+            Some(RecordId::parse(CLASS_A).unwrap())
+        );
+        assert!(!record.new_class);
+
+        // Controls: a name that differs in a word is a new class, and so is one with no words in it.
+        let (record, added) =
+            apply_over(dir.path(), new_class_answer("The reviewer is never told"));
+        let added = added.expect("a different name is a new class");
+        assert!(record.new_class);
+        assert_ne!(added.id.as_str(), CLASS_A);
+        assert_eq!(record.failure_class, Some(added.id));
+        let (record, added) = apply_over(dir.path(), new_class_answer("!!!"));
+        assert!(
+            added.is_some() && record.new_class,
+            "a name with no words matches nothing"
+        );
+    }
+
+    #[test]
+    fn a_new_class_named_like_a_retired_class_reuses_its_live_target() {
+        let dir = tempfile::tempdir().unwrap();
+        put_class(dir.path(), CLASS_A, "A check ends jobs");
+        put_class(dir.path(), CLASS_B, "The reviewer is not told");
+        put_merge(
+            dir.path(),
+            (CLASS_B, "The reviewer is not told"),
+            (CLASS_A, "A check ends jobs"),
+        );
+        let (record, added) = apply_over(dir.path(), boundary_answer("reviewer"));
+        assert!(added.is_none());
+        assert_eq!(
+            record.failure_class,
+            Some(RecordId::parse(CLASS_A).unwrap())
+        );
+        assert!(!record.new_class);
+        // The merge record carries the retired class's name but is not a class to match.
+        let past = read_records(dir.path()).unwrap();
+        assert_eq!(
+            class_named(&past.all_classes, &past.merges, "the reviewer is not told"),
+            Some(RecordId::parse(CLASS_A).unwrap())
+        );
+    }
+
+    #[test]
+    fn class_named_takes_the_earliest_of_two_equal_names_and_skips_merge_records() {
+        let late = class_value(
+            "20261002-000000-c0c3",
+            "2026-10-02T00:00:00Z",
+            "Stale cache",
+        );
+        let early = class_value(
+            "20261003-000000-c0d4",
+            "2026-10-01T00:00:00Z",
+            "stale  cache!",
+        );
+        let other = class_value("20261004-000000-c0e5", "2026-10-01T00:00:00Z", "Other");
+        let merge = early.merged_into_class(
+            &other,
+            RecordId::parse("20261020-000000-9abc").unwrap(),
+            "2026-10-20T00:00:00Z".parse().unwrap(),
+        );
+        let classes = vec![late.clone(), early.clone(), other.clone()];
+        let merges = ClassMerges::of(&classes);
+        assert_eq!(
+            class_named(&classes, &merges, "STALE CACHE"),
+            Some(early.id.clone())
+        );
+        assert_eq!(class_named(&classes, &merges, "  "), None);
+        assert_eq!(class_named(&classes, &merges, "Something else"), None);
+        // Once `early` is merged into `other`, its name stands for `other`; the merge record itself is no match.
+        let classes = vec![late, early, other.clone(), merge];
+        let merges = ClassMerges::of(&classes);
+        assert_eq!(
+            class_named(&classes, &merges, "stale cache"),
+            Some(other.id)
+        );
+    }
+
+    #[test]
+    fn a_merged_class_is_listed_once_and_its_cases_count_under_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        put_class(dir.path(), CLASS_A, "A check ends jobs");
+        put_class(dir.path(), CLASS_B, "The reviewer is not told");
+        put_case(dir.path(), CLASS_A, PreventionKind::Default, 2);
+        put_case(dir.path(), CLASS_B, PreventionKind::Default, 3);
+        let both_cases = ["20261002-000000-1abc", "20261003-000000-1abc"];
+        let cited = |class: &str| {
+            let mut answer = boundary_answer("reviewer");
+            answer.failure_class = class.into();
+            answer.new_class = None;
+            answer.earlier_cases = both_cases.iter().map(ToString::to_string).collect();
+            answer
+        };
+
+        // Before the merge: two classes, and a case in B is not in class A.
+        let before = read_records(dir.path()).unwrap();
+        assert_eq!(before.classes.len(), 2);
+        let (record, added) = apply_over(dir.path(), cited(CLASS_A));
+        assert!(added.is_none());
+        assert_eq!(record.earlier_cases.len(), 1);
+        assert_eq!(record.dropped_ids, ["20261003-000000-1abc"]);
+
+        // After: one live class, and both cases count under A.
+        put_merge(
+            dir.path(),
+            (CLASS_B, "The reviewer is not told"),
+            (CLASS_A, "A check ends jobs"),
+        );
+        let after = read_records(dir.path()).unwrap();
+        assert_eq!(after.classes.len(), 1, "the live class count drops by one");
+        assert_eq!(after.classes[0].id, CLASS_A);
+        assert_eq!(after.all_classes.len(), 3, "no record is removed");
+        assert!(after.cases.iter().all(|c| c.failure_class == CLASS_A));
+        for class in [CLASS_A, CLASS_B] {
+            let (record, _) = apply_over(dir.path(), cited(class));
+            assert_eq!(
+                record.status,
+                IntrospectionStatus::Recorded,
+                "{:?}",
+                record.failure
+            );
+            assert_eq!(
+                record.failure_class,
+                Some(RecordId::parse(CLASS_A).unwrap())
+            );
+            assert_eq!(record.earlier_cases.len(), 2, "{class}");
+            assert!(
+                record.dropped_ids.is_empty(),
+                "{class}: {:?}",
+                record.dropped_ids
+            );
+        }
     }
 
     #[test]

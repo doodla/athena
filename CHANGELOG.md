@@ -9,6 +9,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Failure classes are deduplicated at creation and can be merged (`crates/athena-core/src/introspect.rs`,
+  `crates/athena-data/src/records/introspection.rs`, `docs/design/defaults-loop.md` section 3.4, decision D166).
+  Root cause: class creation never looked at the registry, so every `new` answer made a class and none was ever
+  merged. Now `class_named` is the one rule for both places a class is created: a new class whose name equals an
+  existing class's name after normalising (lower case, letters and digits, one space between words) is that class.
+  The introspection step records the existing id and adds no class record; `athena review --new-class` refuses and
+  names the class to use (it compared lower case only before). `ClassStatus` gains `Merged { merged_into,
+  merged_from }`: because records are append-only, a merge is a new `athena.failure-class/1` record, and the
+  retired class's file is not touched. Readers resolve a retired class to its target in memory: the class registry
+  and earlier-case selection (a merged class's cases may be cited under the target), Hestia's recurrence keys, the
+  producer brief's class summaries, the recurrence evidence label, default proposals, and the labeled set; the live
+  class count drops by one for each merge. `athena review --class` refuses a merge record's id and a retired id.
+  `Athena::merge_classes(from, into)` writes the record. Records of status `proposed` parse as before. This change
+  does not rewrite or merge the existing 158 classes. Reach is narrow: only names equal after normalising are
+  reused, so differently worded duplicates still need a merge record. Design, not built: an `athena` command that
+  merges two classes, a backtest that counts name collisions over the records branch, merging the existing classes,
+  and clustering classes with a model.
 - Per-gate counters, the `relax` and `remove` prevention kinds, and Hestia's review of a gate
   (`crates/athena-core/src/gate_counts.rs`, `docs/design/defaults-loop.md` section 3.8). A gate is a failed check
   of a rejected job, the verifier when no check failed, or an admission rule that ended a rejected or failed job.

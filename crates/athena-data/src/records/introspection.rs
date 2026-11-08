@@ -282,11 +282,19 @@ impl IntrospectionRecord {
     }
 }
 
-/// Where a class stands in the registry. Only `proposed` is written by code; the user renames or merges.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Where a class stands in the registry. Introspection and review write `proposed`; `merged` is written by
+/// `Athena::merge_classes`. Records are append-only, so a merge is a new record, never an edit of the retired
+/// class's file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ClassStatus {
     Proposed,
+    /// This record is a merge: class `merged_from` is retired and counts as class `merged_into` from now on.
+    /// A merge record is not itself a class; readers skip it when they list classes.
+    Merged {
+        merged_into: RecordId,
+        merged_from: RecordId,
+    },
 }
 
 /// `athena.failure-class/1`: one entry of the class registry (`docs/design/defaults-loop.md` section 3.4).
@@ -301,8 +309,129 @@ pub struct FailureClass {
     /// One line.
     pub description: String,
     pub status: ClassStatus,
-    /// The introspection that proposed it.
+    /// The introspection that proposed it. In a merge record this is the retired class's value, copied to keep
+    /// the record's shape; no introspection proposed the merge.
     pub proposed_by: RecordId,
+}
+
+impl FailureClass {
+    /// Whether this record is a merge record rather than a class.
+    pub fn is_merge(&self) -> bool {
+        matches!(self.status, ClassStatus::Merged { .. })
+    }
+
+    /// The class this record merges into, if it is a merge record.
+    pub fn merge_target(&self) -> Option<&RecordId> {
+        match &self.status {
+            ClassStatus::Merged { merged_into, .. } => Some(merged_into),
+            ClassStatus::Proposed => None,
+        }
+    }
+
+    /// The checks a failure-class record must pass.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("a failure class has a name".into());
+        }
+        match &self.status {
+            ClassStatus::Merged {
+                merged_into,
+                merged_from,
+            } if merged_into == merged_from => Err("a class cannot be merged into itself".into()),
+            ClassStatus::Merged { merged_from, .. } if *merged_from == self.id => {
+                Err("a merge record is not the class it retires".into())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The merge record that retires `self` into the class `into`: a fresh record with id `id` and time `at`.
+    /// The retired class's name and `proposed_by` are copied; the description says where it went.
+    pub fn merged_into_class(
+        &self,
+        into: &FailureClass,
+        id: RecordId,
+        at: Timestamp,
+    ) -> FailureClass {
+        FailureClass {
+            id,
+            at,
+            name: self.name.clone(),
+            description: format!("Merged into {}", into.name),
+            status: ClassStatus::Merged {
+                merged_into: into.id.clone(),
+                merged_from: self.id.clone(),
+            },
+            proposed_by: self.proposed_by.clone(),
+        }
+    }
+}
+
+/// The merges recorded in the registry, folded into a map from each retired class id to the class it was
+/// merged into. Readers resolve ids through it, in memory; no record is rewritten.
+#[derive(Debug, Clone, Default)]
+pub struct ClassMerges {
+    into: std::collections::BTreeMap<RecordId, RecordId>,
+}
+
+impl ClassMerges {
+    /// Fold the merge records among `classes`. If two merge records retire the same class, the earliest by
+    /// time, then id, wins. With no merge record nothing is sorted.
+    pub fn of(classes: &[FailureClass]) -> Self {
+        let mut merges: Vec<&FailureClass> = classes.iter().filter(|c| c.is_merge()).collect();
+        if merges.is_empty() {
+            return Self::default();
+        }
+        merges.sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+        let mut into = std::collections::BTreeMap::new();
+        for record in merges {
+            if let ClassStatus::Merged {
+                merged_into,
+                merged_from,
+            } = &record.status
+            {
+                into.entry(merged_from.clone())
+                    .or_insert_with(|| merged_into.clone());
+            }
+        }
+        Self { into }
+    }
+
+    /// The class `id` counts as: itself, or the end of its chain of merges. A cycle ends after at most one
+    /// step per merge.
+    pub fn resolve(&self, id: &RecordId) -> RecordId {
+        let mut current = id;
+        for _ in 0..=self.into.len() {
+            match self.into.get(current) {
+                Some(next) => current = next,
+                None => break,
+            }
+        }
+        current.clone()
+    }
+
+    /// Whether `id` was merged into another class.
+    pub fn is_retired(&self, id: &RecordId) -> bool {
+        self.into.contains_key(id)
+    }
+
+    /// The live class `id` counts as, if it is in `classes`: the resolved target when that is a class record
+    /// that is not a merge record.
+    pub fn live_target(&self, classes: &[FailureClass], id: &RecordId) -> Option<RecordId> {
+        let target = self.resolve(id);
+        classes
+            .iter()
+            .any(|c| c.id == target && !c.is_merge())
+            .then_some(target)
+    }
+
+    /// The classes of `classes` that are live: not a merge record and not retired.
+    pub fn live_classes<'a>(&self, classes: &'a [FailureClass]) -> Vec<&'a FailureClass> {
+        classes
+            .iter()
+            .filter(|c| !c.is_merge() && !self.is_retired(&c.id))
+            .collect()
+    }
 }
 
 /// Who wrote a class label (`docs/design/defaults-loop.md` section 10.2).

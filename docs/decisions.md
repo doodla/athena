@@ -4747,3 +4747,64 @@ should replace those estimates with its figures.
   20261014-082328-g6vy, 20261014-174815-7bf8 and 20261017-173508-0wtc (g6vy by `check_outcome_state`, 7bf8 and 0wtc by
   `check_defined_terms`), and the accepted and refused `ambiguous-name-*` cases built with the real generators. Not
   measured: the share of past readings newly refused; the loop replay records it at verification.
+
+## D166 · Failure classes are deduplicated when they are created, and merged by a record with status merged; nothing is rewritten
+
+- **Case:** The introspection step only ever added failure classes: when the model answered `new`, code minted a
+  class with a fresh id, and nothing merged two classes that named one cause. The user counted 158 classes on the
+  records branch and none merged ("lessons become checks, not knowledge"). Root cause: class creation had no check
+  against the registry, in either place a class is created (the introspection step, and `athena review
+  --new-class`, which compared names with a different rule: lower case only, so punctuation passed), and
+  `docs/design/defaults-loop.md` section 3.4 said the user may merge classes while no code could.
+- **Decision:** Two parts. (1) Dedupe at creation: one function, `introspect::class_named`, finds the live class whose
+  name equals a new name after `normalise` (lower case, letters and digits, words joined by one space); a merge
+  record is skipped, a retired class stands for its target, a name with no words matches nothing, and of two equal
+  names the earlier by time then id wins. The introspection step reuses the class (the introspection records the
+  existing id, no class record is added) and `athena review --new-class` refuses and names the class to use.
+  (2) Merge by record: `ClassStatus` gains `Merged { merged_into, merged_from }`. Records are append-only, so a
+  merge is a new `athena.failure-class/1` record; the retired class's file is not touched. Readers fold the merge
+  records into a retired-to-target map (`ClassMerges`) and resolve ids in memory: the registry read by the
+  introspection step and by the labeled set, earlier-case selection, recurrence keys (`class:<id>`), the producer
+  brief's class summaries, the recurrence evidence label, default proposals, and `athena review --class`, which
+  refuses a merge record's id and a retired id. `Athena::merge_classes(from, into)` writes the record and refuses
+  a self-merge, an unknown id, a merge record, and an already-retired class. In a merge record, `proposed_by` is the
+  retired class's value and does not mean an introspection proposed the merge. The existing records, including
+  the 158 classes, are not rewritten by this change.
+- **Alternatives:** Periodic clustering of the registry by a model, or by Jev with pairwise questions: it costs
+  tokens on every sweep, gives different answers on different runs, can merge unlike causes, has no measured
+  threshold, and section 13 of the design lists Jev pairwise merging as not decided; it can follow later and
+  would write the same merge record. A manual-only merge with no creation check: the merge path alone leaves the
+  fault where it starts, so every new duplicate would need a person to find and merge it, and the count would keep
+  climbing. Rewrite the retired class's record with the new status: the gate refuses a modified file under
+  `records/` (append-only, D06), and the history of what the class was would be lost. A new record kind for
+  merges: more surface (a record-kind arm, a path, a schema, docs) for no gain over a status of the class record.
+  A mutable alias file in the repository: section 3.4 says the registry is a record store, not a file Athena edits.
+  Match on description or word overlap: no measured threshold, and it risks merging unlike causes; equality after
+  normalising is a rule that can be tested. An instruction in the prompt not to duplicate: prose only, and the
+  prompt has no token headroom. Change only the introspection step: it leaves the review command as a second
+  place that mints duplicates.
+- **Tradeoff:** The creation rule is narrow on purpose. It catches names equal after normalising; a model that
+  words one cause differently each time still creates a new class, so the 158-class problem is not claimed to be
+  fixed, and the share of duplicates the rule would have prevented is not measured (the records are not in the
+  working copy). Differently worded duplicates need a merge record. Today nothing but `Athena::merge_classes`
+  writes one, and no command calls it; a user command, a backtest that counts name collisions over the records
+  branch, merging the existing classes and model clustering are design, not built. Two introspections that run at
+  once both read the registry before either commits, so they can still create the same new class; that rare
+  duplicate is left for a merge record. A request queued for a class before it was merged names the retired id
+  and name; Hestia's `mentions` matches the target's id and name only, so a request that cites only the retired
+  id is not matched by text (a request that cites an introspection id is still matched, and those ids stay in the
+  merged group). `ClassStatus` loses `Copy` and gains a data variant; a build older than this change cannot parse a
+  merge record, and no code path writes one before this change has landed.
+- **Reversal cost:** Low to medium. Remove the `Merged` variant, `ClassMerges`, `class_named` and the resolve calls
+  (about a dozen call sites, each a few lines). Merge records already written would then fail to parse and would
+  have to be deleted by hand; none exists until a merge is run.
+- **Provenance:** Read: `crates/athena-core/src/introspect.rs` (`apply_answer`, `read_records`, `normalise`),
+  `crates/athena-core/src/review.rs`, `crates/athena-core/src/hestia.rs` (`class_of`, `cause_key`,
+  `repeated_causes`), `crates/athena-core/src/labeled.rs` (`read_inputs`), `crates/athena-core/src/proposals.rs`,
+  `crates/athena-core/src/evidence_labels.rs`, `crates/athena-context/src/briefs.rs` (`class_summaries`),
+  `crates/athena-data/src/records/introspection.rs`, `docs/design/defaults-loop.md` sections 3.4 and 13, and the
+  job brief's figure of 158 classes. Measured: tests that reuse a class on an equal normalised name, merge a class and
+  count its cases under the target in each reader, round-trip the merge record, and refuse the review cases;
+  `crates/athena-cli/tests/introspection.rs` and `review.rs` run the introspection step and the review command end
+  to end. Not measured: how many existing classes share a normalised name, and how many differently worded duplicates
+  remain.

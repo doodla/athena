@@ -505,3 +505,68 @@ fn errors_write_nothing() {
         "names 3 introspections",
     );
 }
+
+#[test]
+fn review_refuses_a_merge_record_and_a_retired_class_and_a_renamed_duplicate() {
+    let fx = fixture();
+    // OTHER is merged into CLASS by a merge record.
+    let class = |id: &str, name: &str| FailureClass {
+        id: RecordId::parse(id).unwrap(),
+        at: at(0),
+        name: name.into(),
+        description: "A class.".into(),
+        status: ClassStatus::Proposed,
+        proposed_by: rid(0, 1),
+    };
+    let merge = class(OTHER, "Missing test").merged_into_class(
+        &class(CLASS, "Field with no use"),
+        rid(10, 7),
+        at(10),
+    );
+    commit(&fx, &[AnyRecord::FailureClass(merge.clone())]);
+    assert_eq!(read_inputs(fx.root()).unwrap().classes.len(), 1);
+    let merge_id = merge.id.to_string();
+
+    // Each is refused, writes nothing, and names the live class.
+    let refuse = |args: &[&str], needle: &str| {
+        let head = fx.head();
+        let out = athena(&fx, args);
+        assert!(!out.status.success(), "{args:?} succeeded");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(needle), "{needle:?} not in {stderr}");
+        assert_eq!(fx.head(), head);
+        assert!(labels(&fx).is_empty());
+    };
+    refuse(
+        &["review", &id(1), "--class", &merge_id],
+        "is a merge record, not a class",
+    );
+    refuse(
+        &["review", &id(1), "--class", OTHER],
+        &format!("was merged into {CLASS}; use --class {CLASS}"),
+    );
+    // The same name in other case and punctuation, and the retired class's own name, both point at the live one.
+    for name in ["field WITH no use!", "Missing  test"] {
+        refuse(
+            &["review", &id(1), "--new-class", name, "--description", "d"],
+            &format!("use --class {CLASS}"),
+        );
+    }
+
+    // Controls: the live class and a differently worded new class are accepted.
+    let out = athena(&fx, &["review", &id(1), "--class", CLASS, "--json"]);
+    assert_eq!(json(&out)["label"]["class"], CLASS);
+    let out = athena(
+        &fx,
+        &[
+            "review",
+            &id(3),
+            "--new-class",
+            "Stale cache",
+            "--description",
+            "A cache outlives its source.",
+            "--json",
+        ],
+    );
+    assert_ne!(json(&out)["label"]["class"], CLASS);
+}

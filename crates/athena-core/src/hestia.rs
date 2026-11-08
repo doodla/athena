@@ -99,9 +99,9 @@ use athena_agent::env::Side;
 use athena_context::briefs::plain_boundary_text;
 use athena_context::{CONTRACT, Component, Composed, compose};
 use athena_data::records::{
-    AnyRecord, BuildMeasurement, HestiaCheckResult, IntrospectionRecord, IntrospectionStatus,
-    Invocation, InvocationOutcome, OutcomeState, PreventionKind, Role, ThroughputFollowup,
-    ThroughputProposal, ThroughputReview, ThroughputTrigger, WasteFigures,
+    AnyRecord, BuildMeasurement, ClassMerges, HestiaCheckResult, IntrospectionRecord,
+    IntrospectionStatus, Invocation, InvocationOutcome, OutcomeState, PreventionKind, Role,
+    ThroughputFollowup, ThroughputProposal, ThroughputReview, ThroughputTrigger, WasteFigures,
 };
 use athena_data::{JobId, RecordId};
 use jiff::Timestamp;
@@ -247,12 +247,19 @@ impl RepeatedCause {
 }
 
 /// The failure class an introspection belongs to: the class its record names when the class registry holds
-/// it, else the class Jev chose when that is a registry class (`new` and unknown ids are not).
-fn class_of(records: &Records, i: &IntrospectionRecord) -> Option<RecordId> {
-    let known = |id: &RecordId| records.classes.iter().any(|c| &c.id == id);
-    i.failure_class.clone().filter(known).or_else(|| {
+/// it, else the class Jev chose when that is a registry class (`new` and unknown ids are not). A class that was
+/// merged into another is the other (`merges`), so a cause recorded under either class has one key.
+fn class_of(records: &Records, merges: &ClassMerges, i: &IntrospectionRecord) -> Option<RecordId> {
+    let live = |id: &RecordId| {
+        records
+            .classes
+            .iter()
+            .any(|c| &c.id == id && !c.is_merge())
+            .then(|| merges.resolve(id))
+    };
+    i.failure_class.as_ref().and_then(live).or_else(|| {
         let choice = i.jev.as_ref()?.class.as_ref()?.choice.as_str();
-        RecordId::parse(choice).ok().filter(known)
+        RecordId::parse(choice).ok().as_ref().and_then(live)
     })
 }
 
@@ -273,6 +280,15 @@ fn one_line(text: &str) -> String {
 /// removing a gate. The last is a challenge to a check, reviewed apart from the root-cause requests
 /// ([`Athena::gate_review`]); in a cause group it would hide a code-check of the same cause from the backfill.
 pub fn cause_key(records: &Records, i: &IntrospectionRecord) -> Option<String> {
+    cause_key_with(records, &ClassMerges::of(&records.classes), i)
+}
+
+/// [`cause_key`] with the class merges already folded, for a caller that keys many introspections.
+fn cause_key_with(
+    records: &Records,
+    merges: &ClassMerges,
+    i: &IntrospectionRecord,
+) -> Option<String> {
     let cause = i.cause.as_deref()?;
     if i.status != IntrospectionStatus::Recorded
         || i.job.is_none()
@@ -280,7 +296,7 @@ pub fn cause_key(records: &Records, i: &IntrospectionRecord) -> Option<String> {
     {
         return None;
     }
-    if let Some(class) = class_of(records, i) {
+    if let Some(class) = class_of(records, merges, i) {
         return Some(format!("class:{class}"));
     }
     let text = crate::introspect::normalise(cause);
@@ -358,9 +374,10 @@ fn closed_by_person(job: &JobRecords) -> bool {
 /// The causes that occurred in [`REPEAT_JOBS`] or more distinct jobs, with their introspections and the
 /// request that addresses each. Ordered by the time of the earliest introspection of each cause.
 pub fn repeated_causes(records: &Records) -> Vec<RepeatedCause> {
+    let merges = ClassMerges::of(&records.classes);
     let mut groups: Vec<(String, Vec<&IntrospectionRecord>)> = Vec::new();
     for i in &records.introspections {
-        let Some(key) = cause_key(records, i) else {
+        let Some(key) = cause_key_with(records, &merges, i) else {
             continue;
         };
         match groups.iter_mut().find(|(k, _)| *k == key) {
@@ -381,7 +398,7 @@ pub fn repeated_causes(records: &Records) -> Vec<RepeatedCause> {
                 return None;
             }
             let introspections: Vec<String> = members.iter().map(|i| i.id.to_string()).collect();
-            let class = class_of(records, members[0]).map(|id| {
+            let class = class_of(records, &merges, members[0]).map(|id| {
                 let name = records
                     .classes
                     .iter()
@@ -3932,6 +3949,59 @@ mod tests {
         let other = introspection(40, 'g', Some(&unlisted), "The brief omits file names.");
         put_introspection(dir.path(), &athena, &other);
         assert_eq!(athena.error_review(&other, &crate::Quiet), None);
+    }
+
+    #[test]
+    fn a_cause_in_a_merged_class_is_one_repeated_cause_with_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let a = class(1, "Reading ignores the earlier verdict");
+        let b = class(3, "The earlier verdict is not read");
+        put(
+            dir.path(),
+            &athena,
+            vec![
+                AnyRecord::FailureClass(a.clone()),
+                AnyRecord::FailureClass(b.clone()),
+            ],
+        );
+        put_introspection(
+            dir.path(),
+            &athena,
+            &introspection(10, 'a', Some(&a.id), "The verdict is not read."),
+        );
+        put_introspection(
+            dir.path(),
+            &athena,
+            &introspection(11, 'b', Some(&b.id), "Nobody loads the verdict."),
+        );
+        // Two classes, one job each: no cause repeats.
+        assert!(repeated_causes(&records(&athena)).is_empty());
+
+        let merge = b.merged_into_class(&a, rec_id(20), at(20));
+        put(
+            dir.path(),
+            &athena,
+            vec![AnyRecord::FailureClass(merge.clone())],
+        );
+        let known = records(&athena);
+        let key = format!("class:{}", a.id);
+        for i in &known.introspections {
+            assert_eq!(cause_key(&known, i), Some(key.clone()));
+        }
+        let causes = repeated_causes(&known);
+        assert_eq!(causes.len(), 1, "{causes:?}");
+        assert_eq!(causes[0].jobs.len(), 2);
+        assert_eq!(causes[0].key, key);
+        assert_eq!(
+            causes[0].class.as_deref(),
+            Some(format!("{} ({})", a.name, a.id).as_str())
+        );
+        // A merge record is no class an introspection can be placed in.
+        let mut in_merge = introspection(12, 'c', Some(&merge.id), "Another cause entirely.");
+        in_merge.jev = None;
+        assert!(cause_key(&known, &in_merge).is_some_and(|k| k.starts_with("cause:")));
     }
 
     #[test]

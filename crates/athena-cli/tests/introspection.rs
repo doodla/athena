@@ -1008,6 +1008,184 @@ fn an_earlier_case_is_matched_ids_not_passed_in_are_dropped_and_only_listed_fiel
     );
 }
 
+/// The model answers `new` with a class of this name.
+fn say_new_class(model: &Model, name: &'static str, what: &'static str, cause: &'static str) {
+    model.say_with(move |_| {
+        let mut answer = reply("new", what, cause);
+        answer["new_class"]["name"] = json!(name);
+        answer
+    });
+}
+
+#[test]
+fn a_new_class_named_like_a_live_class_reuses_it() {
+    let model = Model::default();
+    say_new_class(
+        &model,
+        "Check removes a file the repository needs",
+        "The user edited the README by hand.",
+        "The reading left out a file the user cared about.",
+    );
+    // The same name in other case and punctuation, then a name that differs in a word.
+    say_new_class(
+        &model,
+        "check REMOVES a file, the repository needs!",
+        "The user edited the README by hand again.",
+        "The reading ignores the last edit.",
+    );
+    say_new_class(
+        &model,
+        "Check removes a file the repository reads",
+        "The user edited the README a third time.",
+        "The reading never learns from edits.",
+    );
+    let (fx, athena) = setup(Scenario::default(), &model);
+    intervene(&athena, "Edited the README by hand");
+    let after_first = fx.head();
+    intervene(&athena, "Edited the README by hand once more");
+
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let [first, second] = records.introspections.as_slice() else {
+        panic!("two introspections")
+    };
+    assert_eq!(second.status, IntrospectionStatus::Recorded);
+    assert_eq!(
+        records.classes.len(),
+        1,
+        "the second reused the first's class"
+    );
+    assert_eq!(second.failure_class, first.failure_class);
+    assert!(first.new_class && !second.new_class);
+    // The second event added no class record: only its own records changed.
+    let changed = fx
+        .git
+        .run(["diff", "--name-only", &after_first, &fx.head()])
+        .unwrap();
+    assert!(!changed.contains("records/failure-classes/"), "{changed}");
+    assert!(changed.contains("records/introspections/"), "{changed}");
+
+    // Control: a name that differs in a word is a new class.
+    intervene(&athena, "Edited the README by hand a third time");
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.classes.len(), 2);
+    assert!(records.introspections[2].new_class);
+}
+
+#[test]
+fn merging_a_class_counts_its_cases_under_the_target() {
+    let model = Model::default();
+    say_new_class(
+        &model,
+        "Check removes a file the repository needs",
+        "The user edited the README by hand.",
+        "The reading left out a file the user cared about.",
+    );
+    say_new_class(
+        &model,
+        "A deleted file breaks the checks",
+        "The user edited the README by hand again.",
+        "The reading ignores the last edit.",
+    );
+    // The third event names the one class it is shown and cites every earlier case it is shown.
+    model.say_with(|prompt| {
+        let class = prompt["class_registry"][0]["id"].as_str().unwrap();
+        let mut answer = reply(
+            class,
+            "The user edited the README a third time.",
+            "The reading never learns from edits.",
+        );
+        let cases: Vec<Value> = prompt["earlier_cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].clone())
+            .collect();
+        answer["earlier_cases"] = Value::Array(cases);
+        answer
+    });
+    let (fx, athena) = setup(Scenario::default(), &model);
+    intervene(&athena, "Edited the README by hand");
+    intervene(&athena, "Edited the README by hand once more");
+    let known = Records::load(&fx.git, &fx.head()).unwrap();
+    let [first, second] = known.introspections.as_slice() else {
+        panic!("two introspections")
+    };
+    let (a, b) = (
+        first.failure_class.clone().unwrap(),
+        second.failure_class.clone().unwrap(),
+    );
+    assert_ne!(a, b);
+    assert_eq!(known.classes.len(), 2);
+
+    // The merge is refused for itself, an unknown id, a retired class and a merge record.
+    assert!(athena.merge_classes(&a, &a).is_err());
+    let unknown = RecordId::parse("20260101-000000-zzzz").unwrap();
+    assert!(athena.merge_classes(&unknown, &a).is_err());
+    assert!(athena.merge_classes(&b, &unknown).is_err());
+    let before = fx.head();
+    let merge = athena.merge_classes(&b, &a).unwrap();
+    assert_eq!(merge.merge_target(), Some(&a));
+    assert_ne!(fx.head(), before);
+    assert!(
+        athena.merge_classes(&b, &a).is_err(),
+        "b is already retired"
+    );
+    assert!(
+        athena.merge_classes(&a, &b).is_err(),
+        "b is retired, so not a target"
+    );
+    assert!(
+        athena.merge_classes(&merge.id, &a).is_err(),
+        "a merge record is no class"
+    );
+    assert!(athena.merge_classes(&a, &merge.id).is_err());
+
+    // Nothing was rewritten: the merge is one new record under records/failure-classes.
+    let changed = fx
+        .git
+        .run(["diff", "--name-status", &before, "HEAD"])
+        .unwrap();
+    let lines: Vec<&str> = changed.lines().collect();
+    assert_eq!(lines.len(), 1, "{changed}");
+    assert!(
+        lines[0].starts_with("A\t") && lines[0].contains("records/failure-classes/"),
+        "{changed}"
+    );
+    let known = Records::load(&fx.git, &fx.head()).unwrap();
+    let merges = athena_data::records::ClassMerges::of(&known.classes);
+    assert_eq!(
+        merges.live_classes(&known.classes).len(),
+        1,
+        "the live count fell by one"
+    );
+    assert_eq!(merges.resolve(&b), a);
+
+    // A third event is shown one class and both cases, which sit under it, and keeps both.
+    intervene(&athena, "Edited the README by hand a third time");
+    let prompts = model.prompts.lock().unwrap();
+    let prompt = &prompts[2];
+    assert_eq!(prompt["class_registry"].as_array().unwrap().len(), 1);
+    assert_eq!(prompt["class_registry"][0]["id"], a.as_str());
+    let shown = prompt["earlier_cases"].as_array().unwrap();
+    assert_eq!(shown.len(), 2);
+    assert!(
+        shown.iter().all(|c| c["failure_class"] == a.as_str()),
+        "{shown:?}"
+    );
+    let records = introspections(&fx);
+    let third = &records[2];
+    assert_eq!(
+        third.status,
+        IntrospectionStatus::Recorded,
+        "{:?}",
+        third.failure
+    );
+    assert_eq!(third.failure_class.as_ref(), Some(&a));
+    assert_eq!(third.earlier_cases.len(), 2);
+    assert!(third.dropped_ids.is_empty(), "{:?}", third.dropped_ids);
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
 #[test]
 fn a_cause_that_restates_the_event_is_flagged_and_the_record_rated_failed() {
     let model = Model::default();
