@@ -660,6 +660,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Landing now refuses, with a clear error, when the working copy is off its branch. Root cause: nothing asked
+  before landing whether the working copy was on a branch, so a hand command that detached HEAD in the drain's
+  working copy made two landings fail as a missing verification (a stale outcome committed onto the detached
+  commit, or `job has no verification` from the pull-request step), and the drain stopped
+  (introspection 20261029-045649-k845). `land::refuse_detached` now runs in `Athena::land_or_block` before any
+  score, closing commit or stale outcome is built, and the drain's landing step (`RealSteps::land`) runs it
+  before the lander, reading the expected branch from the job record (`land::dispatched_from`). The error names
+  the detached commit and the dispatch branch and says nothing landed. The drain step also refuses a different
+  checked-out branch, naming both. A different branch inside `land_or_block` keeps its stale outcome.
 - Attribution checkpoints are now pushed to the remote `athena/records` branch. `athena check --attribution` on
   main and `athena land` wrote the checkpoint commit to the local records branch only, and the next write to
   the records branch (a landing, which first resets the local branch to the remote tip) dropped it, so CI never

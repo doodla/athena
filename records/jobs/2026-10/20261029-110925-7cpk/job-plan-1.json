@@ -1,0 +1,261 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261029-110925-7cpk",
+  "round": 1,
+  "at": "2026-11-08T22:44:29.539797024Z",
+  "invocation_seq": 2,
+  "approach": "Add one shared precondition in `crates/athena-core/src/land.rs`: `refuse_detached(git, &Dispatched)`, which bails when `Git::current_branch()` is `None`. The message names the detached commit (12-char sha) and the expected branch from the job's `dispatch_branch`, says \"nothing landed\", and has no \"verification\" wording. Call it in two places. (1) `Athena::land_or_block` in `run/close.rs`, right after the repository lock and before the attempt loop, so no score, closing commit or stale outcome is built for a detached HEAD. (2) `RealSteps::land` in `crates/athena-cli/src/drain.rs`, before `self.lander.land`. This is the drain's PR landing step. Its `land_pr` loads records at a detached HEAD, can fail with \"job has no verification; it cannot be landed\" (gh/landing.rs:855), and is where the reported misleading error most likely arose. The drain step also refuses a different checked-out branch with a message naming both branches, because nothing else catches that there. `land_or_block` keeps its existing `Plan::OtherBranch` handling for a different branch (stale outcome or bail), so existing tests keep their meaning. To find the expected branch when the detached HEAD lacks the job's records, add `dispatched_from(git, head, id)` in land.rs. It reads `dispatch_branch` from the records at HEAD. If HEAD lacks the job, it reads `job.json` from the first local branch (`for-each-ref refs/heads`) whose tip holds it. If none holds it, the result is `Dispatched::Unknown`, which still refuses a detached HEAD but names no branch. `gh/landing.rs`, stale rules, merge-tree and fingerprint are untouched. Tests: a lifecycle test detaches HEAD in the existing `Scenario.during_verification` hook and calls `athena.go`. A drain test calls `RealSteps::land` with a recording lander. Land.rs gets unit tests for the helper. CHANGELOG.md gets an Unreleased/Fixed line with the root cause.",
+  "decisions": [
+    {
+      "choice": "Fix at the landing precondition with a shared helper in land.rs, called from land_or_block and from RealSteps::land, instead of editing plan() or the OtherBranch mapping.",
+      "reason": "The fault starts where landing proceeds without asking whether the working copy is on a branch. In land_or_block a detached HEAD becomes a recorded stale outcome committed onto the detached HEAD (holds_job is true when HEAD is at the tip), or a generic bail. In the drain's PR step it becomes `job has no verification` (gh/landing.rs:855) when records are read at a detached HEAD. A check before either step fixes both with one message.",
+      "rejected": [
+        {
+          "option": "Change Plan::OtherBranch handling so detached HEAD returns an error from plan()",
+          "why": "plan() runs inside the attempt loop after the score is built, and it is also used by retry_landing. The brief wants the refusal before any closing commit or stale outcome is built."
+        },
+        {
+          "option": "Edit gh/landing.rs land_pr to check the branch",
+          "why": "The brief lists the --pr landing path as out of scope. The drain-side check sits in drain.rs before land_pr is called."
+        }
+      ]
+    },
+    {
+      "choice": "In land_or_block refuse only a detached HEAD, and leave a different checked-out branch to plan()'s existing OtherBranch path.",
+      "reason": "The request and criteria are about the detached case. The tests a_job_finished_on_a_branch_with_its_records_goes_stale and a_job_finished_on_a_branch_without_its_records_changes_nothing pin the current outcomes for another branch (a stale record or a bail naming `main` and `other`). The message there already names both branches.",
+      "rejected": [
+        {
+          "option": "Make every off-branch state a hard bail in land_or_block",
+          "why": "It changes the stale outcome those tests assert and is a behavior change beyond the request."
+        }
+      ]
+    },
+    {
+      "choice": "The drain step refuses both a detached HEAD and a different branch before calling the lander.",
+      "reason": "There is no stale-outcome path at that step. A landing commit made on the dispatch branch cannot be found by land_pr's landed_commit_for(HEAD) from any other checkout. The check turns that into a clear error naming the actual HEAD state and the expected branch.",
+      "rejected": [
+        {
+          "option": "Check only detached HEAD in the drain too",
+          "why": "The request says the branch must match the drain branch. A different branch at that step gives the same confusing downstream error."
+        }
+      ]
+    },
+    {
+      "choice": "Do not add a field to RealSteps or Athena. Derive the expected branch from the job record (dispatch_branch), with a fallback scan of local branches for the job's job.json.",
+      "reason": "More than 30 tests build `RealSteps { .. }` literals (tests/drain.rs, job_plan.rs:173, focus.rs:159), so a new field would break them all. No separate drain-branch setting exists in the code I read. The job's dispatch branch is the branch the drain works on.",
+      "rejected": [
+        {
+          "option": "Capture the branch at drain start in RealSteps::live",
+          "why": "It needs a new field, which breaks every struct-literal test and makes the check depend on how the steps were built."
+        },
+        {
+          "option": "Read only records at HEAD",
+          "why": "A HEAD detached on an older commit lacks the job's records, which is the incident's shape. The expected branch would then be unnamed."
+        }
+      ]
+    },
+    {
+      "choice": "A detached HEAD is refused for every dispatch kind: Branch, Detached, and Unknown (old records). The message names the expected branch when one is recorded and says 'a checked-out branch' otherwise.",
+      "reason": "The request says HEAD must not be detached. A job dispatched on a detached HEAD already never lands (it became a stale outcome); it now stops with a clear error instead. No existing test lands from a detached HEAD (grep of crates for --detach found only reconcile and land.rs plan() tests).",
+      "rejected": [
+        {
+          "option": "Skip the check for Dispatched::Detached and Unknown",
+          "why": "Leaves the commit-onto-detached-HEAD path open for those jobs."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Add pub fn refuse_detached(git, &Dispatched) -> Result<()> and pub fn dispatched_from(git, head, id) -> Result<Dispatched> (record at HEAD, else local-branch scan). Update the module doc with the working-copy precondition. Add unit tests for detached/branch/unknown and the fallback.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "purpose": "In land_or_block, call crate::land::refuse_detached(&self.git, &dispatched)? after lock_repository and the dispatched computation, before the `for _attempt` loop. Import the helper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "In RealSteps::land, before self.lander.land, compute the expected branch with athena_core::land::dispatched_from and refuse a detached HEAD (refuse_detached) or a different branch, returning Landing::NotLanded(message) and removing the table row as the existing path does.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Add a_detached_head_at_landing_is_refused_naming_the_head_and_the_branch (detach in during_verification; Err with 'detached' and `main`; tip unchanged; no landing; job interrupted) and a_job_lands_when_head_is_on_the_dispatch_branch.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the_drain_step_refuses_to_land_from_a_detached_head and the_drain_step_lands_from_the_dispatch_branch, using RealSteps::land with RecordingLander after athena.go; add a case for a different branch.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One Fixed entry under [Unreleased] naming the root cause: landing did not check the working copy was on the branch before proceeding, so a detached HEAD surfaced as a missing verification or a stale outcome.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "land.rs: add `refuse_detached(git: &Git, expected: &Dispatched) -> Result<()>`. Call git.current_branch()?; on None read `git.head()?`, take the first 12 chars, and bail with `the working copy's HEAD is detached at <sha>; landing needs branch `<name>` checked out (the job's dispatch branch); nothing landed. Check it out, then run again`. For Dispatched::Detached or Unknown, say 'a checked-out branch' instead of the name. Avoid the word 'verification'. Add `dispatched_from(git, head, id: &JobId) -> Result<Dispatched>`: Records::load(git, head), take jobs.get(id).and_then(|j| j.job).dispatch_branch; if absent, run `git.run([\"for-each-ref\",\"--format=%(refname:short)\",\"refs/heads\"])`, and for each branch read `git.show_file(branch, &format!(\"{}/job.json\", id.dir()))`, parse with AnyRecord::parse and take its dispatch_branch (as lifecycle.rs:1835 does); otherwise Dispatched::Unknown. Update the module doc.",
+    "land.rs tests: with base_and_candidate(), assert refuse_detached is Ok on main, and on a detached HEAD is Err containing 'detached', the short sha and `main` (Branch), and 'a checked-out branch' (Detached/Unknown), and never contains 'verification'. Add a test for the dispatched_from fallback using a committed job record, or reuse the store fixtures the file uses, if a job.json is easy to build there; otherwise cover the fallback via the drain test.",
+    "close.rs: in land_or_block, right after `let dispatched = ...`, add `crate::land::refuse_detached(&self.git, &dispatched)?;` before the for loop, with a comment on why it precedes any record or commit (a stale outcome would otherwise be committed on the detached HEAD).",
+    "drain.rs RealSteps::land: after the Stage::Landing table entry and before `self.lander.land`, run the check. Get head via self.athena.head(), parse JobId, call dispatched_from, then refuse_detached; if Dispatched::Branch(name) and current_branch is Some(other) != name, build a message naming both branches. On a refusal, remove the table row (`self.table_result(self.table().remove(job))`) and return Landing::NotLanded(message). On an Err from the check itself, return NotLanded with the error text. Keep the rest of the function unchanged.",
+    "lifecycle.rs: add the detach hook (clone of switch_to_new_branch_during_verification, using `checkout -q --detach` and recording the tip) and the two tests. The negative test asserts: Err with 'detached', 'main' in backticks and no 'verification'; `git rev-parse main` and fx.head() equal the tip; README.md lacks 'Hello, reader.'; athena.status() lists the job as interrupted after checking out main again. The positive test asserts Landed, the tip advanced from the pre-go tip, the branch is main, and README.md has the greeting.",
+    "tests/drain.rs: add the two RealSteps::land tests. Build the fixture and scenario as the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page does (rated_scenario, queue_steward_request). Run athena.go through RealSteps::run or athena.go so the job lands locally, detach with `git checkout -q --detach`, and call steps.land(job): expect NotLanded with 'detached' and `main`, and an empty RecordingLander log. Then `git checkout -q main` and steps.land(job) returns Landed with one lander call.",
+    "CHANGELOG.md: add a Fixed entry (create the ### Fixed heading under [Unreleased] if absent) with the root cause, the failed job and the introspection record id 20261029-045649-k845, and the two places the check sits.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; also run `cargo test --locked -p athena-core` and `cargo test --locked -p athena-cli` to see the lifecycle, drain and land tests directly."
+  ],
+  "risks": [
+    {
+      "risk": "The drain-side guard changes what the drain does for a job dispatched on a detached HEAD or an old record whose dispatch branch is unknown. The unknown case still lands from a branch.",
+      "mitigation": "A detached HEAD is refused in all cases, as the request says. Unknown or Detached dispatch only refuses a detached HEAD and checks no branch. The behavior is limited to the refusal and mentioned in the CHANGELOG. No existing test lands from a detached HEAD (grep for --detach found only the reconcile fixtures and plan() unit tests)."
+    },
+    {
+      "risk": "The detach hook may leave verification or an earlier step failing on a detached HEAD before land_or_block, so the test does not reach the new guard.",
+      "mitigation": "The existing other-branch test uses the same hook point and reaches land_or_block. The test asserts the error text names 'detached' and `main`, so any earlier failure with a different message makes it fail rather than pass silently. If an earlier step fails, move the detach to a hook just before landing."
+    },
+    {
+      "risk": "The fallback branch scan in dispatched_from could name the wrong branch when several local branches hold the job's record (as `other` did in the existing test).",
+      "mitigation": "Prefer the record at HEAD; the scan runs only when HEAD lacks the job. Sort the branch names and take the one whose job.json carries a non-empty dispatch_branch. The recorded dispatch_branch, not the scanned branch's own name, is what is reported."
+    },
+    {
+      "risk": "Read cost and failure: the drain guard loads Records at HEAD again (RealSteps::records already does this per landing) and a git error could block landing.",
+      "mitigation": "The load already happens for each landing (`records()` right after). An Err from the check becomes NotLanded with the error text. It does not panic, and the drain's usual retry and stop policy applies."
+    },
+    {
+      "risk": "The CHANGELOG.md or a doc test could fail a convention check (a heading or line-length scan).",
+      "mitigation": "Follow the existing entry layout (hanging two-space lines); the verifier runs the full `cargo test --locked`, which includes xtask policy tests."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "land_or_block precondition (new early bail on detached HEAD)",
+      "dependent": "crates/athena-core/src/run/close.rs land_or_block (called from the closing path at close.rs:118; reached by Athena::go via go_job's Dispatched branch, by athena retry and by RealSteps::run in the drain, including the concurrent drain_concurrent path, which lands under lock_repository)",
+      "kind": "code",
+      "test": "New lifecycle tests a_detached_head_at_landing_is_refused_naming_the_head_and_the_branch and a_job_lands_when_head_is_on_the_dispatch_branch. The existing lifecycle tests where HEAD stays on a branch (the Landed test at lifecycle.rs:~1780, the other-branch stale test at 1874) must pass unchanged.",
+      "reason": null
+    },
+    {
+      "name": "plan() branch rule and Plan::OtherBranch outcomes",
+      "dependent": "crates/athena-core/src/land.rs plan() and Plan::OtherBranch (land.rs:77-103) and its tests at land.rs:629-698",
+      "kind": "code",
+      "test": "land.rs tests a_job_dispatched_elsewhere_is_refused_on_another_branch, a_branch_job_finished_on_a_detached_head_is_refused and a_job_dispatched_on_a_detached_head_never_lands, unchanged.",
+      "reason": "plan() is not edited. The helper runs before it and fires only when current_branch() is None; a different branch still reaches plan() and gets the same stale outcome or bail."
+    },
+    {
+      "name": "retry of a blocked landing",
+      "dependent": "crates/athena-core/src/run/close.rs retry_landing (close.rs:458-599), reached by `athena go` on a blocked job",
+      "kind": "code",
+      "test": "Existing lifecycle test a_blocked_job_will_not_retry_on_another_branch (lifecycle.rs:1978), unchanged.",
+      "reason": "Not changed. A detached HEAD there already bails 'job {id} can no longer land: ... HEAD is detached' via Plan::OtherBranch, which names the branch and states the HEAD. It writes nothing and does not read as a missing verification."
+    },
+    {
+      "name": "PR landing path (out of scope)",
+      "dependent": "crates/athena-core/src/gh/landing.rs land_pr (called by PrLander::land at drain.rs:3256 and by `athena land --pr`)",
+      "kind": "code",
+      "test": null,
+      "reason": "Not edited. The drain guard runs before it, so a detached HEAD never reaches its 'has no verification' message (gh/landing.rs:855). `athena land --pr` by hand is unchanged by request."
+    },
+    {
+      "name": "drain landing step: new NotLanded(reason) for an off-branch working copy",
+      "dependent": "crates/athena-cli/src/drain.rs RealSteps::land (drain.rs:4418), and Drain::land (drain.rs:1784) that maps Landing::NotLanded to a failed attempt and a 'not landed' line",
+      "kind": "code",
+      "test": "New tests/drain.rs tests the_drain_step_refuses_to_land_from_a_detached_head and the_drain_step_lands_from_the_dispatch_branch; the existing the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page (tests/drain.rs:2337) must pass unchanged with HEAD on main.",
+      "reason": "The drain already handles any NotLanded text by printing 'drain <job> not landed: <why>' and counting the attempt as failed, so the stop and retry policy is unchanged (out of scope). The reason text now names the HEAD state and expected branch."
+    },
+    {
+      "name": "RealSteps struct shape and Lander trait",
+      "dependent": "Tests that build `RealSteps { .. }` literals: crates/athena-cli/tests/drain.rs (about 30 sites), job_plan.rs:173, focus.rs:159; Lander impls RecordingLander (tests/drain.rs:2291) and ConfigLander (3280); Steps fakes in drain.rs unit tests (4694, 6052, 6947)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli (whole crate), part of the criterion 4 command.",
+      "reason": "No field is added to RealSteps and Lander's signature is unchanged, so these compile as before. The fakes in drain.rs unit tests implement Steps, not RealSteps, so they never reach the new guard. The tests that call RealSteps::land run with HEAD on main, so the guard passes."
+    },
+    {
+      "name": "Job.dispatch_branch record field (read only)",
+      "dependent": "crates/athena-core/src/run/mod.rs:1241 (writes dispatch_branch at dispatch) and crates/athena-data/src/records.rs:633 (the field)",
+      "kind": "code",
+      "test": "land.rs test the_dispatch_branch_is_read_from_the_record (exists); new unit test for dispatched_from falling back to the local branch that holds the job.",
+      "reason": "Only read by the new helper through Dispatched::from_record and dispatched_from. No record or schema changes, so the records allow-list and AnyRecord are untouched."
+    },
+    {
+      "name": "Landing rules and host merge rules",
+      "dependent": "docs/system-facts.md and the Land fact; docs/design (landing docs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No fact there describes the working-copy branch check. The change adds no admission or gate check, no config key, no check name and no host setting. The CI checks (fmt, clippy, test) are unchanged."
+    },
+    {
+      "name": "Refusal and matching rules over request text",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not touched: the change is a git branch check, not a parser, stem list, stop list or reading check, so no input form maps to a corpus case."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "lifecycle.rs test: Fixture::new(); a Scenario whose during_verification hook runs `git checkout -q --detach` via athena_git::Git::at(root) (as switch_to_new_branch_during_verification does for branches) and records main's tip. Call athena.ask, then athena.go. Expect Err whose `{error:#}` contains 'detached', the 12-char sha and '`main`', and not 'verification'. Then assert `git rev-parse main` equals the recorded tip, fx.head() equals the recorded tip, the git log from the tip has no commit with an 'Athena-Job' landing and README.md lacks 'Hello, reader.'. A twin test in tests/drain.rs, the_drain_step_refuses_to_land_from_a_detached_head, runs athena.go on main, detaches HEAD, calls RealSteps::land(job) with a RecordingLander and expects Landing::NotLanded whose text names the detached HEAD and `main`, with the lander never called.",
+      "command": "cargo test --locked -p athena-cli --test lifecycle a_detached_head_at_landing_is_refused_naming_the_head_and_the_branch",
+      "observes": "The error text names the detached HEAD and the expected branch. The branch tip is unchanged, nothing is committed, and the drain step's lander is not reached.",
+      "fails_without": "Without refuse_detached in land_or_block, go does not return an error. It records a stale outcome on the detached HEAD (the job's records are at the detached commit). The assertions that go errors with 'detached' and `main`, that the HEAD commit is unchanged and that no landing commit exists all fail. A second test on RealSteps::land fails the same way: the recording lander is called, or land_pr reports no verification.",
+      "seam": "Production entry points: Athena::go -> land_or_block (close.rs) and Steps::land on RealSteps (drain.rs). Seam: Scenario.during_verification in tests/common/mod.rs:428 (exists; used at lifecycle.rs:1782 and 1858) injects the git detach. In tests/drain.rs the injected fake is RecordingLander (exists, tests/drain.rs:2289), passed via `RealSteps { lander: &lander, .. }`. Real git and the real landing code run; the double only records calls. The new tests are added in plan steps 5 and 6."
+    },
+    {
+      "criterion": 2,
+      "method": "lifecycle.rs: same fixture without the detach hook; athena.go returns Finished with state Landed, the branch tip advanced past the pre-go tip (rev-parse main differs, parent is the old tip), HEAD is still on `main`, README.md contains 'Hello, reader.', and the landed commit is on main. drain.rs: with HEAD on main, RealSteps::land(job) calls the RecordingLander once and returns Landing::Landed.",
+      "command": "cargo test --locked -p athena-cli --test lifecycle a_job_lands_when_head_is_on_the_dispatch_branch && cargo test --locked -p athena-cli --test drain the_drain_step_lands_from_the_dispatch_branch",
+      "observes": "Landing commit present, tip advanced, branch still main; the lander is reached once.",
+      "fails_without": "If the guard refused too much (for example always, or on any branch), these tests fail because there is no landing commit and the tip does not advance. They pass before and after the change, so they show no regression.",
+      "seam": "Athena::go -> land_or_block and RealSteps::land; Fixture and Scenario in tests/common (exist); RecordingLander (exists, tests/drain.rs:2289). The new tests are added in plan steps 5 and 6."
+    },
+    {
+      "criterion": 3,
+      "method": "land.rs unit tests (`refuse_detached_*`) build a repo with the existing base_and_candidate() fixture, detach HEAD with `git checkout -q --detach`, and call refuse_detached with Dispatched::Branch(\"main\"), Detached and Unknown, asserting the Err text. Also a case on a branch returns Ok. The diff shows the call sits after lock_repository and before `for _attempt in 0..3`, ahead of score_on, build_commit and plan.",
+      "command": "cargo test --locked -p athena-core land::tests::refuse_detached && git diff -- crates/athena-core/src/run/close.rs crates/athena-core/src/land.rs",
+      "observes": "The error is produced without touching the repository's objects or refs. The text contains 'detached' and `main` and no 'verification' wording.",
+      "fails_without": "If the call were placed inside the attempt loop, after score_on or after plan(), or if the message said 'verification', the test's order and wording assertions fail. The unit test asserts the Err text contains 'detached' and the expected branch and does not contain 'verification'. The lifecycle test in criterion 1 asserts that the job has no outcome record afterwards (athena.status() shows it 'interrupted'), which would fail if a stale outcome had been built first.",
+      "seam": "Production function land::refuse_detached (added in step 1) driven with a real temporary git repo from base_and_candidate() (exists in the land.rs test module, used at land.rs:597). No double. Ordering is shown by the diff and the lifecycle 'interrupted' assertion."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three checks Athena runs on the result, over the whole workspace.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "Compile, lint or formatting errors fail it. A regression in land.rs's existing tests (a_branch_job_finished_on_a_detached_head_is_refused, a_job_dispatched_on_a_detached_head_never_lands, the lifecycle other-branch tests) or in the drain tests fails it.",
+      "seam": "Whole-workspace commands; no double."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff: only land.rs (new helper functions plus tests, doc line), run/close.rs (one call), drain.rs (RealSteps::land guard), the tests in lifecycle.rs and tests/drain.rs, and CHANGELOG.md. plan(), Plan, retry_landing and gh/ stay byte-identical.",
+      "command": "git diff --stat",
+      "observes": "Only the files in the deliverables list changed, and only the landing precondition and its tests.",
+      "fails_without": "A diff touching plan()'s stale rules, merge-tree, fingerprint logic or gh/landing.rs would show up in the stat and in `git diff -- crates/athena-core/src/gh`.",
+      "seam": "git diff over the working tree; no double."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the existing other-branch lifecycle tests (stale on `other`; no records on `other` changes nothing; a blocked job will not retry on another branch) and the existing land.rs plan() tests unchanged. The new refusal is limited to current_branch() == None in land_or_block, and to None or a different branch in the drain step. No reading is involved: the rule is a branch check, not a refusal or matching rule over text, so no refusal_corpus case applies.",
+      "command": "cargo test --locked -p athena-cli --test lifecycle a_job_finished_on_a_branch",
+      "observes": "Those tests pass with their assertions unmodified, so their landings still behave as before.",
+      "fails_without": "If the guard were widened to refuse a different checked-out branch inside land_or_block, a_job_finished_on_a_branch_with_its_records_goes_stale would no longer see a stale outcome and would fail. Because the existing tests pass unchanged, the guard narrows landing only for the detached case, plus a different branch at the drain step.",
+      "seam": "Athena::go -> land_or_block with the existing switch_to_new_branch_during_verification hook (lifecycle.rs:1849, exists); no change to it."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "90aa8ec8eb8bd7991884ede7772565d1109d7916df42e5fa702f13ca2da055e6"
+}

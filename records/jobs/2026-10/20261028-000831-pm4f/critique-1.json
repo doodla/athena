@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-000831-pm4f",
+  "round": 1,
+  "at": "2026-11-08T21:14:01.955858008Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The cause is guessed, not read. An in-process error after the dispatch commit leaves a dispatched job with no outcome, and the drain moves past it. The plan neither reads nor fixes that path.",
+      "evidence": "run/mod.rs:1245-1257 commits the job record and brief-producer.md ('committed before any work starts'). After that, `self.plan_round(&ctx, ...)?` (1314) and `produce_and_verify` errors, which pass through `finish_dispatched` (1342-1345, where `close_dispatched` runs only on Ok), return Err with no outcome. Planning-round invocations sit only in the in-memory `Closing`, so no invocation is recorded either. `RealSteps::run` maps Err to `Run { outcome: None, reason: error }` (drain.rs:4395-4408), and the drain counts it and starts the next item. HISTORY.txt also shows e6a2c1e (2026-10-27, 'Rebuild and re-exec Athena after drain lands changes to its own code') on the same day as the six jobs, another candidate the plan does not examine. Step 1 reads neither run/mod.rs 1180-1346 nor run/planning.rs. Fix: Add run/mod.rs 1180-1346, run/planning.rs and drain.rs 3170-3195 / 4363-4410 to step 1, and name the paths that can leave a dispatched job with no outcome. Fix the origin: either close the dispatched job with a stated reason when `dispatch` errors after the Dispatch commit (keeping deliberate holds such as SlotWait, low disk and BudgetShort as holds), or say why that is wrong and leave the sweep as the only fix. Add a real-steps test in which `go` fails after the Dispatch commit and before the producer (for example a failing planner, or a snapshot error). Assert the job ends with an outcome and reason, or is reported held with a reason, in the same drain.",
+      "location": "Approach / Risks ('run/mod.rs is unrelated to the fault'); Step 1 reading list",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Settle says nothing about an interrupted job that has no standing retry. If the drain does not get to work it, the drain still ends past it silently, so criterion 2 is unshown in that case.",
+      "evidence": "`settle_interrupted` returns Close or Hold only for jobs with no request record or with a standing retry. Demo 2(a) asserts that no request job is left Dispatched unless a note names it, but only after test 1(a), where every interrupted job is retried and passes. An interrupted item that the job limit, the budget (`RunStep::Budget`, drain.rs:1630-1634), a stop, or a failed `athena retry` keeps from being worked stays dispatched with no settle line. The second settle call after `sweep` gives nothing for it. Fix: In the final settle after `sweep`, return a Hold line for every remaining dispatched job with no outcome and no process, with its reason (for example 'not worked this run: no room in the job limit', or the retry's read error). Add a real-steps or Stub test in which an interrupted item cannot be worked (max_jobs 0, or a failing retry read) and assert that the report notes name it with a reason.",
+      "location": "Step 3 ('no standing retry gives nothing'); Demonstration for criterion 2(a)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The fixture runs the producer and then rewinds history. It copies the record shape of the six jobs, not the event 'stopped before the producer runs'.",
+      "evidence": "The plan says `interrupt` runs a killing producer script and then resets to before the closing commit (lifecycle.rs:1309-1320). The low-disk hold (`go_with_disk`, tests/drain.rs:2424) is named only as a fallback. Fix: Prefer a seam that really stops the job between the Dispatch commit and the producer: the post-dispatch error from the first finding, or a hold at dispatch. Keep the assertion that the job has no invocation and no outcome before the drain.",
+      "location": "Demonstration for criterion 1 (the `interrupt` helper)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The `re-queued as ` literal is duplicated in steward.rs and hestia.rs, and the pinning test checks only the steward's copy, so a change to hestia's text would go unnoticed.",
+      "evidence": "hestia.rs:342 `const REQUEUE_CLOSE_REASON: &str = \"re-queued as \";` is private, and `closed_by_person` (346-354) reads it. The steward test cannot see hestia's constant. Fix: Make the constant `pub(crate)` and use it from steward (a one-line visibility change). Or add a test through hestia's public API, such as `repeated_causes`, showing that a settled original is not counted as a person's close.",
+      "location": "Decision 3; test `settle_reason_starts_with_the_requeue_prefix`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Settle closes any dispatched job that has no request record, but the plan never says which jobs those are or why closing them is safe. A held job could be closed instead of resumed.",
+      "evidence": "`interrupted_work` never listed jobs without a request (`.request.as_ref()...?`, steward.rs:464-467). Holds (`disk::read_any_hold`, run/mod.rs:481-490) deliberately leave a job dispatched with no process so that a drain can resume it. Fix: Name the population, for example a request job whose request.json is missing. Skip any job with a disk or slot hold. Add a unit test showing that a held job is not closed.",
+      "location": "Step 3 ('no request record gives Close')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's claims against the snapshot with Read and Grep, and they hold. `interrupted_work` keeps only the drained channels (steward.rs:464-467) and hides any job that a later request names as a retry (448-460). `retries_by_job` does not count a closed-without-running retry as standing (retry.rs:246-267). `prepare` skips reading interrupted items (drain.rs:2132). Hestia's `re-queued as ` prefix is real (hestia.rs:342-354). The design (defaulted `Steps` hook, pure settle function, closing through `Athena::close`) is reasonable, and the dependents list is mostly complete. But the plan guesses the cause without reading the code where it actually starts. `run/mod.rs` `dispatch` commits job.json and brief-producer.md (run/mod.rs:1245-1257), then can return Err before any closing record: at `plan_round(...)?` (1314), or through `finish_dispatched`, which closes only on Ok (1343). `RealSteps::run` turns that Err into a run with no outcome (drain.rs:4395-4408), and the drain moves on. That is exactly \"dispatched, brief present, no producer invocation, no outcome, later jobs moved past it\". The plan calls run/mod.rs unrelated and never reads it. Its settle step also returns nothing for an interrupted job that has no standing retry, so a drain can still end past such a job without a word. Criteria 1 and 2 are therefore not fully shown, and the root-cause default is not met. Both problems can be fixed within the plan."
+}
