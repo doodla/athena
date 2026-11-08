@@ -1,0 +1,185 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261107-044655-wwcf",
+  "candidate_commit": "222c267fff5b0291a8300c76f9ea054b59c39473",
+  "verified_fingerprint": "sha256:d1485c0d6431c045a3a97344642d2e836c36124918251233e755c100adef016d",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42428624085 for 222c267fff5b0291a8300c76f9ea054b59c39473",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42428624085 for 222c267fff5b0291a8300c76f9ea054b59c39473",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42428624085 for 222c267fff5b0291a8300c76f9ea054b59c39473",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 10,
+  "criteria": [
+    {
+      "criterion": "A note under docs/design/ states the cause of the longer producer stage. It cites the code paths and the measured numbers (12.7 to 23.5 minutes), and labels any estimate.",
+      "kind": "content",
+      "met": false,
+      "evidence": "The note exists, quotes 12.7 to 23.5 and the other figures, cites code paths and labels estimates. But the cause it states is not the cause. Evidence snapshot records: producer invocations that started before the instruction landed (69057b9, 2026-11-06T14:08, from history.json) were already 20 to 54 min (jvd9 started 12:55, 3242 s, landed 14:03 inside the new window; f6x6 2648 s; xkfs 2441 s; cbcc 2375 s). Producers that ran the mirrors command were short (ymst 322 s and 281 s, bhjf 225 s and 59 s, w7my 461 s, 7wsq 210 s). The note says the previous review was 2026-11-04; throughput-reviews/2026-11/20261106-092545-c1wj.json shows 2026-11-06T09:25. It also says no records were available, yet the snapshot holds them.",
+      "commands": [
+        "ls docs/design/producer-slowdown.md"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run cargo test. A new or changed test fails on the old behavior and passes on the new, showing the identified cause no longer adds time to the producer stage.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "The recorded full test run passed. producer_briefs_do_not_tell_the_producer_to_build_for_the_mirror_check and mirrors_the_producer_is_not_asked_to_build_and_the_loop_still_sends_the_drift_back pass (9 and 12 passed). Both assert the section or prompt does not contain `cargo`, `--test mirrors` or `cargo test -p athena-cli`, which the old MIRROR_CHECK_INSTRUCTION text contained, so they fail on the old behaviour. Caveat: they show the instruction is gone, not that the real cause is gone (see criterion 1).",
+      "commands": [
+        "cargo test --locked",
+        "cargo test -p athena-context producer_briefs",
+        "cargo test -p athena-core --lib mirrors_"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run cargo clippy and cargo fmt --check. Both are clean.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Both passed in Athena's recorded checks for 222c267 (CI run 42428624085).",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The diff touches only the code on the cause path and its tests. It does not change stage-median reporting merely to make the numbers look better.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Changed files: CHANGELOG.md, crates/athena-context/src/briefs.rs, crates/athena-core/src/run/tests.rs, docs/design/producer-slowdown.md. No status.rs, store.rs, main.rs or threshold changes, so stage reporting is untouched. The touched code is the path the note claims is the cause, though the records do not support that claim.",
+      "commands": [
+        "git diff HEAD~1 --stat"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The fix removes the cause itself, not a symptom such as a raised timeout or hidden timing. The note says what the next throughput review should show: a lower producer median.",
+      "kind": "content",
+      "met": false,
+      "evidence": "No timeout or timing was hidden, and the note says the next review should show a lower producer median. But what it removes is not the cause: long producer runs in the window predate the instruction, and producers that ran the command took 1 to 8 minutes in total. The root cause is still unfound, so a fall in the median cannot be expected from this change.",
+      "commands": [],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "The stated root cause is contradicted by the recorded producer timings. The cause was inferred from code and dates, although the records could have been read.",
+      "evidence": "Evidence snapshot: 20261106-081034-jvd9/invocations/13-producer.json started 2026-11-06T12:55, 3241.6 s, landed 14:03, before 69057b9 (14:08) added the instruction. Pre-instruction producers f6x6 2648 s, xkfs 2441 s, cbcc 2375 s, wzy7 2224 s. Post-instruction producers that ran `--test mirrors`: ymst 322 s and 281 s, bhjf 225 s and 59 s, w7my 461 s, 7wsq 210 s. Better approach: compare per-invocation wall times and invocation counts per landed job across the window from records/jobs/*/invocations, and find what the long runs spent their time on, before choosing a fix.",
+      "location": "docs/design/producer-slowdown.md section 4; CHANGELOG.md entry",
+      "source": "verifier"
+    },
+    {
+      "severity": "major",
+      "summary": "The note gives the wrong date for the previous throughput review and says no records were available.",
+      "evidence": "records/throughput-reviews/2026-11/20261106-092545-c1wj.json (2026-11-06T09:25, median 918.1) is the previous review, not 2026-11-04. The evidence snapshot holds records/ with invocation wall times and commands_run.",
+      "location": "docs/design/producer-slowdown.md sections 3, 4 and 9",
+      "source": "verifier"
+    },
+    {
+      "severity": "major",
+      "summary": "The claim that the command forces a cold build of most of the workspace on every job is overstated.",
+      "evidence": "Producer commands_run show workspace builds anyway: cg5z runs `cargo build --workspace --all-targets` and workspace clippy, and 8nz8 runs `cargo test -p athena-core` before mirrors. The note's own measurement is 30.8 s. Many briefs carried the instruction but the producer never ran it.",
+      "location": "docs/design/producer-slowdown.md section 4",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two changed files are outside the expected deliverables list, and three listed files did not change.",
+      "evidence": "Expected deliverables list status.rs, main.rs and store.rs (all unchanged). briefs.rs and run/tests.rs changed; the planned demonstrations did name them.",
+      "location": "crates/athena-context/src/briefs.rs, crates/athena-core/src/run/tests.rs",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "D158 in docs/decisions.md is left stale.",
+      "evidence": "The note's section 7 admits the sentence 'The producer brief gains a short note to run the target' no longer holds.",
+      "location": "docs/decisions.md D158",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "2 of 5 criteria unmet",
+    "3 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results",
+    "planned demonstrations and files"
+  ],
+  "summary": "The code change is small, tested and harmless: the producer brief no longer tells the producer to run `cargo test -p athena-cli --test mirrors`, and the loop's in-process mirror check still sends a drift back. Both new tests pass and would fail on the old text, and the recorded fmt, clippy and test runs passed. But the request was to find and remove the cause of the longer producer stage, and the records in the evidence snapshot contradict the cause the note names. The instruction landed at 2026-11-06T14:08 (69057b9). Producer invocations that started before then were already 20 to 54 minutes long: jvd9 3242 s, f6x6 2648 s, xkfs 2441 s, cbcc 2375 s, wzy7 2224 s. jvd9 landed at 14:03, after the previous review (c1wj, 2026-11-06T09:25), so it is in the new window. Producers that did run the mirrors command were short: ymst 322 s and 281 s, bhjf 225 s and 59 s, w7my 461 s, 7wsq 210 s. Producers already build the workspace (athena-core tests, workspace build, workspace clippy), so the mirrors run is an incremental build, about 30 s by the note's own measurement. The note also gives the wrong date for the previous review and says no records were available. So the stated root cause is a guess the data refutes, and the fix will not bring the producer median back down. The change fails."
+}
