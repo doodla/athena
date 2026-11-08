@@ -37,6 +37,7 @@ type Reply = Box<dyn Fn(&Value) -> Value + Send>;
 struct Model {
     replies: Arc<Mutex<VecDeque<Reply>>>,
     prompts: Arc<Mutex<Vec<Value>>>,
+    systems: Arc<Mutex<Vec<String>>>,
 }
 
 impl Model {
@@ -57,6 +58,11 @@ impl Model {
             }
             let prompt: Value = serde_json::from_str(&spec.user_prompt).unwrap();
             model.prompts.lock().unwrap().push(prompt.clone());
+            model
+                .systems
+                .lock()
+                .unwrap()
+                .push(spec.system_prompt.clone());
             match model.replies.lock().unwrap().pop_front() {
                 Some(reply) => {
                     let mut turn = FakeTurn::output(reply(&prompt));
@@ -467,6 +473,29 @@ fn the_prompt_for_a_rejected_job_names_the_unmet_criterion_and_the_major_finding
     assert!(!what.contains("trailing space"), "{what}");
     assert!(!what.contains("the tests still pass"), "{what}");
     assert!(!what.contains("Failed checks"), "{what}");
+}
+
+#[test]
+fn the_introspection_of_a_rejected_job_is_given_the_diagnose_failure_skill() {
+    let model = Model::default();
+    model.say(reply("new", "The job was rejected.", "No step caught it."));
+    let (_fx, athena) = setup(rejecting(), &model);
+    let finished = run_job(&athena, "add a greeting");
+    assert_eq!(finished.state, OutcomeState::Rejected);
+
+    let skill = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../athena-context/skills/diagnose-failure.md"
+    ))
+    .unwrap();
+    let systems = model.systems.lock().unwrap();
+    let [system] = systems.as_slice() else {
+        panic!("one system prompt, got {}", systems.len())
+    };
+    assert!(
+        system.contains(skill.trim()),
+        "the skill text is missing from:\n{system}"
+    );
 }
 
 #[test]
