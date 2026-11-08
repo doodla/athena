@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-044511-q59y",
+  "round": 1,
+  "at": "2026-11-08T14:04:35.463108626Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan never shows the requested outcome: a prompt edit that conflicts with a rule is blocked. The plan presents the check as unwired, even though its own test already acts as a gate.",
+      "evidence": "Request: 'A conflict blocks dispatch until the prompt and the rule agree'. Acceptance: 'Changes to agent instructions are not checked against the rules ... conflicts show up only as verifier rejections'. Step 4 writes in the CHANGELOG that the check 'is not wired into a gate' and that 'no reading is newly refused'. Yet `the_shipped_verifier_prompts_pass_the_check` runs `check_verifier_prompt` over `VERIFIER_FRAME.text` (include_str! of athena-context/prompts/verifier.md) and the cap-change and cap-study fragments. Athena runs `cargo test` on every candidate (the cap-change verifier.md:5 says Athena already ran the tests), so a candidate that edits those files is already checked. Fix: Name that test as the enforcement point: a producer's edit to any verifier prompt that contradicts a rule fails `cargo test`, with the rule id in the panic message, before the verifier runs. Add a demonstration: edit a scratch copy of verifier.md (or simulate it with the function on edited text) and show the test assertion fails, naming the rule. Make the assertion message print the check's error. Rewrite the CHANGELOG entry to match. Keep the open question about admission-time wiring for a later job.",
+      "location": "Plan Decision 1, step 4 (CHANGELOG), criterion 4 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A field counts as present if its name appears anywhere as a whole word. For the common words commands, criterion and verdict, ordinary prose satisfies the check, so dropping the field instruction goes undetected.",
+      "evidence": "In crates/athena-context/prompts/verifier.md:7, 'run commands showing it and list them in commands exactly as run' uses 'commands' twice, and :14 says 'Bash runs only the brief's commands'. The cap-change verifier.md:5 says 'Cite them in that criterion's commands list'. The cap-study verifier.md:3 says 'record a verdict on each'. Deleting the instruction 'list them in commands exactly as run' still leaves 'commands' as a whole word, so the check passes. The criterion-3 test replaces every whole-word occurrence with `xx`, which never exercises this realistic case. Fix: Match the field where the prompt names it as an output field, not as a bare word. For example, give each table row a short anchor pattern taken from the current prompt ('in request_reading_mismatch', 'in criterion', 'in commands', 'verdict is'), or require the field in backticks and adjust the drift guard. Add a criterion-3 case that deletes only the field instruction sentence from the real frame and asserts refusal.",
+      "location": "Decision 3, step 2 (field presence), criterion 3 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The three-word negation lookback has an obvious false negative: a negation word aimed at a different verb suppresses a real contradiction.",
+      "evidence": "The plan skips a phrase when any of the three preceding words is one of not, never, no, don't, cannot or nor. The edit 'Never refuse; accept uncited commands' normalizes to '... never refuse accept uncited commands', and 'never' is within three words of 'accept', so the contradiction is accepted. The same happens with 'no finding needed: accept uncited commands'. The criterion-2 negated case is the only negation the plan tests. Fix: Limit the lookback to the same clause: stop at ; : . , and at a line break or list bullet, before checking for negation. Better still, list the shipped negated wordings ('is not enough', 'never accept') as explicit allowed phrases instead of using a general lookback. Add a test case like 'Never refuse; accept uncited commands' that must be refused.",
+      "location": "Decision 2, step 2 (`phrase_conflicts` negation lookback)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The drift guard reads verify.rs, which contains the table itself. Unless the test restricts itself to the `//!` header lines, it always passes.",
+      "evidence": "The plan uses `include_str!(\"verify.rs\")`, and the `VERDICT_RULES` literal in that same file contains \"D43\", \"D63\" and \"D115\". Fix: Keep only lines starting with `//!`, or better, check that each D-id appears in a `format!` finding string inside `judge`, for example the one at verify.rs:601, so the guard tracks the judging code rather than its comments.",
+      "location": "Decision 4(b), `table_ids_appear_in_the_module_docs`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The demonstration contradicts itself on its threshold and measures the wrong quantity for the criterion.",
+      "evidence": "The test is said to assert all five contradicting edits are refused, but 'Fails without' says 'at least 4 of 5'. The criterion is about newly refused readings, while the test counts literal edits. Fix: Assert 5 of 5. State the result for readings plainly as 0 newly refused, because the reading gate is unchanged, and leave the 5% question to the user as the plan already does.",
+      "location": "Criterion 5 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Changing CHANGELOG.md breaks criterion 7 as worded, and reading.rs is an expected deliverable the plan leaves untouched. The verifier may flag either one.",
+      "evidence": "Criterion 7: 'The git diff touches only crates/athena-core/src/verify.rs'. The deliverables list names CHANGELOG.md and reading.rs. The plan raises this only as an open question. Fix: Keep the open question, and in the criterion-7 demonstration say explicitly that CHANGELOG.md is required by the changelog default and that leaving reading.rs unchanged is deliberate, so the verifier judges the diff against the stated rationale.",
+      "location": "Files list vs criterion 7 and Expected deliverables",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The request says a conflict \"blocks dispatch until the prompt and the rule agree\", and its acceptance line says agent-instruction changes are currently not checked. The reading contradicts itself on this. Its first assumption says the check \"runs at reading/plan admission when the request edits a prompt file\". Its second lets the function stay unwired (\"else the function is exposed\"). It also narrows \"an agent prompt\" to the verifier prompt only. The plan follows the unwired branch, so as planned no real prompt edit is ever blocked. That is the very state the request asks to change.",
+  "summary": "I checked the plan's references against the snapshot and they are accurate: `judge` at verify.rs:408, the D43 finding at :601, `request_reading_mismatch` at :626, the test module at :1140, `VERIFIER_FRAME` public at athena-context lib.rs:50, and the three verifier.md files. The table-plus-pure-function shape fits the Files line and one producer run, and the dependents list matches what grep finds for the module's callers. There are three problems. First, the plan calls the check unwired and its CHANGELOG entry says it is not in any gate, so the requested blocking behavior is never shown. Yet the plan's own shipped-prompt test already runs in `cargo test` on every candidate, so a producer edit to verifier.md that contradicts a rule would fail Athena's checks. The plan should claim that as the enforcement point and demonstrate it. Second, the required-field check accepts any whole-word match. `commands`, `criterion` and `verdict` are ordinary prose words, and `commands` appears several times in verifier.md outside the instruction that names the field. Deleting \"list them in commands exactly as run\" would therefore still pass, and the criterion-3 test hides this by deleting every occurrence. Third, the three-word negation lookback has an obvious hole: \"Never refuse; accept uncited commands\" passes. The module-docs drift guard is also circular, because it reads verify.rs, which contains the table itself."
+}
