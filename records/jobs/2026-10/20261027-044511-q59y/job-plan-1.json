@@ -1,0 +1,239 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-044511-q59y",
+  "round": 1,
+  "at": "2026-11-08T14:03:15.115359996Z",
+  "invocation_seq": 2,
+  "approach": "Add to crates/athena-core/src/verify.rs a static table `VERDICT_RULES` and a pure function `check_verifier_prompt(texts: &[&str]) -> anyhow::Result<()>`. The table has the D-numbered evidence rules the judge enforces (D43, D63, D115; header docs lines 3-9, finding at line 601) and the judged output fields it reads. Those fields are `verdict` (line 642), `criterion` (line 534), `commands` (line 557) and `request_reading_mismatch` (line 625). Each row carries an id, a one-line statement, the field the prompt must name (if any), and lowercase phrases that contradict the rule. The function normalizes the text (lowercase, no backticks or quotes, collapsed whitespace). It refuses if a contradicting phrase appears without a negation in the three words before it. It also refuses if a required field is absent as a whole word from the joined texts. The error names every rule id and missing field. It takes several texts because the verifier prompt is the frame plus a capability fragment, and the fields are required of the composed prompt. Tests in the existing `mod tests` run the function over `athena_context::VERIFIER_FRAME.text`, which is already `pub`, plus edits, and over the two capability verifier fragments. The function is not wired into a reading or plan gate. No hook exists: `refusing_check` in reading/checks.rs:515 sees a reading's criteria, not the proposed prompt text, and a new `step!` line would force a refusal-corpus case in a file outside the Files line. CHANGELOG.md gets an entry, as the changelog default requires.",
+  "decisions": [
+    {
+      "choice": "Pure function and static table in verify.rs, exposed `pub`, not wired into the reading gate or plan admission.",
+      "reason": "The request's Files line is verify.rs. No hook exists today: `refusing_check` (reading/checks.rs:515-544) receives a Reading, whose text holds no proposed prompt body. Adding a `step!(check_...)` there would also trip `every_acceptance_check_has_a_refusing_corpus_case` (refusal_corpus.rs:2174) until a corpus case is added. An unwired pure function adds no refusal to any reading, so nothing existing is newly refused.",
+      "rejected": [
+        {
+          "option": "Add a `step!(check_prompt_edit(..))` to `refusing_check` in reading/checks.rs plus a corpus case",
+          "why": "Needs the proposed prompt text, which a reading does not carry. Touches two files outside Files, and the critic and reading briefs would have to carry the text."
+        },
+        {
+          "option": "Edit reading.rs (listed in Expected deliverables)",
+          "why": "Nothing in reading.rs needs to change for a pure function. The edit would conflict with criterion 7 (diff only verify.rs). See open_questions."
+        }
+      ]
+    },
+    {
+      "choice": "Match by lowercase phrases normalized for case, backticks and whitespace, with a three-word negation lookback (not, never, no, don't, cannot, nor).",
+      "reason": "Cap-change verifier.md line 5 says 'evidence text alone is not enough (D43 ...)'. verifier.md says 'Athena counts the criterion unmet unless ...'. A bare substring match would refuse the real prompts, which criterion 4 forbids. The negation lookback lets 'Never accept uncited commands' pass.",
+      "rejected": [
+        {
+          "option": "Regex or sentence parsing for meaning",
+          "why": "Larger, harder to review, and the request asks for simple phrase and field-name matching."
+        },
+        {
+          "option": "Bare substring match without negation handling",
+          "why": "Refuses prompts that restate the rule in the negative."
+        }
+      ]
+    },
+    {
+      "choice": "Required fields are checked as whole words (letters, digits and underscore) over the joined texts, and the field list is `verdict`, `criterion`, `commands`, `request_reading_mismatch`.",
+      "reason": "These are read by `judge` (verify.rs lines 534-557, 625, 642). Each is a whole word in the current verifier.md: lines 5, 7 and 11. A frame-only edit that drops one is refused. `evidence` and `met` are left out because verifier.md names neither as a field, so adding them would refuse the real prompt.",
+      "rejected": [
+        {
+          "option": "Require every `VerdictOutput` field",
+          "why": "verifier.md does not name `met`, `evidence`, `summary` or `location`, so the real prompt would be refused and criterion 4 would fail."
+        },
+        {
+          "option": "Check the frame alone for each capability fragment",
+          "why": "A fragment such as cap-study's does not repeat the field names, so each fragment would be refused."
+        }
+      ]
+    },
+    {
+      "choice": "Two drift guards inside the tests: (a) each table field must be a key of a serialized `VerdictOutput` or `CriterionVerdictOutput` (serde_json is a core dependency, Cargo.toml line 22); (b) each D-id in the table must appear in verify.rs's own header docs via `include_str!(\"verify.rs\")`.",
+      "reason": "A table of rules that can drift from the code it describes would produce false refusals. These two tests fail when a field is renamed or a rule id is dropped from the docs.",
+      "rejected": [
+        {
+          "option": "No drift guard",
+          "why": "The table would silently go stale after a field rename."
+        }
+      ]
+    },
+    {
+      "choice": "Real-prompt test reads `athena_context::VERIFIER_FRAME.text` (lib.rs:50-54). The capability fragments come in via test-only `include_str!(\"../../athena-cap-change/prompts/verifier.md\")` and the cap-study equivalent.",
+      "reason": "No prompt file is edited. core cannot depend on cap-change (cap-change depends on core), so a relative `include_str!` in the test module is the only way to cover the fragments that mention D43. The frame needs no include.",
+      "rejected": [
+        {
+          "option": "Only test the frame",
+          "why": "The cap-change fragment is the one prompt text that cites D43. Leaving it out would miss a likely false positive."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add `VerdictRule`, `VERDICT_RULES`, `check_verifier_prompt` and its helpers (about 150 lines, placed before `mod tests`). Add the tests named in the demonstrations to the existing `mod tests`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased > Added bullet. Root cause: prompt edits that contradicted a verdict rule surfaced only as verifier rejections. It states that the check is not wired into a gate.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read verify.rs lines 1-20 and 1140-1160 (imports, header docs, test module start) and `athena_context::VERIFIER_FRAME`. In verify.rs, before `#[cfg(test)] mod tests`, add `pub struct VerdictRule { pub id: &'static str, pub statement: &'static str, pub field: Option<&'static str>, pub contradicts: &'static [&'static str] }` and `pub const VERDICT_RULES: [VerdictRule; 6]`. Rows: D43 (field `commands`), D63, D115, `criteria` (field `criterion`), `pass` (field `verdict`), and `mismatch` (field `request_reading_mismatch`). Each `statement` quotes what `judge` does and cites its line area. Phrases are lowercase.",
+    "Add `pub fn check_verifier_prompt(texts: &[&str]) -> anyhow::Result<()>` and two private helpers. `normalize` lowercases, drops backticks and quotes, and collapses whitespace. `phrase_conflicts` finds each phrase occurrence and skips it when any of the three preceding words is in the negation set (not, never, no, don't, cannot, nor). Field presence is a whole-word search (letters, digits, underscore) over the joined normalized texts. Collect all conflicts and return one error: 'prompt contradicts verdict rule D43 (<statement>): \"<phrase>\"' and 'prompt does not name `<field>`, which verdict rule <id> requires', joined by '; '. Keep it under 200 lines and put a doc comment on it with the root cause.",
+    "Add the tests to `mod tests` in verify.rs. They are: `a_prompt_edit_that_contradicts_d43_is_refused_naming_the_rule` with D63, D115, pass and mismatch cases; `a_consistent_prompt_edit_is_accepted` including the negated 'Never accept uncited commands'; `a_prompt_that_omits_a_required_field_is_refused_naming_it` with a whole-word replace helper and a `commandsx` case; `the_shipped_verifier_prompts_pass_the_check` using `athena_context::VERIFIER_FRAME.text` and the two test-only `include_str!` fragments; `the_check_refuses_edits_it_could_not_refuse_before` (5 refused, 3 accepted, 0 real); `table_fields_are_real_output_fields` using `serde_json::to_value` of a `VerdictOutput` and a `CriterionVerdictOutput`; `table_ids_appear_in_the_module_docs` using `include_str!(\"verify.rs\")`.",
+    "Add an Unreleased > Added bullet to CHANGELOG.md: the root cause (prompt edits that contradicted the judge's rules showed up only as verifier rejections), the new check and its rule table, that it is not wired into a gate, and that no reading is newly refused.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-core verify`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-cli --test budgets` and `cargo test --locked`. Confirm the diff touches only verify.rs and CHANGELOG.md."
+  ],
+  "risks": [
+    {
+      "risk": "A contradiction phrase matches wording the real prompts use, so the real prompts are refused and criterion 4 fails.",
+      "mitigation": "Cap-change verifier.md ('evidence text alone is not enough') and verifier.md ('unmet unless') are tested in `the_shipped_verifier_prompts_pass_the_check`. The negation lookback and the specific phrases ('evidence text alone is enough') are chosen against them. The producer reads both files before fixing the phrases."
+    },
+    {
+      "risk": "Phrase matching misses a differently worded contradiction, giving a false sense of coverage.",
+      "mitigation": "The matcher is documented as a phrase list. The phrase rows are data in `VERDICT_RULES`, so a new wording is one added string with a test. The module docs state that an unlisted wording passes."
+    },
+    {
+      "risk": "The table drifts from `judge` after a later change.",
+      "mitigation": "The two drift-guard tests fail on a field rename (checked through serde_json keys of a serialized `VerdictOutput`) or when a D-id leaves the module docs."
+    },
+    {
+      "risk": "The deliverables list and criterion 7 disagree about the files touched.",
+      "mitigation": "Flagged in open_questions. The plan keeps the diff to verify.rs and CHANGELOG.md and names the conflict."
+    },
+    {
+      "risk": "The test-only `include_str!` of the cap-change and cap-study fragments breaks if the paths move.",
+      "mitigation": "The relative path crates/athena-cap-change/prompts/verifier.md exists (read). It is test-only, so it cannot affect the shipped binary. If compilation fails on the path the producer drops the fragment case and keeps the frame test."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "verdict rules D43, D63, D115 (read-only reference)",
+      "dependent": "crates/athena-core/src/verify.rs `judge` and its existing tests (D43/D63/D115 behavior, lines 408-675; tests such as `d43_finding`)",
+      "kind": "code",
+      "test": "The existing verify.rs tests (`cargo test -p athena-core verify`) pass unchanged. The new drift guard `table_ids_appear_in_the_module_docs` ties the ids to the header docs.",
+      "reason": "The table only describes these rules. `judge`, `simple_commands` and the finding at line 601 are not edited, which the Out of scope list requires."
+    },
+    {
+      "name": "public items of the `verify` module",
+      "dependent": "crates/athena-core/src/run/verification.rs, run/checks.rs, run/send_back.rs, run/planning.rs, reading/retry.rs, land.rs, cli display.rs (callers of `verify::`, found by grep)",
+      "kind": "code",
+      "test": null,
+      "reason": "The change only adds items (a `pub fn`, a `pub struct`/const). Nothing existing is renamed, removed or re-typed, so none of these callers sees a change."
+    },
+    {
+      "name": "reading gate checks (`refusing_check` step list)",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `every_acceptance_check_has_a_refusing_corpus_case` (line 2174) and `acceptance_check_names`, which scan `refusing_check` in reading source",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus (both the producer and the verifier run it)",
+      "reason": "No `step!` line is added, so the extractor finds the same checks and every one still has a refusing case. The new rule is not a reading check. Its input forms (plain phrase, mixed case, backticked field, line-wrapped phrase, negated phrase, field inside a longer word) are covered by verify.rs unit tests, not the reading corpus, so no corpus case is added. Corpus cases read: the replay and the delivery/defined-term cases are about request text, not prompt text."
+    },
+    {
+      "name": "prompt budgets (verifier 1298 of 1300 and the others)",
+      "dependent": "athena-cli tests/budgets.rs `system_facts_budgets_match_computed`; docs/system-facts.md budget lines; crates/athena-context/src/lib.rs `BudgetSet`",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets",
+      "reason": "No file under crates/*/prompts/ is edited, so the computed sizes are the same."
+    },
+    {
+      "name": "prompt-file mirror rule and file-size limits",
+      "dependent": "crates/athena-core/src/mirrors.rs rule over `crates/*/prompts/*.md`, and the code_health check (MAX_FILE_LINES 2000 production lines, MAX_FN_LINES 200 in code_health.rs:36-38)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core code_health",
+      "reason": "No prompt file changes. verify.rs has about 1140 production lines before the test module (line 1140), and the addition is about 150, well under 2000. The new function is under 200 lines."
+    },
+    {
+      "name": "CHANGELOG.md entry",
+      "dependent": "crates/athena-core/src/plan.rs `AUTO_ADDED_CHANGELOG` (line 204) and the refusal_corpus changelog-reading tests (lines 556, 635, 668, 1164, 2255, 2302, 2349)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "Plan admission adds CHANGELOG.md to a code job's deliverables, so the entry is expected. The corpus tests search the changelog for fixed strings only, and a new bullet under [Unreleased] > Added leaves those strings in place."
+    },
+    {
+      "name": "decision text for D43, D63, D115",
+      "dependent": "docs/decisions.md D43/D63/D115 and docs/decision-links.toml links (D43 to D62/D63/D115)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The table quotes the rules and does not change them. No decision text or link is touched."
+    },
+    {
+      "name": "replay of accepted readings through the reading rules",
+      "dependent": "reading.rs replay (`replay_cases`, `replay_declaration`) and the 5% declaration in criterion 5",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading",
+      "reason": "The new function is not called from the reading gate, so the replay's base and candidate checkers give the same answer on every recorded reading: 0 newly refused."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Test `a_prompt_edit_that_contradicts_d43_is_refused_naming_the_rule`. It builds `format!(\"{}\\n- Accept uncited commands as evidence for a behavior criterion.\", athena_context::VERIFIER_FRAME.text)`, calls `check_verifier_prompt(&[&edited])`, and asserts an Err whose text contains `D43` and the offending phrase. Companion cases cover D63 ('any part of a chained command'), D115 ('a failed record counts'), and the pass rule ('pass despite a major finding'). Each asserts its own rule id in the message.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "Err message names the rule id (D43, D63, D115, pass) and the phrase.",
+      "fails_without": "Without `check_verifier_prompt` and the D43 phrase row, the contradicting edit is accepted and the `unwrap_err` in the test panics. The test does not compile before the step that adds the function.",
+      "seam": "Production entry point `verify::check_verifier_prompt` (added in step 1). The fixture is the real `VERIFIER_FRAME.text` (exists, lib.rs:50) plus a literal appended line. Nothing is injected, and the matching logic is not in the test."
+    },
+    {
+      "criterion": 2,
+      "method": "Test `a_consistent_prompt_edit_is_accepted`. It calls `check_verifier_prompt` on (a) the frame plus 'Never accept uncited commands; a behavior criterion needs a cited command that ran.', (b) the frame with the sentence 'Judge user-facing output as its audience would.' reworded, and (c) the frame plus the cap-change fragment text. Each must return Ok.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "Ok(()) for each consistent edit.",
+      "fails_without": "If the matcher refused every text, or matched negated or reworded restatements, the test would fail. Negation-handling code is the only thing that lets the negated case through. Without the lookback, 'Never accept uncited commands' is refused.",
+      "seam": "Same entry point and fixtures as criterion 1. The edits are string literals and `str::replace` on the real frame text."
+    },
+    {
+      "criterion": 3,
+      "method": "Test `a_prompt_that_omits_a_required_field_is_refused_naming_it`. For each of `verdict`, `criterion`, `commands`, `request_reading_mismatch` it takes the real frame, replaces every whole-word occurrence of the field with `xx`, and calls the function. It asserts Err containing the field name and the owning rule id. It also asserts that a field name embedded in a longer word (`commandsx`) does not satisfy the requirement.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "Err text contains 'does not name' and the field name, and the rule id.",
+      "fails_without": "Without the required-field loop, a frame with `request_reading_mismatch` removed returns Ok and `unwrap_err` panics.",
+      "seam": "`check_verifier_prompt` with a field-stripped copy of `VERIFIER_FRAME.text`. A small test helper does the whole-word replacement in the test module (step 3). The helper only edits the fixture and holds no check logic."
+    },
+    {
+      "criterion": 4,
+      "method": "Test `the_shipped_verifier_prompts_pass_the_check`. It calls `check_verifier_prompt(&[VERIFIER_FRAME.text])`, then with the cap-change and cap-study fragments appended (each via test-only `include_str!`). It expects Ok. Drift guards `table_fields_are_real_output_fields` and `table_ids_appear_in_the_module_docs` also run. Full `cargo test` shows no other test changes.",
+      "command": "cargo test",
+      "observes": "Ok for all three compositions; the full suite passes.",
+      "fails_without": "If a phrase row or required field disagreed with the shipped prompts, the test fails. Dropping the negation lookback makes it fail on the cap-change fragment's 'evidence text alone is not enough' line.",
+      "seam": "`athena_context::VERIFIER_FRAME` (exists, pub) and test-only `include_str!` of the two capability `verifier.md` files (both exist, read above). No prompt file is edited."
+    },
+    {
+      "criterion": 5,
+      "method": "Test `the_check_refuses_edits_it_could_not_refuse_before`. It runs a fixed set of five contradicting edits (D43, D63, D115, pass rule, mismatch rule) and a set of three consistent ones through the function. It asserts all five are refused and all three accepted, and that the real prompts are refused 0 times. Because nothing is wired into the reading gate, `reading::replay` shows 0 newly refused readings, inside the 5% the criterion declares. Run `cargo test -p athena-core reading` for the replay tests.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "5 of 5 contradicting edits refused, 3 of 3 consistent accepted, 0 real prompts refused. The reading replay stays at 0 newly refused.",
+      "fails_without": "Without the check, the edit set refuses 0 of its cases, so the assertion that at least 4 of 5 are refused fails.",
+      "seam": "`check_verifier_prompt` over literal edits of the real frame. The replay tests in reading.rs (`replay_declaration` is used at refusal_corpus.rs:2217) exist and are untouched."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the checks Athena runs: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. The budget test lives in crates/athena-cli/tests/budgets.rs. Also run `cargo test -p athena-core --test refusal_corpus` and `cargo test -p athena-cli --test budgets`.",
+      "command": "cargo test --locked",
+      "observes": "All exit 0. The budget lines in docs/system-facts.md still equal the computed values (verifier 1298 of 1300, unchanged). The corpus tests pass unchanged.",
+      "fails_without": "A prompt-text change would fail the budget test `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs). A new reading check without a corpus case would fail `every_acceptance_check_has_a_refusing_corpus_case`. Neither happens, since no prompt is edited and no `step!` is added.",
+      "seam": "Existing test suites only. The plan adds no code that they call."
+    },
+    {
+      "criterion": 7,
+      "method": "Content criterion: read `git diff --stat` and `git status`, and confirm that the changed files are verify.rs and CHANGELOG.md only, with no governance file. CHANGELOG.md is added to satisfy the changelog default and the Expected deliverables list. Criterion 7 as worded counts only verify.rs (see open_questions).",
+      "command": "git diff --stat",
+      "observes": "The list of changed paths.",
+      "fails_without": "A second source file in the diff, or any change to athena.toml, defaults.toml or a workflow, breaks this criterion.",
+      "seam": "None; reads the diff."
+    }
+  ],
+  "open_questions": [
+    "User: Criterion 7 says the diff touches only verify.rs, but the Expected deliverables list also names CHANGELOG.md and crates/athena-core/src/reading.rs, and the changelog default says the change records itself in CHANGELOG.md. The plan changes verify.rs and CHANGELOG.md and leaves reading.rs alone. Is that right, or should a reading.rs hook be added?",
+    "User: The request says the reading and plan critic are shown the verdict rules and a conflict 'blocks dispatch'. No code does this today, and a reading holds no proposed prompt text to check. Is exposing a pure function (unwired) acceptable for this job, with the gate wiring left to a later job that supplies the prompt text to the check?",
+    "User: Criterion 5 expects 5% of readings newly refused, but an unwired function refuses 0 readings. Is 0% acceptable, within the declared 5%?"
+  ],
+  "producer_section_sha256": "560c4ac08bf7af2678be6a28e37634dcd58bc8ecd60e2f56870a3a552339dc64"
+}
