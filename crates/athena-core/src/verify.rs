@@ -1137,6 +1137,230 @@ fn demonstration_entry(
     }
 }
 
+/// Which shipped verifier prompt text [`check_verifier_prompt`] is reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptScope {
+    /// The verifier's role frame (`crates/athena-context/prompts/verifier.md`). It must also carry the
+    /// instructions that name each field [`judge`] reads, so the required-field check runs here.
+    Frame,
+    /// A capability's verifier fragment. It is only scanned for sentences that contradict a rule.
+    Fragment,
+}
+
+/// One word group: a clause matches the group when it holds any one of these exact words.
+type WordGroup = &'static [&'static str];
+/// One forbidden sentence shape: a clause matches when every group has a word in it.
+type Pattern = &'static [WordGroup];
+
+/// A verdict rule that [`judge`] enforces, and the sentence shapes a prompt must not state against it.
+struct VerdictRule {
+    /// The rule id as it appears in findings and in the design notes.
+    id: &'static str,
+    /// A phrase quoted from the header of this file or from a `format!` finding string in [`judge`]. The test
+    /// `rule_sources_appear_in_the_header_or_judge_format_strings` fails when judge or the header changes it,
+    /// so this table cannot silently drift from the code.
+    source: &'static str,
+    /// The rule in a few words, for the refusal message. It is not quoted from the code.
+    summary: &'static str,
+    /// Sentence shapes that state the opposite of the rule.
+    forbidden: &'static [Pattern],
+}
+
+/// The rules the verifier prompts must not contradict. Matching is by whole words (no prefixes) over a
+/// lowercased clause, so it is a word-set screen of the listed contradiction forms, not a language parser: a
+/// phrasing with other words passes, and each new form is a new row.
+const VERDICT_RULES: &[VerdictRule] = &[
+    VerdictRule {
+        id: "D43",
+        source: "must cite commands that ran (D43)",
+        summary: "a behavior criterion is not met by an uncited or unseen command",
+        forbidden: &[
+            &[
+                &["accept", "accepts", "accepted", "accepting"],
+                &["uncited", "unlisted"],
+            ],
+            &[&["met", "meets"], &["without"], &["command", "commands"]],
+            &[
+                &["evidence"],
+                &["alone"],
+                &["enough", "sufficient", "suffices"],
+            ],
+        ],
+    },
+    VerdictRule {
+        id: "D63",
+        source: "as one whole simple command inside a chained or piped one",
+        summary: "a chained command is seen only through each whole simple command in it",
+        forbidden: &[&[
+            &["part", "parts", "partly", "partial", "partially"],
+            &["command"],
+            &["count", "counts", "counted"],
+        ]],
+    },
+    VerdictRule {
+        id: "D115",
+        source: "Athena ran and recorded it on the same candidate tree and it passed",
+        summary: "only a passing record made on the same tree stands in for a verifier run",
+        forbidden: &[
+            &[&["another"], &["tree"], &["count", "counts", "counted"]],
+            &[
+                &["failed"],
+                &["record", "records"],
+                &["count", "counts", "counted"],
+            ],
+        ],
+    },
+];
+
+/// Instructions the frame must keep, as (rule id, field, anchor words). The anchor is a run of consecutive
+/// words that must occur inside one clause of the frame, so the bare word `commands` elsewhere in the text does
+/// not satisfy it once the instruction naming it is deleted. The `M-mismatch` row describes how
+/// `request_reading_mismatch` is rated in [`judge`]; its text is not checked against judge (judge builds that
+/// finding without a format string), and the test `a_request_reading_mismatch_is_a_major_finding_and_the_verdict_is_not_pass`
+/// guards the behavior instead.
+const REQUIRED_FIELDS: &[(&str, &str, &[&str])] = &[
+    ("D43", "commands", &["in", "commands"]),
+    (
+        "D63",
+        "whole simple command",
+        &["whole", "simple", "command"],
+    ),
+    (
+        "M-mismatch",
+        "request_reading_mismatch",
+        &["in", "request_reading_mismatch"],
+    ),
+];
+
+/// Words that turn a clause into a denial of what it names.
+const NEGATORS: &[&str] = &[
+    "not", "never", "cannot", "no", "nor", "neither", "none", "nothing", "unless",
+];
+
+/// Why a verifier prompt was refused: the rule, the prompt line, and what to reword.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptConflict {
+    /// The verdict rule id, such as `D43`.
+    pub rule: &'static str,
+    /// The 1-based prompt line of the contradicting clause. `None` when an instruction is missing.
+    pub line: Option<usize>,
+    message: String,
+}
+
+impl std::fmt::Display for PromptConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Checks verifier prompt text against [`VERDICT_RULES`] and, for the frame, [`REQUIRED_FIELDS`].
+///
+/// A clause contradicts a rule when it matches a forbidden pattern and holds no negator. Clauses are split on
+/// semicolons, colons, full stops, commas and line breaks, so `Never refuse; accept uncited commands` is refused: the `Never` does not reach
+/// the second clause. The same split means `Never, for any reason, accept uncited commands` is also refused and
+/// must be reworded. The check is pure; the test module runs it on the shipped prompts, so
+/// `cargo test` fails on every candidate whose prompt edit contradicts a rule.
+pub fn check_verifier_prompt(text: &str, scope: PromptScope) -> Result<(), PromptConflict> {
+    let clauses = split_clauses(text);
+    for (line, clause) in &clauses {
+        let words = clause_words(clause);
+        if words.iter().any(|w| is_negator(w)) {
+            continue;
+        }
+        for rule in VERDICT_RULES {
+            if rule.forbidden.iter().any(|pattern| {
+                pattern
+                    .iter()
+                    .all(|group| group.iter().any(|g| words.contains(&(*g).to_string())))
+            }) {
+                return Err(PromptConflict {
+                    rule: rule.id,
+                    line: Some(*line),
+                    message: format!(
+                        "{}: line {line} contradicts verdict rule {} ({}; the code says \"{}\"): `{}`",
+                        rule.id,
+                        rule.id,
+                        rule.summary,
+                        rule.source,
+                        clause.trim()
+                    ),
+                });
+            }
+        }
+    }
+    if scope == PromptScope::Frame {
+        for (rule, field, anchor) in REQUIRED_FIELDS {
+            let named = clauses
+                .iter()
+                .any(|(_, clause)| has_anchor(&clause_words(clause), anchor));
+            if !named {
+                return Err(PromptConflict {
+                    rule,
+                    line: None,
+                    message: format!(
+                        "{rule}: no instruction names the field `{field}` (expected the words `{}` in one clause)",
+                        anchor.join(" ")
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Splits text into clauses on `; : .` , and line breaks, each with the 1-based line of its first word.
+fn split_clauses(text: &str) -> Vec<(usize, String)> {
+    fn flush(out: &mut Vec<(usize, String)>, current: &mut String, first_line: &mut Option<usize>) {
+        if let Some(line) = first_line.take()
+            && !current.trim().is_empty()
+        {
+            out.push((line, std::mem::take(current)));
+        }
+        current.clear();
+    }
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut first_line = None;
+    let mut line = 1;
+    for ch in text.chars() {
+        if matches!(ch, ';' | ':' | '.' | ',' | '\n') {
+            flush(&mut out, &mut current, &mut first_line);
+            if ch == '\n' {
+                line += 1;
+            }
+        } else {
+            if first_line.is_none() && !ch.is_whitespace() {
+                first_line = Some(line);
+            }
+            current.push(ch);
+        }
+    }
+    flush(&mut out, &mut current, &mut first_line);
+    out
+}
+
+/// Lowercase words of a clause: letters, digits, `_` and `'` (a curly apostrophe counts as `'`).
+fn clause_words(clause: &str) -> Vec<String> {
+    clause
+        .to_lowercase()
+        .replace('\u{2019}', "'")
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+        .map(|w| w.trim_matches('\'').to_string())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+fn is_negator(word: &str) -> bool {
+    NEGATORS.contains(&word) || word.ends_with("n't")
+}
+
+fn has_anchor(words: &[String], anchor: &[&str]) -> bool {
+    !anchor.is_empty()
+        && words
+            .windows(anchor.len())
+            .any(|window| window.iter().zip(anchor).all(|(w, a)| w == a))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2874,5 +3098,224 @@ mod tests {
             .final_verdict,
             Verdict::Pass
         );
+    }
+
+    const CHANGE_FRAGMENT: &str = include_str!("../../athena-cap-change/prompts/verifier.md");
+    const STUDY_FRAGMENT: &str = include_str!("../../athena-cap-study/prompts/verifier.md");
+
+    fn frame() -> &'static str {
+        athena_context::VERIFIER_FRAME.text
+    }
+
+    /// The frame with one line appended after the real text.
+    fn with_line(base: &str, line: &str) -> String {
+        format!("{base}\n{line}")
+    }
+
+    fn refusal(text: &str, scope: PromptScope) -> String {
+        match check_verifier_prompt(text, scope) {
+            Ok(()) => panic!("expected a refusal for: {text:?}"),
+            Err(conflict) => conflict.to_string(),
+        }
+    }
+
+    #[test]
+    fn shipped_verifier_prompts_have_no_verdict_rule_conflict() {
+        for (name, text, scope) in [
+            ("verifier frame", frame(), PromptScope::Frame),
+            (
+                "cap-change verifier.md",
+                CHANGE_FRAGMENT,
+                PromptScope::Fragment,
+            ),
+            (
+                "cap-study verifier.md",
+                STUDY_FRAGMENT,
+                PromptScope::Fragment,
+            ),
+        ] {
+            if let Err(conflict) = check_verifier_prompt(text, scope) {
+                panic!("{name} contradicts a verdict rule: {conflict}");
+            }
+        }
+    }
+
+    #[test]
+    fn contradicting_edits_are_refused_with_the_rule_id() {
+        check_verifier_prompt(frame(), PromptScope::Frame)
+            .expect("the shipped frame is consistent");
+        let edits = [
+            ("Never refuse; accept uncited commands", "D43"),
+            ("A behavior criterion is met without a command.", "D43"),
+            ("Evidence text alone is enough.", "D43"),
+            ("A partly run command still counts.", "D63"),
+            ("A record made on another tree counts as run.", "D115"),
+        ];
+        let mut refused = 0;
+        for (edit, rule) in edits {
+            let edited = with_line(frame(), edit);
+            let message = refusal(&edited, PromptScope::Frame);
+            assert!(
+                message.starts_with(&format!("{rule}: ")),
+                "{edit}: {message}"
+            );
+            let line = format!("line {}", edited.lines().count());
+            assert!(
+                message.contains(&line),
+                "{edit}: {message} (expected {line})"
+            );
+            refused += 1;
+        }
+        assert_eq!(refused, edits.len());
+        assert_eq!(refused, 5);
+        // The same edit is refused in a capability fragment.
+        let edited = with_line(CHANGE_FRAGMENT, edits[0].0);
+        let message = refusal(&edited, PromptScope::Fragment);
+        assert!(message.starts_with("D43: "), "{message}");
+        assert!(
+            message.contains(&format!("line {}", edited.lines().count())),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn deleting_the_commands_instruction_names_the_missing_field() {
+        let sentence = "list them in commands exactly as run";
+        assert!(frame().contains(sentence));
+        let edited = frame().replace(sentence, "");
+        assert_ne!(edited, frame());
+        assert!(
+            edited.split_whitespace().any(|w| w == "commands"),
+            "the word must still appear elsewhere"
+        );
+        let message = refusal(&edited, PromptScope::Frame);
+        assert!(message.starts_with("D43: "), "{message}");
+        assert!(message.contains("`commands`"), "{message}");
+
+        let edited = frame().replace("say how in request_reading_mismatch", "");
+        assert_ne!(edited, frame());
+        let message = refusal(&edited, PromptScope::Frame);
+        assert!(message.starts_with("M-mismatch: "), "{message}");
+        assert!(message.contains("`request_reading_mismatch`"), "{message}");
+
+        let edited = frame().replace("as a whole simple command", "");
+        assert_ne!(edited, frame());
+        let message = refusal(&edited, PromptScope::Frame);
+        assert!(message.starts_with("D63: "), "{message}");
+        assert!(message.contains("`whole simple command`"), "{message}");
+
+        // A fragment is not required to carry the instructions.
+        check_verifier_prompt("Keep it short.", PromptScope::Fragment)
+            .expect("fragments carry no fields");
+    }
+
+    #[test]
+    fn consistent_edits_are_accepted_and_negation_is_per_clause() {
+        for sentence in [
+            "Keep findings short.",
+            "Never accept uncited commands.",
+            "Evidence text alone is not enough, so cite commands.",
+            "Evidence text alone isn't enough.",
+            "Evidence text alone isn\u{2019}t enough.",
+            "No record made on another tree counts.",
+            "No behavior criterion is met without a command.",
+            "Neither a failed record nor a record made on another tree counts.",
+            "Each part of the rationale counts.",
+            "A method without a command is a gap.",
+        ] {
+            let edited = with_line(frame(), sentence);
+            if let Err(conflict) = check_verifier_prompt(&edited, PromptScope::Frame) {
+                panic!("`{sentence}` was refused: {conflict}");
+            }
+        }
+        // The shipped cap-change fragment holds the negated wording.
+        assert!(CHANGE_FRAGMENT.contains("evidence text alone is not enough"));
+        check_verifier_prompt(CHANGE_FRAGMENT, PromptScope::Fragment)
+            .expect("negated wording is accepted");
+        // A negator excuses only its own clause.
+        let message = refusal(
+            &with_line(frame(), "Never refuse; accept uncited commands"),
+            PromptScope::Frame,
+        );
+        assert!(message.starts_with("D43: "), "{message}");
+        assert!(message.contains("`accept uncited commands`"), "{message}");
+        // A comma also splits clauses, so this restatement must be reworded.
+        let message = refusal(
+            &with_line(frame(), "Never, for any reason, accept uncited commands."),
+            PromptScope::Frame,
+        );
+        assert!(message.starts_with("D43: "), "{message}");
+    }
+
+    /// Only the `//!` header lines and the `format!` string literals in `judge`; never this table or the tests.
+    fn drift_haystack() -> String {
+        let source = include_str!("verify.rs");
+        let mut parts: Vec<String> = source
+            .lines()
+            .filter_map(|l| l.strip_prefix("//!"))
+            .map(String::from)
+            .collect();
+        let start = source
+            .find("\npub fn judge(")
+            .expect("judge is in this file");
+        let from_judge = &source[start..];
+        let end = from_judge
+            .find("\n}\n")
+            .expect("judge ends at a closing brace");
+        let mut rest = &from_judge[..end];
+        while let Some(at) = rest.find("format!(") {
+            rest = &rest[at + "format!(".len()..];
+            let Some(literal) = rest.trim_start().strip_prefix('"') else {
+                continue;
+            };
+            let mut escaped = false;
+            let mut close = literal.len();
+            for (i, c) in literal.char_indices() {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    close = i;
+                    break;
+                }
+            }
+            parts.push(literal[..close].to_string());
+        }
+        parts
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn rule_sources_appear_in_the_header_or_judge_format_strings() {
+        let haystack = drift_haystack();
+        assert!(
+            haystack.contains("must cite commands that ran (D43)"),
+            "bad judge slice: {haystack}"
+        );
+        for rule in VERDICT_RULES {
+            assert!(
+                haystack.contains(rule.source),
+                "{}: the phrase `{}` is no longer in the header or a judge finding string",
+                rule.id,
+                rule.source
+            );
+        }
+    }
+
+    #[test]
+    fn the_drift_haystack_leaves_out_the_table() {
+        let haystack = drift_haystack();
+        for rule in VERDICT_RULES {
+            assert!(
+                !haystack.contains(rule.summary),
+                "{}: summary found in the haystack",
+                rule.id
+            );
+        }
+        assert!(!haystack.contains("VerdictRule"));
     }
 }

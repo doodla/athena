@@ -9,6 +9,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A check that a verifier prompt does not contradict the verdict rules. Root cause: `judge` in
+  `crates/athena-core/src/verify.rs` refuses a behavior criterion that cites no command or one the core did not
+  see run (D43, D63, D115), but nothing compared the verifier prompts with those rules, so an edit such as
+  "accept uncited commands" would have shipped and only been met by `judge` at run time. `verify.rs` gains a
+  table of rules (`VERDICT_RULES`, each with a `source` phrase quoted from its header or a `format!` finding
+  string) and a table of instructions the frame must keep (`REQUIRED_FIELDS`: `commands`, `whole simple command`,
+  `request_reading_mismatch`), and one pure function, `check_verifier_prompt(text, scope)`. The enforcement point
+  is the existing `cargo test` run on every candidate: the test
+  `shipped_verifier_prompts_have_no_verdict_rule_conflict` runs the check on the shipped verifier frame and the
+  cap-change and cap-study `verifier.md`, and a conflicting edit fails it with the rule id and the prompt line.
+  Negation is judged per clause (split on semicolons, colons, full stops, commas and line breaks), so "Never
+  refuse; accept uncited commands" is refused, and "evidence text alone is not enough" is accepted. A required
+  field counts only where the instruction naming it stands (for example `in commands`), not as a bare word. The
+  test `rule_sources_appear_in_the_header_or_judge_format_strings` reads only the header lines and the `format!`
+  strings in `judge`, so a changed finding string fails until the table follows it. Limits: it is a word-set
+  screen of the listed contradiction forms, not a language parser, and a comma splits clauses, so "Never, for
+  any reason, accept uncited commands" is refused and must be reworded. No prompt file, `reading.rs` or reading
+  rule changes; the reading gate is unchanged, so the expected share of newly refused readings is 0%.
 - Crate reach facts and a test-placement reading rule. Root cause: a reading and a plan placed a test in a
   crate that cannot import the code under test (xtask is binary-only, with no library target), and nothing
   they read said which crates have libraries or may depend on which, so it was found late and fixed by hand.

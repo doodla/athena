@@ -1,0 +1,316 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261108-140528-y8yh",
+  "round": 2,
+  "at": "2026-11-08T14:12:51.145881576Z",
+  "invocation_seq": 4,
+  "approach": "In crates/athena-core/src/verify.rs, above the test module, add a table `VERDICT_RULES` (rule id, a `source` phrase quoted from the //! header or a format! string in `judge`, a `summary`, and forbidden patterns) plus `REQUIRED_FIELDS` (rule id, field, anchor words), and one pure function `check_verifier_prompt(text, PromptScope) -> Result<(), PromptConflict>`. The text is split into clauses on `; : . ,` and line breaks, then lowercased into words. A forbidden pattern is a list of word groups; whole-word matching against explicit inflections, no prefix matching. A clause contradicts a rule when every group of a pattern has a word in the clause and the clause holds no negator. The negator set is `not never cannot no nor neither none nothing unless` plus any word ending `n't`. For the frame scope only, each required field needs its anchor word sequence in some clause, negated or not, so the bare word `commands` elsewhere does not satisfy it. D63 now needs `command`: [part, command, count]. The M-mismatch (request_reading_mismatch) entry lives only in REQUIRED_FIELDS with the explicit id `M-mismatch`. It has no drift-guard source because judge builds that finding with `.into()`; the existing test `a_request_reading_mismatch_is_a_major_finding_and_the_verdict_is_not_pass` is its behavior guard, and the table doc comment says so. The header sentence the first plan added is dropped. Tests in the existing `mod tests` run the check on the real `VERIFIER_FRAME.text` and the cap-change and cap-study `verifier.md` (include_str!), then on edited copies; a drift guard reads only //! lines and the format! literals sliced from the `judge` body. The enforcement point is the existing `cargo test --locked` run on every candidate. The doc comment and the CHANGELOG state the limits: it is a word-set screen, and a comma splits clauses, so `Never, for any reason, accept uncited commands` is refused and must be reworded. No prompt, reading.rs or governance file changes.",
+  "decisions": [
+    {
+      "choice": "Enforce through a unit test over the shipped prompt text, run by the existing `cargo test --locked` check on every candidate.",
+      "reason": "Every candidate already runs `cargo test --locked`, so a prompt edit that contradicts a rule fails there, naming the rule id and prompt line. No new wiring is needed, which answers the earlier failure of a check nothing called.",
+      "rejected": [
+        {
+          "option": "Wire the check into reading or plan admission now",
+          "why": "Out of scope. Candidates edit the verifier prompts, not readings. It would also risk newly refusing accepted readings (criterion 7 expects 0%)."
+        },
+        {
+          "option": "Leave the pure function with no caller",
+          "why": "This is what failed the prior job. Nothing would enforce it."
+        }
+      ]
+    },
+    {
+      "choice": "Match required fields at the instruction that names them: anchor word sequences (`in commands`, `whole simple command`, `in request_reading_mismatch`) found inside some clause of the frame. Negation is not required of an anchor. The check runs on the frame scope only.",
+      "reason": "The frame's D63 anchor sentence ('Athena counts the criterion unmet unless it saw each cited command run as a whole simple command') holds `unless`, now a negator, so a non-negated anchor rule would wrongly flag the real frame. Deleting 'list them in commands exactly as run' (frame line 7) leaves `commands` in 'run commands showing it' and 'the brief's commands', but the anchor `in commands` is gone, so the check catches it. The fragments do not carry these instructions, so they get the contradiction scan only.",
+      "rejected": [
+        {
+          "option": "Whole-word presence of `commands` anywhere",
+          "why": "Passes after the instruction is deleted (criterion 3)."
+        },
+        {
+          "option": "Require the anchors in the composed prompt (frame + fragment)",
+          "why": "A fragment line could mask a deleted frame instruction."
+        },
+        {
+          "option": "Require the anchor clause to be non-negated",
+          "why": "Flags the shipped D63 sentence, which holds `unless`."
+        }
+      ]
+    },
+    {
+      "choice": "Judge negation per clause, split on `; : . ,` and line breaks. The negator set is not, never, cannot, no, nor, neither, none, nothing, unless and any word ending n't. Curly apostrophes are normalised to `'`.",
+      "reason": "'Never refuse; accept uncited commands' splits at `;`, so `Never` does not excuse the second clause. Restatements with 'no', 'nor' or 'neither' ('No record made on another tree counts.', 'No behavior criterion is met without a command.', 'Neither a failed record nor a record on another tree counts.') are accepted, and the shipped 'evidence text alone is not enough' stays accepted. This answers finding 1.",
+      "rejected": [
+        {
+          "option": "Negation anywhere in the line or paragraph",
+          "why": "Lets 'Never refuse; accept uncited commands' through."
+        },
+        {
+          "option": "Treat a clause of only a negator and filler words as negating the next clause",
+          "why": "Needs a filler list and can hide a real contradiction ('Never; accept uncited commands'). The comma-scope limit is stated in the table doc comment and the CHANGELOG instead, and a refusal prints the clause and line so a maintainer can reword."
+        }
+      ]
+    },
+    {
+      "choice": "Pattern words match whole words against explicit inflection lists, not by prefix. D63 is [part|parts|partly|partial|partially][command|commands][count|counts|counted].",
+      "reason": "Prefix matching made `part` match partial and particular, `count` match counter and country, and `met` match method and metadata. The shipped cap-study lines 'each part of its rationale' and 'A waiver counts only if' would be near-misses. Requiring `command` ties D63 to chained commands. Edit 4 ('A partly run command still counts.') still matches. Tests add 'Each part of the rationale counts.' and 'A method without a command is a gap.' as accepted. This answers finding 2.",
+      "rejected": [
+        {
+          "option": "Keep word-prefix matching",
+          "why": "Refuses ordinary sentences."
+        },
+        {
+          "option": "A stemmer or language classifier",
+          "why": "Not deterministic enough to fail a build, and larger than one focused change."
+        }
+      ]
+    },
+    {
+      "choice": "Drift guard: a rule's `source` phrase must occur in the //! header lines (joined, whitespace collapsed) or in a string literal that follows `format!(` inside the `judge` body. D43 uses 'must cite commands that ran (D43)' (the format! at verify.rs:601). D63 uses 'as one whole simple command inside a chained or piped one' (header lines 5-6). D115 uses 'Athena ran and recorded it on the same candidate tree and it passed' (header lines 7-8). Every rule `summary` must be absent from the haystack.",
+      "reason": "The judge body is sliced from `\\npub fn judge(` to the first `\\n}\\n`, so the table literal in the file cannot satisfy its own guard. The summary-absent test proves the haystack excludes the table.",
+      "rejected": [
+        {
+          "option": "Search the whole file for the phrase",
+          "why": "The table and tests contain it, so the guard would always pass."
+        },
+        {
+          "option": "Use the `reasons.push(...into())` strings",
+          "why": "They are not format! strings; the brief limits the guard to header lines and format! strings."
+        }
+      ]
+    },
+    {
+      "choice": "The M-mismatch (request_reading_mismatch) entry is only in REQUIRED_FIELDS with the explicit rule id `M-mismatch`. No header sentence is added and it has no drift-guard source. The doc comment says its text is a description not checked against judge, and that the existing test `a_request_reading_mismatch_is_a_major_finding_and_the_verdict_is_not_pass` (verify.rs:2666) guards the judge behavior.",
+      "reason": "Judge builds that finding with `.into()` (verify.rs ~631-635), so a drift guard cannot read it. A header sentence added by this job would only check itself. This answers finding 3 and shrinks the diff.",
+      "rejected": [
+        {
+          "option": "Add a //! header sentence as the source",
+          "why": "The guard would only compare the sentence with the entry added alongside it."
+        }
+      ]
+    },
+    {
+      "choice": "Leave reading.rs unchanged although the brief lists it as a deliverable.",
+      "reason": "The reading gate does not change, and criterion 9 limits the diff to verify.rs and CHANGELOG.md.",
+      "rejected": [
+        {
+          "option": "Edit reading.rs to call the check",
+          "why": "Admission wiring is out of scope and risks newly refusing accepted readings."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add PromptScope, VerdictRule, the VERDICT_RULES and REQUIRED_FIELDS tables, PromptConflict (Display with rule id, line and clause or field), `check_verifier_prompt` and small private helpers, with doc comments for outside readers that state the limits. Add tests for the shipped prompts, the 5 contradicting edits, the deleted-instruction cases, consistent and negation cases, and the drift guard.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet under [Unreleased] / Added: root cause, the table and check, the enforcement point (the existing cargo test run on every candidate), the limits, and that the reading gate is unchanged.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/src/verify.rs: the //! header (lines 1-12), `pub fn judge(` (line 408) and the format! at line 601, and the head of `mod tests` (line 1141) to place the new items. Do not edit the header.",
+    "Above `#[cfg(test)] mod tests`, add `pub enum PromptScope { Frame, Fragment }` and `struct VerdictRule { id, source, summary, forbidden: &'static [&'static [&'static [&'static str]]] }` (a pattern is a list of word groups; a group matches if the clause holds any one of its exact words). Add `const VERDICT_RULES`: D43 (source 'must cite commands that ran (D43)'; patterns [accept|accepts|accepted|accepting][uncited|unlisted], [met|meets][without][command|commands], [evidence][alone][enough|sufficient|suffices]); D63 (source 'as one whole simple command inside a chained or piped one'; pattern [part|parts|partly|partial|partially][command|commands][count|counts|counted]); D115 (source 'Athena ran and recorded it on the same candidate tree and it passed'; patterns [another][tree][count|counts|counted], [failed][record|records][count|counts|counted]). Add `const REQUIRED_FIELDS` as (rule id, field, anchor words): ('D43','commands',['in','commands']), ('D63','whole simple command',['whole','simple','command']), ('M-mismatch','request_reading_mismatch',['in','request_reading_mismatch']). The doc comment says the M-mismatch text is a description not checked against judge (guarded by the test at line 2666), and states the clause and comma limits.",
+    "Add `pub struct PromptConflict { rule, line: Option<usize>, kind }` with a Display such as 'D43: line 12 contradicts verdict rule D43 (<summary>): `accept uncited commands`' or 'D43: no instruction names the field `commands` (expected the words `in commands`)'. Add `pub fn check_verifier_prompt(text, scope) -> Result<(), PromptConflict>` with private helpers: `clauses(text)` (split on ; : . , and newlines, track the 1-based line of each clause's first word), `words(clause)` (lowercase; keep letters, digits, `_` and `'`; map the curly apostrophe to `'`), `is_negated(words)` (not, never, cannot, no, nor, neither, none, nothing, unless, or a word ending n't), `matches_pattern(words, pattern)` (every group has an exact-word hit), `has_anchor(words, anchor)` (consecutive words). The forbidden scan runs for both scopes and skips negated clauses; the required-field scan runs for Frame only and ignores negation.",
+    "Add a pointer in the doc comment that the check is run by the test module on every candidate through `cargo test --locked`; add no wiring elsewhere.",
+    "In `mod tests`, add `CHANGE_FRAGMENT = include_str!(\"../../athena-cap-change/prompts/verifier.md\")` and `STUDY_FRAGMENT = include_str!(\"../../athena-cap-study/prompts/verifier.md\")`, and the test `shipped_verifier_prompts_have_no_verdict_rule_conflict` over `athena_context::VERIFIER_FRAME.text` (Frame) and both fragments (Fragment), printing the PromptConflict in the assert message. Run it first; if it fails, tighten the table, never the prompt files.",
+    "Add the tests for criteria 2-4: the five appended edits plus the cap-change fragment case (refused == 5 of 5, rule id and `line N` checked); the three deleted-instruction cases (the word `commands` still present for the first); and the accepted list ('Keep findings short.', 'Never accept uncited commands.', 'Evidence text alone is not enough, so cite commands.', 'No record made on another tree counts.', 'No behavior criterion is met without a command.', 'Neither a failed record nor a record made on another tree counts.', 'Each part of the rationale counts.', 'A method without a command is a gap.') with 'Never refuse; accept uncited commands' refused.",
+    "Add the drift guard: helper `drift_haystack()` (lines of `include_str!(\"verify.rs\")` starting `//!`, plus the string literal after each `format!(` inside the judge body sliced from `\\npub fn judge(` to the first `\\n}\\n`, whitespace collapsed); a test that each VERDICT_RULES `source` is found; a test that no rule `summary` is found; a sanity assert that the slice holds `format!(` and the D43 string.",
+    "Add the CHANGELOG bullet under `## [Unreleased]` / `### Added`: the root cause (a prompt edit could contradict a verdict rule with nothing to catch it), the table and function, the enforcement point (the existing cargo test run on every candidate, failing with the rule id and prompt line), the scope (verifier frame and the two capability fragments only), the limits (word-set screen; a comma splits clauses), and that the reading gate is unchanged (expected 0% newly refused readings). Do not use the words 'unwired' or 'exposed'.",
+    "Run `cargo fmt --all`, `cargo test -p athena-core verify`, `cargo test -p athena-core admission`, `cargo test -p athena-core reading`, `cargo test -p athena-core --test refusal_corpus`, `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`. Confirm `git diff --stat` lists only verify.rs and CHANGELOG.md."
+  ],
+  "risks": [
+    {
+      "risk": "A forbidden pattern flags an innocent sentence (false positive).",
+      "mitigation": "Whole-word matching with explicit inflection lists, several co-occurring groups per pattern, and the D63 pattern requiring `command`. Step 6 runs the check on all three real prompts, and tests assert 'Each part of the rationale counts.' and 'A method without a command is a gap.' are accepted. A refusal prints the rule id, line and clause so a maintainer can reword or tighten a pattern."
+    },
+    {
+      "risk": "A correct restatement of a rule is refused because the negator is missing or in another clause.",
+      "mitigation": "Negator set includes no, nor, neither, none, nothing, unless and n't words, with tests for 'No record ... counts.', 'No behavior criterion is met without a command.' and 'Neither ... nor ... counts.'. The remaining comma-scope limit ('Never, for any reason, accept uncited commands' is refused) is stated in the table doc comment and the CHANGELOG, and the refusal message shows the clause."
+    },
+    {
+      "risk": "A contradicting edit phrased with other words passes (false negative).",
+      "mitigation": "The CHANGELOG and doc comment say the check is a word-set screen of the listed contradiction forms, not a language parser. The 5 tested edits are the guaranteed coverage; new forms are added as table rows."
+    },
+    {
+      "risk": "The judge-body slice for the drift guard picks the wrong region, because `pub fn judge(` also appears in test string literals.",
+      "mitigation": "Slice from the first `\\npub fn judge(` to the first `\\n}\\n`; the test also asserts the slice holds `format!(` and the D43 string, so a bad slice fails loudly. The summary-absent test proves the table is excluded."
+    },
+    {
+      "risk": "clippy or code_health failures from the new items.",
+      "mitigation": "Run `cargo clippy --all-targets --locked -- -D warnings`. The new items are `pub` in the `pub mod verify`, so they are not dead code; keep helpers small."
+    },
+    {
+      "risk": "The check flags a current prompt and the producer edits a prompt, which would change the token budget.",
+      "mitigation": "The producer must not edit any prompt file. If a shipped prompt trips the check, tighten the table instead. Criterion 9 is checked with git diff --stat."
+    },
+    {
+      "risk": "The producer reads the refusal-corpus instruction as a duty to add corpus cases.",
+      "mitigation": "State in the CHANGELOG and tests that the reading gate is unchanged and add no corpus case. Run `cargo test -p athena-core --test refusal_corpus` as a regression; I cannot run it, so no result is claimed here."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "verdict rules D43/D63/D115 behavior",
+      "dependent": "crates/athena-core/src/verify.rs `judge` (line 408) and its D43/D63/D115 tests (e.g. d43_finding use at lines 1948, 1969, 2197)",
+      "kind": "code",
+      "test": "cargo test -p athena-core verify (existing judge tests). judge is not edited; only a table and function are added below it.",
+      "reason": null
+    },
+    {
+      "name": "request_reading_mismatch is rated major (M-mismatch)",
+      "dependent": "crates/athena-core/src/verify.rs test `a_request_reading_mismatch_is_a_major_finding_and_the_verdict_is_not_pass` (line 2666)",
+      "kind": "code",
+      "test": "cargo test -p athena-core verify. It is the behavior guard for the M-mismatch entry, which the drift guard does not read.",
+      "reason": null
+    },
+    {
+      "name": "VERIFIER_FRAME text",
+      "dependent": "crates/athena-core/src/run/verification.rs:194, run/tests.rs:118, run_pin_tests.rs:47, scope_guard.rs:993 (compose VERIFIER_FRAME into the verifier prompt)",
+      "kind": "code",
+      "test": null,
+      "reason": "The prompt file is not edited, so composition and pins are unchanged; the new test only reads the text."
+    },
+    {
+      "name": "verifier prompt token budget (budget verifier: 1298 of 1300)",
+      "dependent": "crates/athena-context/src/lib.rs budgets; crates/athena-cli/tests/budgets.rs `system_facts_budgets_match_computed`; docs/system-facts.md budget lines",
+      "kind": "rule",
+      "test": "cargo test --locked (budgets test). No prompt file changes, so computed sizes are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "capability verifier.md files, newly read by include_str! from verify.rs",
+      "dependent": "xtask/tests/policy.rs:944 (reads crates/athena-cap-change/prompts/verifier.md); crates/athena-cap-change/src/lib.rs:26 and crates/athena-cap-study/src/lib.rs:31 (include_str! of the fragments)",
+      "kind": "code",
+      "test": null,
+      "reason": "Files are only read, never moved or edited. The relative paths ../../athena-cap-change/prompts/verifier.md and ../../athena-cap-study/prompts/verifier.md resolve inside the workspace; a wrong path fails compilation of the test."
+    },
+    {
+      "name": "verify.rs source text",
+      "dependent": "crates/athena-core/src/admission.rs test `ci_reuse_replay_the_seen_commands_filter_turns_up_in_a_search_and_must_be_named` (lines 1427-1451) reads src/verify.rs and asserts it still holds `c.reused && c.exit_code.is_none()`; it also expects verify.rs among the files containing the `exit_code` needle",
+      "kind": "code",
+      "test": "cargo test -p athena-core admission. The plan only adds code and does not touch that filter line; the new code does not need the `exit_code` needle and adds no new file.",
+      "reason": null
+    },
+    {
+      "name": "verify.rs size limits",
+      "dependent": "crates/athena-core/src/code_health.rs MAX_FILE_LINES 2000 / MAX_FN_LINES 200 (production lines outside #[cfg(test)])",
+      "kind": "rule",
+      "test": "cargo test --locked (code_health tests). Production part of verify.rs is about 1140 lines, plus about 170 added; every new function is far under 200 lines; tests sit in the existing #[cfg(test)] module.",
+      "reason": null
+    },
+    {
+      "name": "reading refusal rules and input forms",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and the reading checks in crates/athena-core/src/reading.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus. No reading check, parser, stem list or input form changes. The new rule's input is verifier prompt text, not a request or reading, so none of the 41 INPUT_FORMS (read at refusal_corpus.rs:90-132) maps to it and no corpus case is added. The prompt-text forms (appended contradiction, deleted instruction, negated clause, 'no'/'nor' restatement, comma scope, shipped prompt) are covered by named tests in verify.rs instead.",
+      "reason": null
+    },
+    {
+      "name": "CHANGELOG.md Unreleased section",
+      "dependent": "crates/athena-core/src/reading.rs tests that read CHANGELOG.md (lines 4042, 4764, 5209, 6276, 6579, 6918, 6944, 7565) and `ensure_changelog` (line 297)",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading. These find entries by specific phrases or the `## [Unreleased]` split; a new '- ' bullet with none of their phrases leaves them unaffected.",
+      "reason": null
+    },
+    {
+      "name": "banned-word and personal-data scan of verify.rs and CHANGELOG.md",
+      "dependent": "xtask/tests/policy.rs boundary_words() scan; the [personal_data] allow-list in athena.toml",
+      "kind": "rule",
+      "test": "cargo test --locked (xtask policy tests). The new text uses no banned word and no email-like text.",
+      "reason": null
+    },
+    {
+      "name": "verify.rs public API",
+      "dependent": "Users of verify.rs items: land.rs, run/checks.rs, run/mod.rs, evidence_labels.rs, reading/retry.rs, athena-cli display.rs",
+      "kind": "code",
+      "test": null,
+      "reason": "Only additions (a new pub const, enum, struct and fn); no existing signature changes. The new function is pure and reads no mode, record or job state."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test `shipped_verifier_prompts_have_no_verdict_rule_conflict` calls `check_verifier_prompt` on `athena_context::VERIFIER_FRAME.text` with PromptScope::Frame, and on `include_str!(\"../../athena-cap-change/prompts/verifier.md\")` and `include_str!(\"../../athena-cap-study/prompts/verifier.md\")` with PromptScope::Fragment. Each assert message prints the returned PromptConflict Display (rule id, line, clause or field).",
+      "command": "cargo test -p athena-core verify",
+      "observes": "All three shipped texts return Ok. A failure would print e.g. `D63: line 7 contradicts ...`.",
+      "fails_without": "Without the check and test nothing runs over the shipped prompts. A loose pattern that flags a real line fails the test and prints the rule id and line.",
+      "seam": "Production entry point `check_verifier_prompt` (added in step 3). Fixtures are the real prompt text: `VERIFIER_FRAME` exists (crates/athena-context/src/lib.rs:50); the two fragment files exist (read); the include_str! constants are added in step 5. Nothing is mocked."
+    },
+    {
+      "criterion": 2,
+      "method": "Test `contradicting_edits_are_refused_with_the_rule_id` appends each of five edits as a new last line of the real frame, after first asserting the unedited frame is Ok. The edits are: (1) 'Never refuse; accept uncited commands' -> D43; (2) 'A behavior criterion is met without a command.' -> D43; (3) 'Evidence text alone is enough.' -> D43; (4) 'A partly run command still counts.' -> D63; (5) 'A record made on another tree counts as run.' -> D115. It counts refused == 5 of edits.len() == 5, and asserts each Display names the expected rule id and `line N`, where N is the line count of the edited text. A sixth case appends edit (1) to the cap-change fragment under Fragment scope and expects D43.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "Five Err results naming D43, D43, D43, D63 and D115 with the appended line.",
+      "fails_without": "Without the forbidden-pattern scan, or with per-line negation, the appended 'Never refuse; accept uncited commands' and the other four edits return Ok and the `is_err` assertion fails.",
+      "seam": "`check_verifier_prompt` on `format!(\"{}\\n{edit}\", VERIFIER_FRAME.text)`. The edited copy is built in the test from the real asset; the check logic is not duplicated in the test. The seam is added in steps 3 and 6."
+    },
+    {
+      "criterion": 3,
+      "method": "Test `deleting_the_commands_instruction_names_the_missing_field` removes only 'list them in commands exactly as run' from the real frame with `str::replace`. First it asserts the text changed and that the word `commands` still occurs. It then asserts `check_verifier_prompt(.., Frame)` is Err with rule D43 and field `commands` in the Display. A second case removes 'say how in request_reading_mismatch' and expects rule M-mismatch and field `request_reading_mismatch`. A third removes 'as a whole simple command' and expects D63.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "Err naming the missing field although the word still appears elsewhere; Ok for the unedited frame.",
+      "fails_without": "A bare whole-word check for `commands` passes because 'run commands showing it' remains, so the `is_err` assertion fails.",
+      "seam": "`check_verifier_prompt` required-anchor path (step 3) over the real frame text with `str::replace`; exists after step 3."
+    },
+    {
+      "criterion": 4,
+      "method": "Test `consistent_edits_are_accepted_and_negation_is_per_clause`. Ok for: the frame plus 'Keep findings short.'; the cap-change fragment as shipped (holds 'evidence text alone is not enough'); 'Never accept uncited commands.'; 'Evidence text alone is not enough, so cite commands.'; 'No record made on another tree counts.'; 'No behavior criterion is met without a command.'; 'Neither a failed record nor a record made on another tree counts.'; 'Each part of the rationale counts.'; 'A method without a command is a gap.'. Err (D43) for 'Never refuse; accept uncited commands'.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "Ok for all consistent texts; Err only for the split-clause contradiction.",
+      "fails_without": "With no negator handling the shipped 'evidence text alone is not enough' is refused. With a negator set lacking `no`/`nor`/`neither`, 'No record made on another tree counts.' is refused. With prefix matching, 'Each part of the rationale counts.' is refused (and 'A method without a command' hits D43 via `met`). With per-line negation, 'Never refuse; accept uncited commands' passes. Each makes this test fail.",
+      "seam": "`check_verifier_prompt` on the real text plus appended sentences (exists after step 3)."
+    },
+    {
+      "criterion": 5,
+      "method": "Test `rule_sources_appear_in_the_header_or_judge_format_strings` builds a haystack with helper `drift_haystack()` from `include_str!(\"verify.rs\")`: only lines starting `//!`, plus the string literal following each `format!(` inside the `judge` body (from `\\npub fn judge(` to the first `\\n}\\n`), whitespace collapsed. It asserts every VERDICT_RULES `source` occurs in it. A second test asserts no rule `summary` (text that occurs only in the table) is in the haystack. A sanity assert checks the slice holds `format!(` and the D43 string, so a bad slice fails loudly. A Grep of verify.rs for `drift_haystack` and `//!` shows the helper reads only those two sources.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "Every source phrase is found in the header/format! text; table-only summaries are not found.",
+      "fails_without": "Without the guard a header or finding-string change leaves a stale table unnoticed. If the guard searched the whole file, the summary-absent test would fail.",
+      "seam": "New test helper `drift_haystack()` in the test module (step 7) over `include_str!(\"verify.rs\")`; the header (lines 1-12) and judge (line 408, format! at line 601) exist today."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the CHANGELOG.md diff. One bullet under `## [Unreleased]` / `### Added` names the root cause, the table and `check_verifier_prompt`, and says the enforcement point is the existing `cargo test` run on every candidate, which fails with the rule id and prompt line. It states the limits (word-set screen of the listed contradiction forms; a comma splits clauses) and that the reading gate is unchanged. It does not use 'unwired' or 'exposed'. `git diff` shows the text; `cargo test -p athena-core reading` shows the reading.rs changelog tests still pass.",
+      "command": "git diff",
+      "observes": "The bullet holds 'cargo test' and 'every candidate' and neither 'unwired' nor 'exposed'.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the whole suite, including `cargo test -p athena-core --test refusal_corpus` (tests such as `corpus_cases_get_the_expected_outcome`, `corpus_covers_the_listed_input_forms`; I read the file header and INPUT_FORMS but did not run them) and the reading.rs tests. reading.rs, its replay and the corpus are unchanged, so 0% newly refused readings (a design fact, not a measurement). The new verify tests show the added refusals of prompt edits (5 of 5).",
+      "command": "cargo test --locked",
+      "observes": "Reading and corpus tests pass unchanged; the added refusals appear only in the new verify tests.",
+      "fails_without": "If the candidate changed reading admission, the corpus and the accepted-reading replay would show newly refused readings; with only prompt edits refused they show none.",
+      "seam": "Existing tests; no reading check or input form changes, so no corpus case is added (see the input-form mapping in risks)."
+    },
+    {
+      "criterion": 8,
+      "method": "Run `cargo test --locked` (includes the prompt budget test `system_facts_budgets_match_computed`), `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`.",
+      "command": "cargo test --locked",
+      "observes": "All pass; the budget lines in docs/system-facts.md still match because no prompt file changes.",
+      "fails_without": "A prompt edit, a compile or lint error, or a size-limit breach fails the budget test, the build, clippy or the code_health test.",
+      "seam": "Existing check commands and crates/athena-cli/tests/budgets.rs (exists)."
+    },
+    {
+      "criterion": 9,
+      "method": "`git diff --stat` and `git status` list the changed paths.",
+      "command": "git diff --stat",
+      "observes": "Only crates/athena-core/src/verify.rs and CHANGELOG.md; no athena.toml, defaults.toml, workflow, reading.rs or crates/*/prompts/ file.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: crates/athena-core/src/reading.rs is listed as a deliverable (modify) but criterion 9 limits the diff to verify.rs and CHANGELOG.md. The plan leaves reading.rs unchanged; say so if you want an edit there instead."
+  ],
+  "producer_section_sha256": "4ddb4d1c9b3af6ea81c96d37d25f6e8ab6e67e33c2199edb3133d672343af407"
+}
