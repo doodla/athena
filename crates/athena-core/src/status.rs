@@ -1622,6 +1622,85 @@ pub struct OpenIntervention {
     pub next: String,
 }
 
+/// One forecast headline per class of work: how many of its request jobs have a score, and the mean
+/// event Brier score of the reader and of the reference forecaster. Ordered by class name.
+fn class_forecasts(records: &Records) -> Vec<ClassHeadline> {
+    let mut per_class: BTreeMap<String, Vec<&athena_data::records::Score>> = BTreeMap::new();
+    for job in records.request_jobs() {
+        if let (Some(score), Some(class)) = (job.latest_score(), job.class()) {
+            per_class.entry(class.to_string()).or_default().push(score);
+        }
+    }
+    per_class
+        .into_iter()
+        .map(|(class, scores)| {
+            let agg = athena_score::aggregate(&scores);
+            let mean = |name: &str| {
+                agg.per_forecaster
+                    .get(name)
+                    .filter(|t| t.events > 0)
+                    .map(|t| t.event_brier_sum / t.events as f64)
+            };
+            ClassHeadline {
+                class,
+                scored_jobs: scores.len(),
+                reader_mean_brier: mean("reader"),
+                reference_mean_brier: mean("reference"),
+            }
+        })
+        .collect()
+}
+
+/// The pending quantities in `set`, each joined to the resolution record that settles it (matched on
+/// target path and field), or to None while it is still open.
+fn pending_with_resolutions(
+    records: &Records,
+    set: &athena_gate::records::RecordSet,
+) -> Vec<Pending> {
+    let resolutions: BTreeMap<(String, String), String> = records
+        .resolutions
+        .iter()
+        .map(|r| {
+            (
+                (r.target_path.clone(), r.target_field.clone()),
+                format!("records/resolutions/{}/{}.json", r.id.month(), r.id),
+            )
+        })
+        .collect();
+    pending_quantities(set)
+        .into_iter()
+        .map(|(record, field, basis)| {
+            let resolved_by = resolutions.get(&(record.clone(), field.clone())).cloned();
+            Pending {
+                record,
+                field,
+                basis,
+                resolved_by,
+            }
+        })
+        .collect()
+}
+
+/// The status note for the bootstrap range: a warning while it is open, a short statement once it is
+/// closed through a commit.
+fn bootstrap_view(range: &BootstrapRange) -> Bootstrap {
+    match range {
+        BootstrapRange::Open => Bootstrap {
+            range_open: true,
+            through_commit: None,
+            note: format!(
+                "OPEN: commits labeled Athena-Job: bootstrap may still change governed content unverified. The bootstrap \
+                 closes its range by adding {BOOTSTRAP_OUTCOME}, naming its last commit (docs/records.md)."
+            ),
+        },
+        BootstrapRange::ClosedThrough(through) => Bootstrap {
+            range_open: false,
+            through_commit: Some(through.clone()),
+            note: "closed: governed content changes only through verified landings and declared interventions".into(),
+        },
+    }
+}
+
 /// The interventions that call for follow-up: those recorded by the user (`source` `user`) that no later
 /// request job cites. A request job cites an intervention when its request text names the intervention's
 /// record id and it was received at or after the intervention was recorded. Interventions Athena observed
@@ -2075,6 +2154,37 @@ impl Athena {
         Ok(mistake_report(&Records::load(&self.git, &head)?))
     }
 
+    /// Appends the `next` line for each open job, in the order of `open`: the command that moves a queued,
+    /// proposed, declined, interrupted or blocked job forward, or the follow-up of an interrupted job that was
+    /// already retried. Other states add nothing.
+    fn open_job_next_lines(&self, records: &Records, open: &[JobLine], next: &mut Vec<String>) {
+        for line in open {
+            let id = &line.id;
+            match line.state.as_str() {
+                "queued" => next.push(format!("athena go {id}   # reads it first, then asks to run it · or: athena close {id} --why \"...\"")),
+                "proposed" => next.push(format!("athena go {id}   # or: athena correct {id} \"<line>\" · athena close {id} --why \"...\"")),
+                "declined" => next.push(format!("athena correct {id} \"<line>\"   # or: athena close {id} --why \"...\"")),
+                "interrupted" => match &line.retried_as {
+                    Some(new) => {
+                        let state = records
+                            .jobs
+                            .get(new.as_str())
+                            .map_or("unknown", |j| j.state().name());
+                        let follow_up = crate::reading::retry_follow_up(
+                            records,
+                            new,
+                            self.running(new),
+                        );
+                        next.push(format!("retried as {new} ({state})   # {follow_up} · or: athena close {id} --why \"...\" (commits what the interrupted job left)"));
+                    }
+                    None => next.push(format!("athena retry {id}   # reads it again to resume · or: athena close {id} --why \"...\" (commits what the interrupted job left)")),
+                },
+                "blocked" => next.push(format!("athena go {id}   # after resolving local edits; or: athena close {id} --why \"...\"")),
+                _ => {}
+            }
+        }
+    }
+
     /// The state of the work.
     pub fn status(&self) -> Result<StatusView> {
         self.state.registry().reap();
@@ -2128,98 +2238,15 @@ impl Athena {
             *by_category.entry(i.category.as_str().into()).or_default() += 1;
             *by_class.entry(i.class_of_work.clone()).or_default() += 1;
         }
-        let mut per_class: BTreeMap<String, Vec<&athena_data::records::Score>> = BTreeMap::new();
-        for job in records.request_jobs() {
-            if let (Some(score), Some(class)) = (job.latest_score(), job.class()) {
-                per_class.entry(class.to_string()).or_default().push(score);
-            }
-        }
-        let forecasts = per_class
-            .into_iter()
-            .map(|(class, scores)| {
-                let agg = athena_score::aggregate(&scores);
-                let mean = |name: &str| {
-                    agg.per_forecaster
-                        .get(name)
-                        .filter(|t| t.events > 0)
-                        .map(|t| t.event_brier_sum / t.events as f64)
-                };
-                ClassHeadline {
-                    class,
-                    scored_jobs: scores.len(),
-                    reader_mean_brier: mean("reader"),
-                    reference_mean_brier: mean("reference"),
-                }
-            })
-            .collect();
-        let resolutions: BTreeMap<(String, String), String> = records
-            .resolutions
-            .iter()
-            .map(|r| {
-                (
-                    (r.target_path.clone(), r.target_field.clone()),
-                    format!("records/resolutions/{}/{}.json", r.id.month(), r.id),
-                )
-            })
-            .collect();
-        let pending: Vec<Pending> = pending_quantities(&set)
-            .into_iter()
-            .map(|(record, field, basis)| {
-                let resolved_by = resolutions.get(&(record.clone(), field.clone())).cloned();
-                Pending {
-                    record,
-                    field,
-                    basis,
-                    resolved_by,
-                }
-            })
-            .collect();
-        let range = bootstrap_range(&self.git, &head)?;
-        let bootstrap = match &range {
-            BootstrapRange::Open => Bootstrap {
-                range_open: true,
-                through_commit: None,
-                note: format!(
-                    "OPEN: commits labeled Athena-Job: bootstrap may still change governed content unverified. The bootstrap \
-                     closes its range by adding {BOOTSTRAP_OUTCOME}, naming its last commit (docs/records.md)."
-                ),
-            },
-            BootstrapRange::ClosedThrough(through) => Bootstrap {
-                range_open: false,
-                through_commit: Some(through.clone()),
-                note: "closed: governed content changes only through verified landings and declared interventions".into(),
-            },
-        };
+        let forecasts = class_forecasts(&records);
+        let pending = pending_with_resolutions(&records, &set);
+        let bootstrap = bootstrap_view(&bootstrap_range(&self.git, &head)?);
         let kill_switch_on = self.state.registry().stopped();
         let mut next = Vec::new();
         if kill_switch_on {
             next.push("athena start   # the kill switch is on; new work is blocked".into());
         }
-        for line in &open {
-            let id = &line.id;
-            match line.state.as_str() {
-                "queued" => next.push(format!("athena go {id}   # reads it first, then asks to run it · or: athena close {id} --why \"...\"")),
-                "proposed" => next.push(format!("athena go {id}   # or: athena correct {id} \"<line>\" · athena close {id} --why \"...\"")),
-                "declined" => next.push(format!("athena correct {id} \"<line>\"   # or: athena close {id} --why \"...\"")),
-                "interrupted" => match &line.retried_as {
-                    Some(new) => {
-                        let state = records
-                            .jobs
-                            .get(new.as_str())
-                            .map_or("unknown", |j| j.state().name());
-                        let follow_up = crate::reading::retry_follow_up(
-                            &records,
-                            new,
-                            self.running(new),
-                        );
-                        next.push(format!("retried as {new} ({state})   # {follow_up} · or: athena close {id} --why \"...\" (commits what the interrupted job left)"));
-                    }
-                    None => next.push(format!("athena retry {id}   # reads it again to resume · or: athena close {id} --why \"...\" (commits what the interrupted job left)")),
-                },
-                "blocked" => next.push(format!("athena go {id}   # after resolving local edits; or: athena close {id} --why \"...\"")),
-                _ => {}
-            }
-        }
+        self.open_job_next_lines(&records, &open, &mut next);
         // Marks that no longer hold under the current attempts are not shown.
         let lines = self.live_marks(&records);
         for l in lines.iter().filter(|l| l.is_pause()) {

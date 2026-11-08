@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- `Athena::status` in `crates/athena-core/src/status.rs` is split into helpers for the open-job next-step
+  lines, the per-class forecast headlines, the pending-quantity join and the bootstrap note, so no function
+  is over the 200-line limit. Output is unchanged.
+
 ### Added
 
 - `athena check --host-rules`: the read-only check of the host rules (GET requests only). It reports whether
