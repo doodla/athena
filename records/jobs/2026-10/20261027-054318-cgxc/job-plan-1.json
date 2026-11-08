@@ -1,0 +1,387 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-054318-cgxc",
+  "round": 1,
+  "at": "2026-11-08T21:09:39.636471934Z",
+  "invocation_seq": 3,
+  "approach": "Root cause: a job cut on an earlier unmerged job's branch has its dependency written nowhere, and nothing after a merge looks at the earlier pull requests that merge carries. Fix in two parts. (1) PrLink (pr.rs) gains a defaulted `base_jobs` field. `land_pr` fills it for an open link with the other jobs whose open link head is an ancestor of the job's landing commit; a new `pr::all_links` reads both link locations. (2) After `land_pr` sees its own link Landed, a new `close_carried_prs` (landing.rs) walks `base_jobs`, and through each earlier link's own `base_jobs` the rest of the stack. For each earlier PR it asks the host for state and current head, skips any PR that is not open, and closes it (with a comment naming the merging PR and merged commit) only when that head is an ancestor of the merged commit or of the exact head the host merged (the second arm covers squash merges, which leave no ancestry). Closing uses two new PrHost methods, `pr_status` and `close_pr`, with default error bodies. Every failure becomes a PrReport.warnings entry; the merge, landing record and stored link are never undone. Scope note answering the round-1 findings: the only edits outside the listed deliverables are (a) one mechanical line `base_jobs: Vec::new()` at each existing PrLink struct literal in early.rs, after_merge_tests.rs, display.rs, drain.rs and external_calls.rs, because Rust requires every field in a literal and criteria 2 and 8 need the field and a compiling workspace; no behavior changes there; and (b) docs/design/native-pr-landing.md, the only doc that mentions pr-link and lists its fields (lines 151-153), which criterion 7 requires updated. No other out-of-list file is touched; main.rs is deliberately left unchanged.",
+  "decisions": [
+    {
+      "choice": "Record `base_jobs: Vec<String>` on PrLink with #[serde(default, skip_serializing_if = \"Vec::is_empty\")], filled inside `land_pr` for an open link by testing which other open links' heads are ancestors of `job.commit`.",
+      "reason": "`land_pr` runs for both a link it just published and one adopted from the early step, so one site covers both. It already holds Ancestry and StateDir, so `LandPr` gets no new field and its construction sites stay untouched. Ancestry is exactly 'built on that job's branch' with no trailer parsing, which works before and after C0. Skip-if-empty keeps unstacked links byte-identical on disk.",
+      "rejected": [
+        {
+          "option": "Compute the base job from git history in Athena::land_pr and pass it in a new LandPr field",
+          "why": "After C0 commits carry no trailers; a new LandPr field breaks every `LandPr {` literal; detecting bases from history for landed jobs is out of scope."
+        },
+        {
+          "option": "Record the earlier PR number instead of the job id",
+          "why": "The number is not known when the later job is cut; the job id keys into the state-directory link that holds number and head."
+        },
+        {
+          "option": "Record nothing and scan all open links after a merge",
+          "why": "That is the 'no recorded dependency' behavior named as the root cause, and criterion 2 requires the field."
+        }
+      ]
+    },
+    {
+      "choice": "Carried test: the earlier PR's head as the host reports it now is an ancestor of the merged commit, OR an ancestor of the merging link's head (the commit the host was told to merge). An ancestry Err counts as 'not carried' for that arm; if neither arm holds and one errored, leave the PR open and warn.",
+      "reason": "The brief's rule is 'every commit reachable from the merged commit'. The repository squash-merges (docs/design/native-pr-landing.md, D88), so a squash commit has main as its only parent and the earlier head is never its ancestor; the first arm alone would never fire in production. The merge is guarded by the head sha, so a head that is an ancestor of it has all its content in main. Using the host's current head means a later push to the earlier branch is judged too, and an unreachable new commit keeps the PR open.",
+      "rejected": [
+        {
+          "option": "Only is_ancestor(earlier_head, merged_commit)",
+          "why": "Never closes anything after a squash merge, so stale PRs would stay."
+        },
+        {
+          "option": "Compare trees or fingerprints",
+          "why": "Out of scope ('any rule other than all commits reachable') and could close a PR whose content a later job changed."
+        }
+      ]
+    },
+    {
+      "choice": "Run the reconciliation at the end of `land_pr` whenever the link is Landed, including a run that finds the PR already merged. It never returns an error.",
+      "reason": "Covers a merge made by the host's setting or by hand, and retries a close that failed earlier. Closed PRs read as not open, so repeats are idempotent.",
+      "rejected": [
+        {
+          "option": "Run only on the call that sends the merge request",
+          "why": "A manual merge or a failed close would never be reconciled."
+        },
+        {
+          "option": "Put it in confirm_existing_merge",
+          "why": "It takes only &dyn Host and has no ancestry or close capability; widening it changes its callers."
+        }
+      ]
+    },
+    {
+      "choice": "Add PrHost::pr_status(number) -> PrStatus { state: PrState (Open, Merged, Closed), head } and PrHost::close_pr(number, comment), both with default bodies returning an error. GhClient overrides: GET pulls/N; PATCH pulls/N state=closed, then POST issues/N/comments. All three log HostOperation::ReadPr.",
+      "reason": "Defaults keep the other PrHost implementors (test_support.rs FakeHost and EarlyFake, tests.rs RunHost) compiling with no edit, so no extra files change. HostOperation is a closed list in athena-data that the watcher parses; client.rs rerun_failed already reuses an existing variant for the same reason. Closing first then commenting means a failed comment leaves the PR closed and the warning says so.",
+      "rejected": [
+        {
+          "option": "New HostOperation variants",
+          "why": "Changes athena-data, out of scope."
+        },
+        {
+          "option": "Required trait methods without defaults",
+          "why": "Forces edits to every fake in out-of-list files for no behavioral gain."
+        }
+      ]
+    },
+    {
+      "choice": "Do not add LinkState::Closed or a carried_by field on the earlier link; the host's PR state is the authority.",
+      "reason": "A new variant reaches every exhaustive match on LinkState (display.rs and others), and writing another job's link file would bypass that job's lock.",
+      "rejected": [
+        {
+          "option": "LinkState::Closed or carried_by",
+          "why": "Widens scope and writes another job's link without its lock."
+        }
+      ]
+    },
+    {
+      "choice": "Leave crates/athena-cli/src/main.rs unchanged although the brief lists it as expected.",
+      "reason": "display::land_pr already prints every report.warnings entry (display.rs:540) and land_pr_code (main.rs:905) does not read warnings, so closed-PR notices ride in warnings with no CLI change.",
+      "rejected": [
+        {
+          "option": "Add a CLI line or flag",
+          "why": "Duplicates the existing warnings output."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the one-line `base_jobs: Vec::new()` edits in early.rs, after_merge_tests.rs, display.rs, drain.rs and external_calls.rs, and the edit to docs/design/native-pr-landing.md, though they are outside the listed deliverables.",
+      "reason": "Round-1 findings 2-7 flag these. The literal edits cannot be avoided: Rust requires every field in a struct literal, criterion 2 requires a field on PrLink, and criterion 8 requires the workspace (including the cli crate's tests) to compile. Each is a single mechanical line with no behavior. The native-pr-landing.md edit is the one doc that lists the link's fields, which criterion 7 says to update.",
+      "rejected": [
+        {
+          "option": "Make the new data a separate file so PrLink gets no field",
+          "why": "Criterion 2 requires a defaulted field on PrLink."
+        },
+        {
+          "option": "Hide the field behind a constructor or `..Default::default()` in all literals",
+          "why": "Still edits the same literal sites, and adds a Default impl for no reason."
+        },
+        {
+          "option": "Skip docs/design/native-pr-landing.md",
+          "why": "Criterion 7 requires docs that list the link's fields to be updated; it would leave the field list wrong."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal_corpus case and no commit-shape table.",
+      "reason": "The change adds no parser, stem list, stop list or reading check, and no history-check or attribution classifier. It is a post-merge host action keyed on recorded job ids and commit ancestry.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "purpose": "Add PrLink::base_jobs (defaulted, skipped when empty) with root-cause doc comment; add all_links, load_link_any, record_bases; tests for old-file loading and record_bases; add base_jobs to the test literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "purpose": "In land_pr call record_bases for an open link; when Landed call new close_carried_prs and append its warnings before the final store_link; add base_jobs: Vec::new() in publish.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "purpose": "Add PrState, PrStatus, parse_pr_status and PrHost::pr_status / close_pr (default error bodies); GhClient implements them via GET pulls/N, PATCH pulls/N state=closed, POST issues/N/comments, using HostOperation::ReadPr.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/mod.rs",
+      "action": "modify",
+      "purpose": "Re-export PrState, PrStatus, parse_pr_status; extend the cfg(test) import list tests.rs needs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Extend FakeHost (statuses, closed, close_fails, status_fails, pr_status/close_pr overrides); add Edges ancestry fake; tests for criteria 3-6 and client tests for PATCH, comment and parse_pr_status; base_jobs in the literal at line 116.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased/Added entry naming the root cause, the failure class, jobs 20261010-154004-60r4 and 20261010-154007-jbt9, the fix, and the squash-merge rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "Short paragraph near 'What is never recorded': the PR link is state, not a record, and holds base_jobs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "action": "modify",
+      "purpose": "Outside the listed deliverables but required by criterion 7: §5.1 step 3 (lines 151-156) lists the stored link fields; add base_jobs and one sentence on the post-merge close of earlier PRs. Sentences only; no ontology marker line edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/early.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add `base_jobs: Vec::new()` to the PrLink literal at line 314. No behavior change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/after_merge_tests.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add `base_jobs: Vec::new()` to the PrLink literal at line 31.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add `base_jobs: Vec::new()` to the test PrLink literal at line 1951.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add `base_jobs: Vec::new()` to the two test PrLink literals at lines 6059 and 6222.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add `base_jobs: Vec::new()` to the `link()` literal at line 119.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read pr.rs tests, the `Anc`, `Spy` and `FakeRunner` helpers in gh/tests.rs and the `gh_cli` runner's reply format so the new tests follow the existing shapes.",
+    "pr.rs: add `base_jobs` to PrLink with #[serde(default, skip_serializing_if = \"Vec::is_empty\")] and a doc comment naming the root cause. Add all_links (reads jobs/*/pr-link.json and early-pr/*/pr-link.json, the job-dir link wins on a duplicate), load_link_any and record_bases (keeps only other jobs' Open links whose head is an ancestor of the commit, sorted and de-duplicated). Update module docs. Add base_jobs to the test literal and the tests for old-file loading and record_bases.",
+    "client.rs: add PrState, PrStatus, parse_pr_status and the two default-error PrHost methods; implement them in GhClient (GET pulls/N; PATCH pulls/N state=closed; POST issues/N/comments with body). Re-export from mod.rs.",
+    "landing.rs: in land_pr call record_bases on an open link after loading or publishing it (errors become warnings). Add close_carried_prs(job, &link) -> Vec<String>: walk base_jobs transitively with a visited set, ask pr_status, apply the carried test, call close_pr, never return an error. Call it when the link is Landed and extend warnings before the final store_link. Comment text: closed by Athena because every commit of this pull request is carried by #N (job J), merged as <short sha>. Add base_jobs: Vec::new() in publish.",
+    "Add `base_jobs: Vec::new()` to the remaining PrLink literals: early.rs:314, after_merge_tests.rs:31, display.rs:1951, drain.rs:6059 and 6222, external_calls.rs:119, tests.rs:116. Grep `PrLink {` to confirm none is missed.",
+    "tests.rs: extend FakeHost (statuses: RefCell<BTreeMap<u64, PrStatus>>, closed: RefCell<Vec<(u64, String)>>, close_fails: Cell<bool>, status_fails: Cell<bool>, and the two overrides) and add Edges. Write the tests for criteria 3-6 and the client tests. Confirm the criterion 3 and 5 tests fail with the close_carried_prs call removed, then restore it.",
+    "Update CHANGELOG.md, docs/records.md and docs/design/native-pr-landing.md with new sentences only; edit no ontology marker line.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` for the whole workspace, and fix any warnings, including in the cli crate."
+  ],
+  "risks": [
+    {
+      "risk": "Some stale PRs stay open: after rebase_job_branch replays an earlier job's commit under a new hash its published head is no longer an ancestor of the later head; or an earlier job's link was already cleaned so it was never recorded.",
+      "mitigation": "The failure is on the safe side: the PR is left open, and a warning names it when the ancestry check errors. Detecting such PRs from history is out of scope. The CHANGELOG states the rule."
+    },
+    {
+      "risk": "The earlier job's PR is closed while its stored link still says Open, so a later `athena land <earlier job>` would try to merge a closed PR.",
+      "mitigation": "No worse than the old state (it would merge an empty change). The host refuses a merge on a closed PR and land reports it. No new link state is added, to avoid touching every LinkState match."
+    },
+    {
+      "risk": "A close succeeds and the comment then fails, leaving a closed PR with no explanation.",
+      "mitigation": "The comment is posted after the close; its failure becomes a warning naming the PR and saying it is closed. The warning text is asserted in a test."
+    },
+    {
+      "risk": "Wrongly closing live work, e.g. an earlier PR with a newer commit not in the merge.",
+      "mitigation": "The host's current head is judged, not the recorded one; closing needs the PR Open and its head an ancestor. The head-e2 test and the Merged/Closed test guard it."
+    },
+    {
+      "risk": "A concurrent process writes another job's pr-link.json while it is read ([parallel] max_concurrency path).",
+      "mitigation": "The step only reads other links; a read or parse error is a warning that skips that link; it never writes another job's file. The merging job's own lock covers its own link."
+    },
+    {
+      "risk": "Editing docs trips the ontology or budget tests.",
+      "mitigation": "Add sentences only; leave marker lines (docs/ontology.toml:56,128,129) unchanged; run `cargo test --locked` before finishing."
+    },
+    {
+      "risk": "A PrLink literal is missed, breaking compilation in a crate outside the listed deliverables.",
+      "mitigation": "The nine literal sites found by grep of `PrLink {` are all listed; the producer searches `PrLink {` again and runs the full `cargo test --locked`, which fails to compile on any miss."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "PrLink struct (new `base_jobs` field)",
+      "dependent": "Struct literals of PrLink: crates/athena-core/src/gh/early.rs:314, gh/landing.rs:461, gh/tests.rs:116, gh/after_merge_tests.rs:31, pr.rs:392, crates/athena-cli/src/display.rs:1951, crates/athena-cli/src/drain.rs:6059 and 6222, crates/athena-cli/tests/external_calls.rs:119 (grep of `PrLink {` shows exactly these)",
+      "kind": "code",
+      "test": "Each literal gets `base_jobs: Vec::new()`; compile-checked by `cargo test --locked`; existing tests such as `a_link_is_stored_in_the_job_state_directory_and_loaded_back` still pass.",
+      "reason": null
+    },
+    {
+      "name": "pr-link.json files on disk (jobs/<id>/ and early-pr/<id>/)",
+      "dependent": "load_link, load_early_link, load_link_or_adopt_early, store_early_link in pr.rs; open_early_pr in gh/early.rs (~292-298)",
+      "kind": "code",
+      "test": "`an_old_link_file_without_base_jobs_still_loads` in pr.rs. Old files parse via serde(default); open_early_pr copies an existing link with its base_jobs unchanged, so needs no edit.",
+      "reason": null
+    },
+    {
+      "name": "PrHost trait (new `pr_status` and `close_pr`, default errors)",
+      "dependent": "Implementors: GhClient (client.rs ~589), FakeHost and RunHost in gh/tests.rs (~1337, 2313), FakeHost and EarlyFake in gh/test_support.rs (~209, 418)",
+      "kind": "code",
+      "test": null,
+      "reason": "The new methods have default bodies, so these compile with no edit. They are called only for an earlier link that exists in the state directory and is open; those fakes' tests store no such link. Only the extended tests.rs FakeHost overrides them."
+    },
+    {
+      "name": "`land_pr` behavior (records bases, reconciles after Landed)",
+      "dependent": "Callers: Athena::land_pr (landing.rs ~776, the single path also used by the [parallel] max_concurrency mode, which holds only the merging job's own lock); gh/test_support.rs `land_job` helper (~641); run_pin_tests.rs:455; gh/tests.rs:1479, 1947, 2747, 2820, 3641; crates/athena-cli/tests/external_calls.rs:468",
+      "kind": "code",
+      "test": "Existing landing tests in gh/tests.rs, run_pin_tests.rs and external_calls.rs; new tests for criteria 3-6 cover the stacked paths.",
+      "reason": "Those tests use a fresh state directory with no other job's link, so `all_links` returns nothing, `base_jobs` stays empty and no extra host call is made. The new code only reads other jobs' link files (a torn or unreadable read becomes a warning that skips that link) and never writes another job's link. State read: own pr-link.json, other jobs' pr-link.json under jobs/ and early-pr/, git ancestry, host PR status."
+    },
+    {
+      "name": "`PrReport.warnings` (now also carries closed-PR notices and close failures)",
+      "dependent": "display.rs:540 prints each warning; drain.rs `landing_from_report` (~3271) and main.rs `land_pr_code` (~905)",
+      "kind": "code",
+      "test": null,
+      "reason": "display.rs only prints them; no other reader of warnings in crates/athena-cli/src branches on them. Exit codes and drain decisions follow `link.state`, which this change does not alter."
+    },
+    {
+      "name": "Host operation names / error log (HostOperation::ReadPr reused for status, close and comment)",
+      "dependent": "HostErrorLog::record (transport.rs ~316) and the watcher (watcher.rs ~262, 429+; tests/watcher.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "HostOperation is a closed list in athena-data/records/core.rs:18-45 and is not changed. The watcher's decision signals read Merge and CreatePr entries only, so a refused close logged as read-pr fires no signal."
+    },
+    {
+      "name": "`confirm_existing_merge` (landing.rs ~359)",
+      "dependent": "Athena::land_pr fallback (landing.rs ~800)",
+      "kind": "code",
+      "test": "Existing confirm_existing_merge tests in gh/tests.rs.",
+      "reason": "Not changed. A job whose landed commit left the branch after a squash resync takes this path and gets no retry of an earlier failed close; the reconciliation in `land_pr` is the single new step."
+    },
+    {
+      "name": "Records schema, AnyRecord and check_record_file",
+      "dependent": "crates/athena-data records and gate record checks",
+      "kind": "rule",
+      "test": null,
+      "reason": "pr-link.json is a state-directory file, not a records-branch record (docs/design/native-pr-landing.md:153). No record type, schema version or gate check reads it."
+    },
+    {
+      "name": "Docs with ontology markers",
+      "dependent": "docs/ontology.toml:56 (records.md marker 'the dispatched job'), :128-129 (native-pr-landing.md markers 'merged-unverified', 'identified from records')",
+      "kind": "rule",
+      "test": "The ontology test run by `cargo test --locked`.",
+      "reason": "Edits add new sentences and leave the marker lines unchanged."
+    },
+    {
+      "name": "System-facts budgets and prompt sets",
+      "dependent": "`system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs); docs/system-facts.md budget lines",
+      "kind": "rule",
+      "test": "`cargo test --locked` runs the budgets test.",
+      "reason": "The edited docs (records.md, native-pr-landing.md, CHANGELOG.md) are not in any always-loaded prompt set found by searching crates/athena-context; the test would show it if they were."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff: CHANGELOG entry and doc comments on PrLink::base_jobs and close_carried_prs state the root cause (a job built on an unmerged job's branch has no recorded dependency and no post-merge reconciliation). The code change is in pr.rs and landing.rs and no job id is hard-coded outside tests.",
+      "command": "git diff -- CHANGELOG.md crates/athena-core/src/pr.rs crates/athena-core/src/gh/landing.rs",
+      "observes": "The text names the cause; `base_jobs` is added in pr.rs; the record call and the reconciliation function are in landing.rs; no job id literal appears outside tests.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test `an_old_link_file_without_base_jobs_still_loads` in pr.rs: write a pr-link.json with only the old keys at `link_path(&state, &job)`, call `load_link`; also store a link with `base_jobs` set and load it back; check an empty list serializes without the key.",
+      "command": "cargo test -p athena-core an_old_link_file_without_base_jobs_still_loads",
+      "observes": "The old file parses with `base_jobs` empty; a non-empty list round-trips; an empty list writes no `base_jobs` key.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Tests in gh/tests.rs using `Rig`: store an open link for an earlier job (head e1), then run `Rig::run_with` (production `land_pr`) with merge_via_rest on and green checks. Cases: merge-commit merge (e1 an ancestor of the merged commit) and squash merge (e1 an ancestor of the merging head cand1 only). Base recording runs inside `land_pr` because e1 is an ancestor of cand1.",
+      "command": "cargo test -p athena-core landing_a_stacked_job_closes_the_earlier_pull_request",
+      "observes": "After the report shows LinkState::Landed, the host's closed list holds exactly the earlier PR's number; the comment names the merging PR #42 and the merged commit; the earlier job's stored link keeps its own state; a warning line reports the close.",
+      "fails_without": "With the `close_carried_prs` call removed from `land_pr`, or `record_bases` not called, the host's closed list is empty and the assertion fails. The decision to close lives in production `land_pr`/`close_carried_prs`; the fake only records calls and returns scripted statuses.",
+      "seam": "Entry point: `land_pr` in landing.rs via `Rig::run_with` (exists, tests.rs:1469). Guards: link Landed after observe_merge and `base_jobs` non-empty. Preconditions: earlier link stored with `store_link`, its PR Open on the fake host. Fakes: `FakeHost` (tests.rs ~1252) gains `statuses`, `closed`, `close_fails` fields and `pr_status`/`close_pr` overrides, and a new `Edges` ancestry fake reports given (ancestor, descendant) pairs; both are passed as the `host` and `ancestry` arguments of `run_with`. FakeHost extension and Edges are added by plan step 6; Rig::run_with exists."
+    },
+    {
+      "criterion": 4,
+      "method": "Tests `an_earlier_pull_request_with_a_commit_the_merge_does_not_carry_stays_open` and `a_merged_or_closed_earlier_pull_request_is_not_touched` in tests.rs. First: the later link is stored with `base_jobs` already naming the earlier job (stored link is adopted, as at tests.rs:182), the earlier link head is e1, the fake host reports head e2 (pushed since), and Edges has e1 an ancestor of cand1 only, so e2 is reachable from neither the merged commit nor the merging head. Second: the host reports Merged for one earlier PR and Closed for another, both heads reachable.",
+      "command": "cargo test -p athena-core earlier_pull_request",
+      "observes": "The host's `closed` list is empty in every case; the report state is still Landed; pr_status was asked for the open PR and nothing was written.",
+      "fails_without": "A reconciliation that closes on the recorded link alone, or skips the status check, closes the PR whose head e2 is not carried, or the merged and closed ones, and the closed-list assertion fails.",
+      "seam": "Same as criterion 3: production `land_pr` via `Rig::run_with` (exists), extended `FakeHost` and `Edges` (added by step 6)."
+    },
+    {
+      "criterion": 5,
+      "method": "Test `a_chain_of_stacked_jobs_closes_every_earlier_pull_request` in tests.rs with a real `Git::isolated` repository and job ids generated by `JobId::parse` in a loop over three ids, none named in assertions. Commit A, then B, then C on one line; store open links for A and B with real commit ids as heads. Case 1: `land_pr` for C records `base_jobs` itself from real ancestry and closes both. Case 2: links stored as C->[B] and B->[A] only, to show the walk through the earlier links' own `base_jobs`.",
+      "command": "cargo test -p athena-core a_chain_of_stacked_jobs_closes_every_earlier_pull_request",
+      "observes": "Both earlier PR numbers are in the host's closed list after C lands; each comment names C's PR; C's own PR is not closed.",
+      "fails_without": "A reconciliation that follows only the first recorded base leaves A open in case 2 (or leaves both open in case 1); the second closed number is missing.",
+      "seam": "Entry point: production `land_pr` via `Rig::run_with` with `&Git` as `ancestry` (`Git` implements `Ancestry`, pr.rs:178; exists). Git history is real, built with `Git::isolated` as the pr.rs tests do (pr.rs:553; exists). Fake host and `store_link` as for criterion 3 (extended FakeHost added by step 6)."
+    },
+    {
+      "criterion": 6,
+      "method": "Test `a_failure_to_close_is_a_warning_and_the_landing_stands` in tests.rs: the fake host's `close_fails` is set so `close_pr` errors; a second case makes `pr_status` error. Stack as in criterion 3, `Rig::run_with` calls `land_pr`.",
+      "command": "cargo test -p athena-core a_failure_to_close_is_a_warning_and_the_landing_stands",
+      "observes": "`land_pr` returns Ok; `report.link.state` is Landed with `merged_commit` set; `Rig::stored()` shows Landed; `report.warnings` holds an entry naming the earlier PR number and the host's error text; host.merges is 1 and no merge is retried.",
+      "fails_without": "If the close error were propagated with `?`, `land_pr` would return Err and the unwrap fails. If the link were stored before the reconciliation and rolled back, the stored-state assertion fails.",
+      "seam": "Entry points: production `land_pr` and `close_carried_prs`. The failing `close_pr` is the fake's scripted error only; the decision to warn and continue is production code. Seam is the extended `FakeHost` (`close_fails`, `status_fails`) added by step 6; `Rig::run_with` and `Rig::stored` exist (tests.rs:1469, 1507)."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff of CHANGELOG.md, docs/records.md and docs/design/native-pr-landing.md, then grep for the field name.",
+      "command": "git diff -- CHANGELOG.md docs/records.md docs/design/native-pr-landing.md",
+      "observes": "CHANGELOG.md has an Unreleased entry naming the root cause; native-pr-landing.md step 3 (the only doc mentioning pr-link, lines 151-153) lists `base_jobs`; records.md has a short note that the link is state, not a record, and holds the base jobs; no ontology marker line is edited (docs/ontology.toml:56,128,129).",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three checks Athena runs over the whole workspace, which also compiles the cli crate tests that hold PrLink literals. The doc-check, ontology, boundary and `system_facts_budgets_match_computed` tests run inside `cargo test`.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0; every PrLink literal compiles with `base_jobs`; the new tests for criteria 2-6 pass.",
+      "fails_without": "A missed `base_jobs` at any `PrLink {` literal is a compile error in that crate's tests, so `cargo test` fails; a formatting or lint slip fails the first two commands.",
+      "seam": "Entry points: the three cargo commands as Athena runs them (fmt, clippy, test) over the workspace. No fake or fixture; each crate's own test fixtures run unchanged. The seam exists today (the commands are the repository's checks); no plan step adds it."
+    }
+  ],
+  "open_questions": [
+    "User: This plan closes an earlier PR when its head is an ancestor of the merged commit or of the merged PR's own head. The second arm goes beyond the brief's 'reachable from the merged commit', which never holds after a squash merge, and this repository merges only by squash. Confirm the second arm is wanted; if not, delete the second is_ancestor call in close_carried_prs and the first-arm tests stay valid.",
+    "User: The compile-forced one-line `base_jobs: Vec::new()` edits in early.rs, after_merge_tests.rs, display.rs, drain.rs and external_calls.rs, and the native-pr-landing.md edit, fall outside the listed deliverables. They cannot be avoided if PrLink gains a field and the field list doc is updated; confirm they are accepted.",
+    "Host: whether the repository's GitHub token may PATCH a pull request's state and POST an issue comment. The code shows only that it can merge (GhClient::merge, client.rs ~640). If not, every close becomes a warning and nothing else changes."
+  ],
+  "producer_section_sha256": "bbd71406b48a17993951f85d63f5a81712221c9d1830a5aae92d16b148de60d1"
+}

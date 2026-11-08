@@ -2,8 +2,9 @@
 //! (`docs/design/native-pr-landing.md`, slice 1).
 //!
 //! Three pieces:
-//! - [`PrLink`]: the pull request number, host, repository, pushed head and job id, kept in the job's state
-//!   directory (never in the repository's `records/`, design §5.1 step 3);
+//! - [`PrLink`]: the pull request number, host, repository, pushed head, job id and the earlier jobs it was
+//!   built on (`base_jobs`), kept in the job's state directory (never in the repository's `records/`, design
+//!   §5.1 step 3);
 //! - [`check_push`]: the push guard. It refuses any branch other than the job's work branch and any push that
 //!   is not a fast-forward. It has no force option;
 //! - [`check_merged`]: the merged-content check. The merge is found by the stored pull request number, never
@@ -48,6 +49,17 @@ pub struct PrLink {
     /// The merged commit id the host reported, once seen.
     #[serde(default)]
     pub merged_commit: Option<String>,
+    /// The earlier jobs whose unmerged pull requests this job was built on: other jobs with an open link
+    /// whose head is an ancestor of this job's landing commit. It is found at landing (see
+    /// [`record_bases`]), not when the job is cut, because only then is the earlier pull request's head
+    /// known. After this job's pull request merges, each recorded pull request that the merge carries is
+    /// closed (`close_carried_prs` in `gh/landing.rs`).
+    ///
+    /// Root cause of the stale pull requests this field ends: a job built on an unmerged job's branch had
+    /// no recorded dependency and nothing reconciled the earlier pull requests after the merge. Links
+    /// written before the field existed parse with an empty list, and an empty list is not written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_jobs: Vec<String>,
 }
 
 /// The file that holds a job's link, under the job's state directory.
@@ -132,6 +144,69 @@ pub fn load_link_or_adopt_early(state: &StateDir, job: &JobId) -> Result<Option<
     let path = early_link_path(state, job);
     std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     Ok(Some(link))
+}
+
+/// The link of `job` as it is on disk, read only: the one in the job's own directory, else the one opened
+/// early. Unlike [`load_link_or_adopt_early`] it moves nothing, so it is safe to use on another job's link.
+pub fn load_link_any(state: &StateDir, job: &JobId) -> Result<Option<PrLink>> {
+    match load_link(state, job)? {
+        Some(link) => Ok(Some(link)),
+        None => load_early_link(state, job),
+    }
+}
+
+/// Every stored link, each with the id of the job it belongs to: the links in the jobs' own directories and
+/// the links of pull requests opened early. A job's own link wins over its early one. A file that cannot be
+/// read or parsed is returned as a note and skipped, so one damaged file never hides the others. Read only.
+pub fn all_links(state: &StateDir) -> (Vec<(JobId, PrLink)>, Vec<String>) {
+    let mut ids: Vec<JobId> = state.job_ids();
+    if let Ok(entries) = std::fs::read_dir(state.root().join("early-pr")) {
+        for entry in entries.flatten() {
+            if let Ok(id) = JobId::parse(&entry.file_name().to_string_lossy())
+                && !ids.contains(&id)
+            {
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort();
+    let mut links = Vec::new();
+    let mut notes = Vec::new();
+    for id in ids {
+        match load_link_any(state, &id) {
+            Ok(Some(link)) => links.push((id, link)),
+            Ok(None) => {}
+            Err(e) => notes.push(format!(
+                "the pull request link of job {id} was skipped: {e:#}"
+            )),
+        }
+    }
+    (links, notes)
+}
+
+/// The jobs `job` is built on, found at landing: the other jobs whose link is still open and whose head is
+/// an ancestor of `commit`, the job's landing commit. A head that git cannot place cannot be shown to be
+/// carried, so that link is not a base. The result is sorted and has no repeats; `job` itself is never in it.
+pub fn record_bases(
+    state: &StateDir,
+    ancestry: &dyn Ancestry,
+    job: &JobId,
+    commit: &str,
+) -> (Vec<String>, Vec<String>) {
+    let (links, notes) = all_links(state);
+    let mut bases: Vec<String> = links
+        .into_iter()
+        .filter(|(id, link)| {
+            id != job
+                && link.state == LinkState::Open
+                && link.head != commit
+                && ancestry.is_ancestor(&link.head, commit).unwrap_or(false)
+        })
+        .map(|(id, _)| id.as_str().to_string())
+        .collect();
+    bases.sort();
+    bases.dedup();
+    (bases, notes)
 }
 
 /// Records the commit pushed early (at verification start) as the head of the job's branch. Landing replaces
@@ -397,7 +472,111 @@ mod tests {
             job: job.into(),
             state: LinkState::Open,
             merged_commit: None,
+            base_jobs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_old_link_file_without_base_jobs_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(dir.path().to_path_buf());
+        let job = JobId::parse("bootstrap").unwrap();
+        // A link as older versions wrote it: no `base_jobs` key.
+        let path = link_path(&state, &job);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"pr_number": 42, "host": "github.com", "repository": "example/project",
+                "head": "abc123", "job": "bootstrap", "state": "open", "merged_commit": null}"#,
+        )
+        .unwrap();
+        let loaded = load_link(&state, &job).unwrap().unwrap();
+        assert!(loaded.base_jobs.is_empty());
+        assert_eq!(loaded, link("bootstrap"));
+
+        // An empty list is not written, so an unstacked link stays as it was on disk.
+        store_link(&state, &job, &loaded).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("base_jobs")
+        );
+        // A recorded base round-trips.
+        let mut stacked = loaded;
+        stacked.base_jobs = vec!["20261001-000000-aaaa".into()];
+        store_link(&state, &job, &stacked).unwrap();
+        assert_eq!(load_link(&state, &job).unwrap(), Some(stacked));
+    }
+
+    /// An ancestry that holds exactly the listed (ancestor, descendant) pairs.
+    struct Pairs(Vec<(&'static str, &'static str)>);
+    impl Ancestry for Pairs {
+        fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+            if ancestor == "unknown" {
+                anyhow::bail!("unknown commit");
+            }
+            Ok(self.0.contains(&(ancestor, descendant)))
+        }
+    }
+
+    #[test]
+    fn the_bases_are_the_other_open_links_whose_head_is_carried_by_the_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(dir.path().to_path_buf());
+        let put = |id: &str, head: &str, link_state: LinkState, early: bool| {
+            let job = JobId::parse(id).unwrap();
+            let mut l = link(id);
+            l.head = head.into();
+            l.state = link_state;
+            if early {
+                store_early_link(&state, &job, &l).unwrap();
+            } else {
+                store_link(&state, &job, &l).unwrap();
+            }
+        };
+        let own = JobId::parse("20261001-000000-aaaa").unwrap();
+        put("20261001-000000-aaaa", "own", LinkState::Open, false);
+        put("20261001-000001-bbbb", "carried", LinkState::Open, false);
+        // An early link counts; a job directory is not needed for it.
+        put(
+            "20261001-000002-cccc",
+            "early-carried",
+            LinkState::Open,
+            true,
+        );
+        put("20261001-000003-dddd", "sibling", LinkState::Open, false);
+        put("20261001-000004-eeee", "carried", LinkState::Landed, false);
+        put("20261001-000005-ffff", "unknown", LinkState::Open, false);
+        // A damaged file is a note and does not hide the others.
+        let bad = JobId::parse("20261001-000006-gggg").unwrap();
+        std::fs::create_dir_all(state.job_dir(&bad)).unwrap();
+        std::fs::write(link_path(&state, &bad), "{").unwrap();
+
+        let ancestry = Pairs(vec![
+            ("own", "landing"),
+            ("carried", "landing"),
+            ("early-carried", "landing"),
+        ]);
+        let (bases, notes) = record_bases(&state, &ancestry, &own, "landing");
+        assert_eq!(bases, vec!["20261001-000001-bbbb", "20261001-000002-cccc"]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("20261001-000006-gggg"), "{notes:?}");
+    }
+
+    #[test]
+    fn a_job_own_link_wins_over_its_early_link_in_all_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(dir.path().to_path_buf());
+        let job = JobId::parse("20261001-000000-aaaa").unwrap();
+        let mut early = link("x");
+        early.head = "early".into();
+        store_early_link(&state, &job, &early).unwrap();
+        let mut own = link("x");
+        own.head = "own".into();
+        store_link(&state, &job, &own).unwrap();
+        let (links, notes) = all_links(&state);
+        assert!(notes.is_empty());
+        assert_eq!(links, vec![(job, own)]);
     }
 
     #[test]

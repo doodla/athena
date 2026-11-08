@@ -121,6 +121,7 @@ fn the_client_runs_only_gh_api_with_rest_paths() {
         job: "j".into(),
         state: LinkState::Open,
         merged_commit: None,
+        base_jobs: Vec::new(),
     };
     assert_eq!(client.merged_commit(&link).unwrap(), Some("m1".into()));
 
@@ -1295,10 +1296,28 @@ struct FakeHost {
     /// How many merge requests get `merge_error`, counting from the first; later ones are accepted. Unset: every
     /// request is refused.
     merge_error_limit: Cell<Option<u32>>,
+    /// What the host reports for an earlier pull request, by number. A number not in it is an error.
+    statuses: RefCell<BTreeMap<u64, PrStatus>>,
+    /// The numbers whose status was read.
+    status_reads: RefCell<Vec<u64>>,
+    /// The pull requests closed, each with the comment left on it.
+    closed: RefCell<Vec<(u64, String)>>,
+    /// A status read that fails.
+    status_fails: Cell<bool>,
+    /// A close that fails, before it closes anything.
+    close_fails: Cell<bool>,
+    /// A close that succeeds but whose comment fails.
+    comment_fails: Cell<bool>,
 }
 impl FakeHost {
     fn new(checks: Checks) -> Self {
         FakeHost {
+            statuses: RefCell::new(BTreeMap::new()),
+            status_reads: RefCell::new(vec![]),
+            closed: RefCell::new(vec![]),
+            status_fails: Cell::new(false),
+            close_fails: Cell::new(false),
+            comment_fails: Cell::new(false),
             runs: RefCell::new(None),
             merge_error: RefCell::new(None),
             merge_error_limit: Cell::new(None),
@@ -1422,6 +1441,26 @@ impl PrHost for FakeHost {
             *self.merged.borrow_mut() = Some(self.merge_makes.to_string());
         }
         Ok(MergeMethod::Merge)
+    }
+    fn pr_status(&self, number: u64) -> Result<PrStatus> {
+        self.status_reads.borrow_mut().push(number);
+        if self.status_fails.get() {
+            bail!("the host could not be asked");
+        }
+        match self.statuses.borrow().get(&number) {
+            Some(status) => Ok(status.clone()),
+            None => bail!("no status was scripted for #{number}"),
+        }
+    }
+    fn close_pr(&self, number: u64, comment: &str) -> Result<()> {
+        if self.close_fails.get() {
+            bail!("the host refused to close");
+        }
+        self.closed.borrow_mut().push((number, comment.to_string()));
+        if self.comment_fails.get() {
+            bail!("pull request #{number} was closed, but the comment could not be posted");
+        }
+        Ok(())
     }
 }
 
@@ -4273,5 +4312,572 @@ mod records_flow {
             None,
             "a job with no landing has no cutover"
         );
+    }
+}
+
+/// Jobs built on an earlier job's unmerged branch: the dependency is recorded when the later job lands, and
+/// the earlier pull requests its merge carries are closed.
+mod stacked {
+    use super::*;
+    use crate::pr::store_link;
+
+    /// An ancestry that holds exactly the listed (ancestor, descendant) pairs. A commit named in `unknown`
+    /// cannot be placed, as git cannot place a commit it does not have.
+    struct Edges {
+        pairs: Vec<(&'static str, &'static str)>,
+        unknown: Vec<&'static str>,
+    }
+    impl Edges {
+        fn new(pairs: &[(&'static str, &'static str)]) -> Self {
+            Edges {
+                pairs: pairs.to_vec(),
+                unknown: vec![],
+            }
+        }
+    }
+    impl Ancestry for Edges {
+        fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+            if self.unknown.contains(&ancestor) {
+                bail!("unknown commit {ancestor}");
+            }
+            Ok(self
+                .pairs
+                .iter()
+                .any(|(a, d)| *a == ancestor && *d == descendant))
+        }
+    }
+
+    /// The nth job id of a made-up stack (1 to 9); nothing else in the tests names a job.
+    fn id(n: u32) -> JobId {
+        JobId::parse(&format!("2026100{n}-000000-aaa{n}")).unwrap()
+    }
+
+    fn state_of(rig: &Rig) -> StateDir {
+        StateDir::new(rig.dir.path().to_path_buf())
+    }
+
+    fn put_link(rig: &Rig, job: &JobId, number: u64, head: &str, bases: &[JobId]) {
+        let link = PrLink {
+            pr_number: number,
+            host: HOST.into(),
+            repository: "example/project".into(),
+            head: head.into(),
+            job: job.as_str().into(),
+            state: LinkState::Open,
+            merged_commit: None,
+            base_jobs: bases.iter().map(|b| b.as_str().to_string()).collect(),
+        };
+        store_link(&state_of(rig), job, &link).unwrap();
+    }
+
+    fn status(state: PrState, head: &str) -> PrStatus {
+        PrStatus {
+            state,
+            head: head.into(),
+        }
+    }
+
+    /// A rig for the newest job of a stack of `heads.len() + 1` jobs, with an open pull request stored for
+    /// each earlier job (numbered from 101) whose head the host reports as given.
+    struct Scene {
+        rig: Rig,
+        host: FakeHost,
+        earlier: Vec<(JobId, u64)>,
+    }
+
+    fn scene(heads: &[&str]) -> Scene {
+        let mut rig = Rig::new();
+        rig.job = id(heads.len() as u32 + 1);
+        let host = FakeHost::new(Checks::Green);
+        let mut earlier = vec![];
+        for (i, head) in heads.iter().enumerate() {
+            let job = id(i as u32 + 1);
+            let number = 101 + i as u64;
+            put_link(&rig, &job, number, head, &[]);
+            host.statuses
+                .borrow_mut()
+                .insert(number, status(PrState::Open, head));
+            earlier.push((job, number));
+        }
+        Scene { rig, host, earlier }
+    }
+
+    impl Scene {
+        fn try_land(&self, ancestry: &dyn Ancestry) -> Result<PrReport> {
+            self.rig.run_with(
+                &self.host,
+                true,
+                &work_branch(&self.rig.job),
+                "cand1",
+                ancestry,
+            )
+        }
+        fn land(&self, ancestry: &dyn Ancestry) -> PrReport {
+            self.try_land(ancestry).unwrap()
+        }
+        fn closed_numbers(&self) -> Vec<u64> {
+            let mut numbers: Vec<u64> = self.host.closed.borrow().iter().map(|c| c.0).collect();
+            numbers.sort();
+            numbers
+        }
+    }
+
+    #[test]
+    fn landing_a_stacked_job_closes_the_earlier_pull_request() {
+        // A merge commit has the earlier head as an ancestor; a squash commit does not, but the merge was
+        // guarded by the merging pull request's own head, which does.
+        for (kind, pairs) in [
+            ("merge commit", vec![("e0", "cand1"), ("e0", "merged1")]),
+            ("squash", vec![("e0", "cand1")]),
+        ] {
+            let scene = scene(&["e0"]);
+            let report = scene.land(&Edges::new(&pairs));
+            assert_eq!(report.link.state, LinkState::Landed, "{kind}");
+            assert_eq!(scene.host.merges.get(), 1, "{kind}");
+            let closed = scene.host.closed.borrow();
+            assert_eq!(closed.len(), 1, "{kind}: {closed:?}");
+            assert_eq!(closed[0].0, scene.earlier[0].1, "{kind}");
+            // The comment names the pull request that carried it, and the merged commit.
+            assert!(closed[0].1.contains("#42"), "{kind}: {}", closed[0].1);
+            assert!(closed[0].1.contains("merged1"), "{kind}: {}", closed[0].1);
+            assert!(
+                report
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("closed pull request #101")),
+                "{kind}: {:?}",
+                report.warnings
+            );
+            // The base was found at landing and is in the stored link.
+            let earlier = scene.earlier[0].0.as_str().to_string();
+            assert_eq!(scene.rig.stored().base_jobs, vec![earlier], "{kind}");
+            assert_eq!(scene.rig.stored(), report.link, "{kind}");
+            // The earlier job's own link file is not rewritten.
+            let theirs = load_link(&state_of(&scene.rig), &scene.earlier[0].0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(theirs.state, LinkState::Open, "{kind}");
+        }
+    }
+
+    #[test]
+    fn nothing_is_asked_or_closed_when_no_earlier_job_is_carried() {
+        // A job that is not built on any other job's unmerged branch: no status read, no close.
+        let scene = scene(&["e0"]);
+        let report = scene.land(&Edges::new(&[]));
+        assert_eq!(report.link.state, LinkState::Landed);
+        assert!(report.link.base_jobs.is_empty());
+        assert!(scene.host.status_reads.borrow().is_empty());
+        assert!(scene.host.closed.borrow().is_empty());
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn an_earlier_pull_request_with_a_commit_the_merge_does_not_carry_stays_open() {
+        // The earlier branch took a newer commit after the later job was cut: its head now is e2, which the
+        // merge does not carry.
+        let scene = scene(&["e1"]);
+        scene
+            .host
+            .statuses
+            .borrow_mut()
+            .insert(101, status(PrState::Open, "e2"));
+        let report = scene.land(&Edges::new(&[("e1", "cand1")]));
+        assert_eq!(report.link.state, LinkState::Landed);
+        assert_eq!(*scene.host.status_reads.borrow(), vec![101]);
+        assert!(scene.host.closed.borrow().is_empty());
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn a_head_git_cannot_place_leaves_the_pull_request_open_and_names_it() {
+        let scene = scene(&["e0"]);
+        scene
+            .host
+            .statuses
+            .borrow_mut()
+            .insert(101, status(PrState::Open, "bad"));
+        let mut edges = Edges::new(&[("e0", "cand1")]);
+        edges.unknown = vec!["bad"];
+        let report = scene.land(&edges);
+        assert_eq!(report.link.state, LinkState::Landed);
+        assert!(scene.host.closed.borrow().is_empty());
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(report.warnings[0].contains("#101"), "{:?}", report.warnings);
+        assert!(
+            report.warnings[0].contains("left open"),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn a_merged_or_closed_earlier_pull_request_is_not_touched() {
+        let scene = scene(&["e0", "e1", "e2"]);
+        {
+            let mut statuses = scene.host.statuses.borrow_mut();
+            statuses.insert(101, status(PrState::Merged, "e0"));
+            statuses.insert(102, status(PrState::Closed, "e1"));
+        }
+        let edges = Edges::new(&[("e0", "cand1"), ("e1", "cand1"), ("e2", "cand1")]);
+        let report = scene.land(&edges);
+        assert_eq!(report.link.state, LinkState::Landed);
+        // All three were asked; only the one that is open was closed.
+        assert_eq!(*scene.host.status_reads.borrow(), vec![101, 102, 103]);
+        assert_eq!(scene.closed_numbers(), vec![103]);
+    }
+
+    #[test]
+    fn a_failure_to_close_is_a_warning_and_the_landing_stands() {
+        for mode in ["status", "close", "comment"] {
+            let scene = scene(&["e0"]);
+            match mode {
+                "status" => scene.host.status_fails.set(true),
+                "close" => scene.host.close_fails.set(true),
+                _ => scene.host.comment_fails.set(true),
+            }
+            let edges = Edges::new(&[("e0", "cand1")]);
+            let report = scene.land(&edges);
+            // The merge, the link and the landing state stand.
+            assert_eq!(report.link.state, LinkState::Landed, "{mode}");
+            assert_eq!(
+                report.link.merged_commit.as_deref(),
+                Some("merged1"),
+                "{mode}"
+            );
+            assert_eq!(scene.host.merges.get(), 1, "{mode}");
+            assert_eq!(scene.rig.stored(), report.link, "{mode}");
+            let warning = report
+                .warnings
+                .iter()
+                .find(|w| w.contains("#101"))
+                .unwrap_or_else(|| panic!("{mode}: {:?}", report.warnings));
+            let wanted = match mode {
+                "status" => "could not be asked",
+                "close" => "refused to close",
+                _ => "was closed, but the comment could not be posted",
+            };
+            assert!(warning.contains(wanted), "{mode}: {warning}");
+        }
+    }
+
+    #[test]
+    fn a_close_that_failed_is_tried_again_by_the_next_landing_call() {
+        let scene = scene(&["e0"]);
+        scene.host.close_fails.set(true);
+        let edges = Edges::new(&[("e0", "cand1")]);
+        scene.land(&edges);
+        assert!(scene.host.closed.borrow().is_empty());
+        scene.host.close_fails.set(false);
+        let again = scene.land(&edges);
+        assert_eq!(again.link.state, LinkState::Landed);
+        assert_eq!(scene.closed_numbers(), vec![101]);
+        // The merge was not asked for again.
+        assert_eq!(scene.host.merges.get(), 1);
+    }
+
+    #[test]
+    fn the_walk_follows_the_earlier_links_own_bases() {
+        // C records only B; B records only A. Both are closed. Nothing here says A is built under C.
+        let scene = scene(&["a1", "b1"]);
+        let (job_a, job_b) = (scene.earlier[0].0.clone(), scene.earlier[1].0.clone());
+        put_link(&scene.rig, &job_b, 102, "b1", &[job_a]);
+        put_link(&scene.rig, &scene.rig.job, 42, "cand1", &[job_b]);
+        *scene.rig.remote.head.borrow_mut() = Some("cand1".into());
+        // Only b1 is under the landing commit; a1 is under the merged commit only.
+        let edges = Edges::new(&[("b1", "cand1"), ("b1", "merged1"), ("a1", "merged1")]);
+        let report = scene.land(&edges);
+        assert_eq!(report.link.state, LinkState::Landed);
+        assert_eq!(scene.closed_numbers(), vec![101, 102]);
+    }
+
+    #[test]
+    fn a_link_whose_pull_request_is_not_merged_stays_unconfirmed() {
+        // The drain asks this for a job whose landing commit left the branch. A pull request that is not
+        // merged gives no landing, whether it is open or was closed by a later job's merge.
+        let rig = Rig::new();
+        put_link(&rig, &rig.job, 7, "h1", &[]);
+        let host = FakeHost::new(Checks::Green);
+        let got =
+            confirm_existing_merge(&state_of(&rig), &rig.job, &host, &rig.content, "verified")
+                .unwrap();
+        assert!(got.is_none());
+        assert_eq!(rig.stored().state, LinkState::Open);
+    }
+
+    // ---- real git ----
+
+    fn leak(text: String) -> &'static str {
+        Box::leak(text.into_boxed_str())
+    }
+
+    /// A repository that holds the branch the jobs are stacked on.
+    struct Repo {
+        dir: tempfile::TempDir,
+        git: Git,
+        base: String,
+    }
+
+    impl Repo {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let git = Git::isolated(dir.path());
+            git.run(["init", "-q", "-b", "trunk"]).unwrap();
+            let mut repo = Repo {
+                dir,
+                git,
+                base: String::new(),
+            };
+            repo.base = repo.commit("base.txt", "base\n");
+            repo
+        }
+
+        /// A commit on the branch.
+        fn commit(&self, path: &str, text: &str) -> String {
+            let file = self.dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, text).unwrap();
+            self.git.run(["add", "-A"]).unwrap();
+            self.git.run(["commit", "-q", "-m", path]).unwrap();
+            self.git.head().unwrap().unwrap()
+        }
+
+        /// A commit with the tree of `like` and the parent `parent`, on no branch: what the early candidate
+        /// is to the landing commit, or what a replay under a new hash is to the commit it replaced.
+        fn sibling(&self, parent: &str, like: &str, message: &str) -> String {
+            let tree = self.git.tree_of(like).unwrap();
+            self.git
+                .commit_tree(&tree, &[parent], message, false)
+                .unwrap()
+        }
+
+        /// What the host's merge makes of the branch ending at `tip`: a squash (the default branch as the only
+        /// parent) or a merge commit (it also has `tip` as a parent). It is leaked, as the fake's commit ids
+        /// are static strings.
+        fn merged(&self, tip: &str, squash: bool) -> &'static str {
+            let tree = self.git.tree_of(tip).unwrap();
+            let parents: Vec<&str> = if squash {
+                vec![&self.base]
+            } else {
+                vec![&self.base, tip]
+            };
+            leak(
+                self.git
+                    .commit_tree(&tree, &parents, "Merged (#42)", false)
+                    .unwrap(),
+            )
+        }
+    }
+
+    /// Lands the newest job of a stack on `repo`, the host merging as a squash or a merge commit.
+    fn land_on(
+        rig: &mut Rig,
+        host: &mut FakeHost,
+        repo: &Repo,
+        tip: &str,
+        squash: bool,
+    ) -> Result<PrReport> {
+        let merged = repo.merged(tip, squash);
+        rig.content = FakeContent(BTreeMap::from([(merged, "verified")]));
+        host.merge_makes = merged;
+        rig.run_with(&*host, true, &work_branch(&rig.job), tip, &repo.git)
+    }
+
+    /// The jobs A, B and C: B is cut on A's landing commit and C on B's, with a records-only commit and an
+    /// intervention commit between jobs. Returns the landing commit of each, oldest first.
+    fn stack(repo: &Repo, jobs: usize) -> Vec<String> {
+        let mut landing = vec![];
+        for i in 0..jobs {
+            if i > 0 {
+                repo.commit("records/note.txt", &format!("records of job {}\n", i - 1));
+                repo.commit("intervention.txt", &format!("intervention {i}\n"));
+            }
+            landing.push(repo.commit(&format!("job{i}.txt"), &format!("job {i}\n")));
+        }
+        landing
+    }
+
+    #[test]
+    fn a_chain_of_stacked_jobs_closes_every_earlier_pull_request() {
+        for squash in [true, false] {
+            let repo = Repo::new();
+            let landing = stack(&repo, 3);
+            // The newest job is the last of three; the other two are its earlier jobs. The ids are made up
+            // in a loop and never named in an assertion.
+            let jobs: Vec<JobId> = (1..=3).map(id).collect();
+            let mut rig = Rig::new();
+            rig.job = jobs[2].clone();
+            let mut host = FakeHost::new(Checks::Green);
+            for (i, job) in jobs[..2].iter().enumerate() {
+                let number = 101 + i as u64;
+                put_link(&rig, job, number, &landing[i], &[]);
+                host.statuses
+                    .borrow_mut()
+                    .insert(number, status(PrState::Open, &landing[i]));
+            }
+            // A fourth job whose pull request still holds its early candidate: a sibling of the stack.
+            let other = id(4);
+            let candidate = repo.sibling(&landing[0], &landing[1], "candidate");
+            put_link(&rig, &other, 104, &candidate, &[]);
+            host.statuses
+                .borrow_mut()
+                .insert(104, status(PrState::Open, &candidate));
+
+            let report = land_on(&mut rig, &mut host, &repo, &landing[2], squash).unwrap();
+            assert_eq!(report.link.state, LinkState::Landed, "squash={squash}");
+            let mut closed: Vec<u64> = host.closed.borrow().iter().map(|c| c.0).collect();
+            closed.sort();
+            // Both earlier pull requests, not the sibling, and not the merging one.
+            assert_eq!(closed, vec![101, 102], "squash={squash}");
+            for (_, comment) in host.closed.borrow().iter() {
+                assert!(comment.contains("#42"), "{comment}");
+            }
+            // The two bases were found from git alone, and recorded.
+            let expected: Vec<String> = jobs[..2].iter().map(|j| j.as_str().to_string()).collect();
+            assert_eq!(rig.stored().base_jobs, expected, "squash={squash}");
+            // The warnings are the two close notices and nothing else.
+            assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
+            assert!(
+                report
+                    .warnings
+                    .iter()
+                    .all(|w| w.starts_with("closed pull request #10")),
+                "{:?}",
+                report.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn shapes_the_rule_leaves_open_are_left_open() {
+        let repo = Repo::new();
+        let landing = stack(&repo, 5);
+        // 0: an ordinary earlier job, closed. 1: its pull request holds the early candidate. 2: a stack
+        // replayed under new hashes, so its old published head is on no branch. 3: its host head is a commit
+        // this repository does not have. 4 is the newest job.
+        let jobs: Vec<JobId> = (1..=5).map(id).collect();
+        let mut rig = Rig::new();
+        rig.job = jobs[4].clone();
+        let mut host = FakeHost::new(Checks::Green);
+        let candidate = repo.sibling(&landing[0], &landing[1], "candidate");
+        let replayed = repo.sibling(&landing[1], &landing[2], "the old hash");
+        let unknown = "0123456789abcdef0123456789abcdef01234567".to_string();
+        let heads = [&landing[0], &candidate, &replayed, &landing[3]];
+        let reported = [&landing[0], &candidate, &replayed, &unknown];
+        for i in 0..4 {
+            let number = 101 + i as u64;
+            put_link(&rig, &jobs[i], number, heads[i], &[]);
+            host.statuses
+                .borrow_mut()
+                .insert(number, status(PrState::Open, reported[i]));
+        }
+
+        let report = land_on(&mut rig, &mut host, &repo, &landing[4], true).unwrap();
+        assert_eq!(report.link.state, LinkState::Landed);
+        // The candidate and the replayed head are not under the landing commit, so they were never
+        // recorded as bases and never asked about; the unplaceable head was, and named.
+        let mut closed: Vec<u64> = host.closed.borrow().iter().map(|c| c.0).collect();
+        closed.sort();
+        assert_eq!(closed, vec![101]);
+        assert_eq!(*host.status_reads.borrow(), vec![101, 104]);
+        let names_104: Vec<_> = report
+            .warnings
+            .iter()
+            .filter(|w| w.contains("#104"))
+            .collect();
+        assert_eq!(names_104.len(), 1, "{:?}", report.warnings);
+        assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
+    }
+
+    // ---- the client ----
+
+    struct ScriptRunner {
+        calls: RefCell<Vec<Vec<String>>>,
+        /// The call (1-based) that fails.
+        fails_at: Option<usize>,
+    }
+    impl Runner for ScriptRunner {
+        fn gh(&self, args: &[String]) -> Result<String> {
+            self.calls.borrow_mut().push(args.to_vec());
+            if Some(self.calls.borrow().len()) == self.fails_at {
+                bail!("the host said no");
+            }
+            Ok(r#"{"state": "open", "merged": false, "head": {"sha": "h1"}}"#.to_string())
+        }
+    }
+
+    #[test]
+    fn the_client_reads_a_status_and_closes_with_a_comment() {
+        let runner = ScriptRunner {
+            calls: RefCell::new(vec![]),
+            fails_at: None,
+        };
+        let client = GhClient::new(&runner, "example/project".into());
+        assert_eq!(client.pr_status(9).unwrap(), status(PrState::Open, "h1"));
+        client.close_pr(9, "carried by #42").unwrap();
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0][2], "GET");
+        assert_eq!(calls[0][3], "repos/example/project/pulls/9");
+        // Closed first, then the comment.
+        assert_eq!(calls[1][2], "PATCH");
+        assert_eq!(calls[1][3], "repos/example/project/pulls/9");
+        assert!(
+            calls[1].contains(&"state=closed".to_string()),
+            "{:?}",
+            calls[1]
+        );
+        assert_eq!(calls[2][2], "POST");
+        assert_eq!(calls[2][3], "repos/example/project/issues/9/comments");
+        assert!(
+            calls[2].contains(&"body=carried by #42".to_string()),
+            "{:?}",
+            calls[2]
+        );
+        for args in calls.iter() {
+            assert_eq!(args[0], "api");
+        }
+    }
+
+    #[test]
+    fn a_comment_that_fails_after_the_close_says_the_pull_request_is_closed() {
+        let runner = ScriptRunner {
+            calls: RefCell::new(vec![]),
+            fails_at: Some(2),
+        };
+        let client = GhClient::new(&runner, "example/project".into());
+        let error = client.close_pr(9, "x").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("was closed, but the comment"),
+            "{error:#}"
+        );
+        // A refused close posts no comment.
+        let runner = ScriptRunner {
+            calls: RefCell::new(vec![]),
+            fails_at: Some(1),
+        };
+        let client = GhClient::new(&runner, "example/project".into());
+        assert!(client.close_pr(9, "x").is_err());
+        assert_eq!(runner.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_status_reply_is_read_as_open_merged_or_closed() {
+        let reply = |state: &str, merged: bool| json!({"state": state, "merged": merged, "head": {"sha": "h1"}});
+        assert_eq!(
+            parse_pr_status(&reply("open", false)).unwrap(),
+            status(PrState::Open, "h1")
+        );
+        assert_eq!(
+            parse_pr_status(&reply("closed", false)).unwrap(),
+            status(PrState::Closed, "h1")
+        );
+        // The host calls a merged pull request closed and sets `merged`.
+        assert_eq!(
+            parse_pr_status(&reply("closed", true)).unwrap(),
+            status(PrState::Merged, "h1")
+        );
+        assert!(parse_pr_status(&json!({"state": "open"})).is_err());
+        assert!(parse_pr_status(&json!({"state": "weird", "head": {"sha": "h1"}})).is_err());
     }
 }

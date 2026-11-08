@@ -1956,6 +1956,7 @@ mod tests {
                 job: "j".into(),
                 state: LinkState::Open,
                 merged_commit: None,
+                base_jobs: Vec::new(),
             },
             checks: Some(checks),
             merge_requested: false,

@@ -87,6 +87,54 @@ pub trait PrHost: Host {
     fn early_run_wait(&self) -> Duration {
         EARLY_RUN_WAIT
     }
+    /// Where a pull request stands on the host now, and the commit its branch holds now. The default is an
+    /// error, so a host that cannot answer closes nothing.
+    fn pr_status(&self, number: u64) -> Result<PrStatus> {
+        bail!("this host cannot read the state of pull request #{number}")
+    }
+    /// Closes the pull request without merging it and leaves `comment` on it. The default is an error.
+    fn close_pr(&self, number: u64, comment: &str) -> Result<()> {
+        let _ = comment;
+        bail!("this host cannot close pull request #{number}")
+    }
+}
+
+/// Whether a pull request is open, merged or closed without a merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Merged,
+    Closed,
+}
+
+/// What the host says about one pull request: its state and the commit its branch holds now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrStatus {
+    pub state: PrState,
+    /// The commit the pull request's branch holds now, which may be newer than the one first pushed.
+    pub head: String,
+}
+
+/// Reads the reply of `GET pulls/{number}` into a [`PrStatus`]. A merged pull request is reported by the
+/// host as closed with `merged` set, so `merged` is read first.
+pub fn parse_pr_status(reply: &Value) -> Result<PrStatus> {
+    let state = if reply["merged"].as_bool() == Some(true) {
+        PrState::Merged
+    } else {
+        match reply["state"].as_str() {
+            Some("open") => PrState::Open,
+            Some("closed") => PrState::Closed,
+            other => bail!("the host's reply for the pull request has an unknown state {other:?}"),
+        }
+    };
+    let head = reply["head"]["sha"]
+        .as_str()
+        .filter(|sha| !sha.is_empty())
+        .context("the host's reply for the pull request names no head commit")?;
+    Ok(PrStatus {
+        state,
+        head: head.to_string(),
+    })
 }
 
 /// One workflow run of a commit, as the host reports it.
@@ -703,6 +751,38 @@ impl PrHost for GhClient<'_> {
             &self.repo_path(&format!("actions/runs/{run_id}/rerun-failed-jobs")),
             &[],
         )?;
+        Ok(())
+    }
+
+    fn pr_status(&self, number: u64) -> Result<PrStatus> {
+        let pull = self.api(
+            HostOperation::ReadPr,
+            "GET",
+            &self.repo_path(&format!("pulls/{number}")),
+            &[],
+        )?;
+        parse_pr_status(&pull)
+    }
+
+    fn close_pr(&self, number: u64, comment: &str) -> Result<()> {
+        // Both calls are recorded under the pull-request read operation: the host operation list is closed
+        // (as for `rerun_failed`). The pull request is closed first, so a comment that fails leaves it closed,
+        // and the error says so.
+        self.api(
+            HostOperation::ReadPr,
+            "PATCH",
+            &self.repo_path(&format!("pulls/{number}")),
+            &[("state", "closed")],
+        )?;
+        self.api(
+            HostOperation::ReadPr,
+            "POST",
+            &self.repo_path(&format!("issues/{number}/comments")),
+            &[("body", comment)],
+        )
+        .with_context(|| {
+            format!("pull request #{number} was closed, but the comment could not be posted")
+        })?;
         Ok(())
     }
 

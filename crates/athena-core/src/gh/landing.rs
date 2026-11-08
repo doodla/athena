@@ -4,12 +4,13 @@
 use super::early::{replace_early, wait_for_checks};
 use super::{
     Checks, GhClient, GitLandingRecords, GitRemote, HostErrorLog, LandingFacts, LandingRecords,
-    NewPr, PAGES_WAIT_DELAY, PAGES_WAIT_LOOKS, PagesHost, PrDraft, PrHost, Remote, Runner,
+    NewPr, PAGES_WAIT_DELAY, PAGES_WAIT_LOOKS, PagesHost, PrDraft, PrHost, PrState, Remote, Runner,
     cutover_job_for, parse_remote, watch_pages,
 };
 use crate::pr::{
     Ancestry, Content, GitContent, Host, LinkState, PrLink, PushRequest, check_push, clear_early,
-    load_early, load_link, load_link_or_adopt_early, observe_merge, store_link,
+    load_early, load_link, load_link_any, load_link_or_adopt_early, observe_merge, record_bases,
+    store_link,
 };
 use crate::state::StateDir;
 use crate::{Athena, Ui};
@@ -192,6 +193,15 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
     let mut reruns = 0;
     let mut failing_test = None;
     observe_merge(job.host, job.content, &mut link, job.verified_fingerprint)?;
+    if matches!(link.state, LinkState::Open | LinkState::Landed) {
+        // Record, now that the landing commit is known, the earlier jobs this one is built on. The
+        // reconciliation after the merge reads them from the link.
+        let (bases, notes) = record_bases(job.state, job.ancestry, job.job, job.commit);
+        warnings.extend(notes);
+        link.base_jobs.extend(bases);
+        link.base_jobs.sort();
+        link.base_jobs.dedup();
+    }
     if link.state == LinkState::Open {
         // The pull request's head is whatever its branch holds now, not the job's commit: a fix may have
         // been pushed since. Everything below judges and guards that head, and nothing replaces it.
@@ -335,6 +345,10 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
             }
         }
     }
+    // The merge is done and stays done: closing the earlier pull requests it carries never fails the landing.
+    if link.state == LinkState::Landed {
+        warnings.extend(close_carried_prs(job, &link));
+    }
     store_link(job.state, job.job, &link)?;
     Ok(PrReport {
         link,
@@ -344,6 +358,111 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
         failing_test,
         warnings,
     })
+}
+
+/// After `link`'s pull request merged, closes each earlier pull request it carries.
+///
+/// Root cause this ends: a job built on an unmerged job's branch had no recorded dependency, and nothing
+/// looked at the earlier pull requests once the later one merged, so they stayed open although their
+/// commits were in the default branch. The earlier jobs are the `base_jobs` of the link, followed through
+/// each earlier link's own `base_jobs`, so a chain (A, then B on A, then C on B) closes every earlier pull
+/// request when C lands.
+///
+/// An earlier pull request is closed only when the host reports it open and every commit of its head (as
+/// the host reports it now, so a later push is judged too) is reachable from the merged commit, or from the
+/// head the host was asked to merge. The second test covers a squash merge, whose commit has the default
+/// branch as its only parent and so never has the earlier head as an ancestor, while the merge was guarded by
+/// that head. A pull request that is merged or closed, or whose head holds a commit the merge does not carry,
+/// is left alone. The head of a job's early candidate (never on its branch) and a stack replayed under new
+/// hashes are not reachable, so those pull requests stay open.
+///
+/// Nothing here fails: every problem is returned as a warning line, and so is every pull request closed.
+fn close_carried_prs(job: &LandPr, link: &PrLink) -> Vec<String> {
+    let mut notes = Vec::new();
+    let Some(merged) = link.merged_commit.as_deref() else {
+        return notes;
+    };
+    let short = merged.chars().take(12).collect::<String>();
+    let mut seen = std::collections::BTreeSet::from([job.job.as_str().to_string()]);
+    let mut queue: std::collections::VecDeque<String> = link.base_jobs.iter().cloned().collect();
+    while let Some(id) = queue.pop_front() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let earlier = match JobId::parse(&id).map(|parsed| load_link_any(job.state, &parsed)) {
+            Ok(Ok(Some(earlier))) => earlier,
+            Ok(Ok(None)) => continue,
+            Ok(Err(e)) => {
+                notes.push(format!(
+                    "the pull request link of job {id}, which job {} is built on, could not be read: {e:#}",
+                    link.job
+                ));
+                continue;
+            }
+            Err(e) => {
+                notes.push(format!(
+                    "a base job of job {} is not a job id: {e}",
+                    link.job
+                ));
+                continue;
+            }
+        };
+        queue.extend(earlier.base_jobs.iter().cloned());
+        if earlier.state != LinkState::Open || earlier.pr_number == link.pr_number {
+            continue;
+        }
+        let number = earlier.pr_number;
+        let status = match job.host.pr_status(number) {
+            Ok(status) => status,
+            Err(e) => {
+                notes.push(format!(
+                    "pull request #{number} (job {id}) was not closed: its state could not be read: {e:#}"
+                ));
+                continue;
+            }
+        };
+        if status.state != PrState::Open {
+            continue;
+        }
+        let mut carried = false;
+        let mut unanswered = None;
+        for descendant in [merged, link.head.as_str()] {
+            match job.ancestry.is_ancestor(&status.head, descendant) {
+                Ok(true) => {
+                    carried = true;
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => unanswered = Some(e),
+            }
+        }
+        if !carried {
+            if let Some(e) = unanswered {
+                notes.push(format!(
+                    "pull request #{number} (job {id}) was left open: whether its head {} is carried by #{} \
+                     could not be told: {e:#}",
+                    status.head.chars().take(12).collect::<String>(),
+                    link.pr_number
+                ));
+            }
+            continue;
+        }
+        let comment = format!(
+            "Closed by Athena: every commit of this pull request is carried by #{} (job {}), merged as {short}.",
+            link.pr_number, link.job
+        );
+        match job.host.close_pr(number, &comment) {
+            Ok(()) => notes.push(format!(
+                "closed pull request #{number} (job {id}): every commit of it is carried by #{}, merged as {short}",
+                link.pr_number
+            )),
+            Err(e) => notes.push(format!(
+                "pull request #{number} (job {id}) is carried by #{} but could not be closed cleanly: {e:#}",
+                link.pr_number
+            )),
+        }
+    }
+    notes
 }
 
 /// Whether the host refused a merge by its repository rules (GitHub: "Repository rule violations found").
@@ -466,6 +585,7 @@ fn publish(job: &LandPr, early: Option<&str>) -> Result<(PrLink, Option<String>)
         job: job.job.as_str().to_string(),
         state: LinkState::Open,
         merged_commit: None,
+        base_jobs: Vec::new(),
     };
     store_link(job.state, job.job, &link)?;
     Ok((link, note))
