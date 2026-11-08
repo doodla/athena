@@ -393,6 +393,38 @@ fn every_role_set_is_within_its_budget() {
 }
 
 #[test]
+fn the_reader_defaults_context_includes_the_version_pin_and_tool_path_policies() {
+    let text = defaults().render();
+    for needle in [
+        "pinned-versions",
+        "claude_version",
+        "never float",
+        "explicit-tool-paths",
+        "never relies on inherited environment or ambient tools",
+    ] {
+        assert!(text.contains(needle), "reader defaults lack {needle:?}");
+    }
+    // The reader sees each entry's first sentence; the full statements carry the rest of each policy.
+    let model = defaults();
+    let statement = |id: &str| {
+        model
+            .defaults
+            .iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("no default {id}"))
+            .statement
+            .clone()
+    };
+    let pins = statement("pinned-versions");
+    assert!(pins.contains("One explicit command bumps them"));
+    assert!(pins.contains("names that command"));
+    let tools = statement("explicit-tool-paths");
+    assert!(tools.contains("passes every tool path a check needs explicitly"));
+    assert!(tools.contains("records which was used"));
+    assert!(tools.contains("silent fallback is a defect"));
+}
+
+#[test]
 fn the_reader_headroom_rows_equal_the_budget_figures_and_name_shared_files() {
     // The rows the reader's brief shows come from the same compose and budgets as `computed_rows`.
     let defaults = defaults();
