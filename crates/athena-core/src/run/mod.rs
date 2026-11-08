@@ -61,6 +61,7 @@ use std::time::Instant;
 mod candidate;
 mod checks;
 mod close;
+mod format;
 mod pin;
 mod planning;
 mod producer;
