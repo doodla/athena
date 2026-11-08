@@ -10,4 +10,4 @@ Code already ran the study's validation rules: citations, pin, quotes, cards, nu
 6. Whether each scenario was written without sight of the reader's claims.
 7. Numbers written in prose.
 
-A waiver counts only if it names the rule and the ids, carries the user's reason, and cites a user intervention record. Evidence rules cannot be waived. Check every claim against the cited lines yourself; do not trust the producer's summary.
+A waiver counts only if it names the rule and the ids, carries the user's reason, and cites a user intervention record. Evidence rules cannot be waived.

@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-224504-k8mh",
+  "round": 1,
+  "at": "2026-11-07T22:52:44.841906042Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "docs/system-facts.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/system-facts.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The keyword trigger matches common words, so feature jobs get a root-cause criterion they cannot meet.",
+      "evidence": "has_phrase (reading.rs:4058-4064) counts any non-alphanumeric character as a word break, so `bug` matches inside `bug-evidence`. This job's own reading title, \"Add bug-evidence default and enforce root-cause criterion on bug\", would trigger on that alone. HISTORY.txt:345 has \"Throughput review: flag median slowdowns and queue a request\", a feature that would match `slowdowns`. \"Add a regression test for X\" matches `regression`. The plan's Risks section admits the regression-test false positive and calls the extra criterion \"harmless\". It is not: the added criterion requires stating a root cause and showing \"why the wrong output or metric change follows\". A feature job cannot meet that, and the verifier judges criteria at the final verdict. The negative cases in Demonstration 3(b) ('debug logging', a README demo) skip these realistic collisions, so the test would pass with the false positives still in place. Fix: Make the trigger less crude. Have the step guarantee the criterion whenever the reader itself named `bug-evidence` in defaults_applied; the reader sees the new default's first sentence and can judge semantically. Keep keyword matching only as a fallback, and narrow it: match on the request text and title, ignore a keyword followed by `-` (so compounds like `bug-evidence` do not count), and exclude `regression test(s)`. Add the realistic collisions to the negative table: 'Add a regression test for the parser', 'Add bug-evidence default…', 'flag median slowdowns and queue a request'. Then the test fails if the trigger regresses to bare substring-like matching.",
+      "location": "Decision 2 / Step 4 (BUG_WORDS whole-word matching via has_phrase on title, summary and request text)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan rewords three governance defaults outside the reading's scope instead of raising the reader budget, as the repository did for behavior-evidence.",
+      "evidence": "The reading says athena.toml changes \"only if the reader prompt budget check requires it, and then only that budget value\"; its intent is to raise the reader budget and touch nothing else. The plan finds, correctly, that the budget lives in `BudgetSet::Reader` (athena-context lib.rs:175), not athena.toml. But it then reworks three governance defaults the reading never listed, citing two rules that do not say what it claims. The system-facts note says to update the facts line, not the budget, when that line drifts from the computed value. `an_over_budget_role_set_fails` (budgets.rs:262-272) tests moving rules between components to escape the check. The repository's precedent for adding a default line is CHANGELOG.md:3035-3042: \"pushed its set over 1,930 tokens, so the reader budget in crates/athena-context/src/lib.rs is now 2,000 (docs/decisions.md D25 records it)\". The rewording also loses meaning: the reader's view of `public` would shrink to \"Everything committed is public.\", dropping \"no secrets, credentials, or personal data\". The plan proceeds with the rewording by default and leaves the alternative as an open question. Fix: Follow the behavior-evidence precedent. Raise `BudgetSet::Reader` in lib.rs by the measured amount, record the new value in docs/decisions.md D25, update the `budget reader` line in docs/system-facts.md and the pinned \"of 2000\" in run_pin_tests.rs:1625, and say so in the CHANGELOG entry. Name lib.rs, decisions.md and system-facts.md as forced deviations from the reading's file list, since the reading pointed at athena.toml by mistake. Leave buy-first, public and verified untouched. If the planner still prefers rewording, make it the user question and do not proceed with it by default.",
+      "location": "Decision 5 / Step 3 / Files: defaults.toml (splitting the first sentences of buy-first, public, verified)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two docs that quote the reader budget figure are missing from the dependents and would go stale.",
+      "evidence": "docs/design/context-engineer.md:54 quotes \"1997 of 2000 (99.85%)\" and line 141 quotes \"reader 99.85%\". The plan changes the reader size but does not list these readers. No test checks them (a Grep of crates/ for context-engineer.md and 1997 finds nothing), so they would go stale silently. run_pin_tests.rs:1625 also pins \"of 2000\"; it is listed for its recomputation, but not as a line that must change if the budget is raised. Fix: Add context-engineer.md lines 54 and 141 to the dependents and update them to the measured figure. If the budget is raised, also update run_pin_tests.rs:1625.",
+      "location": "Dependents: budget reader line",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Checking only the lead phrase lets a reader-written root-cause criterion and the step's own criterion both remain.",
+      "evidence": "The step adds its criterion only if no existing criterion starts with the constant's lead phrase. A reader that writes its own root-cause-evidence criterion in other words therefore gets a near-duplicate, and the plan accepts this. Admission requires exactly one demonstration per criterion (admission.rs:179-197), so each duplicate costs the planner an extra demonstration. Fix: Skip adding the criterion when the reader both named `bug-evidence` and already has a content criterion mentioning \"root cause\". Otherwise keep the lead-phrase check. Test both paths.",
+      "location": "Decision 3 (idempotency of the criterion by lead phrase)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code by reading it; I ran nothing. Most of what it names exists as described: `ensure_changelog` (reading.rs:281-303), the `build_reading` call to it at line 842 just before `validate()`, the single production caller at 642-651, the `build_sized` test helper at 5606-5640, `has_phrase` at 4058, `change_reading` at 6130, `first_sentence` and `render` in defaults.rs, `BudgetSet::Reader => 2_000` at athena-context lib.rs:175, and the briefs.rs test helpers. The dependents list is mostly complete. Two parts of the approach are not sound, so the verdict is revise. (1) The trigger matches common words, so it fires on non-bug work. `has_phrase` treats `-` as a word break, so \"bug\" matches \"bug-evidence\", which is this job's own title. \"slowdowns\" matches a feature commit in HISTORY.txt:345. \"regression\" matches \"add a regression test\". When it fires wrongly, a feature job gets a criterion it cannot meet (\"Before any fix, the change states the root cause…\"). (2) To fit the reader's token budget, the plan rewords three standing defaults (`buy-first`, `public`, `verified`) that the reading never listed. It justifies this by misreading two rules. The system-facts note \"update the line, never the budget\" is about fixing a drifted facts line, and `an_over_budget_role_set_fails` is about moving rules between components to dodge the check. Neither forbids raising a budget. The direct precedent is the `behavior-evidence` default, whose reader line was paid for by raising `BudgetSet::Reader` in lib.rs (CHANGELOG.md:3035-3042, D25). The reading's assumption shows the same intent: change only the reader budget value. Smaller issues: two docs that quote the 1997 figure would go stale, and a test in run_pin_tests.rs pins \"of 2000\"."
+}

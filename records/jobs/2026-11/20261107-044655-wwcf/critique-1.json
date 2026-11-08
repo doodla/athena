@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-044655-wwcf",
+  "round": 1,
+  "at": "2026-11-07T23:50:42.821636283Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/producer.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/producer.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The fix targets a rare case of the slowdown mechanism the plan itself names, so the producer median is unlikely to fall and the criterion tied to the next throughput review would go unmet.",
+      "evidence": "The producer stage counts only producer invocation time (status.rs:933-940 role_minutes), so a replay never adds to its own job's producer minutes. It can only slow another job's producer through the shared build slot. Every producer cargo build/test/clippy/check takes a Class::Producer slot, the lowest priority, below every Class::Check request (slots.rs:22-47; docs/design/agent-and-build-slots.md section 8, build job 4). By default there is one slot (config.rs:165) and two concurrent jobs (athena.toml:195). Every in-loop replay, not only those later thrown away, holds that slot for two workspace builds (mod.rs:2297-2354). All of this landed after the 2026-11-04 throughput review (HISTORY.txt: d0ff1e9 on 11-04; f2d168c and 5bae74b on 11-05; 387255a on 11-06). The plan's skip fires at most once per job (PRODUCER_SEND_BACKS = 1, mod.rs:1548), only when the change touches crates/ and the first report has another problem. The plan gives no estimate of how many landed jobs that is, and its Risks section concedes 'the median may move less than hoped'. Fix: Size each source of slot holds that a producer waits behind: the other job's producer cargo commands, checks (which outrank producers), every in-loop replay (base and candidate builds), and the hold at verification. Do it from the code, with labeled estimates. Name the dominant one as the root cause and fix it for every job that builds, not only send-back jobs. One example to weigh: reuse the base-side reading checker for the same base commit across replays, so each replay holds the slot for one build instead of two. Keep the current skip only as a secondary part if it still pays. If the dominant cause is truly out of scope, say so in the note, propose its fix, and do not present the narrow skip as removing the cause.",
+      "location": "Approach and Decision 1 (cause choice); crates/athena-core/src/run/producer.rs:370",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The rejection says a slot-count change needs athena.toml, but the default slot count is code under crates/.",
+      "evidence": "crates/athena-data/src/config.rs:165 sets max_check_slots: 1 as the code default, and athena.toml has no [drain.pipeline] section. Changing the default is a crates/ edit. The disk-sizing reason (agent-and-build-slots.md section 7) may still justify the rejection, but the athena.toml reason does not. Fix: Restate the rejection on its real grounds (disk and memory per slot, section 7), or keep the option among the candidates when sizing the contention.",
+      "location": "Decision 1, rejected alternative 'Raise max_check_slots'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Skipping the replay on the first report, when another problem triggers a send-back, can turn a fixable too-broad rule into a job rejected at verification. That adds wasted work, which the throughput review now counts.",
+      "evidence": "With PRODUCER_SEND_BACKS = 1, a first report with an unmet criterion and a held replay used to send both back together (producer.rs:398-399, 501-503). Under the plan, the held replay is found only on the second report, after the send-back is spent, so the loop breaks and the hold at verification rejects the job. ad7e260 (2026-11-07) made the throughput review measure wasted work. Fix: In the note, estimate the cost of this trade against the slot time saved. If the main fix becomes the general one, consider dropping this skip.",
+      "location": "Risks, second bullet; Decision 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The tests count calls to the reading checker. They do not show that the sent-back round leaves the build slot free, which is the mechanism the plan says slows the other job's producer.",
+      "evidence": "candidate_calls counts calls to the checker seam (tests.rs:1777-1794). The slot is taken in loop_replay before the checkers (mod.rs:2297), so the count is a proxy for slot holds, not a direct observation of them. Fix: Add an assertion that ties to the slot. For example, hold the slot in the sent-back round as an_in_loop_replay_waits_for_a_build_slot does (tests.rs:2046) and show the first round does not wait. Or count Class::Producer acquisitions.",
+      "location": "Demonstrations, criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The doc comment on loop_replay still says the replay 'runs after each parsed report'.",
+      "evidence": "mod.rs:2238: 'Here the same replay ... runs after each parsed report'. The plan updates only the producer.rs:173 doc comment. Fix: Update the mod.rs:2238 sentence too, if the skip stays.",
+      "location": "Files, producer.rs; crates/athena-core/src/run/mod.rs:2238",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan's code facts check out. The skip condition is the exact opposite of the break at producer.rs:445-446 (PRODUCER_SEND_BACKS and SCOPE_SEND_BACKS are both 1, mod.rs:1548 and 1600). The helpers and tests it names exist in run/tests.rs. Its reading of limits_changed_files (briefs.rs:146-222) is correct, so no allowed-paths list applies and producer.rs and tests.rs are safe to edit. The approach does not hold up. The producer stage counts only the producer's own invocation time (status.rs:933-940), so an in-loop replay adds producer minutes only by holding the single build slot while another job's producer cargo command waits. The plan correctly names that mechanism: since 2026-11-05 every producer build/test/clippy/check takes a slot at the lowest priority, one slot by default, two concurrent jobs. But it fixes only one narrow case: the replay of a report that is later sent back. That happens at most once per job, and only for jobs that touch crates/ and fail their first self-check. The plan never estimates how often that is, and its own risk section says the median may not move. A careful engineer would ask for the general cause to be sized and fixed for every job that builds, not one corner of it. The other findings are minor."
+}

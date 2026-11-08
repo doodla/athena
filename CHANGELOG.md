@@ -440,6 +440,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The change verifier, study verifier and study producer prompts drop sentences their briefs already state
+  (`crates/athena-context/prompts/verifier.md`, `crates/athena-context/prompts/producer.md`,
+  `crates/athena-cap-change/prompts/verifier.md`, `crates/athena-cap-study/prompts/verifier.md`; D166). No rule
+  changed. Budget headroom rises from 2, 4 and 43 tokens to 154, 135 and 140 (change verifier 1146, study verifier
+  1165, study producer 1160, each of 1300), and `docs/system-facts.md` records the new producer and verifier sizes.
 - An open earlier throughput design request no longer stops the throughput review. The review runs, asks the
   model, records the proposal, and notes the open request in the record and in `THROUGHPUT.md`; four of seven runs
   on 4 to 6 Nov did nothing for this reason. A proposal recorded without a design request has `request_job` unset.

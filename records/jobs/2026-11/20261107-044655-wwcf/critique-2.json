@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-044655-wwcf",
+  "round": 2,
+  "at": "2026-11-07T23:59:26.403648846Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/producer.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/producer.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The cause timeline is wrong: producers started taking a build slot on 2026-11-07, not 2026-11-05.",
+      "evidence": "HISTORY.txt:87-136 lists 9a97e24 (2026-11-07) as the commit that first adds crates/athena-cli/src/slot_exec.rs and tests/slot_exec.rs. No older commit in HISTORY touches slot_exec.rs. CHANGELOG.md:286-288: \"The producer's cargo build, test, clippy and check now take a build slot. Root cause: only Athena's checks went through the build-slot queue, so any number of producers built at once\". docs/design/agent-and-build-slots.md:393: \"Only the check class is requested now; the landing and producer classes exist in slots.rs for build jobs 4\". f2d168c's subject is \"...counting build-slot queue for local checks\". The review that triggered this job ran on 2026-11-07, so most landed jobs in its window ran before any producer waited on a slot. Slot-hold sources (1) and (3) could not have lengthened those jobs' producer invocations. Fix: Correct the timeline in the plan and the note: wrapper 9a97e24 on 2026-11-07. Then re-judge which cause fits a rise measured over jobs that mostly ran without producer slot waits. If producer slot contention matters only from 2026-11-07, say so, and do not present it as the cause of the measured rise.",
+      "location": "Approach (timeline paragraph); Decision 1; note section (3)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan never considers a cause visible in the code: send-backs added on 2026-11-06 add whole extra producer passes, and producer stage time counts every pass.",
+      "evidence": "status.rs:933-941: `role_minutes` sums started_at..ended_at over every producer invocation of the job. producer.rs:244-507: each send-back runs another producer invocation in the same loop. Four new send-back triggers landed between the 2026-11-04 review and now (HISTORY: 10166b3 decision gate, e0f1a6f allowed paths, 69057b9 hand-kept mirrors, 387255a in-loop replay, all 2026-11-06). A job sent back once pays its producer roughly twice (estimate). The rise from 12.7 to 23.5 is close to 2x. The plan also leaves out CPU contention: with max_concurrency = 2 (b32888f), two cold producer builds plus the replay's two builds run on 4 CPUs (agent-and-build-slots.md section 7.1 calls two builds at CARGO_BUILD_JOBS=2 'a mild overload'). Neither candidate appears in the slot-hold table. Fix: Add these candidates to the analysis and the note: the send-back rate and its triggers, and CPU contention from concurrent builds. For each, say what evidence the code gives and which record would settle it: producer invocation count per landed job, and the `self-check failed:` detail that producer.rs:434 writes per send-back. Pick the fix for the cause that best fits the corrected timeline. If that is the extra producer passes, aim the fix there, for example the trigger that sends back most often or a send-back of a problem the producer cannot act on. A replay skip that saves slot time other producers did not wait for in the window is not that fix.",
+      "location": "Approach; Decision 1 (named dominant cause); Risks",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "With the corrected timeline, the fix does not remove what lengthened the measured producer stage, so criterion 5 and the request's second acceptance bullet go unshown.",
+      "evidence": "The replay runs between producer invocations (producer.rs:370, after `invoke_and_record`), so its duration never enters the job's own `role_minutes`. It could lengthen another job's producer only through slot waits, which exist only since 9a97e24 (2026-11-07). The plan itself says the median moves 'only if send-back jobs are a large share of the window'. Criterion 5 requires that 'the fix removes the cause itself'. The request says 'the next throughput review shows the median minutes per landed job falling'. Fix: Once the cause is re-established, make the focused change on that cause. If the remaining cause truly lies outside crates/ (athena.toml), the root-cause default allows naming it and proposing the fix. But the note must then not call the skip the removal of the cause, and the open question to the user should say plainly that this job may not lower the median.",
+      "location": "Decision 1 and Demonstration for criterion 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The note should say that the replay's own time is not producer stage time.",
+      "evidence": "`role_minutes` (status.rs:933) counts only invocation wall time. `loop_replay` runs outside the producer invocation (producer.rs:289 vs 370). A reader could think the skip shortens the job's own producer stage. Fix: State in the note that the skip can shorten producer minutes only for other jobs' producers that wait on the slot, and only since the wrapper landed.",
+      "location": "Note section (2) / table of slot-hold sources",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Editing files outside the deliverables list is justified; keep the justification brief.",
+      "evidence": "Criterion 4 limits the diff to 'the code on the cause path and its tests', and the plan checked `limits_changed_files`. Athena's findings about producer.rs, mod.rs and tests.rs being outside the list are covered by Decision 6. Fix: No change needed beyond keeping Decision 6. If the corrected cause moves the change to another file, update the list to match.",
+      "location": "Files / Athena findings 1-3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan's code mechanics are right. The skip condition is the exact complement of the break at producer.rs:446, `loop_replay` takes the Class::Producer slot at mod.rs:2297 before the checkers, and tests (a), (a2) and (b) use seams that exist and would fail on the old code. The cause analysis is not right. The plan says the producer cargo wrapper (producers queueing for the one build slot) landed on 2026-11-05 with f2d168c and 5bae74b. It did not. HISTORY.txt shows slot_exec.rs first in 9a97e24, dated 2026-11-07. The CHANGELOG entry for the wrapper says that before it \"any number of producers built at once\". The design note at line 393 says only the check class was requested after f2d168c and 5bae74b. So for most of the reviewed window, producers never waited on a slot. Then neither the named dominant cause (producers serialised on one slot) nor the fix's rationale (the replay's thrown-away slot holds delay other producers) can explain the rise from 12.7 to 23.5 minutes. The plan also leaves out a cause the code shows directly. `role_minutes` sums every producer invocation, so each send-back adds a whole producer pass. Four new send-back triggers landed on 2026-11-06: the decision gate (10166b3), allowed paths (e0f1a6f), mirrors (69057b9) and the in-loop replay (387255a). It also leaves out CPU contention from builds running at the same time under max_concurrency = 2. The plan should redo the timeline, weigh these candidates against the code, and choose the fix that matches the corrected cause. It should keep the skip only if the corrected analysis still supports it."
+}
