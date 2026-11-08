@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A format step in the producer stage (`crates/athena-core/src/run/format.rs`): a job whose only defect is
+  rustfmt layout now reaches the verifier formatted. Root cause: the producer may run `cargo fmt`, but only
+  prose asked it to, and nothing made the work tree formatted before the `fmt` check, so jobs were rejected
+  for layout and not for their work (job 20261108-023649-67f6 was rejected on one constant). After each
+  producer pass, before the change list is taken, Athena runs `cargo fmt --all` and then
+  `cargo fmt --all --check` on the work tree, as Athena code and not as an agent command, so the policy that
+  denies `cargo fmt` without `--check` to agent roles is unchanged. The step runs only when the work tree has
+  a `Cargo.toml` and a Rust file was changed and not deleted. The loop's replay, the candidate, the checks and
+  the verifier see the formatted tree, and the recorded change list includes the formatter's changes. A
+  `format` line tells the user when the tree was rewritten and when the formatter changed a file the producer
+  had not. An error the formatter cannot fix (a file that does not parse) stays in the tree, and the `fmt`
+  check still fails on it with rustfmt's text; the gate is not relaxed. A job stopped by the kill switch, or
+  one whose format run hits its deadline, ends at the step as failed and runs no check or verifier.
 - Per-gate counters, the `relax` and `remove` prevention kinds, and Hestia's review of a gate
   (`crates/athena-core/src/gate_counts.rs`, `docs/design/defaults-loop.md` section 3.8). A gate is a failed check
   of a rejected job, the verifier when no check failed, or an admission rule that ended a rejected or failed job.

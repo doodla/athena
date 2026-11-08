@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261108-041939-fqaz",
+  "round": 4,
+  "at": "2026-11-08T04:39:34.623458568Z",
+  "invocation_seq": 11,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Git demonstrations without HEAD~1 show nothing in the verifier's snapshot, so criteria 5 (content part), 6 and 8 go unshown and would pass even without the change.",
+      "evidence": "crates/athena-core/src/run/verification.rs:444-469 builds the verifier's snapshot as `SnapshotRepo::BaseAndCandidate`: \"base then candidate as two commits\". crates/athena-context/prompts/verifier.md:3 says \"`git diff HEAD~1` is the change\", and briefs.rs:1073-1075 says the same. With the candidate committed, a bare `git diff`, `git diff --stat` or `git status` compares the work tree with HEAD (the candidate). It prints an empty diff or a clean status whether or not CHANGELOG.md, policy.rs or introspect.rs changed. So the criterion 6 command cannot show the Unreleased bullet. The criterion 5 command cannot show that policy.rs is unchanged. The criterion 8 command cannot show \"only the five deliverables are changed\". None of the three would fail without the behavior. `git diff` with a revision is on the verifier's list (athena.toml:76 `git = [\"status\", \"diff\", \"log\", \"show\"]`; policy.rs:1046 tests `git diff HEAD~1 -- src/lib.rs`). Fix: Use `git diff HEAD~1 -- CHANGELOG.md` for criterion 6. Use `git diff --stat HEAD~1` for criterion 5 (policy.rs must not be listed) and for criterion 8 (exactly the five deliverables listed, no introspect.rs, introspection.rs or diagnose-failure.md). Drop bare `git status` as evidence. Give step 8's producer self-check the same correction where it uses `git status`.",
+      "location": "Demonstrations for criterion 5 (`git diff --stat`), criterion 6 (`git diff -- CHANGELOG.md`) and criterion 8 (`git status`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The directory does not exist at base, so the command exits non-zero with 'No such file or directory' instead of producing a listing to inspect.",
+      "evidence": "Glob `crates/athena-context/skills/*` matches nothing in the snapshot. Git tracks no empty directories, so the candidate will not have it either unless a file was added there. The plan's prose names `ls crates/athena-context`, but the Run line lists only the skills path. Fix: Run `ls crates/athena-context` (diagnose-failure.md's parent `skills` should be absent), or rely on `git diff --stat HEAD~1` not listing any path under crates/athena-context/. Say that a missing directory is the expected result.",
+      "location": "Demonstration for criterion 8, Run line `ls crates/athena-context/skills`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 3's wording says the step is called 'after the producer loop'. The plan calls it inside each loop pass. A literal-minded verifier could mark the content part unmet.",
+      "evidence": "Criterion 3: \"the format step is called after the producer loop and before the checks and verifier run\". Plan step 3 inserts the call after producer.rs:335 and before 336, inside `loop { .. }`. The reading's assumption (\"The format step belongs at the end of producer_loop, before the change list is taken\") supports the placement, and Decision 1 explains why it is right. Fix: In format.rs module docs, the producer_loop doc comment and the criterion 3 demonstration, quote the reading's assumption. State that the call is the last producer-stage act of every pass, after the producer agent returns, and that the loop's exit and the candidate, checks and verifier all come after it. The verifier then has the reconciliation in front of it.",
+      "location": "Criterion 3 versus Decision 1 (format inside each pass of producer_loop)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan answers the request and the accepted reading: after each producer pass and before the change list is taken, Athena host code runs `cargo fmt --all` and then `--check`, through `run_check`. Everything the plan names exists as described: the producer.rs loop (report parse at 325-335, `change_list` at 339, `loop_replay` at 370); `CheckContext` and `CheckSpec` fields; `run_check` with its cleared env and kill-switch note (checks.rs:513-583); `checks::timed_out`; the `env::build`/`EnvSpec` signature; `Snapshot::work_tree_tree`/`change_list`; `Athena::failure` (mod.rs:2447); `Registry::stopped`/`stop_file`; the fake driver checking the switch only before the script (athena-agent/src/fake.rs:92-97); and the test helpers in `produce_and_verify_order_tests`. The `include_str!` path to rust-toolchain.toml resolves to the repository root. The design is sound, for three reasons. Formatting inside the loop keeps the `LoopReplay` tree and the in-loop send-back checks on the candidate tree. The `.rs` and Cargo.toml guards limit the blast radius. The Stopped arm is proven through `Athena::go`. One defect remains, and it is in the demonstrations, not the code. The verifier's snapshot commits base and candidate as two commits (`verifier_snapshot`, verification.rs:444-469; verifier.md: \"`git diff HEAD~1` is the change\"). So the bare `git diff -- CHANGELOG.md`, `git diff --stat` and `git status` used for criteria 5, 6 and 8 show an empty change whatever the candidate holds. They cannot observe those criteria and would not fail without the behavior. The fix is small: add `HEAD~1`."
+}
