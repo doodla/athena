@@ -1025,6 +1025,14 @@ relax or remove only for a gate whose disagreements are 1 or more, name that gat
 counts in `prevention`; for every other kind set `gate` to null. Say exactly what would have prevented the \
 whole class, and write a complete next request, ready to submit.";
 
+/// The versioned method for diagnosing a failed job, kept as a markdown file in the repository.
+pub const DIAGNOSE_FAILURE_SKILL: &str = include_str!("../../athena-context/skills/diagnose-failure.md");
+
+/// The system prompt of an introspection: the task, then the diagnosis method it must follow.
+pub fn system_prompt() -> String {
+    format!("{SYSTEM_PROMPT}\n\nFollow this method:\n\n{DIAGNOSE_FAILURE_SKILL}")
+}
+
 fn answer_schema() -> serde_json::Value {
     let text = json!({ "type": "string" });
     json!({
@@ -1654,7 +1662,7 @@ impl Athena {
             role: Role::Reader,
             model: config.models.reader.clone(),
             effort: config.models.reader_effort.clone(),
-            system_prompt: SYSTEM_PROMPT.to_string(),
+            system_prompt: system_prompt(),
             user_prompt: prompt,
             tools: Vec::new(),
             allowed_tools: Vec::new(),

@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261108-023645-456v",
+  "round": 1,
+  "at": "2026-11-08T02:48:23.693208897Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-context/src/briefs.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-context/src/briefs.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/evidence_labels.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/evidence_labels.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/proposals.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/proposals.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/records.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/records.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "review.rs both accepts and creates classes. After this change it accepts a merge record's id as a class, and it checks duplicate names with a different rule from the new one.",
+      "evidence": "From reading review.rs: `Verdict::Class(id)` accepts any id found in `records.classes` (line 268: `if !records.classes.iter().any(|c| &c.id == id)`). Under this plan, `store::Records.classes` holds merge records too, so `athena review --class <merge-record-id>` would write a ClassLabel whose class is not a class at all. `ClassMerges` has no key for that id (its keys are `merged_from` ids), so `labeled::read_inputs` would keep it as a label for an unknown class. `Verdict::NewClass` refuses a duplicate only when `c.name.to_lowercase() == name.to_lowercase()` (line 277). So 'Stale cache!' passes review even though introspect's new `normalise` rule would reuse 'stale cache'. The plan's stated reason ('only look up names or existence') is wrong about the existence check, and review is a creation path that the root-cause default asks to fix the same way. Fix: In review.rs, refuse a merge record's id in `Verdict::Class`. For a retired class id, either resolve it to its live target or refuse it with a pointer to the target. Make `Verdict::NewClass` use the same normalised-name lookup as introspect (share one helper, for example on `ClassMerges` or a free function next to `normalise`), and point at the live target. Add a review.rs test (or a cli review test) showing both refusals, and move review.rs from the 'Reason' entry to an entry with a test.",
+      "location": "Dependents: 'store::Records.classes now includes merge records and retired classes' (review.rs, marked 'Not changed by this plan'); crates/athena-core/src/review.rs lines 267-297",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Exact equality after normalising will probably catch only a small share of real near-duplicates. The docs should say so instead of implying the 158-class problem is fixed.",
+      "evidence": "`normalise` (introspect.rs line 856) only lower-cases the text and splits it into words. Model-written names for the same cause usually differ in wording, not just in case or punctuation. The plan's own third open question admits it cannot measure how many of the 158 this rule would have caught, because records/ is absent. The rule fits the accepted criterion 1, so this is not a design error, but users may over-read it. Fix: In the defaults-loop.md 3.4 paragraph, CHANGELOG and D166 Tradeoff, say plainly that creation-time reuse catches only names that are equal after normalising, and that differently worded duplicates still need a merge record. Name the follow-up: count collisions with a backtest over the records branch, and add a user merge command.",
+      "location": "Decision 3 / Risks ('Name matching ...'); docs and CHANGELOG text",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The merge record copies the retired class's `proposed_by`, which falsely says an introspection proposed the merge record.",
+      "evidence": "From reading introspection.rs line 304, `proposed_by` is documented as 'The introspection that proposed it'. A merge record is written by `merge_classes`, not by an introspection. Readers that show or follow `proposed_by` would credit the merge to the retired class's first introspection. Fix: Document on the field that a merge record's `proposed_by` is the retired class's proposer and is kept only so the struct keeps its shape. Or set it to the surviving class's proposer and say why in the doc comment. Either way, state the meaning in records.md and the D166 entry.",
+      "location": "Step 1 / Files: `FailureClass::merged_into_class` ('proposed_by copied')",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Building `ClassMerges::of(&records.classes)` inside `class_of` re-sorts the class list for every introspection in `repeated_causes`.",
+      "evidence": "From reading hestia.rs: `class_of` is called once per introspection from `cause_key` (line 283), and again at line 384. The plan builds the map inside it. Fix: Build the map once, either on store `Records` load or cached by the caller, and pass it in, or have `live_target` take a prebuilt map.",
+      "location": "Step 6: hestia.rs `class_of`",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The mirrors unit tests run on fixtures, not on this diff of docs/decisions.md, so they do not check the D166 entry.",
+      "evidence": "mirrors.rs holds unit tests such as `a_decision_inserted_inside_a_base_entry_is_an_append_only_finding_naming_it` (line 1802), which build their own text. The diff check against the base runs in Athena's verification, not in that cargo command. Fix: Say that the decision-entry rule is applied by Athena's mirror check on the finished diff, and keep 'read the diff' as the observation.",
+      "location": "Demonstration for criterion 6 (`cargo test -p athena-core mirrors`)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is careful and mostly correct. The code and helpers it names exist: ClassStatus is unit-only and Copy, used only as `ClassStatus::Proposed` and in one assert_eq. It also checked `normalise`, `put_class`, `put_case`, `put_record`, `boundary_answer`, `athena_with`, `read_records` and `apply_answer` (introspect.rs lines 1547-1623), `class_of` (hestia.rs line 251), `class_summaries` (briefs.rs line 351), and the recurrence comparisons in evidence_labels.rs. Writing a merge as a new FailureClass record follows the append-only rule. Using a data variant means the ten or so FailureClass struct literals elsewhere still compile. Demonstrations 1-3 call production entry points and include controls that would fail without the change. One major gap: the plan says review.rs needs no change because it 'only looks up names or existence'. But review.rs is a second place that creates and accepts classes. Its existence check (review.rs line 268) will now accept a merge record's id as a class, so a merge record can be written as a label's class. Its `--new-class` duplicate check (lines 274-285) compares lower-cased names, not the new `normalise` rule. The fix is small and fits in this run. Minor points: the exact-name rule probably catches few real duplicates, so the docs should say so plainly; the merge record copies a false `proposed_by`; hestia rebuilds the merge map on every `class_of` call; and the `mirrors` test run does not check the new decision entry. Athena's four out-of-deliverable findings are fair, but each extra file closes a reader the plan found by grep, so it is justified."
+}
