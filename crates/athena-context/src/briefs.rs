@@ -2241,9 +2241,10 @@ pub const REFUSAL_HEADING: &str = "# Your previous reading was refused";
 /// The heading of the section that lists the reading rules.
 pub const READING_RULES_HEADING: &str = "# Reading rules";
 
-/// Each rule a reading must pass, one short line each, with the check that enforces it. A reading that
-/// breaks one is refused and read again once, with the refusal as a correction.
-pub const READING_RULES: [&str; 8] = [
+/// Each rule a reading must pass, one short line each. A line gives the check that enforces it; a reading
+/// that breaks a checked rule is refused and read again once, with the refusal as a correction. A line
+/// ending `(prose only)` has no check and causes no refusal.
+pub const READING_RULES: [&str; 9] = [
     "Previous result: a retry or follow-up names each earlier job, says how its result is addressed, lists deliverables and out_of_scope, and lists or excludes the files it changed (`check_prior_result_and_scope`).",
     "Criteria evidence: each criterion rests on a command, Grep or file the verifier can check, never the producer's report (`check_criteria_evidence`).",
     "Governance files: list one as a deliverable and name it in a criterion when the request names it or a deliverable implies it, or name it in out_of_scope (`check_governance_coverage`).",
@@ -2252,6 +2253,7 @@ pub const READING_RULES: [&str; 8] = [
     "Environment: a CI workflow, a push, PR or pull request, or a records-branch or history read needs an `Environment:` assumption: site, read/write permissions, data reached (`check_environment_reach`).",
     "Terms: define each structural term the request uses (ladder, rung, tier, layer) in a `Term ladder: <meaning>` assumption; a quoted or cited mention needs none (`check_defined_terms`).",
     "Valid reading: class, capability and producer model from the closed lists; a decline gives a reason; a capability needs a criterion; forecasts are valid (`build_reading`).",
+    "Test placement: put each test in a crate that can import the code under test; xtask has no library target, so test it in `xtask/tests/` or unit tests in `xtask/src/` (prose only).",
 ];
 
 /// What the reader writes before it gives behavior criteria for a code or tests change, and when a request
@@ -3791,11 +3793,16 @@ mod tests {
             "scopes a cache",
             "Early pull request",
             "waits",
+            "Crate reach",
+            "no library target",
+            "`xtask/tests/`",
+            "unit tests in `xtask/src/`",
+            "- crate xtask: bin",
         ] {
             assert!(flat.contains(marker), "the facts omit {marker:?}");
         }
         let facts: Vec<&str> = SYSTEM_FACTS.split("\n- **").skip(1).collect();
-        assert!(facts.len() >= 11, "{} fact bullets", facts.len());
+        assert!(facts.len() >= 12, "{} fact bullets", facts.len());
         for fact in facts {
             assert!(fact.contains("Source"), "no source in: {fact}");
         }
@@ -4543,7 +4550,13 @@ mod tests {
         ] {
             assert!(section.contains(check), "no rule for {check}:\n{section}");
         }
-        assert_eq!(READING_RULES.len(), 8);
+        assert_eq!(READING_RULES.len(), 9);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Test placement") && l.ends_with("(prose only).")),
+            "no prose-only rule line for test placement:\n{section}"
+        );
         assert!(
             lines
                 .iter()
@@ -4563,8 +4576,9 @@ mod tests {
                     && l.contains("`check_design_existing_code`")),
             "no rule line names Existing code: and its check:\n{section}"
         );
-        // The section adds little to the brief: eight rule lines and the code survey guide paragraph.
-        assert!(section.len() < 2600, "{} bytes", section.len());
+        // The section adds little to the brief: nine rule lines and the code survey guide paragraph. The
+        // section was about 2540 bytes with eight rules and measured 2718 with the ninth.
+        assert!(section.len() < 2750, "{} bytes", section.len());
     }
 
     #[test]
