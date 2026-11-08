@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The change producer brief requires, for each behavior change, at least one test through the real call site
+  that fails if the production call is deleted, and asks the producer to name that test in its report. A unit
+  test in `athena-cap-change` checks the brief holds the convention.
 - The reader and producer briefs require every acceptance criterion to be checkable from the snapshot, the diff
   or the commands the verifier runs, never from the producer's report or change description. Section 5 of
   `docs/design/structure-pass.md` now puts its proofs in the snapshot or in commands the verifier reruns.

@@ -4747,3 +4747,20 @@ should replace those estimates with its figures.
   20261014-082328-g6vy, 20261014-174815-7bf8 and 20261017-173508-0wtc (g6vy by `check_outcome_state`, 7bf8 and 0wtc by
   `check_defined_terms`), and the accepted and refused `ambiguous-name-*` cases built with the real generators. Not
   measured: the share of past readings newly refused; the loop replay records it at verification.
+
+## D166 · The change producer brief requires a real-call-site test and names it in the report
+
+- **Case:** A rejected job (20261026-170042-cgq9, cited from the request, not re-read) added tests that only called
+  helpers, so every test would still pass if the changed production call were reverted.
+- **Decision:** `crates/athena-cap-change/prompts/producer.md` says each behavior change needs at least one test
+  through the real call site (the existing fake agent driver or nested-run harness where needed) that would fail if
+  the production call were deleted, and that the producer names that test in its report. The unit test
+  `producer_brief_requires_a_real_call_site_test_and_names_it` in `crates/athena-cap-change/src/lib.rs` fails if the
+  embedded prompt lacks those phrases.
+- **Alternatives:** A checker that runs new tests against the reverted diff: larger, out of scope here. Prose only,
+  with no test: the rule would drift unseen.
+- **Tradeoff:** The test proves the convention is in the brief, not that a producer follows it; the verifier still
+  judges that from the diff.
+- **Reversal cost:** Low. Remove the paragraph and the test.
+- **Provenance:** Read: `crates/athena-cap-change/src/lib.rs`, `prompts/producer.md`. Measured: `cargo test -p
+  athena-cap-change`.

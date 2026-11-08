@@ -154,6 +154,22 @@ mod tests {
     }
 
     #[test]
+    fn producer_brief_requires_a_real_call_site_test_and_names_it() {
+        let text = Change.producer_section().text;
+        for phrase in [
+            "at least one test through the real call site",
+            "fake agent driver or nested-run harness",
+            "would fail if the production call were deleted",
+            "name the test that is",
+        ] {
+            assert!(
+                text.contains(phrase),
+                "the producer brief lacks the convention phrase: {phrase}"
+            );
+        }
+    }
+
+    #[test]
     fn grants_come_from_the_configuration() {
         let config = athena_data::Config::parse(include_str!("../../../athena.toml")).unwrap();
         let defaults =
