@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Crate reach facts and a test-placement reading rule. Root cause: a reading and a plan placed a test in a
+  crate that cannot import the code under test (xtask is binary-only, with no library target), and nothing
+  they read said which crates have libraries or may depend on which, so it was found late and fixed by hand.
+  `docs/system-facts.md` gains a "Crate reach" bullet (4990 bytes in all, under the 5,000 cap) with one
+  `- crate <name>: lib|bin|lib+bin; deps ...; dev ...` line per workspace crate, taken from the Cargo.toml
+  files; the budget tests `system_facts_crate_lines_match_manifests` and `system_facts_crate_drift_is_rejected`
+  fail on a doctored, missing, unknown or repeated line. `READING_RULES` gains a ninth, prose-only line
+  ("Test placement"; no check, no refusal), and the reading-rules section cap moves from 2600 to 2750 bytes
+  (about 2540 before the line, 2718 after). Merging failure classes 20261026-155850-0ksw and
+  20261026-170231-4fcf lives in `records/`, outside a job, and is left to the records tooling.
 - Plan admission refuses a plan that leaves caller and test impact to the producer. Root cause: planning was
   not required to settle which existing callers and tests run a changed path, and a risk or a dependent could
   say "producer to check", so plans passed the gate with that impact open (job 20261025-055626-er96: the risk

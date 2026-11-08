@@ -46,5 +46,20 @@ whole. Each fact names its source. Where the source is a request and not code, t
   Source: `.github/workflows/ci.yml` (header and cache comments); `docs/design/ci-routing.md`.
 - **Early pull request and CI waits.** Athena opens the pull request early, at verification start, and `land`
   reuses it. Before replacing the early head, `land` waits (every 20 seconds, up to 10 minutes) for the early
-  commit's CI run, so the landing run finds the cached pass. Source: `crates/athena-core/src/gh.rs`
+  commit's CI run, to reuse its pass. Source: `crates/athena-core/src/gh.rs`
   (`early_run_wait`); `CHANGELOG.md` (Unreleased); `crates/athena-core/src/run_pin_tests.rs`.
+- **Crate reach.** A test reaches its crate's library, `deps` and `dev` crates; no cycles. Only
+  `cli` has a binary; `xtask` has no library target: test it in `xtask/tests/` or unit tests in `xtask/src/`.
+  Names drop `athena-`; `dev` omits `deps`. Source: `Cargo.toml`, `crates/*/Cargo.toml`, `xtask/Cargo.toml`.
+  - crate data: lib
+  - crate score: lib; deps data
+  - crate git: lib; dev testkit
+  - crate gate: lib; deps data git score
+  - crate context: lib; deps data
+  - crate agent: lib; deps data; dev testkit
+  - crate core: lib; deps agent context data gate git score; dev testkit
+  - crate cap-change: lib; deps context core data
+  - crate cap-study: lib; deps context core data
+  - crate cli: lib+bin; deps agent cap-change cap-study core data gate git; dev context testkit
+  - crate testkit: lib
+  - crate xtask: bin; deps data git; dev context testkit

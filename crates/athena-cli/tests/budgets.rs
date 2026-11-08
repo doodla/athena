@@ -149,6 +149,193 @@ fn system_facts_drift_is_rejected() {
     assert!(check_system_facts(&unknown, &rows).is_err());
 }
 
+/// One workspace crate as its Cargo.toml files and source layout show it.
+#[derive(Clone)]
+struct CrateRow {
+    /// The package name without the `athena-` prefix.
+    name: String,
+    /// `lib`, `bin` or `lib+bin`.
+    target: &'static str,
+    /// The workspace crates in `[dependencies]`, without the prefix.
+    deps: Vec<String>,
+    /// The workspace crates in `[dev-dependencies]` that `deps` does not hold, without the prefix.
+    dev: Vec<String>,
+}
+
+/// The names of the `athena-*` crates a manifest section lists, without the prefix, sorted.
+fn workspace_crates(manifest: &toml::Table, section: &str) -> Vec<String> {
+    let mut names: Vec<String> = manifest
+        .get(section)
+        .and_then(|v| v.as_table())
+        .map(|table| {
+            table
+                .keys()
+                .filter_map(|key| key.strip_prefix("athena-"))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// The workspace crates, computed from the root `[workspace] members`, each member's Cargo.toml and its
+/// `src` layout. Cargo.toml is the oracle for `docs/system-facts.md`.
+fn crate_rows() -> Vec<CrateRow> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |dir: &std::path::Path| -> toml::Table {
+        let path = dir.join("Cargo.toml");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        toml::from_str(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"))
+    };
+    let workspace = read(&root);
+    let members = workspace["workspace"]["members"].as_array().unwrap();
+    members
+        .iter()
+        .map(|member| {
+            let dir = root.join(member.as_str().unwrap());
+            let manifest = read(&dir);
+            let package = manifest["package"]["name"].as_str().unwrap();
+            let lib = dir.join("src/lib.rs").is_file() || manifest.contains_key("lib");
+            let bin = manifest.contains_key("bin")
+                || dir.join("src/main.rs").is_file()
+                || dir.join("src/bin").is_dir();
+            let target = match (lib, bin) {
+                (true, true) => "lib+bin",
+                (true, false) => "lib",
+                (false, true) => "bin",
+                (false, false) => panic!("{package} has no library or binary target"),
+            };
+            let deps = workspace_crates(&manifest, "dependencies");
+            let dev = workspace_crates(&manifest, "dev-dependencies")
+                .into_iter()
+                .filter(|name| !deps.contains(name))
+                .collect();
+            CrateRow {
+                name: package
+                    .strip_prefix("athena-")
+                    .unwrap_or(package)
+                    .to_string(),
+                target,
+                deps,
+                dev,
+            }
+        })
+        .collect()
+}
+
+/// The facts line for a crate: `- crate <name>: <target>[; deps <names>][; dev <names>]`.
+fn crate_line(row: &CrateRow) -> String {
+    let mut line = format!("- crate {}: {}", row.name, row.target);
+    if !row.deps.is_empty() {
+        line.push_str(&format!("; deps {}", row.deps.join(" ")));
+    }
+    if !row.dev.is_empty() {
+        line.push_str(&format!("; dev {}", row.dev.join(" ")));
+    }
+    line
+}
+
+/// Compares the `- crate ...` lines of the facts file with the lines computed from the manifests. Every crate
+/// needs exactly one line equal to its computed line; any other `- crate ` line is an error.
+fn check_crate_facts(text: &str, rows: &[CrateRow]) -> Result<(), String> {
+    let mut seen: Vec<&str> = Vec::new();
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("- crate "))
+    {
+        let name = line["- crate ".len()..].split(':').next().unwrap_or("");
+        let Some(row) = rows.iter().find(|r| r.name == name) else {
+            return Err(format!(
+                "the facts file has a line for an unknown crate: {line}"
+            ));
+        };
+        let expected = crate_line(row);
+        if line != expected {
+            return Err(format!(
+                "{name}: the facts file says `{line}`, the Cargo.toml files give `{expected}`; update docs/system-facts.md"
+            ));
+        }
+        if seen.contains(&line) {
+            return Err(format!("the facts file records crate {name} twice"));
+        }
+        seen.push(line);
+    }
+    for row in rows {
+        if !seen.contains(&crate_line(row).as_str()) {
+            return Err(format!("the facts file has no crate line for {}", row.name));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn system_facts_crate_lines_match_manifests() {
+    // The crate facts the planner and critic read state what the Cargo.toml files show.
+    let rows = crate_rows();
+    let result = check_crate_facts(athena_context::briefs::SYSTEM_FACTS, &rows);
+    assert!(result.is_ok(), "{}", result.unwrap_err());
+    // xtask has no library target and cli is the only crate with a binary next to its library.
+    let target = |name: &str| rows.iter().find(|r| r.name == name).unwrap().target;
+    assert_eq!(target("xtask"), "bin");
+    assert_eq!(target("cli"), "lib+bin");
+    assert!(
+        rows.iter()
+            .filter(|r| r.name != "xtask" && r.name != "cli")
+            .all(|r| r.target == "lib")
+    );
+}
+
+#[test]
+fn system_facts_crate_drift_is_rejected() {
+    // Negative case: a doctored line, a missing line, an unknown crate, a repeated line and a malformed line
+    // are each refused.
+    let rows = crate_rows();
+    let real = athena_context::briefs::SYSTEM_FACTS;
+    let swapped = |row: &CrateRow, edit: &dyn Fn(&mut CrateRow)| {
+        let mut doctored = row.clone();
+        edit(&mut doctored);
+        real.replace(&crate_line(row), &crate_line(&doctored))
+    };
+    for row in &rows {
+        let line = crate_line(row);
+        assert!(real.contains(&line), "the file has no line `{line}`");
+        let flipped = swapped(row, &|r| {
+            r.target = if r.target == "lib" { "bin" } else { "lib" };
+        });
+        let err = check_crate_facts(&flipped, &rows).unwrap_err();
+        assert!(err.contains(row.name.as_str()), "{err}");
+        let more_deps = swapped(row, &|r| r.deps.push("steward".into()));
+        assert!(check_crate_facts(&more_deps, &rows).is_err());
+        let fewer_deps = swapped(row, &|r| {
+            r.deps.pop();
+        });
+        assert_eq!(
+            check_crate_facts(&fewer_deps, &rows).is_err(),
+            !row.deps.is_empty()
+        );
+        let more_dev = swapped(row, &|r| r.dev.push("steward".into()));
+        assert!(check_crate_facts(&more_dev, &rows).is_err());
+        let fewer_dev = swapped(row, &|r| {
+            r.dev.pop();
+        });
+        assert_eq!(
+            check_crate_facts(&fewer_dev, &rows).is_err(),
+            !row.dev.is_empty()
+        );
+        let missing = real.replace(&line, "");
+        let err = check_crate_facts(&missing, &rows).unwrap_err();
+        assert!(err.contains(row.name.as_str()), "{err}");
+        let twice = format!("{real}\n  {line}\n");
+        assert!(check_crate_facts(&twice, &rows).is_err());
+    }
+    let unknown = format!("{real}\n  - crate steward: lib\n");
+    assert!(check_crate_facts(&unknown, &rows).is_err());
+    let malformed = format!("{real}\n  - crate steward\n");
+    assert!(check_crate_facts(&malformed, &rows).is_err());
+}
+
 #[test]
 fn every_role_set_is_within_its_budget() {
     // M18 (allows): the current sets pass.
