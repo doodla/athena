@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261108-041939-fqaz",
+  "round": 5,
+  "at": "2026-11-08T04:42:15.138481763Z",
+  "invocation_seq": 13,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The step reformats the whole workspace (`cargo fmt --all`) whenever any `.rs` file changed. Base layout drift in files the producer never touched is reported but still enters the candidate.",
+      "evidence": "Decision 5 only prints a UI line for paths added by the formatter. The in-loop scope check catches them only when the job has allowed paths (producer.rs:224-233). For a job with no allowed paths, a base file with layout drift becomes part of the candidate without any check flagging it. Fix: Keep the design. Also say in the CHANGELOG bullet and the format.rs docs that paths the formatter adds go into the candidate and are named in the UI line. That way a reviewer of a squash-merged diff knows why an untouched file can appear.",
+      "location": "Plan Decisions 1 and 3; Risks (base not fmt-clean)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stop test's Failed outcome depends on nothing between `self.failure` and the record write checking the kill switch. The plan's fallback (\"reads the job's closed state from the records instead\") is vague.",
+      "evidence": "Grep found that refuse_if_stopped sites include mod.rs:2297 (slot acquire) and checks.rs:99/107. hestia.rs:1987 and 2613 also check `stopped()` after a job, so some post-closing work may skip, which is fine. The plan does not name which record the fallback reads. Fix: Name the fallback concretely: `Records::load(&athena.git, &athena.head())` and `jobs[id]` state Failed with the reason. Assert that unconditionally rather than as a conditional alternative.",
+      "location": "Plan Demonstration criterion 3(c) / Risks (refuse_if_stopped)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The CheckSpec literal in Decision 2 omits the `run` field. Step 1 includes it.",
+      "evidence": "Decision 2 gives `CheckSpec{name:\"format\", kind: CheckKind::Command, skip_when_only: None}`. capability.rs:82-88 requires `run: Vec<String>`. Fix: Write the full literal once, including run, in Decision 2.",
+      "location": "Plan Decision 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "This round-5 plan does what the reading asks. It adds a host-side `format_work_tree` step at the end of each producer_loop pass. The step runs after the report is parsed (producer.rs:325-335) and before `snapshot.change_list()` (producer.rs:339), `loop_replay` (370), the candidate, the checks and the verifier. Both cargo runs go through the existing `checks::run_check`, and the policy is left alone. I read the code to check the names the plan relies on, and they exist as described: `CheckContext` with fields dir, env, timeout, registry, job and redactor (checks.rs:456); `checks::timed_out` (checks.rs:481); `run_check` (checks.rs:513); `CheckSpec` with skip_when_only (capability.rs:82); `DiffEntry` with a status char and a path (athena-git lib.rs:129); `Snapshot::change_list` and `work_tree_tree` (snapshot.rs:200-218); `Registry::stop_file` and `stopped` (procs.rs:364-369). The fake driver checks the kill switch only before the script runs (fake.rs:92-97), so the end-to-end stop test is a real seam. The test helpers also exist: `athena_with`, `base_script`, `commit_file`, `Lines` and `counting`. The binding `let registry = self.state.registry();` follows mod.rs:1949. athena.toml:52-58 passes HOME, PATH, RUSTUP_HOME and CARGO_HOME, so the end-to-end fmt check can find rustup and the pinned toolchain. Each demonstration drives production code, either `format_work_tree` or `Athena::go` with real cargo fmt, and would fail without the behavior. The git demonstrations compare against HEAD~1, which works in the verifier's base-then-candidate snapshot. The dependents list covers the readers I found: loop_replay and covers, the in-loop send-back checks, build_candidate and admit, the scope and decision gates, the fmt check, the policy, and the one existing test whose work tree has a Cargo.toml. No athena.toml field is added, and the work fits one producer run. The approach is sound: it uses no heuristic matching, the `.rs` guard reads the actual change list, and stops are handled explicitly. I have only minor and nit findings."
+}

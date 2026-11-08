@@ -165,6 +165,66 @@ impl Athena {
         })
     }
 
+    /// Formats the producer's work tree after a producer pass (see the `format` module). Returns the reason when
+    /// the job must stop (the kill switch is set or a run hit its deadline), and `None` otherwise. It prints a
+    /// `format` line when the formatter could not fix the tree, when it rewrote the tree, and when it added
+    /// files to the change list. A pinned study mounts a checkout inside the work tree, so it is not formatted.
+    fn format_stage(
+        &self,
+        ctx: &RunContext<'_>,
+        job_dir: &std::path::Path,
+        snapshot: &Snapshot,
+        capability_env: &BTreeMap<String, String>,
+    ) -> Result<Option<String>> {
+        if ctx.pin_dir.is_some() || !snapshot.dir().join("Cargo.toml").is_file() {
+            return Ok(None);
+        }
+        let jc = ctx.jc;
+        let env = athena_agent::env::build(
+            &EnvSpec {
+                agents: &jc.config.agents,
+                job: ctx.id().as_str(),
+                job_dir,
+                snapshot: snapshot.dir(),
+                side: Side::Produce,
+                capability_env,
+            },
+            |key| std::env::var(key).ok(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let registry = self.state.registry();
+        let check_ctx = CheckContext {
+            dir: snapshot.dir(),
+            env: &env,
+            timeout: std::time::Duration::from_secs(jc.config.budget.check_timeout_s),
+            registry: &registry,
+            job: ctx.id().as_str(),
+            redactor: ctx.redactor,
+        };
+        let before = snapshot.work_tree_tree()?;
+        let pre = snapshot.change_list()?;
+        match format::format_work_tree(snapshot.dir(), &pre, &check_ctx)? {
+            format::Formatted::Stopped(note) => return Ok(Some(note)),
+            format::Formatted::Unfixed { output, note } => ctx.ui.line(&format!(
+                "format     cargo fmt --check still fails: {}; the fmt check will report it",
+                format::unfixed_summary(&output, note.as_deref())
+            )),
+            format::Formatted::Skipped(_) | format::Formatted::Done => {}
+        }
+        if snapshot.work_tree_tree()? != before {
+            ctx.ui
+                .line("format     cargo fmt rewrote the work tree before the checks");
+            let added = format::paths_added_by_format(&pre, &snapshot.change_list()?);
+            if !added.is_empty() {
+                ctx.ui.line(&format!(
+                    "format     cargo fmt also changed {} beyond the producer's files",
+                    added.join(", ")
+                ));
+            }
+        }
+        Ok(None)
+    }
+
     /// Stage S3: the producer loop. `Flow::Stop` means the job ended here and `closing` says how.
     ///
     /// Root cause of a repeated failure it answers: nothing made the producer measure a new or tightened
@@ -194,6 +254,14 @@ impl Athena {
     /// shape, so content that contradicted the source was found only at the final verdict. The send-back is shared with
     /// the unmet criteria. Drift left at the limit does not stop the job here: the repo test `mirrors`, run by
     /// the configured test check, fails on it at verification.
+    ///
+    /// The work tree is formatted by `Athena::format_stage` (see the `format` module). The format step belongs
+    /// at the end of producer_loop, before the change list is taken: it is the last producer-stage act of every
+    /// pass, right after the producer returned and its report was parsed. "After the producer" means after each
+    /// producer invocation returns. The loop's exit, the replay it measures, the candidate, the checks and the
+    /// verifier all come after it, so they all see the formatted tree. A job whose only defect is rustfmt
+    /// layout therefore reaches the verifier formatted; an error the formatter cannot fix stays in the tree for
+    /// the configured `fmt` check to report.
     pub(super) fn producer_loop(
         &self,
         ctx: &RunContext<'_>,
@@ -333,6 +401,12 @@ impl Athena {
                     return Ok(Flow::Stop);
                 }
             };
+            // The last producer-stage act of the pass: Athena formats the work tree before the change list is
+            // taken, so everything below and everything after the loop sees the formatted tree.
+            if let Some(note) = self.format_stage(ctx, &job_dir, &snapshot, &capability_env)? {
+                closing.happened = self.failure(ctx, &format!("the format step stopped: {note}"));
+                return Ok(Flow::Stop);
+            }
             let unmet = unmet_criteria(&raw, accepted);
             // Planned files and expected deliverables the work tree does not change, with no reason in the
             // report. A run with no change at all fails below as an idle producer, so it is not listed here.

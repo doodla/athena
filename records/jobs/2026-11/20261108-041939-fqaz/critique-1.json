@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261108-041939-fqaz",
+  "round": 1,
+  "at": "2026-11-08T04:26:49.93731989Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The loop-replay reuse is a reader the dependents list omits: formatting after the loop breaks the tree match, so verification builds the replay pair again. The in-loop scope, gate and mirror checks also judge a tree that is not the candidate.",
+      "evidence": "`loop_replay` runs inside the loop (producer.rs:370) on the unformatted tree and keeps `LoopReplay.tree`. `replay_run` reuses it only when `prior.covers(&tree, &ids)`, where `covers` needs `self.tree == tree` (mod.rs:183, 2208-2214). Formatting after the loop changes the candidate tree for any job whose Rust edits needed formatting. So for a job that touches `crates/` (`touches_reading_rules`), verification no longer reuses the loop's measurement and builds the replay pair a second time. The Dependents list does not include `loop_replay` / `replay_run` / `LoopReplay::covers`. The scope, decision-gate and mirror checks in the loop also see a tree that is not the candidate's. If formatting adds a path, the job ends at check_and_verify (mod.rs:1843-1862) and the producer is never sent back. Fix: Choose one. (a) Run the format step in each pass, right after the producer returns and before `snapshot.change_list()` at producer.rs:339. Then the replay, scope, gate and mirror checks all measure the tree that becomes the candidate. This is still 'after the producer and before the checks and verifier', so criterion 3 holds. (b) Keep the post-loop placement, but add the loop-replay reuse to Dependents with a test, and state the cost of the second build pair as accepted. Option (a) is the sounder design.",
+      "location": "Plan Decision 1 and Dependents; crates/athena-core/src/run/mod.rs:166-184, 2206-2215; producer.rs:370",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stated root cause misreads the policy: the producer can already run `cargo fmt`. Only roles that cannot write are denied.",
+      "evidence": "The deny is `if sub == \"fmt\" && !policy.writes && ...`. It applies only to roles that cannot write, such as the verifier. The producer's grant has writes, so it may already run `cargo fmt`. The plan says agent roles may not run `cargo fmt` without `--check` and that the hook 'still denies the rewriting form' to the producer. It plans to write that as the root cause in format.rs docs and in CHANGELOG. The reading's survey has the same error. Fix: State the real root cause: the producer could run `cargo fmt`, but only prose asked it to, and nothing made the tree formatted before the gate. Correct Decision 5 and the dependent entry to say the policy binds the non-writing roles and is unchanged.",
+      "location": "Plan Decision 5, Step 1 module docs, Step 4 changelog, Dependents 'agent-role cargo fmt policy'; crates/athena-agent/src/policy.rs:680",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The changed-paths parameter type is left open, and the tests' calls do not agree with it.",
+      "evidence": "Step 1 leaves the parameter as `&[(char, String)] or &[DiffEntry-derived paths]`. The criterion 1 test calls it with `&[\"src/lib.rs\".into()]`, which carries no status. The criterion 5 test needs a deleted `.rs` entry, so the status matters. athena_git::DiffEntry has `status: char` and `path` (crates/athena-git/src/lib.rs:129-137). Fix: Pick one signature. Taking `&[DiffEntry]` from `snapshot.change_list()`, or `&[(char, String)]`, works. Write every test call with that type, including a 'D' entry for the deleted-file case.",
+      "location": "Plan Step 1 signature vs Demonstrations for criteria 1 and 5",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The env is not 'the same call the checks use': the checks use Side::Verify.",
+      "evidence": "The checks build their env with `side: Side::Verify` (mod.rs:1937-1948). The plan uses `Side::Produce`. It is the same function with different build directories, which is harmless for fmt, but the claim as written is wrong. Fix: Say it uses `env::build` on the produce side, matching the work tree it formats.",
+      "location": "Plan Approach / Decision 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan does what the request and accepted reading ask. It adds a host-side `cargo fmt` then `cargo fmt --check` step at the end of producer_loop, so the candidate, the checks and the verifier see a formatted tree. I read the code it names, and the plan describes it correctly: producer_loop and its loop/return at producer.rs:244-517, `run_check` and `CheckContext` in checks.rs:456-638, candidate.rs:34, and the test helpers `athena_with`, `base_script` and `commit_file` in run/tests.rs. Its demonstrations use the real cargo fmt through the production entry points, not doubles, and each would fail without the behavior. One major gap: the dependents list omits the loop replay. `LoopReplay::covers` compares the tree the loop measured with the candidate's tree (mod.rs:183, 2208-2214), and formatting after the loop breaks that match, so jobs touching crates/ build the replay pair a second time. The scope, gate and mirror checks inside the loop also judge a tree that is not the candidate. Formatting in each pass, before the change list at producer.rs:339, fixes this and still meets criterion 3. Minor: the stated root cause misreads policy.rs:680. The `cargo fmt` deny applies only to roles that cannot write, so the producer could already format; the docs and changelog should say that. The changed-paths parameter type is also left open while the tests need a status. Verdict: revise."
+}

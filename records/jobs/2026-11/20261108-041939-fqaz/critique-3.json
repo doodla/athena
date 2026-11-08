@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261108-041939-fqaz",
+  "round": 3,
+  "at": "2026-11-08T04:34:19.449608736Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The new Stopped arm in producer_loop has no test; the named test only reaches format_work_tree.",
+      "evidence": "The dependents entry says `a_stopped_job_stops_at_the_format_step` shows 'The new Stopped arm closes the job with self.failure and Flow::Stop'. The demonstration, however, describes a unit call: 'with the STOP file present in the registry directory, `format_work_tree` returns `Stopped` and leaves the file byte-identical'. Nothing runs `producer_loop`. If the arm forgot to `return Ok(Flow::Stop)`, or fell through to `loop_replay` and the checks, no planned test would fail. A pipeline test is feasible: `FakeAgentDriver::invoke` checks `Registry::stopped` only before the script runs (crates/athena-agent/src/fake.rs:92-97), and `athena_with` wires the driver to `state.registry()` (tests.rs:196). Fix: Add an end-to-end test in `produce_and_verify_order_tests`. Use a script wrapper whose producer turn edits a `.rs` file in a Cargo.toml base and also writes `state.registry().stop_file()`. Then run `go` and assert three things: the job closes failed, its closing reason contains 'the format step stopped', and no check or verifier invocation ran. Alternatively, narrow the dependents claim to the unit test and accept the gap explicitly. The first option is preferred.",
+      "location": "Plan Dependents: 'stop handling at the producer stage'; Demonstration for criterion 3(b); Step 3 Stopped arm",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In the end-to-end fixture, formatting might turn the producer's src/lib.rs back into the base file, which would drop it from the change list.",
+      "evidence": "The base commits 'a clean src/lib.rs' and the producer writes 'a mis-formatted src/lib.rs'. The test then asserts that `candidate.changes` lists README.md and src/lib.rs. If the producer's text is just the base text with its layout broken, `cargo fmt` restores the base bytes. `Snapshot::change_list` (athena-git snapshot.rs:200) would then omit src/lib.rs, and the assertion fails for a reason unrelated to the behavior under test. Fix: State in the test that the producer's src/lib.rs differs in content from the base (for example, it adds a new function), so the formatted file still differs from the base. Assert `show_file` against that formatted new content.",
+      "location": "Step 6 / Demonstration for criterion 4 (end-to-end test)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The Unfixed UI line and the error text depend on rustfmt's message shape.",
+      "evidence": "The test asserts that the output holds a line starting `error` plus the name `lib.rs`, and that the check's `output_tail` contains the step's first `error` line. Both runs go through the same Redactor and the same directory, so the text should match. Still, the comparison depends on rustfmt printing the same first line on the fix run and on the --check run. Fix: Compare against the first line starting `error` in the `--check` run's output, which `format_work_tree` already captures, rather than any earlier line. That is what the plan implies; state it explicitly.",
+      "location": "Demonstration for criterion 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 3 is a sound plan that matches the request. The format step runs in each producer pass, before the change list is read at producer.rs:339. That means the in-loop send-back checks, `loop_replay`, the candidate, the checks and the verifier all see the formatted tree. It uses `checks::run_check`, which exists and clears the env (checks.rs:534). It is guarded by a Cargo.toml file and a changed `.rs` file, and it leaves the agent policy alone. Every function and field the plan names exists: `CheckContext`, `checks::timed_out`, `Registry::stopped`/`stop_file`, `Snapshot::change_list`/`work_tree_tree`, `ctx.pin_dir`, the `capability_env` binding at producer.rs:156, `EnvSpec`/`Side::Produce`, and the test helpers `athena_with`, `commit_file` and `each_job_its_own_edit`. The round-2 findings are answered: the pinned toolchain file is written in tests, there is a Stopped outcome, the added paths are named, and the registry is bound first. One gap remains. The plan says `a_stopped_job_stops_at_the_format_step` covers the new Stopped arm in `producer_loop`, which closes the job through `self.failure` and returns `Flow::Stop`. But that test only calls `format_work_tree` with a STOP file already present. Nothing exercises the new control flow in `producer_loop`. A pipeline test is easy to write: the fake driver checks the kill switch only when an invocation starts (fake.rs:92), so a script wrapper can create the STOP file during the producer's turn. One minor fixture risk is also noted."
+}

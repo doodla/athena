@@ -1,0 +1,151 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261108-041939-fqaz",
+  "base_commit": "7cdae23ab37a04fd525eec363a1b8f34f220e69c",
+  "base_fingerprint": "sha256:ee928ab61eb8171e5f02e04c6d273b0c45ff3a1b900b74b666a94d0f3860d33c",
+  "previous_job": "20261026-144231-a31y",
+  "candidate_commit": "cfeefa731a1d989878d6ae3f6110aad4fd1c80e1",
+  "candidate_tree": "496484a796521459391927392b6a1399e6848e70",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 375945
+    },
+    {
+      "path": "crates/athena-core/src/run/format.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 5730
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 113146
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28738
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 301699
+    }
+  ],
+  "fingerprint": "sha256:4933da5ee2e563f0d05464fe49bcd72fb18388db844a2c616b9f7731b9bd534f",
+  "violations": [],
+  "producer_report": {
+    "summary": "Athena now formats the producer's work tree itself. After each producer pass, before the change list is taken, it runs `cargo fmt --all` and then `cargo fmt --all --check` on the tree. So a job whose only defect is rustfmt layout reaches the checks and the verifier formatted. The root cause was that the producer may run `cargo fmt`, but only prose asked it to, and nothing made the tree formatted before the gate. The step is new file run/format.rs, called from `producer_loop` through a small method in producer.rs. It is Athena code, not an agent command, so policy.rs is unchanged. It runs only when the tree has a Cargo.toml and a non-deleted .rs file is in the change list; pinned studies are skipped. A parse error stays in the tree and the normal fmt check fails on it with rustfmt's text. The kill switch or a deadline during the step ends the job as failed with \"the format step stopped: …\", and no check or verifier runs. Five unit tests and two end-to-end tests through `Athena::go` cover this. I disabled the call once to confirm both end-to-end tests fail without it; I did not do that for the unit tests, since they call the step directly. The CHANGELOG has an Unreleased entry. The dropped skill work (diagnose-failure.md, introspect.rs, introspection.rs) is absent.",
+    "files": [
+      "crates/athena-core/src/run/format.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/producer.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --locked -q",
+        "result": "pass",
+        "note": "1178 passed, 1 ignored, plus the integration tests; includes the 7 new tests"
+      },
+      {
+        "command": "cargo test -p athena-core --locked -- a_misformatted_rust_file an_unfixable_fmt_error a_work_tree_without_cargo_toml a_stopped_format_step paths_added_by_format a_job_whose_only_defect a_job_stopped_during_the_producer_turn",
+        "result": "pass",
+        "note": "7 new tests pass"
+      },
+      {
+        "command": "Same two end-to-end tests (a_job_whose_only_defect…, a_job_stopped_during_the_producer_turn…) with the format call disabled in producer.rs",
+        "result": "pass",
+        "note": "Both failed as expected (Rejected instead of Landed; no format stop). The call was then restored."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after running cargo fmt --all on the new code"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy --locked",
+        "result": "pass",
+        "note": "17 passed. It reads tracked files only, so the untracked format.rs was reread by hand against the banned words."
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --test mirrors --test lifecycle --test retry --test drain",
+        "result": "pass",
+        "note": "4, 77, 23 and 187 tests pass"
+      },
+      {
+        "command": "cargo test -p athena-agent --locked -q",
+        "result": "pass",
+        "note": "65 passed, 2 ignored; policy unchanged"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-core builds a work tree whose Rust file is mis-formatted (e.g. a long constant on one line), runs the new post-producer format step, and asserts the file is rewritten and `cargo fmt --check` then passes. Run `cargo test -p athena-core` and it passes.",
+        "status": "met",
+        "evidence": "Test a_misformatted_rust_file_is_rewritten_and_cargo_fmt_check_then_passes in run/tests.rs: a 24-number const array on one line plus `fn f( )->u32{1}`. It asserts the fmt check fails first, `format_work_tree` returns Done, the file is rewritten, and the fmt check then passes. `cargo test -p athena-core --locked -q` passed, 1178 passed."
+      },
+      {
+        "criterion": "A new test shows a fmt failure the formatter cannot fix (e.g. a file that does not parse) still yields a failed fmt result whose output text appears in the failed-check output. Run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "Test an_unfixable_fmt_error_is_reported_and_the_fmt_check_fails_with_the_same_text: src/lib.rs is `pub fn broken( {`. The step returns Unfixed, the file is byte-identical, and the independent run_check of the configured `cargo fmt --all --check` fails with the first `error` line of the step's output in its output_tail. Passed in the full athena-core run."
+      },
+      {
+        "criterion": "Grep of crates/athena-core/src/run shows the format step is called after the producer loop and before the checks and verifier run, so the check and the verifier see the formatted tree.",
+        "status": "met",
+        "evidence": "producer.rs calls `self.format_stage(...)` inside each producer_loop pass, right after the producer report is parsed and before `snapshot.change_list()`, `loop_replay` and the loop exit. The module docs of format.rs and the producer_loop doc comment say it is the last producer-stage act of every pass, with the candidate, checks and verifier after it. This is the placement the reading's assumption names (end of producer_loop, before the change list is taken), not after the loop. The end-to-end test a_job_whose_only_defect_is_rustfmt_layout… lands with the real `cargo fmt --all --check` as the configured check, and it fails (Rejected) when I disabled the call."
+      },
+      {
+        "criterion": "A test asserts the recorded candidate diff (change list) includes the formatter's changes, not only the producer's own edits. Run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "a_job_whose_only_defect_is_rustfmt_layout_passes_a_cargo_fmt_check_and_the_candidate_holds_the_formatted_file loads the job's candidate record. It asserts the changes are exactly README.md and src/lib.rs, and that `show_file(candidate_commit, \"src/lib.rs\")` equals the formatted text, which differs from both the producer's text and the base. paths_added_by_format_names_only_new_paths covers the added-path helper. Both passed."
+      },
+      {
+        "criterion": "The format step runs only for a work tree with a Cargo.toml and is Athena code, not an agent command, so the policy in crates/athena-agent/src/policy.rs that denies `cargo fmt` without --check to agent roles is unchanged.",
+        "status": "met",
+        "evidence": "format_work_tree returns Skipped when Cargo.toml is not a file, and when no non-deleted .rs entry is in the change list; producer.rs also skips before building the context. Test a_work_tree_without_cargo_toml_or_a_changed_rust_file_is_not_formatted asserts the Skipped outcomes and unchanged bytes. The step spawns through crate::checks::run_check from host code. git status shows policy.rs untouched, and `cargo test -p athena-agent` passed."
+      },
+      {
+        "criterion": "CHANGELOG.md has an Unreleased entry stating the outcome: a job whose only defect is rustfmt layout reaches the verifier formatted.",
+        "status": "met",
+        "evidence": "A new first bullet under `## [Unreleased]` / `### Added` in CHANGELOG.md: \"a job whose only defect is rustfmt layout now reaches the verifier formatted\", with the root cause and the limits."
+      },
+      {
+        "criterion": "`cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean on the workspace.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`, both clean. I ran `cargo test` for athena-core, athena-agent, xtask policy, and the cli mirrors, lifecycle, retry and drain tests, all passing; I did not run the full workspace `cargo test`."
+      },
+      {
+        "criterion": "Job 20261108-023649-67f6's candidate files are not present: crates/athena-context/skills/diagnose-failure.md does not exist, and crates/athena-core/src/introspect.rs and crates/athena-cli/tests/introspection.rs are unchanged. No secrets or personal data are added.",
+        "status": "met",
+        "evidence": "`git status --short` lists only CHANGELOG.md, run/mod.rs, run/producer.rs, run/tests.rs and the untracked run/format.rs. No path under crates/athena-context, introspect.rs or introspection.rs is touched. The added text has no secrets or personal data, and the policy scan passed."
+      }
+    ],
+    "open_issues": [
+      "Open question from the plan, left to a separate request: an error the formatter cannot fix does not send the producer back; the fmt check reports it at verification, as the reading says.",
+      "The new tests run real `cargo fmt` under the pinned toolchain from rust-toolchain.toml, so a host without that toolchain fails them rather than skipping."
+    ],
+    "mistakes": [
+      "None noticed."
+    ],
+    "learnings": [
+      "`crate::checks::run_check` clears the environment, so tests that run real cargo fmt must pass PATH, HOME and the rustup variables themselves. A rust-toolchain.toml next to the temp crate pins the rustfmt version.",
+      "A Cargo.toml tree with no `.rs` change never reaches the step: format_stage returns early without computing git trees, so fake-job tests without a Cargo.toml pay nothing.",
+      "The fake agent driver checks the kill switch only before the script runs, so a script that writes the STOP file during the producer turn is first seen by the format step. In that test, closing the job as Failed works with the switch still set.",
+      "run/mod.rs already has a private `mod checks;`, so format.rs must use `crate::checks::…` explicitly."
+    ],
+    "desires": []
+  }
+}

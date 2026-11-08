@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261108-041939-fqaz",
+  "round": 2,
+  "at": "2026-11-08T04:30:53.595438782Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The tests run real cargo fmt with the environment cleared, and nothing selects a toolchain, so they may fail on hosts with no rustup default toolchain.",
+      "evidence": "checks.rs:534 calls `env_clear()` and passes only `ctx.env`. The plan's unit tests pass PATH, HOME, RUSTUP_HOME and CARGO_HOME. The end-to-end job's env comes from athena.toml `env_pass = [\"HOME\", \"PATH\"]` plus `env_pass_if_set` RUSTUP_HOME/CARGO_HOME (athena.toml:52-58). Grep finds no RUSTUP_TOOLCHAIN anywhere in the repository. The temp crates sit in a tempdir, and the end-to-end repo from `repo_with_config` (tests.rs:295-337) has no rust-toolchain.toml, so rustup falls back to its default toolchain. setup.sh:26 installs rustup with `--default-toolchain none`, so on such a host I expect cargo fmt to fail to start or to error. Then criterion 1's Done assertion, criterion 2's 'line starting error and lib.rs' assertion, the end-to-end Landed assertion (criteria 3 and 4) and criterion 7's `cargo test` would all fail. The existing real-cargo test (tests.rs:4214) inherits the full process env, so it never hits this. Even with a default toolchain, rustfmt would come from that toolchain, not the pinned 1.97.0. Fix: In the temp-crate helper and the end-to-end base, also write the repository's rust-toolchain.toml (`include_str!(\"../../../../rust-toolchain.toml\")`, channel 1.97.0 with the rustfmt component). Commit it to the end-to-end base with `commit_file`, which the job does not change. Rustup then resolves the pinned toolchain under the cleared env, exactly as it does for the real checks in Athena's own work tree. Alternatively, pass RUSTUP_TOOLCHAIN from the process env in the unit tests' CheckContext, but that does not cover the end-to-end job's env. Update the Risks entry to match.",
+      "location": "Demonstrations for criteria 1-5; Risks 'cargo fmt needs cargo, rustfmt and rustup resolution under a cleared environment'; step 5 temp-crate helper and end-to-end base",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "If the kill switch fires during the format step, the result is treated as an unfixable fmt error and the loop continues.",
+      "evidence": "`run_check` sets the note 'killed by the kill switch' and returns a failed run, not an error (checks.rs:577-583). The plan maps any failed `--check` run to `Unfixed` and continues into loop_replay, the send-back checks and the candidate. Fix: In format_work_tree, return an error (or a distinct outcome that ends the stage) when `ctx.registry.stopped()` is true or the note is the kill-switch note or deadline note. A stopped job should not continue as if the step had merely failed to format.",
+      "location": "Step 1 / Decision 4: Unfixed result changes no flow",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The step formats every package in the workspace, not only the Rust files the job changed, so layout drift in the base can enlarge the job's diff.",
+      "evidence": "The guard only decides whether to run. Once it runs, `cargo fmt --all` rewrites any unformatted file in any workspace package. The plan relies on the fmt-clean-base assumption, and on the in-loop scope check to send the producer back for a file the producer never touched and cannot sensibly fix. Fix: Acceptable as the reading accepted it. A tighter option: run `cargo fmt --all` only for `--check`, and rewrite with `rustfmt --edition <ed> <changed .rs files>` (or `cargo fmt -- <files>`), so only the job's own files change. At minimum, have the UI line name any path the step added outside the pre-step change list.",
+      "location": "Decision 2/3: `cargo fmt --all` over the whole workspace",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Borrowing a temporary into a struct that is used after the statement does not compile.",
+      "evidence": "`StateDir::registry()` is called the same way at mod.rs:1949, where the value is bound first (`let registry = self.state.registry();`). Fix: Bind `let registry = self.state.registry();` before building the CheckContext, as mod.rs:1949 does.",
+      "location": "Step 3: `registry:&self.state.registry()` in the CheckContext literal",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Criterion 3 says 'after the producer loop', but the plan runs the step inside each pass of the loop.",
+      "evidence": "The reading says 'at the end of producer_loop, before the change list is taken'. The plan places the step before producer.rs:339 in every pass, which follows the reading. A literal grep against the criterion's wording could still be misjudged by the verifier. Fix: State in the change description and in the format.rs module docs that 'after the producer' means after each producer pass and before the change list, citing round-1 finding 1, so whoever checks criterion 3 judges it against the reading.",
+      "location": "Criterion 3 demonstration",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The round-2 plan answers round 1. The format step runs inside each producer pass, before the first `snapshot.change_list()` (producer.rs:339), so the in-loop send-back checks, `loop_replay` and the candidate all see one formatted tree. It reuses `checks::run_check` (checks.rs:513), which keeps the rustfmt text and treats a failure to start as a failed run, not an error. It states the root cause correctly (the policy.rs deny binds only roles that cannot write). It skips pinned studies and trees with no Rust change. Every function, line and helper it names exists: DiffEntry, `work_tree_tree`, `change_list`, `athena_with`, `commit_file`, the Docs capability with configurable checks, `env::build`/EnvSpec, and the module slots at mod.rs:61-68. The dependents list matches the readers I found. The athena-cli job tests never give a job a Cargo.toml together with a Rust edit, and the one existing athena-core test with a Cargo.toml edits README.md only. One major gap remains. Every demonstration runs real `cargo fmt` under an environment that `run_check` clears, with no RUSTUP_TOOLCHAIN and no rust-toolchain.toml in the temp crates or the end-to-end test's repo. On a host whose rustup has no default toolchain (setup.sh installs it with `--default-toolchain none`), I expect the tests for criteria 1-5 to fail, and criterion 7 with them. The fix is cheap: put the repo's rust-toolchain.toml into each temp crate and the end-to-end test's base. The other findings are minor."
+}

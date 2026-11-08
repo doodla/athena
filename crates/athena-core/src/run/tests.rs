@@ -348,6 +348,359 @@ mod produce_and_verify_order_tests {
             .unwrap();
     }
 
+    /// The configured fmt check.
+    const FMT_CHECK: &[&str] = &["cargo", "fmt", "--all", "--check"];
+    /// The repository's pinned toolchain, written beside every crate these tests format so that rustup picks
+    /// the same rustfmt as Athena's own fmt check, whatever the host's default is.
+    const PINNED_TOOLCHAIN: &str = include_str!("../../../../rust-toolchain.toml");
+    const DEMO_CARGO_TOML: &str =
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n";
+    /// A formatted library with one function.
+    const ONE_FN: &str = "pub fn one() -> u32 {\n    1\n}\n";
+    /// `ONE_FN` and a second function whose layout rustfmt changes.
+    const TWO_FNS_BADLY_LAID_OUT: &str =
+        "pub fn one() -> u32 {\n    1\n}\n\npub fn two( )->u32{2}\n";
+    /// What rustfmt makes of `TWO_FNS_BADLY_LAID_OUT`.
+    const TWO_FNS_FORMATTED: &str =
+        "pub fn one() -> u32 {\n    1\n}\n\npub fn two() -> u32 {\n    2\n}\n";
+
+    fn entry(status: char, path: &str) -> athena_git::DiffEntry {
+        athena_git::DiffEntry {
+            old_mode: String::new(),
+            new_mode: String::new(),
+            old_oid: String::new(),
+            new_oid: String::new(),
+            status,
+            path: path.to_string(),
+        }
+    }
+
+    /// A directory holding `files` and, unless `files` has its own, a `Cargo.toml` and the pinned toolchain file.
+    fn temp_crate(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let own = |name: &str| files.iter().any(|(path, _)| *path == name);
+        let mut all: Vec<(&str, &str)> = files.to_vec();
+        if !own("Cargo.toml") {
+            all.push(("Cargo.toml", DEMO_CARGO_TOML));
+        }
+        if !own("rust-toolchain.toml") {
+            all.push(("rust-toolchain.toml", PINNED_TOOLCHAIN));
+        }
+        for (path, text) in all {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        }
+        dir
+    }
+
+    /// The pieces of a [`CheckContext`] for the format step run outside a job: the environment a check gets
+    /// (the process's toolchain locations only), a kill switch under its own state directory, and a redactor.
+    struct FmtUnit {
+        _state: tempfile::TempDir,
+        env: BTreeMap<String, String>,
+        registry: athena_agent::procs::Registry,
+        redactor: Redactor,
+    }
+
+    impl FmtUnit {
+        fn new() -> FmtUnit {
+            let state = tempfile::tempdir().unwrap();
+            let env = [
+                "PATH",
+                "HOME",
+                "RUSTUP_HOME",
+                "CARGO_HOME",
+                "RUSTUP_TOOLCHAIN",
+            ]
+            .iter()
+            .filter_map(|key| std::env::var(key).ok().map(|v| (key.to_string(), v)))
+            .collect();
+            FmtUnit {
+                registry: athena_agent::procs::Registry::new(state.path()),
+                _state: state,
+                env,
+                redactor: Redactor::new(&athena_gate::builtin_config()).unwrap(),
+            }
+        }
+
+        fn ctx<'a>(&'a self, dir: &'a std::path::Path) -> CheckContext<'a> {
+            CheckContext {
+                dir,
+                env: &self.env,
+                timeout: std::time::Duration::from_secs(300),
+                registry: &self.registry,
+                job: "format-test",
+                redactor: &self.redactor,
+            }
+        }
+
+        /// The configured fmt check, run on `dir`.
+        fn fmt_check(&self, dir: &std::path::Path) -> CheckRun {
+            let spec = CheckSpec {
+                name: "fmt".into(),
+                run: FMT_CHECK.iter().map(|part| part.to_string()).collect(),
+                kind: CheckKind::Command,
+                skip_when_only: None,
+            };
+            run_check(&spec, &self.ctx(dir)).unwrap()
+        }
+    }
+
+    #[test]
+    fn a_misformatted_rust_file_is_rewritten_and_cargo_fmt_check_then_passes() {
+        let numbers: Vec<String> = (1..=24).map(|n| (n * 1000).to_string()).collect();
+        let text = format!(
+            "pub const TABLE: [u32; 24] = [{}];\nfn f( )->u32{{1}}\n",
+            numbers.join(", ")
+        );
+        let dir = temp_crate(&[("src/lib.rs", &text)]);
+        let unit = FmtUnit::new();
+        let before = unit.fmt_check(dir.path());
+        assert!(!before.passed, "the file starts mis-formatted: {before:?}");
+
+        let changes = [entry('M', "src/lib.rs")];
+        let done = format::format_work_tree(dir.path(), &changes, &unit.ctx(dir.path())).unwrap();
+        assert_eq!(done, format::Formatted::Done);
+
+        let after = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert_ne!(after, text, "the file is rewritten");
+        assert!(after.contains("fn f() -> u32 {\n    1\n}"), "{after}");
+        assert!(
+            after.contains("pub const TABLE: [u32; 24] = [\n"),
+            "{after}"
+        );
+        let check = unit.fmt_check(dir.path());
+        assert!(check.passed, "cargo fmt --check passes now: {check:?}");
+    }
+
+    #[test]
+    fn an_unfixable_fmt_error_is_reported_and_the_fmt_check_fails_with_the_same_text() {
+        let broken = "pub fn broken( {\n";
+        let dir = temp_crate(&[("src/lib.rs", broken)]);
+        let unit = FmtUnit::new();
+        let changes = [entry('M', "src/lib.rs")];
+        let result = format::format_work_tree(dir.path(), &changes, &unit.ctx(dir.path())).unwrap();
+        let format::Formatted::Unfixed { output, .. } = result else {
+            panic!("a file that does not parse stays unfixed, got {result:?}");
+        };
+        let error_line = output
+            .lines()
+            .find(|line| line.starts_with("error"))
+            .unwrap_or_else(|| panic!("the output carries rustfmt's error: {output}"));
+        assert!(!error_line.trim().is_empty());
+        // The tree is left as it was, and the configured check fails with that same text.
+        let after = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert_eq!(after, broken);
+        let check = unit.fmt_check(dir.path());
+        assert!(!check.passed, "{check:?}");
+        assert!(
+            check.output_tail.contains(error_line),
+            "the failed check's output has `{error_line}`: {}",
+            check.output_tail
+        );
+    }
+
+    #[test]
+    fn a_work_tree_without_cargo_toml_or_a_changed_rust_file_is_not_formatted() {
+        let messy = "pub fn f( )->u32{1}\n";
+        let unit = FmtUnit::new();
+        // No Cargo.toml: nothing to run cargo fmt on.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), messy).unwrap();
+        let changes = [entry('M', "src/lib.rs")];
+        let result = format::format_work_tree(dir.path(), &changes, &unit.ctx(dir.path())).unwrap();
+        assert!(
+            matches!(result, format::Formatted::Skipped(_)),
+            "{result:?}"
+        );
+        // A Cargo.toml, but the change list holds no Rust file, or only a deleted one.
+        std::fs::write(dir.path().join("Cargo.toml"), DEMO_CARGO_TOML).unwrap();
+        for changes in [
+            vec![entry('M', "README.md")],
+            vec![entry('D', "src/lib.rs")],
+            Vec::new(),
+        ] {
+            let result =
+                format::format_work_tree(dir.path(), &changes, &unit.ctx(dir.path())).unwrap();
+            assert!(
+                matches!(result, format::Formatted::Skipped(_)),
+                "{result:?}"
+            );
+        }
+        let after = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert_eq!(after, messy, "no file was rewritten");
+    }
+
+    #[test]
+    fn a_stopped_format_step_returns_stopped_and_leaves_the_file_untouched() {
+        let messy = "pub fn f( )->u32{1}\n";
+        let dir = temp_crate(&[("src/lib.rs", messy)]);
+        let unit = FmtUnit::new();
+        std::fs::write(unit.registry.stop_file(), "").unwrap();
+        let changes = [entry('M', "src/lib.rs")];
+        let result = format::format_work_tree(dir.path(), &changes, &unit.ctx(dir.path())).unwrap();
+        assert!(
+            matches!(result, format::Formatted::Stopped(_)),
+            "{result:?}"
+        );
+        let after = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert_eq!(after, messy);
+    }
+
+    #[test]
+    fn paths_added_by_format_names_only_new_paths() {
+        let before = [entry('M', "src/lib.rs"), entry('M', "README.md")];
+        let after = [
+            entry('M', "src/lib.rs"),
+            entry('M', "src/z.rs"),
+            entry('M', "README.md"),
+            entry('M', "src/a.rs"),
+        ];
+        assert_eq!(
+            format::paths_added_by_format(&before, &after),
+            vec!["src/a.rs".to_string(), "src/z.rs".to_string()]
+        );
+        assert!(format::paths_added_by_format(&before, &before).is_empty());
+    }
+
+    /// `inner`, with each producer turn also writing `text` at `path`.
+    fn also_writing(
+        inner: athena_agent::fake::Script,
+        path: &'static str,
+        text: &'static str,
+    ) -> athena_agent::fake::Script {
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            if spec.role == Role::Producer {
+                turn.edits.push((path.into(), Some(text.into())));
+            }
+            turn
+        })
+    }
+
+    #[test]
+    fn a_job_whose_only_defect_is_rustfmt_layout_passes_a_cargo_fmt_check_and_the_candidate_holds_the_formatted_file()
+     {
+        let repo = repo();
+        commit_file(&repo, "Cargo.toml", DEMO_CARGO_TOML);
+        commit_file(&repo, "rust-toolchain.toml", PINNED_TOOLCHAIN);
+        commit_file(&repo, "src/lib.rs", ONE_FN);
+        let state = tempfile::tempdir().unwrap();
+        // The producer's file differs from the base in content and in layout.
+        let script = also_writing(base_script(), "src/lib.rs", TWO_FNS_BADLY_LAID_OUT);
+        let athena = athena_with(
+            &repo,
+            &state,
+            FMT_CHECK,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        // The configured check is the real `cargo fmt --all --check`, run on the candidate: it passed, so the
+        // checks and the verifier saw the formatted tree.
+        let lines = ui.0.lock().unwrap().clone();
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{} {lines:?}",
+            done.reason
+        );
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let candidate = records.jobs[proposal.job.as_str()]
+            .candidate
+            .clone()
+            .expect("the job has a candidate");
+        // The change list of the recorded candidate holds the formatter's work, not only the producer's edit.
+        let mut paths: Vec<&str> = candidate.changes.iter().map(|c| c.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, ["README.md", "src/lib.rs"]);
+        let commit = candidate.candidate_commit.expect("a candidate commit");
+        let held = athena
+            .git
+            .show_file(&commit, "src/lib.rs")
+            .unwrap()
+            .unwrap();
+        let held = String::from_utf8(held).unwrap();
+        assert_eq!(held, TWO_FNS_FORMATTED);
+        assert_ne!(held, TWO_FNS_BADLY_LAID_OUT);
+        assert_ne!(held, ONE_FN);
+        assert!(
+            lines.iter().any(|l| l.starts_with("format")),
+            "the UI says the tree was formatted: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_job_stopped_during_the_producer_turn_closes_at_the_format_step_and_runs_no_check_or_verifier()
+     {
+        let repo = repo();
+        commit_file(&repo, "Cargo.toml", DEMO_CARGO_TOML);
+        commit_file(&repo, "src/lib.rs", ONE_FN);
+        let state = tempfile::tempdir().unwrap();
+        let stop_file = crate::state::StateDir::new(state.path().join("repo"))
+            .registry()
+            .stop_file()
+            .to_path_buf();
+        let counts = Arc::new(Counts::default());
+        let inner = also_writing(
+            counting(counts.clone(), None),
+            "src/lib.rs",
+            TWO_FNS_FORMATTED,
+        );
+        // The kill switch is set during the producer's turn, after the fake driver looked at it.
+        let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
+            if spec.role == Role::Producer {
+                std::fs::create_dir_all(stop_file.parent().unwrap()).unwrap();
+                std::fs::write(&stop_file, "").unwrap();
+            }
+            inner(spec)
+        });
+        let athena = athena_with(
+            &repo,
+            &state,
+            FMT_CHECK,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        let lines = ui.0.lock().unwrap().clone();
+        assert_eq!(
+            done.state,
+            OutcomeState::Failed,
+            "{} {lines:?}",
+            done.reason
+        );
+        assert!(
+            done.reason.contains("the format step stopped"),
+            "{}",
+            done.reason
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("failed     the format step stopped")),
+            "{lines:?}"
+        );
+        let (_, producers, _, verifiers) = counts.all();
+        assert_eq!((producers, verifiers), (1, 0));
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        assert!(records.jobs[proposal.job.as_str()].candidate.is_none());
+    }
+
     #[test]
     fn a_request_with_a_banned_word_is_refused_before_admission_and_a_clean_one_is_admitted() {
         let repo = repo();
