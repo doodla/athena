@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena check --host-rules`: the read-only check of the host rules (GET requests only). It reports whether
+  force pushes and deletion are forbidden on `athena/records` and whether branches must be up to date before
+  merging on `main`, and exits 2 when a required rule is not in force or cannot be read.
 - A design-surface inventory, its diff and its record (`crates/athena-core/src/design_surface.rs`), so the
   question "is the design settling?" has a number before any design review runs. `inventory_at(git, commit)`
   lists, from the files of one commit and with no model call, the commands and their flags (from the clap
