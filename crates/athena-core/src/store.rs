@@ -255,6 +255,8 @@ pub struct Records {
     pub throughput_reviews: Vec<athena_data::records::ThroughputReview>,
     /// Every build measurement (`crate::disk`), oldest first; the last is the latest.
     pub build_measurements: Vec<athena_data::records::BuildMeasurement>,
+    /// Every design-surface inventory (`crate::design_surface`), oldest first; the last is the latest.
+    pub design_surfaces: Vec<athena_data::records::DesignSurface>,
     /// Every focus record (`athena focus`), by `n`; the last is the current focus.
     pub focus: Vec<athena_data::records::FocusRecord>,
     /// Landing records (`landings/`, written after each merge), oldest first. Read from the tree itself and
@@ -415,6 +417,7 @@ impl Records {
                 AnyRecord::CodeHealthBaseline(b) => records.code_health_baselines.push(b),
                 AnyRecord::ThroughputReview(t) => records.throughput_reviews.push(*t),
                 AnyRecord::BuildMeasurement(m) => records.build_measurements.push(*m),
+                AnyRecord::DesignSurface(d) => records.design_surfaces.push(*d),
                 AnyRecord::Focus(f) => records.focus.push(f),
                 AnyRecord::Invocation(i) if i.role == Role::Auditor => {
                     records.auditor_runs.push(*i);
@@ -470,6 +473,9 @@ impl Records {
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         records
             .build_measurements
+            .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+        records
+            .design_surfaces
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         records.focus.sort_by_key(|f| f.n);
         records.interventions.sort_by_key(|i| i.at);
@@ -562,6 +568,7 @@ impl Records {
             || self.hestia_sweeps.iter().any(|r| &r.id == id)
             || self.throughput_reviews.iter().any(|r| &r.id == id)
             || self.build_measurements.iter().any(|r| &r.id == id)
+            || self.design_surfaces.iter().any(|r| &r.id == id)
     }
 
     /// The current state of each decision, folded from its append-only state records.

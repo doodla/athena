@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A design-surface inventory, its diff and its record (`crates/athena-core/src/design_surface.rs`), so the
+  question "is the design settling?" has a number before any design review runs. `inventory_at(git, commit)`
+  lists, from the files of one commit and with no model call, the commands and their flags (from the clap
+  definitions in `athena-cli`), the `athena.toml` sections and keys the config schema accepts, the record
+  schemas with their versions, the roles with their versions, and the workspace crates, each kind sorted by
+  name so the same commit always gives the same bytes. `diff(old, new)` returns added, removed and changed
+  items per kind with totals; a section added or removed counts once, not once per key.
+  `Athena::record_design_surface` commits an inventory as the new `athena.design-surface/1` record
+  (`records/design-surface/`), described in `docs/records.md`. No command was added, since one would change
+  the surface being measured. Tests build a repository with two commits and check that an added command, a
+  removed config section and a record schema moving to version 2 are exactly three changes, and check that the
+  inventory at this repository's HEAD lists every command `athena --help` prints and every section
+  `athena.toml` uses.
 - A format step in the producer stage (`crates/athena-core/src/run/format.rs`): a job whose only defect is
   rustfmt layout now reaches the verifier formatted. Root cause: the producer may run `cargo fmt`, but only
   prose asked it to, and nothing made the work tree formatted before the `fmt` check, so jobs were rejected
