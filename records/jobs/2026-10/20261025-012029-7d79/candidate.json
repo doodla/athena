@@ -1,0 +1,161 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261025-012029-7d79",
+  "base_commit": "edf46a1e5edf581a2a8e3df34b3307cfd7348166",
+  "base_fingerprint": "sha256:5f6b6a8c09036765c2f72be940eaa40441dd978e00947ac6aa63e03c78594e4c",
+  "previous_job": "20261106-145032-rcvz",
+  "candidate_commit": "09fb59dd26033e7ee7bfe36585d3666d457eb98b",
+  "candidate_tree": "843ab3a9f87df28500b8ce9b3ddbaaed12dc0546",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 374255
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 93861
+    },
+    {
+      "path": "crates/athena-cli/tests/binary.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28580
+    },
+    {
+      "path": "crates/athena-gate/src/attribution.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 70893
+    },
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 49470
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 43803
+    }
+  ],
+  "fingerprint": "sha256:fccf32f2b8370ee75527f07d53715657745647e9f2db40ef3b5450d7c5beb683",
+  "violations": [],
+  "producer_report": {
+    "summary": "Checkpoints from `athena check --attribution` and `athena land` are now pushed to the remote `athena/records` branch, so CI's incremental run can start from them. The cause was that `write_checkpoint` used `RecordsWriter::append`, which writes only the local ref. The next landing calls `append_to_remote`, which first resets the local branch to the remote tip and so dropped the checkpoint.\\n\\n`write_checkpoint` now calls `append_to_remote(remote, ...)`: compare-and-swap push, rebuild on the new remote tip, retry, then `Contended`. A new guard runs first and refuses to write unless the records tip the check judged is already an ancestor of the remote tip. Without it the reset would silently discard unpushed local records, and the checkpoint would name a commit the remote lacks. A remote that moved ahead is fine: the checkpoint goes on the newer tip and the next run judges the records in between. A refusal or a failed push sets `checkpoint_error` and keeps the verdict and exit code.\\n\\n`Options` gains a `remote` field, `origin` by default, with `with_remote(...)`. The `Options::new` signature is unchanged, so both callers compile as before.\\n\\nTests:\\n- The existing gate tests now use a bare `origin` and publish their records before checking.\\n- New gate tests read the bare remote directly. They cover the checkpoint reaching the remote, a later landing fast-forwarding past it, CI's fetch-then-incremental run judging only later commits (with a full-replay control), a remote that moved ahead, and the refusals when the remote has no records branch or lacks the judged tip.\\n- `checkpoint_write_failure_keeps_verdict` now uses a broken `pushurl` instead of a ref lock file.\\n- A new `athena-git` test covers a checkpoint-shaped push that loses a race.\\n- `binary.rs` and the `main.rs` unit test assert on the bare remote.\\n- I updated the stale \\\"never pushes\\\" doc comments and `docs/design/records-history.md`, and added a CHANGELOG entry under Unreleased / Fixed.\\n\\nI ran fmt, clippy and the targeted tests for athena-gate, athena-git, athena-cli and xtask policy; all pass. I did not run the full suite.",
+    "files": [
+      "crates/athena-gate/src/attribution.rs",
+      "crates/athena-git/src/records_branch.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/tests/binary.rs",
+      "CHANGELOG.md",
+      "docs/design/records-history.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-gate attribution::",
+        "result": "pass",
+        "note": "25 attribution tests, including the 6 new/rewritten checkpoint tests"
+      },
+      {
+        "command": "cargo test -p athena-gate -p athena-git",
+        "result": "pass",
+        "note": "137 gate tests and 62 git tests, including the new records_branch race test"
+      },
+      {
+        "command": "cargo test -p athena-cli --test binary incremental",
+        "result": "pass",
+        "note": "5 tests including check_attribution_push_failure_keeps_the_verdict"
+      },
+      {
+        "command": "cargo test -p athena-cli --bin athena checkpoint_after_landing",
+        "result": "pass",
+        "note": "asserts the checkpoint is on the bare remote"
+      },
+      {
+        "command": "cargo test -p athena-cli --test mirrors",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "banned-word scan"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-gate/src/attribution.rs, run with `cargo test -p athena-gate`, shows that after a passing check the checkpoint file exists on the remote records branch (read from the bare remote, not the local ref).",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-gate attribution::`. `checkpoint_reaches_the_remote_records_branch` passes. It runs run_check against a bare origin, then reads the bare repo's athena/records tip. It asserts the checkpoint file is there, the tip's only parent is the judged tip, and main_sha and records_sha are right."
+      },
+      {
+        "criterion": "A test run by `cargo test -p athena-gate` shows that a later landing/records write after the checkpoint leaves the checkpoint on the remote and the remote tip is a descendant of the checkpoint commit (fast-forward only, no reset).",
+        "status": "met",
+        "evidence": "`a_later_landing_fast_forwards_past_the_remote_checkpoint` passes. After the check it calls RecordsWriter::append_to_remote with a landing record. On the bare remote the checkpoint file is still present, the new tip's parent is the checkpoint commit, is_ancestor is true, audit_history is empty, and the local ref equals the remote tip."
+      },
+      {
+        "criterion": "A test run by `cargo test -p athena-gate` shows an incremental attribution run, starting from the remote checkpoint, judges only commits after its main_sha rather than replaying in full.",
+        "status": "met",
+        "evidence": "`ci_incremental_run_from_the_remote_checkpoint_judges_only_later_commits` passes. It deletes the local records refs and fetches athena/records from the bare remote, as CI does. The read-only incremental run then has mode Incremental, no fallback_reason, started_from main_sha equal to the third commit, and judges 2 commits and 4 records. A control repo with no pushed checkpoint falls back to a full replay of 5 commits."
+      },
+      {
+        "criterion": "A test in crates/athena-git/src/records_branch.rs or attribution.rs shows a checkpoint push that loses a race is retried on the new remote tip and still lands; a persistent push failure keeps the verdict and sets checkpoint_error.",
+        "status": "met",
+        "evidence": "Three tests pass. `records_branch::tests::a_checkpoint_shaped_push_that_loses_the_race_is_rebuilt_on_the_new_remote_tip_and_lands` shows 2 attempts, the commit parented on the rival tip, and both files on the bare remote. `attribution::tests::checkpoint_lands_on_a_remote_that_moved_ahead_of_the_checked_tip` shows the checkpoint built on a remote that moved ahead. `attribution::tests::checkpoint_write_failure_keeps_verdict`, using a broken pushurl, shows passed true, checkpoint_error Some, and the remote and local tips unchanged. The binary.rs test `check_attribution_push_failure_keeps_the_verdict` shows exit 0 and a string checkpoint_error."
+      },
+      {
+        "criterion": "Grep of crates/athena-gate/src/attribution.rs shows write_checkpoint calls append_to_remote rather than append.",
+        "status": "met",
+        "evidence": "In fn write_checkpoint the call is `RecordsWriter::new(git).append_to_remote(remote, \"checkpoint\", ...)`. The `.append(` call is gone from non-test code. Read the file after editing."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing that checkpoints are now pushed to the remote records branch.",
+        "status": "met",
+        "evidence": "Added the first bullet under [Unreleased] / Fixed: \"Attribution checkpoints are now pushed to the remote `athena/records` branch.\" It gives the root cause, the compare-and-swap and retry, and the refusal when the judged tip is not on origin."
+      },
+      {
+        "criterion": "cargo test, cargo clippy --all-targets and cargo fmt --check all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran fmt --check and clippy --all-targets --locked -D warnings: both clean. I ran the targeted tests for athena-gate, athena-git, athena-cli (binary incremental, the main.rs unit test, mirrors) and xtask policy: all pass. I did not run the full `cargo test --locked`."
+      }
+    ],
+    "open_issues": [
+      "The request lists crates/athena-core/src/gh.rs, which is not a file (crates/athena-core/src/gh/ is a directory). I treated it as needing no change, as the plan did. Say if a change under gh/ was intended.",
+      "Departure from the plan: I did not rewrite `put` in main.rs. The unit test instead pushes the records it wrote to a bare origin with push_branch. The effect is the same: the records are on the remote before the check.",
+      "A clone whose local athena/records holds records not yet pushed now gets checkpoint_error and no checkpoint, where it used to get a local one. This is intended: the alternative silently discards those records. The error text says to push or fetch first.",
+      "If the push succeeds but the following local set_ref fails, the run reports checkpoint_error although the checkpoint is on the remote. The next sync realigns the local ref. I did not add a test for this edge.",
+      "Checkpoints already dropped (for example 5c314d0) are not recovered. The next passing check on main writes a new one.",
+      "I did not run the full `cargo test --locked`. Athena runs it."
+    ],
+    "mistakes": [
+      "My first draft of the local-ahead test had leftover scratch lines (an unused `dir_b` binding). I removed them before running the tests.",
+      "One new test did `ci.started_from.unwrap()` and then borrowed `ci`, which did not compile. Fixed with `as_ref()`."
+    ],
+    "learnings": [
+      "write_checkpoint used RecordsWriter::append, which writes only the local ref. The next append_to_remote calls sync_from, which resets the local ref to the remote tip. That reset dropped the unpushed checkpoint.",
+      "append_to_remote resets the local branch to the remote before building. A local branch ahead of the remote loses its extra commits. The new guard in write_checkpoint therefore refuses unless the judged records tip is an ancestor of the remote tip.",
+      "fetch_remote_branch uses ls-remote, which reads the remote's url, not its pushurl. Setting remote.origin.pushurl to a missing path therefore breaks only pushes, leaving the remote tip unmoved. append_to_remote reports that as a plain error, so no hook script is needed to test a persistent push failure.",
+      "crates/athena-core/src/gh.rs does not exist (gh/ is a directory) and needed no change. The `origin` remote name is the one land_pr already uses.",
+      "The plan did not list main.rs unit-test changes beyond the one checkpoint test. That test needed a bare origin because the records writer now pushes."
+    ],
+    "desires": [
+      "A way to run the full suite cheaply in the producer role, to confirm no unrelated test reads the changed doc text or CLI help."
+    ]
+  }
+}

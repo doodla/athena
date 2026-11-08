@@ -1,0 +1,251 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-044655-wwcf",
+  "round": 3,
+  "at": "2026-11-08T00:03:31.991399352Z",
+  "invocation_seq": 7,
+  "approach": "The earlier plan is dropped. Its timeline was wrong: the producer's cargo wrapper landed on 2026-11-07 (9a97e24, first commit in HISTORY.txt to touch slot_exec.rs), so most jobs in the review window never waited on a slot. The replay also runs between producer invocations, so its time is never in `role_minutes` (status.rs:933-941). I re-derived the cause from the code and the dated history. The snapshot has no records/, so nothing below is measured; the note labels this.\n\nCause (read from code): 69057b9 (2026-11-06) added an unconditional line to every producer brief, `MIRROR_CHECK_INSTRUCTION` (briefs.rs:856, rendered by `mirror_check_section` at briefs.rs:640 and 863). It says: if crates/athena-cli/tests/mirrors.rs exists, run `cargo test -p athena-cli --test mirrors` before you finish. athena-cli depends on agent, cap-change, cap-study, core, data, gate and git, with core's `test-support` feature and testkit as dev-dependencies (athena-cli/Cargo.toml:16-32), and an integration-test run also builds the package's binary. So the command compiles nearly the whole workspace in the test profile, in the producer's own cold target directory (`CARGO_TARGET_DIR = {job_dir}/target/{side}`, athena.toml:80,111). It applies to every job, docs-only ones included, so it shifts a median, which a trigger that fires only on some jobs would not. It sits inside the producer invocation, so `role_minutes` counts it. Since 2026-11-07 it also queues behind the build slot. The date fits: 69057b9 is 2026-11-06 and the previous review was 2026-11-04 (d0ff1e9).\n\nThe instruction duplicates two checks that already exist. The producer loop runs the same registry in-process after every report, with no build (`mirror_drift_in`, producer.rs:76, called at 361-365; a drift is sent back at 409 and 506). The configured test check runs the whole `mirrors` target at verification (decisions.md D158, Tradeoff, lines 4368-4372).\n\nFix: replace the instruction with a note that keeps the facts and runs no build. The facts are that a new test file needs its line in xtask/shard-timings.txt and that docs/decisions.md only gains text after its last line. The note says Athena checks both after each report, so the producer need not build to find a drift. A drift the producer misses is still sent back once by the loop, and still fails the repo test at verification.\n\nOther candidates, in the note with the code evidence and the record that would settle each:\n(a) Send-back passes: four triggers landed 2026-11-06 (10166b3 decision gate, e0f1a6f allowed paths, 69057b9 mirrors, 387255a replay), and a send-back starts a fresh session with the whole brief (agent sessions are never resumed; `session_id` is only used to remove host traces, claude.rs:386). They fire on some jobs only, so they move a median less. The record that settles it is the producer invocation count per landed job and the `self-check failed:` detail (producer.rs:434).\n(b) Slot waits: only since 2026-11-07 (9a97e24).\n(c) CPU contention from `max_concurrency = 2` (b32888f, 2026-11-05, athena.toml:195).\n(d) Heavier readings and plans, which fits planning going from 1.7 to 9.0. That is out of scope.\nThe record that would confirm the chosen cause is `commands_run` of producer invocations (records.rs:712) from 2026-11-06 on, holding `cargo test -p athena-cli --test mirrors`.\n\nThe note says plainly that the next review's window will also hold jobs that waited on slots since 2026-11-07, so the median may fall less than the fix alone would give. The boundary-scan instruction (`cargo test -p xtask --test policy`, c432163, 2026-10-27) was in both windows and is left alone.",
+  "decisions": [
+    {
+      "choice": "Remove the instruction to run `cargo test -p athena-cli --test mirrors` from the producer brief and keep the facts it carried as a no-build note. Rename `MIRROR_CHECK_INSTRUCTION` to `MIRROR_CHECK_NOTE`; grep shows only briefs.rs uses the constant.",
+      "reason": "The instruction is the one change since the previous review that adds work to every producer invocation (a cold, near-workspace-wide test build). The loop's in-process `mirror_drift_in` and the repo test at verification already catch the same drift, so the build adds time and no coverage. This removes the cause, not a symptom: no timeout, slot count, send-back limit or stage reporting changes.",
+      "rejected": [
+        {
+          "option": "Skip the replay in the loop on reports that get sent back (the previous plan)",
+          "why": "The replay runs between producer invocations, outside `role_minutes`. It could lengthen another job's producer only through slot waits, which exist only since 2026-11-07. It does not remove what lengthened the measured window."
+        },
+        {
+          "option": "Make the instruction conditional on the planned paths touching a mirror-watched file",
+          "why": "The registry (`Mirror::covers`/`watches`) lives in athena-core, and athena-context cannot depend on it. The brief is also built before any file changes. It would couple two crates for a check the loop already runs. A follow-up if the next review shows more mirror send-backs."
+        },
+        {
+          "option": "Raise or lower `max_concurrency`, `max_check_slots` or the wrapper wait cap",
+          "why": "These are governance settings or symptoms (queueing and contention), the brief forbids athena.toml edits, and the slot wait did not exist for most of the window."
+        },
+        {
+          "option": "Change `role_minutes`, `StageMinutes`, the thresholds, or exclude command time from the producer stage",
+          "why": "Out of scope and forbidden by criterion 4: it would hide the time. status.rs, store.rs and main.rs only sum recorded durations, so editing them could only change reporting."
+        },
+        {
+          "option": "Cut send-back triggers or raise the send-back limit",
+          "why": "The trigger-by-trigger evidence is not in the snapshot. A trigger fires on some jobs only, so it fits a shifted median less. Left to a follow-up once the invocation counts per landed job are read."
+        }
+      ]
+    },
+    {
+      "choice": "Add one unit test in briefs.rs (replacing `producer_briefs_tell_the_producer_to_run_the_mirror_check`) and one run-level test in run/tests.rs built on the existing `mirror_job` helper.",
+      "reason": "The unit test pins the brief text at the real entry point `producer_brief`. The run-level test drives `Athena::go` and shows two things: the producer's first prompt carries the mirror facts but no cargo command, and a drift is still sent back by the loop, so no coverage is lost. Both fail on the old text.",
+      "rejected": [
+        {
+          "option": "Only assert on the constant's text",
+          "why": "It would not show what the producer is actually given."
+        },
+        {
+          "option": "A timing test of the producer stage",
+          "why": "Producer wall time cannot be re-measured in a verifier run. The test shows the mechanism, which is that no workspace-wide build is asked for."
+        }
+      ]
+    },
+    {
+      "choice": "Touch crates/athena-context/src/briefs.rs and crates/athena-core/src/run/tests.rs, not the listed status.rs, main.rs or store.rs.",
+      "reason": "Criterion 4 limits the diff to 'the code on the cause path and its tests'. The cause path is the producer brief. The three listed files hold no logic the cause passes through. Reading `limits_changed_files` against criterion 4 gives no allowed-paths list (no `may change` within 6 words of `only`, no `no other file`). The producer must read the allowed-paths line of its prompt before editing and report it if present.",
+      "rejected": [
+        {
+          "option": "Edit the listed deliverables to match the list",
+          "why": "Their only possible effect is on reporting, which criterion 4 forbids."
+        }
+      ]
+    },
+    {
+      "choice": "Leave docs/decisions.md D158's sentence 'The producer brief gains a short note to run the target' (line 4360) unedited, and name it in the note and CHANGELOG as superseded by this change.",
+      "reason": "docs/decisions.md is append-only and outside this request's Files line (`crates/`, `docs/design/`). briefs.rs is not in any `[[governs]]` table (decision-links.toml:212-217 lists only snapshot.rs and candidate.rs), so no decision gate fires. A new log entry is the user's call.",
+      "rejected": [
+        {
+          "option": "Append a decision entry in this job",
+          "why": "Outside the stated Files, and the append-only and decision-entry mirror rules would then judge it."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Cause path. Replace `MIRROR_CHECK_INSTRUCTION` (lines 853-860) with `MIRROR_CHECK_NOTE`: keep the facts (a new test file needs its line in xtask/shard-timings.txt; docs/decisions.md only gains text after its last line) and say Athena checks them in-process after each report. It gives no `cargo` command and says the producer need not build to find a drift. Update `mirror_check_section` (863). Replace the test at 3243-3267 with `producer_briefs_do_not_tell_the_producer_to_build_for_the_mirror_check`. Not in the brief's deliverable list; it is the code that issues the instruction.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add `mirrors_the_producer_is_not_asked_to_build_the_mirror_target_and_the_loop_still_sends_the_drift_back` next to the other `mirrors_` tests (after line ~2547), using `mirror_job`. Not in the deliverable list; it is the test of the cause path.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/producer-slowdown.md",
+      "action": "create",
+      "purpose": "The note: the measured figures from the request; how the stage is measured (`role_minutes`); the corrected timeline from HISTORY.txt (b32888f 2026-11-05; 69057b9, 10166b3, e0f1a6f, 387255a 2026-11-06; 9a97e24 2026-11-07); the cause and its code path; the candidates (a) to (d) and the record that settles each; what was not changed and why; the D158 sentence now stale; estimates labeled; and what the next review should show, with the slot-wait and CPU caveat.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "A `### Changed` entry under `[Unreleased]` in the style of the neighbouring entries: root cause (the producer brief told every producer to run a cold workspace-wide test build that the loop and the verification test check already cover), the fix, the note's path, and D158's sentence as superseded.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-context/src/briefs.rs lines 620-710, 840-870 and 3198-3270, crates/athena-core/src/run/mod.rs around 1149 (how the brief reaches `producer_loop`), and the `mirror_job`, `athena_source_repo` and `fixing_on_send_back` helpers in run/tests.rs (2470-2550). Confirm that the producer's first prompt (`spec.user_prompt`) contains the brief text. Read the allowed-paths line of your prompt, if any, and report it before editing.",
+    "In briefs.rs, replace `MIRROR_CHECK_INSTRUCTION` with `MIRROR_CHECK_NOTE` and update `mirror_check_section`. The text keeps the two facts, says Athena compares those files with their sources after each report and sends a drift back, and contains no `cargo` command. Update the doc comment to say why: the command compiled the workspace on every job and the loop already does the check. Check with Grep that no reference to the old name remains.",
+    "In briefs.rs, replace `producer_briefs_tell_the_producer_to_run_the_mirror_check` with `producer_briefs_do_not_tell_the_producer_to_build_for_the_mirror_check`. Use the same `ProducerInputs` fixture and a docs-only reading. Take the section from `## Files kept by hand` to the next `## ` heading and assert it has no `cargo test` and no `--test mirrors`. Assert it names xtask/shard-timings.txt and docs/decisions.md, and that it sits after `## Words you must not write` and before `## Checks Athena will run`.",
+    "In run/tests.rs, add `mirrors_the_producer_is_not_asked_to_build_the_mirror_target_and_the_loop_still_sends_the_drift_back`, using `athena_source_repo()` and `mirror_job` with the `crates/demo/tests/b.rs` edit as in tests.rs:2519. Assert the order: first that prompts[0] contains `## Files kept by hand` and `xtask/shard-timings.txt`, then that it contains neither `--test mirrors` nor `cargo test -p athena-cli`. Then assert two producer runs and a prompts[1] with MIRROR_SENTENCE and the `demo --test b 5.00` fix line.",
+    "Run `cargo test -p athena-context producer_briefs`, `cargo test -p athena-core --lib mirrors_`, then `cargo test --locked`, `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`. Fix only assertions that encoded the old command text. Do not weaken an assertion about the loop's send-back.",
+    "Write docs/design/producer-slowdown.md with these sections: (1) the figures quoted from the request, labeled measured (request); (2) how the stage is measured, and that the replay's time and a send-back's time differ (the replay is outside `role_minutes`, a send-back is a whole new invocation inside it); (3) the corrected timeline from HISTORY.txt and CHANGELOG.md; (4) the cause with its code path and why it fits (every job, inside the invocation, dated 2026-11-06); (5) the candidates (a) to (d) with the evidence and the record that settles each, and the order of confidence; (6) the change, its trade, and what it leaves alone (the boundary-scan instruction, send-back triggers, slots, `max_concurrency`, planning); (7) the stale D158 sentence; (8) what the next review should show, how to read it with `athena status` and `commands_run`, and the caveat about slot waits; (9) every estimate labeled, and that no records were in the snapshot.",
+    "Add the CHANGELOG.md entry under `[Unreleased]` in a `### Changed` section, matching the neighbouring entries. It gives the root cause, the fix, the supersession of D158's sentence, and the note's path.",
+    "Check with `git diff --stat` that the diff holds only briefs.rs, run/tests.rs, the note and CHANGELOG.md, and that status.rs, store.rs, main.rs, producer.rs, slots.rs, slot_exec.rs and athena.toml are untouched."
+  ],
+  "risks": [
+    {
+      "risk": "The cause is read from code and dates, not measured: the snapshot has no records/. The mirrors test may take less time than the 10.8-minute rise, or most of the rise may come from send-back passes, slot waits or heavier plans.",
+      "mitigation": "The note labels the cost of the build and the share of jobs affected as estimates, lists the other candidates, and names the records that settle it (`commands_run`, invocation count per landed job, the `self-check failed:` detail). It states plainly that this job may not lower the median by the whole rise."
+    },
+    {
+      "risk": "Without the instruction, a producer that adds a test file or edits the decision log and forgets the mirror gets a send-back (a fresh full pass) instead of finding it by running the target.",
+      "mitigation": "The brief keeps the two facts, so a careful producer avoids the drift without a build. The loop sends back what is left, and the repo test fails it at verification. The new run test shows the send-back still happens. The note records the trade, and the follow-up of a conditional instruction if the next review shows more mirror send-backs."
+    },
+    {
+      "risk": "The next review's window holds slot waits (since 2026-11-07) and two-at-a-time builds, which can raise the producer median regardless of this fix.",
+      "mitigation": "The note names both as candidates (b) and (c), states the caveat in the section on what the next review should show, and proposes that the maintainer queue the slot-side follow-up if the median does not fall."
+    },
+    {
+      "risk": "The new run test depends on the capturing fake and on `athena_source_repo()` reaching the real brief builder, so the producer's first prompt must actually carry the 'Files kept by hand' section. If it does not, the 'not contains' assertion passes vacuously.",
+      "mitigation": "The test first asserts that prompts[0] contains `## Files kept by hand` and `xtask/shard-timings.txt`, so it fails if the section did not reach the prompt. Step 1 confirms by reading that `producer_loop` hands the brief of mod.rs:1149 to the spec."
+    },
+    {
+      "risk": "briefs.rs and run/tests.rs are outside the brief's deliverable list; a scope check could send them back.",
+      "mitigation": "`limits_changed_files` was read against criterion 4 and derives no allowed list. The producer reads the allowed-paths line of its prompt before editing and reports it if present."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Producer brief text: MIRROR_CHECK_INSTRUCTION (renamed MIRROR_CHECK_NOTE) and the 'Files kept by hand' section",
+      "dependent": "crates/athena-context/src/briefs.rs: `mirror_check_section` (line 863) and the `producer_brief_with_evidence` call at line 640",
+      "kind": "code",
+      "test": "New briefs.rs test `producer_briefs_do_not_tell_the_producer_to_build_for_the_mirror_check` replaces `producer_briefs_tell_the_producer_to_run_the_mirror_check` (lines 3243-3267), which pinned the old command text. Grep shows no other user of the constant. The section's position (after the banned words, before the checks) is still asserted.",
+      "reason": null
+    },
+    {
+      "name": "Every caller and mode that builds a producer brief: fresh job, seeded retry, kept-candidate resume, conflict merge retry, nested run",
+      "dependent": "crates/athena-core/src/run/mod.rs:1149 (`producer_brief_with_evidence`, the job brief handed to `producer_loop`) and crates/athena-core/src/reading.rs:7348 (`producer_brief` in a reading test)",
+      "kind": "code",
+      "test": "`mirrors_the_producer_is_not_asked_to_build_the_mirror_target_and_the_loop_still_sends_the_drift_back` (new) and the existing reading.rs tests that call `producer_brief`, run unchanged in `cargo test --locked`.",
+      "reason": "They all call the one builder, so all get the no-build note. The note depends on no job state: it is a constant section. Nothing reads the removed command text. The retry, resume and conflict sections are separate sections of the brief and unchanged."
+    },
+    {
+      "name": "The producer loop's mirror check, now the producer's only mirror feedback before verification",
+      "dependent": "crates/athena-core/src/run/producer.rs `mirror_drift_in` (76) and the loop's send-back (361-365, 409, 463-472, 506); crates/athena-core/src/mirrors.rs `REGISTRY`",
+      "kind": "rule",
+      "test": "The existing run/tests.rs `mirrors_*` tests (2519-2739) pass unchanged, notably `mirrors_a_new_test_file_without_a_timings_line_is_sent_back_with_the_file_and_the_fix`, `mirrors_a_producer_that_fixes_the_timings_on_the_send_back_reaches_the_verifier`, `mirrors_a_clean_producer_is_not_sent_back` and `mirrors_a_repository_that_is_not_athenas_source_is_not_sent_back`.",
+      "reason": null
+    },
+    {
+      "name": "The unfiltered `mirrors` test target, the backstop for drift the loop's filtered check does not report",
+      "dependent": "crates/athena-cli/tests/mirrors.rs, run by the configured test check at verification; xtask/shard-timings.txt line 31 (`athena-cli --test mirrors 6.00`)",
+      "kind": "rule",
+      "test": "`cargo test --locked` runs the target unchanged.",
+      "reason": "Not changed. Only the brief's request that the producer run it by hand is removed. The test file, its shard-timings line and the registry are untouched, and no test file is added, so no new line is needed in xtask/shard-timings.txt."
+    },
+    {
+      "name": "Prose that says the producer brief tells the producer to run the mirrors target",
+      "dependent": "docs/decisions.md D158 (line 4360: 'The producer brief gains a short note to run the target'); docs/design/requirements-map.md (matched 'kept by hand')",
+      "kind": "rule",
+      "test": null,
+      "reason": "D158's sentence becomes stale. docs/decisions.md is append-only and outside this request's Files line, and briefs.rs is not in any `[[governs]]` table (decision-links.toml:212-217), so the decision gate does not fire. The note and CHANGELOG name the sentence as superseded. Whether to log it as a decision is an open question for the user. The requirements-map match is prose about the mirror feature, not about the brief command."
+    },
+    {
+      "name": "Stage-median calculation and the throughput review",
+      "dependent": "crates/athena-core/src/status.rs `role_minutes` (933-941), `StageMinutes`, `StageMinutes::median_of`, `landed_jobs`; crates/athena-core/src/hestia.rs throughput review",
+      "kind": "code",
+      "test": "`cargo test --locked` runs the existing `throughput_reports_landed_per_day_stage_medians_idle_time_and_time_on_jobs_that_did_not_land` and the `StageMinutes::median_of` test unchanged.",
+      "reason": "Not changed. They sum recorded invocation wall times; a producer that runs one fewer workspace build records a shorter invocation, and the sum is computed as before."
+    },
+    {
+      "name": "Prompt-set token budgets",
+      "dependent": "docs/system-facts.md budget lines, checked by `system_facts_budgets_match_computed` in crates/athena-cli/tests/budgets.rs; crates/athena-context/src/lib.rs `BudgetSet`",
+      "kind": "rule",
+      "test": "`system_facts_budgets_match_computed` passes unchanged in `cargo test --locked`.",
+      "reason": "The budgets are computed over each role's always-loaded prompt set. The producer brief is built at run time and sits outside those sets (docs/system-facts.md, 'Prompt sets and budgets'). No prompt file under crates/*/prompts changes, so no budget line moves."
+    },
+    {
+      "name": "Slot count, wrapper wait cap and per-job target directory",
+      "dependent": "athena.toml `[parallel] max_concurrency = 2` (line 195), the build-slot queue (crates/athena-core/src/slots.rs), the wrapper in crates/athena-cli/src/slot_exec.rs, and the producer's `CARGO_TARGET_DIR` (athena.toml:80,111)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Not changed (governance files, and the brief puts athena.toml out of scope). The fix only lowers how many build commands the producer is asked to run, so it lowers load on these. The note names them as candidates (b) and (c), which may still lengthen the next window's producer stage."
+    },
+    {
+      "name": "Allowed-paths scope check derived from the deliverables list",
+      "dependent": "crates/athena-context/src/briefs.rs `limits_changed_files` (146-222) and `allowed_paths` (115), used by `outside_allowed_paths` in the producer loop",
+      "kind": "rule",
+      "test": "`allowed_paths_equal_the_deliverables_for_a_limiting_criterion_and_are_none_otherwise` (run_pin_tests.rs) runs unchanged.",
+      "reason": "Read against the five criteria: criterion 4 has no `may change` within 6 words after `only` and none of the phrases `no file`, `no other file`, `test only`, `production unchanged`, so no allowed list is derived and briefs.rs and run/tests.rs are not sent back as outside it. The producer re-reads the allowed-paths line of its prompt before editing."
+    },
+    {
+      "name": "Refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No parser, stem list, stop list or reading check is added or changed, so no input form maps to a corpus case. No landing, history-check or attribution rule changes, so no commit-shape table is needed."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the note with Read and check each cited path and symbol with Grep. The command shows the file exists.",
+      "command": "ls docs/design/producer-slowdown.md",
+      "observes": "The note exists. It quotes the measured figures from the request (producer 12.7 to 23.5, planning 1.7 to 9.0 marked out of scope, checks 0.3 to 0.7, verifier 3.4 to 3.6, median total 918.1 to 1604.8). It states the cause with citations: briefs.rs:640, 856 and 863; athena-cli/Cargo.toml:16-32; athena.toml:80 and 111; producer.rs:76 and 361-365; D158; and 69057b9 (2026-11-06) against the 2026-11-04 review (d0ff1e9). It says the wrapper landed 2026-11-07 (9a97e24), so slot waits and the replay are not the cause of the window's rise, and that replay time is not producer stage time (`role_minutes`, status.rs:933-941). It lists candidates (a) to (d) with the record that settles each: `commands_run`, the producer invocation count per landed job, and the `self-check failed:` detail. It labels the cost of the build and the share of jobs affected as estimates, says no records were in the snapshot, and states what the next review should show, with the caveat about slot waits in its window.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Two tests. (1) In briefs.rs, `producer_briefs_do_not_tell_the_producer_to_build_for_the_mirror_check` builds a producer brief with `producer_brief` for a docs-only reading. It asserts the brief has the `## Files kept by hand` section, between the banned words and the checks. It asserts the section names xtask/shard-timings.txt and docs/decisions.md, and that no line of it contains `cargo test` or `--test mirrors`. (2) In run/tests.rs, `mirrors_the_producer_is_not_asked_to_build_the_mirror_target_and_the_loop_still_sends_the_drift_back` runs `mirror_job(&athena_source_repo(), vec![edit(\"crates/demo/tests/b.rs\", \"// b\\n\")], Vec::new())`. It asserts prompts[0] contains the mirror facts but not `--test mirrors` or `cargo test -p athena-cli`, and that the drift is still sent back: two producer runs, prompts[1] containing MIRROR_SENTENCE and `add the line `demo --test b 5.00``. The existing `mirrors_*` tests run unchanged.",
+      "command": "cargo test -p athena-context producer_briefs && cargo test -p athena-core --lib mirrors_",
+      "observes": "Both new tests pass, with the existing `mirrors_a_new_test_file_without_a_timings_line_is_sent_back_with_the_file_and_the_fix` and `mirrors_a_clean_producer_is_not_sent_back`. The producer is given no workspace-wide build to run, and the in-process loop check still catches the drift it replaced.",
+      "fails_without": "On the old brief text, `producer_brief` renders `run `cargo test -p athena-cli --test mirrors` before you finish` in the 'Files kept by hand' section. The unit test's 'no cargo test or --test mirrors in the section' assertion fails, and so does the run test's assertion on prompts[0]. A variant that dropped the loop's mirror check would fail the run test's send-back assertions.",
+      "seam": "Production entry points: `athena_context::briefs::producer_brief` (called directly with the `ProducerInputs` fixture the neighbouring tests use, briefs.rs ~3243-3254, exists) and `Athena::go` through `mirror_job` (run/tests.rs:2501), which uses `athena_source_repo()` and the capturing fake agent `fixing_on_send_back` (exists). Guards: the work tree must be Athena's own source (`is_athena_source`) and the change must touch a file the timings entry watches, which `athena_source_repo()` and `edit(\"crates/demo/tests/b.rs\", ...)` provide, as in the existing test at tests.rs:2519. Step 4 adds both tests. The brief builder and the loop's mirror check stay production code; the fake only records the prompt and makes the edit."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the two workspace checks on the finished tree, as Athena runs them: first `cargo fmt --all --check`, then the clippy command. They are two separate commands.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Both exit 0 with no diagnostics over production and test code. The renamed constant has no remaining references to the old name, and no test imports an unused item.",
+      "fails_without": "An unformatted line, a leftover reference to `MIRROR_CHECK_INSTRUCTION`, or an unused import in a replaced test makes one of the two commands exit non-zero.",
+      "seam": "The real commands over the whole workspace, no double. Both exist today."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff statistic and confirm that only the cause path and its tests changed.",
+      "command": "git diff --stat",
+      "observes": "The stat lists exactly crates/athena-context/src/briefs.rs, crates/athena-core/src/run/tests.rs, docs/design/producer-slowdown.md and CHANGELOG.md. status.rs, store.rs, main.rs, slots.rs, slot_exec.rs, producer.rs, config.rs and athena.toml are absent, so no stage-median reporting, threshold, slot setting or governance file changed. `cargo test -p athena-core --lib throughput` passes unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the code diff and the note's closing section.",
+      "command": "git diff -- crates/athena-context/src/briefs.rs docs/design/producer-slowdown.md",
+      "observes": "The code diff removes work the producer is told to do (a cold workspace-wide test build on every job). It changes no timeout (`build_wait_s`, the 300 s wrapper cap), no slot count, no send-back limit and no stage reporting. The note says the next throughput review should show a lower producer median, with the size an estimate. It names what is not expected to move: planning, checks, the verifier, and the send-back and slot-wait shares. It says that slot waits and CPU contention from `max_concurrency = 2` are in the next window and may hide part of the fall. It gives the way to check: `athena status` stage medians, the stored throughput comparison, and `commands_run` of recent producer invocations no longer holding `cargo test -p athena-cli --test mirrors`.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: Confirm that removing the instruction is acceptable. A mirror drift the producer would have found by running the target itself is now found by the producer loop and costs one send-back (a fresh producer pass) instead of a cold build on every job. The note gives both sides as estimates.",
+    "User: Should D158's sentence in docs/decisions.md ('The producer brief gains a short note to run the target') be superseded by a new decision entry? It is outside this request's Files, so this job leaves it and names it in the note and CHANGELOG.",
+    "User: This job may not lower the next median by the whole 10.8 minutes. The next review's window will also hold jobs that waited on build slots (since 2026-11-07) and ran two at a time (`max_concurrency = 2`). If the median does not fall, which candidate (a) to (d) should be queued next?",
+    "Host: Do the `commands_run` lists of producer invocations from 2026-11-06 on contain `cargo test -p athena-cli --test mirrors`, and how long did the invocations that ran it take against those that did not? The snapshot has no records/, so this is the measurement that confirms or rejects the cause.",
+    "Host: On which dates did the 20 landings in the review window land, and how many producer invocations did each have (`seq`)? This tells how many of them ran under the 2026-11-06 brief and how much of the rise is extra send-back passes."
+  ],
+  "producer_section_sha256": "08a80d66c5567ac2e5ddbdaae4a5661c068960a9d643a48e7453ca7fd0b7f94f"
+}

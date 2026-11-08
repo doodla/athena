@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-012029-7d79",
+  "round": 1,
+  "at": "2026-11-08T00:36:33.030018461Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "docs/design/records-history.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/design/records-history.md",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The lost-race test exercises only the existing writer, so it passes before the change and shows nothing about checkpoints.",
+      "evidence": "append_to_remote_with_hook (records_branch.rs:410-464) already rebuilds and retries, and the existing test near line 871 covers it. Putting checkpoints/cp.json through it does not touch write_checkpoint, so the test passes with the old local append. Its 'fails without' line describes removing the writer's retry, not the requested behavior. Together, test (b) (remote moved ahead, through run_check) and criterion 5 (the grep showing write_checkpoint calls append_to_remote) still show that checkpoints use the CAS-and-retry path. Fix: State plainly that (a) is a regression guard for the writer, and that the checkpoint-path evidence is (b) plus criterion 5. Optionally add a #[cfg(test)] hook parameter to write_checkpoint so an attribution test can force a real race through run_check. Or drop (a) as a duplicate of the line-871 test.",
+      "location": "Demonstrations, Criterion 4 (a): records_branch.rs a_checkpoint_shaped_push_that_loses_the_race_is_rebuilt_on_the_new_remote_tip_and_lands",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stale text runs past the lines the plan names.",
+      "evidence": "records-history.md:390-391 says: 'A checkpoint written locally reaches CI when the records branch is pushed by the existing flow; until then CI's incremental run finds none and runs a full replay'. This is also wrong once the change lands. Fix: Rewrite the whole bullet at 388-391. It should say the checkpoint is pushed with compare-and-swap and retry, describe the refusal when the judged tip is not on the remote, and drop the 'until then' sentence.",
+      "location": "Files: docs/design/records-history.md (~388-389)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The guard checks the records tip against the remote but not main_sha. A pushed checkpoint whose main_sha is missing from the remote main would turn CI red, not merely force a replay.",
+      "evidence": "In run_check (attribution.rs:656-667), a FullReplay run adds FindingKind::CheckpointDisagrees whenever the newest checkpoint's main_sha is not on main's first-parent line. This applies even when an incremental run fell back. Before this change a bad local checkpoint never reached CI. A pass normally means main_sha is a landed commit, so the risk is small, but the plan does not argue this anywhere. Fix: Either also check that main_sha is an ancestor of the remote main (fetch_remote_branch(remote, \"main\")) and refuse with checkpoint_error otherwise, or add one sentence to Decisions or Risks explaining why a pass guarantees main_sha is on the remote main.",
+      "location": "Decisions 1 / Step 2 (write_checkpoint guard)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The expected record count and the control run depend on fixture details the plan does not state.",
+      "evidence": "'records_judged() == 4' assumes the land() helper writes exactly two records per commit. The control run ('a control remote with no checkpoint') says neither how it is built nor how it isolates the checkpoint. Fix: Derive the expected record count from what land() writes. Describe the control concretely, for example a run on a fresh clone of a bare remote that was published before the check.",
+      "location": "Demonstrations, Criterion 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes the fault where it starts. write_checkpoint (attribution.rs:727-753) calls RecordsWriter::append, which writes only the local ref. sync_from (records_branch.rs:374-384) resets a local ref that is ahead of the remote, so the next append_to_remote drops the checkpoint. I read the code to check what the plan relies on, and all of it exists as described: append_to_remote and its private hook at records_branch.rs:398/410, the plain-error return when the remote tip is unmoved at :449-452, fetch_remote_branch using ls-remote by remote name (lib.rs:406), push_branch (lib.rs:432), the literal \"origin\" at gh/landing.rs:743 and RECORDS_TRACKING_REF at records_branch.rs:38. I also grepped every caller of run_check and Options::new: main.rs:826-830 and main.rs:1542, plus attribution tests. checkpoint_after_landing is called only from main.rs:1285, and the dependents list covers each of these. The binary.rs common helper athena_check always passes --no-checkpoint, so other CLI tests are unaffected. Two parts of the design are sound. The ancestry guard stops the sync from silently discarding local-only records and stops a checkpoint naming a records_sha the remote lacks. A broken remote.origin.pushurl is a real, script-free way to fail the push, because ls-remote still uses the url. Demonstrations 1-3 read the bare remote directly and would fail with the old local append. The remaining issues are minor. The lost-race test in records_branch.rs already passes today, and nothing drives a race through write_checkpoint. The doc edit must also cover lines 390-391. The guard could also check main_sha against the remote main. Athena's scope note on docs/design/records-history.md is weighed and agreed as minor; the edit is justified by the strangers default."
+}

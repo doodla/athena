@@ -20,8 +20,11 @@
 //!
 //! A refused batch changes nothing: the whole batch is checked before any commit is made. Trees are built in
 //! a temporary index, so the user's index and work tree are never touched. The importer in `athena-core`
-//! (`records_import`) uses [`RecordsWriter::append`]; landing (`athena-core` `gh`) uses
-//! [`RecordsWriter::append_to_remote`], which builds on the remote tip and publishes to the remote (§8.2).
+//! (`records_import`) uses [`RecordsWriter::append`]; landing (`athena-core` `gh`) and the attribution
+//! check's checkpoint (`athena-gate` `attribution`) use [`RecordsWriter::append_to_remote`], which builds on
+//! the remote tip and publishes to the remote (§8.2). A record written with `append` alone stays local, and
+//! the next `append_to_remote` resets it away, so anything other clones or CI must see goes through the remote
+//! writer.
 
 use crate::index::{IndexEdit, TempIndex};
 use crate::{Git, GitError, null_oid};
@@ -918,6 +921,54 @@ mod tests {
             paths(&bare, &tip),
             vec!["mine.json", "rival.json", "seed.json"],
             "the other writer's record is kept"
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_shaped_push_that_loses_the_race_is_rebuilt_on_the_new_remote_tip_and_lands() {
+        let (_b, bare) = bare_remote();
+        let (_d, git) = clone_of(&bare);
+        let (_d2, rival) = clone_of(&bare);
+        let writer = RecordsWriter::new(&git);
+        let seed = writer
+            .append_to_remote("origin", "seed", &[Change::put("seed.json", "s")], &[])
+            .unwrap();
+        let attempts = Cell::new(0);
+        let rival_tip = Cell::new(None);
+        let checkpoint = writer
+            .append_to_remote_with_hook(
+                "origin",
+                "checkpoint",
+                &[Change::put("checkpoints/cp.json", "{}")],
+                &[],
+                |n| {
+                    attempts.set(n);
+                    if n == 1 {
+                        // A landing from another clone reaches the remote while the checkpoint is pending.
+                        rival_tip.set(Some(
+                            RecordsWriter::new(&rival)
+                                .append_to_remote(
+                                    "origin",
+                                    "landing",
+                                    &[Change::put("landings/rival.json", "r")],
+                                    &[],
+                                )
+                                .unwrap(),
+                        ));
+                    }
+                },
+            )
+            .unwrap();
+        let rival_tip = rival_tip.take().unwrap();
+        assert_ne!(rival_tip, seed);
+        assert_eq!(attempts.get(), 2, "first push rejected, second accepted");
+        assert_eq!(git.parents(&checkpoint).unwrap(), vec![rival_tip]);
+        assert_eq!(remote_tip(&bare).as_deref(), Some(checkpoint.as_str()));
+        assert_eq!(writer.tip().unwrap().as_deref(), Some(checkpoint.as_str()));
+        assert_eq!(
+            paths(&bare, &checkpoint),
+            vec!["checkpoints/cp.json", "landings/rival.json", "seed.json"],
+            "the checkpoint landed and the landing that won the race is kept"
         );
     }
 

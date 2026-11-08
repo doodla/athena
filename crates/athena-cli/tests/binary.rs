@@ -484,14 +484,34 @@ mod incremental {
         "2026-10-24T10:00:00Z".parse().unwrap()
     }
 
+    /// Gives the fixture a bare `origin`, where landing publishes its records and a check publishes its
+    /// checkpoint. Keep the returned directory alive for the test.
+    fn remote_for(fx: &Fixture) -> (tempfile::TempDir, athena_git::Git) {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = athena_git::Git::isolated(dir.path());
+        bare.run(["init", "-q", "--bare", "-b", "main"]).unwrap();
+        fx.git
+            .run(["remote", "add", "origin", dir.path().to_str().unwrap()])
+            .unwrap();
+        (dir, bare)
+    }
+
+    /// The tip of the records branch on the remote.
+    fn remote_tip(bare: &athena_git::Git) -> Option<String> {
+        bare.rev_parse(RECORDS_REF).unwrap()
+    }
+
+    /// Writes a record the way landing does: on the remote tip, pushed to `origin`.
     fn put(fx: &Fixture, dir: &str, id: &RecordId, record: HistoryRecord) {
         RecordsWriter::new(&fx.git)
-            .append(
+            .append_to_remote(
+                "origin",
                 "record",
                 &[Change::put(
                     format!("{dir}/{id}.json"),
                     serde_json::to_string(&record).unwrap(),
                 )],
+                &[],
             )
             .unwrap();
     }
@@ -572,9 +592,11 @@ mod incremental {
     #[test]
     fn check_attribution_writes_checkpoint() {
         let fx = Fixture::new();
+        let (_remote_dir, bare) = remote_for(&fx);
         land(&fx, 1);
         land(&fx, 2);
         let before = tip(&fx);
+        assert_eq!(remote_tip(&bare).as_deref(), Some(before.as_str()));
         let out = check(&fx, &[], None);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert_eq!(out.status.code(), Some(0), "{stdout}");
@@ -586,6 +608,16 @@ mod incremental {
         assert_eq!(cp.verifier_version, athena_gate::attribution::CHECK_VERSION);
         assert_ne!(tip(&fx), before);
 
+        // The checkpoint is on the remote records branch, read from the remote.
+        let on_remote = remote_tip(&bare).unwrap();
+        assert_eq!(bare.parents(&on_remote).unwrap(), vec![before.clone()]);
+        assert!(
+            bare.show_file(&on_remote, &format!("checkpoints/{}.json", cp.id))
+                .unwrap()
+                .is_some(),
+            "the checkpoint reached the remote"
+        );
+
         // A failing check writes none.
         write(fx.root(), &[("rogue.txt", "r\n")]);
         assert!(commit(&fx, "Hand-made commit").status.success());
@@ -593,11 +625,44 @@ mod incremental {
         let out = check(&fx, &[], None);
         assert_eq!(out.status.code(), Some(2));
         assert_eq!(tip(&fx), before);
+        assert_eq!(remote_tip(&bare).as_deref(), Some(before.as_str()));
+    }
+
+    #[test]
+    fn check_attribution_push_failure_keeps_the_verdict() {
+        let fx = Fixture::new();
+        let (remote_dir, bare) = remote_for(&fx);
+        land(&fx, 1);
+        let before = tip(&fx);
+        // Reading the remote still works, but every push to it fails.
+        let missing = remote_dir.path().join("no-such-remote");
+        fx.git
+            .run(["config", "remote.origin.pushurl", missing.to_str().unwrap()])
+            .unwrap();
+        let out = check(&fx, &["--json"], None);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "the verdict and exit code do not change: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(json["passed"], true);
+        assert!(json["checkpoint_written"].is_null());
+        assert!(json["checkpoint_error"].is_string(), "{json}");
+        assert_eq!(tip(&fx), before);
+        assert_eq!(remote_tip(&bare).as_deref(), Some(before.as_str()));
+
+        let out = check(&fx, &[], None);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{stdout}");
+        assert!(stdout.contains("checkpoint not written"), "{stdout}");
     }
 
     #[test]
     fn check_attribution_in_ci_writes_nothing() {
         let fx = Fixture::new();
+        let (_remote_dir, bare) = remote_for(&fx);
         land(&fx, 1);
         let before = tip(&fx);
         let out = check(&fx, &[], Some("true"));
@@ -605,19 +670,23 @@ mod incremental {
         assert_eq!(out.status.code(), Some(0), "{stdout}");
         assert!(stdout.contains("not written (CI is read-only)"), "{stdout}");
         assert_eq!(tip(&fx), before, "CI never writes the records branch");
+        assert_eq!(remote_tip(&bare).as_deref(), Some(before.as_str()));
         // The flag does the same where CI is not set.
         let out = check(&fx, &["--no-checkpoint"], None);
         assert_eq!(out.status.code(), Some(0));
         assert_eq!(tip(&fx), before);
+        assert_eq!(remote_tip(&bare).as_deref(), Some(before.as_str()));
         // An empty CI variable is not CI.
         let out = check(&fx, &[], Some(""));
         assert_eq!(out.status.code(), Some(0));
         assert_ne!(tip(&fx), before);
+        assert_eq!(remote_tip(&bare).unwrap(), tip(&fx));
     }
 
     #[test]
     fn check_attribution_reports_seconds_and_counts() {
         let fx = Fixture::new();
+        let (_remote_dir, _bare) = remote_for(&fx);
         land(&fx, 1);
         land(&fx, 2);
         let out = check(&fx, &[], None);
@@ -663,6 +732,7 @@ mod incremental {
     #[test]
     fn full_replay_tampered_checkpoint_exits_2() {
         let fx = Fixture::new();
+        let (_remote_dir, _bare) = remote_for(&fx);
         land(&fx, 1);
         write(fx.root(), &[("rogue.txt", "r\n")]);
         assert!(commit(&fx, "Hand-made commit").status.success());

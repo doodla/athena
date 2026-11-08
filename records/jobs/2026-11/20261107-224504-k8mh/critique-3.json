@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-224504-k8mh",
+  "round": 3,
+  "at": "2026-11-07T23:00:39.547095152Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-context/src/lib.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-context/src/lib.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run_pin_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run_pin_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/system-facts.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/system-facts.md",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/decisions.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/decisions.md",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/design/context-engineer.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/design/context-engineer.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan says tier 2 can only see the title on a retry, but the code that builds the reading already has the earlier request text. The limit is one the plan creates, not one the code imposes.",
+      "evidence": "`read` takes `attempt: Option<&EarlierAttempt>` (reading.rs:521) and passes it to the reader brief (reading.rs:553). `EarlierAttempt` has `pub request: String` (briefs.rs:1991). The plan only threads `&request.text` into `build_reading`. So on a request like 'try again on <id>' (this job's own request), tier 2 never checks the retried job's request text. It falls back to the title or to the reader naming the default. Retries are a common way bug work comes back after a rejection, which is the failure this job is meant to fix. Fix: Pass the earlier attempt's request text too, for example `attempt.map(|a| a.request.as_str())`. Let tier 2 check request text, title and earlier request. Change the retry test: 'try again on <id>' with a neutral title, where the earlier attempt's request is 'Fix the regression in the parser', gains the criterion. Remove the 'tier 2 sees the title alone' limit from the doc comment, §3.9 and the Risks.",
+      "location": "Decision 2 / Risks (retry limit); crates/athena-core/src/reading.rs:520-551, 642-651; crates/athena-context/src/briefs.rs:1987-1991",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Running the step before the empty-criteria guard hides that guard. A bug change reading that came back with no criteria was refused before; now it would be accepted with only the step's criterion.",
+      "evidence": "`build_reading` runs `ensure_changelog` (842), then `validate()` (843), then `if reading.capability.is_some() && reading.acceptance_criteria.is_empty() { bail!(\"a reading needs at least one acceptance criterion\") }` (844-845). The step goes between 842 and 843, so it always adds a criterion before line 844 checks for none. The dependents list does not name this guard, and no test covers it. Fix: Have `ensure_bug_evidence` return early when `reading.acceptance_criteria` is empty, or call it after the line-844 check (keeping the order test right). Add a test: a change reading with a bug request and no criteria is still refused with 'needs at least one acceptance criterion'. Add the guard to the dependents list.",
+      "location": "Step 7 / Dependents; crates/athena-core/src/reading.rs:841-846",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Raising the budget to the smallest multiple of 50 still leaves the reader above 95%. So the displacement rule still applies to this addition and to the next one; the raise does not discharge it.",
+      "evidence": "context-engineer.md:231-232: 'A change that raises a prompt set above 95% of its budget, or adds to one already above it, must name what it removes or shortens.' The plan's own estimate (about 2,030 of 2,050) is about 99%. §8 also says 'Budgets are not raised to make room'. The plan does raise the matter as an open question. Fix: In D166 and §3.9, say plainly that the raise is the decided exception to the §8 rule, and that the reader stays above 95%. Or pick a budget that clears 95% (for example 2,150) and justify it in the decision.",
+      "location": "Decision 5 / Open question 2; docs/design/context-engineer.md:201-203, 229-234",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Scanning the reader's free-text `how` for a fixed list of negation phrases is an ad hoc string match. 'n/a' as a substring is loose, and other wordings get through.",
+      "evidence": "Tier 1 trusts any `bug-evidence` entry whose lowercased `how` contains none of five phrases. A reader writing 'does not fit: feature work' still triggers the criterion. The plan admits that only the listed wordings are caught. Fix: Make the reader instruction the mechanism instead: the default's first sentence tells the reader to list `bug-evidence` only for bug, wrong-output, regression or slowdown work. Keep the negation list only as a backstop, and match whole phrases rather than 'n/a' as a substring.",
+      "location": "Decision 2, tier-1 negation list",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot with Read and Grep. What it names exists: `ensure_changelog` (reading.rs:281), the call at 842 before `validate()` at 843, the two `build_reading` callers (642 and 5630), `BudgetSet::Reader => 2_000` (athena-context lib.rs:175), the 'of 2000' literal (run_pin_tests.rs:1625), D165 as the last decision (decisions.md:4697), the reader figures in context-engineer.md, and `REPO_DEFAULTS` and `get`/`render` in defaults.rs. The design is sound overall. It adds a step that refuses nothing, next to ensure_changelog. It records the forced reader budget raise as an appended decision rather than editing D25, and Athena's own scope findings are justified for that reason. Its demonstrations drive the real `build_reading` and `refusing_check`. Two major findings need fixing. (1) The plan says tier 2 sees only the title on a retry, but `read` already holds `EarlierAttempt.request` (briefs.rs:1991). The earlier request text should go into tier 2, which covers exactly the retried-bug case this job came from. (2) The step runs before the guard at reading.rs:844 that refuses a reading with no acceptance criteria. A bug change reading with no criteria would now be accepted with only the step's criterion. The dependents list omits this guard. Two minor findings: the raise still leaves the reader above 95%, so the context-engineer.md §8 rule still applies; and the tier-1 negation check is a loose string match. Verdict: revise."
+}
