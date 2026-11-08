@@ -244,10 +244,16 @@ pub fn job_history(records: &Records) -> Vec<JobEnd> {
 /// without running (dropped, declined, abandoned, stale or closed by the bootstrap) does not stand: the
 /// work it was meant to do is still undone, so it does not hide the retried job.
 pub fn retries_by_job(records: &Records) -> BTreeMap<String, String> {
+    retries_in(records, &job_history(records))
+}
+
+/// [`retries_by_job`] over a history the caller already built, so one pass of [`job_history`] can serve
+/// several questions.
+fn retries_in(records: &Records, history: &[JobEnd]) -> BTreeMap<String, String> {
     let mut retries = BTreeMap::new();
     // `job_history` lists the newest job first, so the first retry kept for a job is its newest.
-    for end in job_history(records) {
-        let Some(retried) = end.retry_of else {
+    for end in history {
+        let Some(retried) = end.retry_of.clone() else {
             continue;
         };
         let unrun = matches!(
@@ -261,10 +267,487 @@ pub fn retries_by_job(records: &Records) -> BTreeMap<String, String> {
             ))
         );
         if !unrun {
-            retries.entry(retried).or_insert(end.id);
+            retries.entry(retried).or_insert_with(|| end.id.clone());
         }
     }
     retries
+}
+
+/// How many rejected, failed or timed-out attempts one retry lineage may have. At this many, Athena's drain
+/// stops retrying the lineage and queues one narrower request instead (see [`lineage_stop`]).
+pub const LINEAGE_ATTEMPT_LIMIT: usize = 3;
+
+/// Every job of the retry lineage `job` belongs to, oldest first: the chain of "try again on <job>" requests
+/// through `job`, from the first request that is not a retry to the newest retry that still stands (see
+/// [`retries_in`]). Empty when `job` retries nothing and has no retry. A cycle or a chain longer than
+/// [`MAX_RETRY_DEPTH`] ends the walk where it is.
+fn lineage_chain(history: &[JobEnd], retries: &BTreeMap<String, String>, job: &str) -> Vec<String> {
+    let back: BTreeMap<&str, &str> = history
+        .iter()
+        .filter_map(|e| Some((e.id.as_str(), e.retry_of.as_deref()?)))
+        .collect();
+    if !back.contains_key(job) && !retries.contains_key(job) {
+        return Vec::new();
+    }
+    let mut seen = BTreeSet::from([job.to_string()]);
+    let mut newest = job.to_string();
+    for _ in 0..MAX_RETRY_DEPTH {
+        let Some(next) = retries.get(&newest) else {
+            break;
+        };
+        if !seen.insert(next.clone()) {
+            break;
+        }
+        newest = next.clone();
+    }
+    let mut seen = BTreeSet::from([newest.clone()]);
+    let mut chain = vec![newest.clone()];
+    let mut current = newest;
+    for _ in 0..MAX_RETRY_DEPTH {
+        let Some(previous) = back.get(current.as_str()) else {
+            break;
+        };
+        if !seen.insert((*previous).to_string()) {
+            break;
+        }
+        chain.push((*previous).to_string());
+        current = (*previous).to_string();
+    }
+    chain.reverse();
+    chain
+}
+
+/// Whether `job` ended as an attempt that counts toward [`LINEAGE_ATTEMPT_LIMIT`]: rejected, failed or timed
+/// out. A job that landed, was dropped, is stale or has not run does not count.
+fn is_failed_attempt(records: &Records, job: &str) -> bool {
+    matches!(
+        records.jobs.get(job).map(JobRecords::state),
+        Some(JobState::Closed(
+            OutcomeState::Rejected | OutcomeState::Failed | OutcomeState::TimedOut
+        ))
+    )
+}
+
+/// The rejected, failed or timed-out attempts of the retry lineage `job` belongs to (see [`lineage_chain`]),
+/// oldest first. Empty when `job` is in no lineage.
+pub fn lineage_attempts(records: &Records, job: &str) -> Vec<JobId> {
+    let history = job_history(records);
+    let retries = retries_in(records, &history);
+    lineage_chain(&history, &retries, job)
+        .iter()
+        .filter(|id| is_failed_attempt(records, id))
+        .filter_map(|id| records.jobs.get(id.as_str()).map(|j| j.id().clone()))
+        .collect()
+}
+
+/// Words that carry no meaning of their own in a finding's summary; [`same_summary`] ignores them so that
+/// two short, different findings are not paired for the words they share.
+const SUMMARY_STOP_WORDS: [&str; 27] = [
+    "the", "a", "an", "and", "or", "is", "are", "was", "were", "be", "of", "to", "in", "on", "for",
+    "no", "not", "it", "its", "this", "that", "with", "as", "by", "at", "has", "have",
+];
+
+/// The words of `text` that carry meaning: lower case, digits dropped, split on anything that is not a
+/// letter, stop words removed.
+fn content_words(text: &str) -> Vec<String> {
+    crate::scope_guard::normalise_criterion(text)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && !SUMMARY_STOP_WORDS.contains(w))
+        .map(String::from)
+        .collect()
+}
+
+/// Whether two finding summaries say the same thing, across independent verifier runs: their content words
+/// are equal, or one run of them contains the other (at least 2 words), or at least 2 content words are shared
+/// and they are more than half of the shorter list.
+pub(super) fn same_summary(a: &str, b: &str) -> bool {
+    let (wa, wb) = (content_words(a), content_words(b));
+    if wa.is_empty() || wb.is_empty() {
+        return crate::scope_guard::normalise_criterion(a)
+            == crate::scope_guard::normalise_criterion(b);
+    }
+    if wa == wb {
+        return true;
+    }
+    let (short, long) = if wa.len() <= wb.len() {
+        (&wa, &wb)
+    } else {
+        (&wb, &wa)
+    };
+    if short.len() >= 2 && long.windows(short.len()).any(|w| w == short.as_slice()) {
+        return true;
+    }
+    let shared = short.iter().filter(|w| long.contains(w)).count();
+    shared >= 2 && shared * 2 > short.len()
+}
+
+/// The file of a finding's location: a trailing `:line`, `:line-line` or `:line:col` and a `#anchor` removed.
+pub(super) fn location_path(location: &str) -> &str {
+    let mut path = location.trim();
+    if let Some((head, _)) = path.split_once('#') {
+        path = head;
+    }
+    for _ in 0..2 {
+        match path.rsplit_once(':') {
+            Some((head, tail))
+                if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-') =>
+            {
+                path = head;
+            }
+            _ => break,
+        }
+    }
+    path
+}
+
+/// Whether two unmet criteria are the same one: the scope guard's T4 comparison does not say they differ
+/// (`Yes` or `Maybe`). Criteria of one lineage come from one acceptance list.
+pub(super) fn same_criterion(a: &str, b: &str) -> bool {
+    crate::scope_guard::compare_criteria(a, b) != crate::scope_guard::T4Match::No
+}
+
+/// Whether two blocking findings are the same one. Both located: the same file and the same summary
+/// ([`same_summary`]). Either unlocated: the summaries must be equal after normalising (the T4 comparison
+/// says `Yes`) or have the same content words, so punctuation does not hide a repeat but a partial overlap
+/// is not enough.
+pub(super) fn same_finding(a: (&str, Option<&str>), b: (&str, Option<&str>)) -> bool {
+    match (a.1, b.1) {
+        (Some(la), Some(lb)) => location_path(la) == location_path(lb) && same_summary(a.0, b.0),
+        _ => {
+            let (wa, wb) = (content_words(a.0), content_words(b.0));
+            crate::scope_guard::compare_criteria(a.0, b.0) == crate::scope_guard::T4Match::Yes
+                || (!wa.is_empty() && wa == wb)
+        }
+    }
+}
+
+/// One thing a failed attempt was held to account for: an unmet criterion or a blocking finding.
+#[derive(Clone)]
+struct Observed {
+    criterion: bool,
+    text: String,
+    location: Option<String>,
+}
+
+impl Observed {
+    fn same_as(&self, other: &Observed) -> bool {
+        if self.criterion != other.criterion {
+            return false;
+        }
+        if self.criterion {
+            return same_criterion(&self.text, &other.text);
+        }
+        same_finding(
+            (&self.text, self.location.as_deref()),
+            (&other.text, other.location.as_deref()),
+        )
+    }
+
+    /// The item on one line, as the replacement request words it.
+    fn line(&self) -> String {
+        let text = clip(&self.text, 200);
+        match (&self.location, self.criterion) {
+            (_, true) => format!("Unmet criterion: {text}"),
+            (Some(location), false) => format!("Finding at {}: {text}", clip(location, 80)),
+            (None, false) => format!("Finding: {text}"),
+        }
+    }
+
+    /// The acceptance bullet that asks for the item to be put right.
+    fn acceptance(&self) -> String {
+        let text = clip(&self.text, 200);
+        if self.criterion {
+            format!("Meet: {text}")
+        } else {
+            format!("Resolve: {text}")
+        }
+    }
+}
+
+/// `text` on one line, cut to at most `max` characters.
+fn clip(text: &str, max: usize) -> String {
+    let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    one.chars().take(max).collect()
+}
+
+/// What a failed attempt was held to account for: its unmet criteria and blocking findings from the final
+/// verification. An attempt with no verification contributes the first line of its closing reason.
+fn observed_in(job: &JobRecords) -> Vec<Observed> {
+    let Some(verification) = job.verification.as_ref() else {
+        return job
+            .outcome
+            .as_ref()
+            .and_then(|o| o.reason.lines().find(|l| !l.trim().is_empty()))
+            .map(|line| Observed {
+                criterion: false,
+                text: line.trim().to_string(),
+                location: None,
+            })
+            .into_iter()
+            .collect();
+    };
+    let unmet = verification
+        .criteria
+        .iter()
+        .filter(|c| !c.met)
+        .map(|c| Observed {
+            criterion: true,
+            text: c.criterion.clone(),
+            location: None,
+        });
+    let findings = verification
+        .findings
+        .iter()
+        .filter(|f| crate::verify::finding_blocks(f))
+        .map(|f| Observed {
+            criterion: false,
+            text: f.summary.clone(),
+            location: f.location.clone(),
+        });
+    unmet.chain(findings).collect()
+}
+
+/// The items that repeated across the attempts (`attempts`, oldest first): those seen in at least 2 distinct
+/// attempts, each with its wording from the newest attempt that had it. When nothing repeated, the blocking
+/// items of the newest attempt, and `false`.
+fn repeated_items(records: &Records, attempts: &[JobId]) -> (Vec<Observed>, bool) {
+    let mut clusters: Vec<(Observed, BTreeSet<usize>)> = Vec::new();
+    let mut last: Vec<Observed> = Vec::new();
+    for (n, id) in attempts.iter().enumerate() {
+        let items = records
+            .jobs
+            .get(id.as_str())
+            .map(observed_in)
+            .unwrap_or_default();
+        for item in &items {
+            match clusters.iter_mut().find(|(c, _)| c.same_as(item)) {
+                Some((latest, seen)) => {
+                    *latest = item.clone();
+                    seen.insert(n);
+                }
+                None => clusters.push((item.clone(), BTreeSet::from([n]))),
+            }
+        }
+        last = items;
+    }
+    let repeated: Vec<Observed> = clusters
+        .into_iter()
+        .filter(|(_, seen)| seen.len() >= 2)
+        .map(|(item, _)| item)
+        .collect();
+    if repeated.is_empty() {
+        (last, false)
+    } else {
+        (repeated, true)
+    }
+}
+
+/// What the drain does in place of the next attempt of a stopped lineage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NarrowerAction {
+    /// A narrower request for this lineage is already recorded: this job. Nothing more is queued.
+    Queued(JobId),
+    /// Queue a request with this text.
+    Queue(String),
+    /// No narrower request is made, for this reason; the lineage is still stopped and a person decides.
+    Refused(String),
+}
+
+/// A retry lineage that has reached [`LINEAGE_ATTEMPT_LIMIT`] failed attempts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineageStop {
+    /// The first request of the lineage.
+    pub root: JobId,
+    /// The rejected, failed or timed-out attempts, oldest first.
+    pub attempts: Vec<JobId>,
+    /// The findings that repeated, one line each (or the newest attempt's blocking findings when none did,
+    /// see `repeated_found`).
+    pub repeated: Vec<String>,
+    /// Whether `repeated` holds findings seen in at least 2 attempts (`true`) or only the newest attempt's.
+    pub repeated_found: bool,
+    pub action: NarrowerAction,
+}
+
+/// The text that marks a request as the narrower request of the lineage rooted at `root`.
+fn narrower_marker(root: &str) -> String {
+    format!("Lineage {root}:")
+}
+
+/// The start of the title of every narrower request. A lineage whose root starts like this is not narrowed
+/// again: the narrower request itself failed, and a person decides.
+const NARROWER_TITLE: &str = "Re-scope or split ";
+
+/// The narrower request for the lineage rooted at `root`, from the items that repeated.
+fn narrower_request(
+    records: &Records,
+    root: &JobId,
+    attempts: &[JobId],
+    items: &[Observed],
+    repeated_found: bool,
+) -> Result<String, String> {
+    let root_text = records
+        .jobs
+        .get(root.as_str())
+        .and_then(|j| j.request.as_ref())
+        .map_or("", |r| r.text.as_str());
+    let root_bullets = request_text_acceptance(root_text).len();
+    let room = if root_bullets > 1 {
+        root_bullets - 1
+    } else {
+        1
+    };
+    let (kept, left) = items.split_at(items.len().min(room));
+    let first_line = |text: &str| clip(text.lines().next().unwrap_or(""), 80);
+    let subject = items
+        .first()
+        .map_or_else(|| first_line(root_text), |i| clip(&i.text, 80));
+    let title = format!("{NARROWER_TITLE}{root}: {subject}");
+    let ids: Vec<&str> = attempts.iter().map(JobId::as_str).collect();
+    let mut body = format!(
+        "{} failed attempts {}.\n",
+        narrower_marker(root.as_str()),
+        ids.join(", ")
+    );
+    body.push_str(&format!(
+        "Athena stopped retrying this request after {} failed attempts and queued this narrower request in place of another retry. Do less than the original: meet only what is asked below, or split the rest into later requests.\n",
+        attempts.len()
+    ));
+    body.push_str(if repeated_found {
+        "Findings that repeated across the attempts:\n"
+    } else {
+        "No finding repeated across the attempts. Blocking findings of the last attempt:\n"
+    });
+    for item in kept {
+        body.push_str(&item.line());
+        body.push('\n');
+    }
+    if !left.is_empty() {
+        body.push_str("Left for a later request: ");
+        let rest: Vec<String> = left.iter().map(|i| clip(&i.text, 80)).collect();
+        body.push_str(&rest.join("; "));
+        body.push('\n');
+    }
+    let acceptance: Vec<String> = if kept.is_empty() {
+        vec![format!(
+            "Name the smallest part of {root} that can pass its checks, and make only that change"
+        )]
+    } else {
+        kept.iter().map(Observed::acceptance).collect()
+    };
+    let mut found: Vec<String> = Vec::new();
+    for item in items {
+        for token in item
+            .location
+            .as_deref()
+            .unwrap_or("")
+            .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+        {
+            let path = location_path(token);
+            if looks_like_path(path) && !found.iter().any(|f| f == path) {
+                found.push(path.to_string());
+            }
+        }
+    }
+    let wanted = request_text_touches(root_text);
+    let files: Vec<String> = if wanted.is_empty() {
+        if found.is_empty() {
+            vec!["records/".to_string()]
+        } else {
+            found
+        }
+    } else {
+        let overlap: Vec<String> = found
+            .iter()
+            .filter(|f| wanted.contains(f))
+            .cloned()
+            .collect();
+        if overlap.is_empty() { wanted } else { overlap }
+    };
+    crate::steward::StewardRequest::new(None, &title, &body, &acceptance, &files)
+        .map(|r| r.render())
+}
+
+/// The stop for each of `jobs` whose retry lineage has [`LINEAGE_ATTEMPT_LIMIT`] or more rejected, failed or
+/// timed-out attempts, with the job it was asked for. One pass of [`job_history`] serves all of `jobs`, and
+/// jobs of one lineage share one stop.
+///
+/// The stop holds the findings that repeated across the attempts and what to do in place of another retry:
+/// the narrower re-scope or split request to queue, the one already queued for the lineage (found by the
+/// `Lineage <root>:` line of its text), or a refusal when the lineage's own root is a narrower request.
+pub fn lineage_stops(records: &Records, jobs: &[String]) -> Vec<(String, LineageStop)> {
+    let history = job_history(records);
+    let retries = retries_in(records, &history);
+    let mut by_root: BTreeMap<String, Option<LineageStop>> = BTreeMap::new();
+    let mut stops = Vec::new();
+    for job in jobs {
+        let chain = lineage_chain(&history, &retries, job);
+        let Some(root) = chain.first().and_then(|r| records.jobs.get(r.as_str())) else {
+            continue;
+        };
+        let root = root.id().clone();
+        let attempts: Vec<JobId> = chain
+            .iter()
+            .filter(|id| is_failed_attempt(records, id))
+            .filter_map(|id| records.jobs.get(id.as_str()).map(|j| j.id().clone()))
+            .collect();
+        if attempts.len() < LINEAGE_ATTEMPT_LIMIT {
+            continue;
+        }
+        let key = format!("{root}:{}", attempts.len());
+        let stop = by_root
+            .entry(key)
+            .or_insert_with(|| Some(stop_of(records, &root, attempts)))
+            .clone();
+        if let Some(stop) = stop {
+            stops.push((job.clone(), stop));
+        }
+    }
+    stops
+}
+
+/// [`lineage_stops`] for one job: `None` while its lineage has fewer than [`LINEAGE_ATTEMPT_LIMIT`] failed
+/// attempts.
+pub fn lineage_stop(records: &Records, job: &str) -> Option<LineageStop> {
+    lineage_stops(records, &[job.to_string()])
+        .pop()
+        .map(|(_, stop)| stop)
+}
+
+fn stop_of(records: &Records, root: &JobId, attempts: Vec<JobId>) -> LineageStop {
+    let (items, repeated_found) = repeated_items(records, &attempts);
+    let marker = narrower_marker(root.as_str());
+    let existing = records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| j.id() != root)
+        .find(|j| j.request.as_ref().is_some_and(|r| r.text.contains(&marker)))
+        .map(|j| j.id().clone());
+    let root_text = records
+        .jobs
+        .get(root.as_str())
+        .and_then(|j| j.request.as_ref())
+        .map_or("", |r| r.text.as_str());
+    let action = if let Some(job) = existing {
+        NarrowerAction::Queued(job)
+    } else if root_text.trim_start().starts_with(NARROWER_TITLE) {
+        NarrowerAction::Refused(format!(
+            "{root} is itself a narrower request, so it is not narrowed again"
+        ))
+    } else {
+        match narrower_request(records, root, &attempts, &items, repeated_found) {
+            Ok(text) => NarrowerAction::Queue(text),
+            Err(why) => {
+                NarrowerAction::Refused(format!("the narrower request could not be built: {why}"))
+            }
+        }
+    };
+    LineageStop {
+        root: root.clone(),
+        attempts,
+        repeated: items.iter().map(Observed::line).collect(),
+        repeated_found,
+        action,
+    }
 }
 
 /// What to do next about `retry`, a retry job that stands for an interrupted job (see [`retries_by_job`]),

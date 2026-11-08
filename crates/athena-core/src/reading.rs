@@ -1776,6 +1776,471 @@ mod tests {
         records
     }
 
+    /// Retry lineages: the attempt limit and the narrower request.
+    mod lineage {
+        use super::*;
+
+        /// The id of the n-th job of a test lineage.
+        fn lid(n: usize) -> String {
+            format!("20261020-10{n:02}00-aa{n:02}")
+        }
+
+        /// A request job with the given request text, ended as `ended`; a job that has not ended has no
+        /// verification either.
+        fn lineage_job(id: &str, request: &str, ended: Option<OutcomeState>) -> JobRecords {
+            let mut job = job_with_checks(vec![]);
+            let jid = JobId::parse(id).unwrap();
+            job.id = Some(jid.clone());
+            job.request.as_mut().unwrap().job = jid.clone();
+            job.request.as_mut().unwrap().text = request.into();
+            job.verification.as_mut().unwrap().job = jid;
+            match ended {
+                Some(state) => job.outcome = Some(outcome(&job, state, "rejected")),
+                None => job.verification = None,
+            }
+            job
+        }
+
+        /// `job` with these unmet criteria and these blocking findings (summary, location) in its verification.
+        fn held_to(
+            mut job: JobRecords,
+            unmet: &[&str],
+            findings: &[(&str, Option<&str>)],
+        ) -> JobRecords {
+            use athena_data::records::{CriterionKind, CriterionResult, FindingSource, Severity};
+            let verification = job.verification.as_mut().unwrap();
+            verification.criteria = unmet
+                .iter()
+                .map(|c| CriterionResult {
+                    criterion: (*c).into(),
+                    kind: CriterionKind::Content,
+                    met: false,
+                    evidence: "missing".into(),
+                    commands: vec![],
+                    commands_verified: true,
+                })
+                .collect();
+            verification.findings = findings
+                .iter()
+                .map(|(summary, location)| athena_data::records::Finding {
+                    severity: Severity::Major,
+                    summary: (*summary).into(),
+                    evidence: "see the change".into(),
+                    location: location.map(String::from),
+                    source: FindingSource::Verifier,
+                })
+                .collect();
+            job
+        }
+
+        fn lineage_records(jobs: Vec<JobRecords>) -> Records {
+            let mut records = Records::default();
+            for job in jobs {
+                records.jobs.insert(job.id().as_str().to_string(), job);
+            }
+            records
+        }
+
+        /// `ends.len()` jobs where the first is the root request and each other retries the one before. A job
+        /// with an ending has run to it; `None` is queued.
+        fn lineage_of(ends: &[Option<OutcomeState>]) -> Vec<JobRecords> {
+            ends.iter()
+                .enumerate()
+                .map(|(i, ended)| {
+                    let request = if i == 0 {
+                        "add a greeting to README.md".to_string()
+                    } else {
+                        format!("try again on {}", lid(i))
+                    };
+                    lineage_job(&lid(i + 1), &request, *ended)
+                })
+                .collect()
+        }
+
+        const REJECTED: Option<OutcomeState> = Some(OutcomeState::Rejected);
+
+        #[test]
+        fn the_lineage_limit_is_three_and_counts_rejected_failed_and_timed_out_attempts() {
+            assert_eq!(LINEAGE_ATTEMPT_LIMIT, 3);
+            let records = lineage_records(lineage_of(&[
+                REJECTED,
+                Some(OutcomeState::Failed),
+                Some(OutcomeState::TimedOut),
+                None,
+            ]));
+            let failed: Vec<JobId> = (1..=3).map(|n| JobId::parse(&lid(n)).unwrap()).collect();
+            // From any job of the chain, the queued retry at its end included.
+            for n in 1..=4 {
+                assert_eq!(lineage_attempts(&records, &lid(n)), failed, "from job {n}");
+            }
+            assert!(lineage_stop(&records, &lid(4)).is_some());
+        }
+
+        #[test]
+        fn landed_dropped_stale_and_foreign_jobs_are_not_attempts_of_the_lineage() {
+            let mut jobs = lineage_of(&[REJECTED, REJECTED]);
+            // A retry that was dropped or went stale does not stand and does not count.
+            jobs.push(lineage_job(
+                &lid(3),
+                &format!("try again on {}", lid(2)),
+                Some(OutcomeState::Dropped),
+            ));
+            jobs.push(lineage_job(
+                &lid(4),
+                &format!("try again on {}", lid(2)),
+                Some(OutcomeState::Stale),
+            ));
+            // A job of another lineage.
+            jobs.push(lineage_job(&lid(8), "add a farewell", REJECTED));
+            jobs.push(lineage_job(
+                &lid(9),
+                &format!("try again on {}", lid(8)),
+                REJECTED,
+            ));
+            let records = lineage_records(jobs);
+            let two: Vec<JobId> = (1..=2).map(|n| JobId::parse(&lid(n)).unwrap()).collect();
+            assert_eq!(lineage_attempts(&records, &lid(1)), two);
+            assert_eq!(lineage_attempts(&records, &lid(3)), two);
+            assert!(
+                lineage_stop(&records, &lid(2)).is_none(),
+                "two is below the limit"
+            );
+
+            // A landed retry ends the lineage's failures but is not one of them.
+            let mut jobs = lineage_of(&[REJECTED, REJECTED, REJECTED]);
+            jobs.push(lineage_job(
+                &lid(4),
+                &format!("try again on {}", lid(3)),
+                Some(OutcomeState::Landed),
+            ));
+            let records = lineage_records(jobs);
+            assert_eq!(lineage_attempts(&records, &lid(4)).len(), 3);
+        }
+
+        #[test]
+        fn a_job_in_no_lineage_has_no_attempts_and_a_cycle_does_not_loop() {
+            let records = lineage_records(vec![lineage_job(&lid(1), "add a greeting", REJECTED)]);
+            assert!(lineage_attempts(&records, &lid(1)).is_empty());
+            assert!(lineage_attempts(&records, "20261020-000000-zzzz").is_empty());
+
+            let records = lineage_records(vec![
+                lineage_job(&lid(1), &format!("try again on {}", lid(2)), REJECTED),
+                lineage_job(&lid(2), &format!("try again on {}", lid(1)), REJECTED),
+            ]);
+            assert_eq!(lineage_attempts(&records, &lid(1)).len(), 2);
+        }
+
+        #[test]
+        fn retries_by_job_names_the_newest_standing_retry_of_each_job() {
+            let mut jobs = lineage_of(&[REJECTED, REJECTED, REJECTED]);
+            jobs.push(lineage_job(
+                &lid(4),
+                &format!("try again on {}", lid(3)),
+                Some(OutcomeState::Dropped),
+            ));
+            let retries = retries_by_job(&lineage_records(jobs));
+            assert_eq!(
+                retries,
+                BTreeMap::from([(lid(1), lid(2)), (lid(2), lid(3))]),
+                "a dropped retry does not stand"
+            );
+        }
+
+        #[test]
+        fn lineage_stops_over_several_jobs_match_lineage_stop_job_by_job() {
+            let records = lineage_records(lineage_of(&[REJECTED, REJECTED, REJECTED, None]));
+            let ids: Vec<String> = (1..=4).map(lid).collect();
+            let batch = lineage_stops(&records, &ids);
+            assert_eq!(batch.len(), 4);
+            for (job, stop) in &batch {
+                assert_eq!(Some(stop.clone()), lineage_stop(&records, job), "{job}");
+            }
+            let short = lineage_records(lineage_of(&[REJECTED, REJECTED, None]));
+            assert!(lineage_stops(&short, &ids).is_empty());
+        }
+
+        #[test]
+        fn repeated_findings_match_across_line_numbers_and_wording() {
+            let jobs = lineage_of(&[REJECTED, REJECTED, REJECTED]);
+            let wordings = [
+                ("The description lists no callers.", "src/a.rs:10"),
+                ("description lists no callers", "src/a.rs:42"),
+                (
+                    "the description lists NO callers (3 of them)",
+                    "src/a.rs:7:2",
+                ),
+            ];
+            let jobs: Vec<JobRecords> = jobs
+                .into_iter()
+                .zip(wordings)
+                .map(|(job, (summary, at))| held_to(job, &[], &[(summary, Some(at))]))
+                .collect();
+            let stop = lineage_stop(&lineage_records(jobs), &lid(3)).expect("three failures stop");
+            assert!(stop.repeated_found);
+            assert_eq!(stop.repeated.len(), 1, "{:?}", stop.repeated);
+            assert!(
+                stop.repeated[0].contains("NO callers (3 of them)")
+                    && stop.repeated[0].contains("src/a.rs:7:2"),
+                "shows the newest wording: {:?}",
+                stop.repeated
+            );
+        }
+
+        #[test]
+        fn findings_with_different_paths_or_unrelated_summaries_do_not_repeat() {
+            let pairs = [
+                // The same words at two files.
+                (
+                    ("the description lists no callers", Some("src/a.rs")),
+                    ("the description lists no callers", Some("src/b.rs")),
+                ),
+                // One file, two unrelated findings.
+                (
+                    ("the description lists no callers", Some("src/a.rs")),
+                    ("unit tests for the parser are missing", Some("src/a.rs")),
+                ),
+                // Short findings that share their stop words and one more word.
+                (
+                    ("Tests are missing", Some("src/a.rs")),
+                    ("Docs are missing", Some("src/a.rs")),
+                ),
+                // Unlocated findings repeat only when equal after normalising.
+                (
+                    ("tests are missing for the parser", None),
+                    ("tests are missing", None),
+                ),
+            ];
+            for (a, b) in pairs {
+                assert!(!same_finding(a, b), "{a:?} vs {b:?}");
+                assert!(!same_finding(b, a), "{b:?} vs {a:?}");
+            }
+            assert!(same_finding(
+                ("Tests are missing.", None),
+                ("tests are MISSING", None)
+            ));
+            assert_eq!(location_path("src/a.rs:10:2"), "src/a.rs");
+            assert_eq!(
+                location_path("docs/decisions.md:3005-3053"),
+                "docs/decisions.md"
+            );
+            assert_eq!(location_path("README.md"), "README.md");
+
+            // And through the lineage: no repeat means the newest attempt's findings, said so.
+            let jobs: Vec<JobRecords> = lineage_of(&[REJECTED, REJECTED, REJECTED])
+                .into_iter()
+                .zip([
+                    ("Tests are missing", "src/a.rs"),
+                    ("Docs are missing", "src/a.rs"),
+                    ("the parser panics on empty input", "src/a.rs"),
+                ])
+                .map(|(job, (summary, at))| held_to(job, &[], &[(summary, Some(at))]))
+                .collect();
+            let stop = lineage_stop(&lineage_records(jobs), &lid(3)).unwrap();
+            assert!(!stop.repeated_found);
+            assert_eq!(stop.repeated.len(), 1);
+            assert!(
+                stop.repeated[0].contains("parser panics"),
+                "{:?}",
+                stop.repeated
+            );
+        }
+
+        #[test]
+        fn unmet_criteria_repeat_across_case_digits_and_whitespace() {
+            let jobs: Vec<JobRecords> = lineage_of(&[REJECTED, REJECTED, REJECTED])
+                .into_iter()
+                .zip([
+                    vec!["README.md  ends with 1 greeting line", "docs are updated"],
+                    vec!["readme.md ends with a greeting LINE"],
+                    vec!["the changelog names the limit"],
+                ])
+                .map(|(job, unmet)| held_to(job, &unmet, &[]))
+                .collect();
+            let stop = lineage_stop(&lineage_records(jobs), &lid(3)).unwrap();
+            assert!(stop.repeated_found);
+            assert_eq!(stop.repeated.len(), 1, "{:?}", stop.repeated);
+            assert!(stop.repeated[0].starts_with("Unmet criterion: readme.md ends with"));
+        }
+
+        #[test]
+        fn a_finding_in_two_of_three_attempts_is_listed_and_one_in_a_single_attempt_is_not() {
+            let jobs: Vec<JobRecords> = lineage_of(&[REJECTED, REJECTED, REJECTED])
+                .into_iter()
+                .zip([
+                    vec![("the cache is never cleared", Some("src/c.rs:1"))],
+                    vec![("a second, one-off remark about naming", Some("src/n.rs:1"))],
+                    vec![("the cache is never cleared", Some("src/c.rs:9"))],
+                ])
+                .map(|(job, findings)| held_to(job, &[], &findings))
+                .collect();
+            let stop = lineage_stop(&lineage_records(jobs), &lid(3)).unwrap();
+            assert!(stop.repeated_found);
+            assert_eq!(stop.repeated.len(), 1, "{:?}", stop.repeated);
+            assert!(stop.repeated[0].contains("cache is never cleared"));
+        }
+
+        /// A lineage of three rejections of one finding, whose root request has three bullets and names files.
+        fn narrowing_records() -> Records {
+            let mut jobs: Vec<JobRecords> = lineage_of(&[REJECTED, REJECTED, REJECTED])
+                .into_iter()
+                .map(|job| {
+                    held_to(
+                        job,
+                        &["README.md ends with a greeting line"],
+                        &[("the description lists no callers", Some("README.md:3"))],
+                    )
+                })
+                .collect();
+            jobs[0].request.as_mut().unwrap().text = "Add a greeting to README.md and CHANGELOG.md\n\n\
+            Acceptance:\n- README.md ends with a greeting line\n- the changelog names it\n- fmt, clippy and test pass\n"
+            .into();
+            lineage_records(jobs)
+        }
+
+        #[test]
+        fn the_narrower_request_carries_the_repeated_findings_and_is_smaller_than_its_root() {
+            let records = narrowing_records();
+            let stop = lineage_stop(&records, &lid(3)).unwrap();
+            assert_eq!(stop.root.as_str(), lid(1));
+            assert_eq!(stop.attempts.len(), 3);
+            let NarrowerAction::Queue(text) = &stop.action else {
+                panic!("expected a request to queue: {:?}", stop.action);
+            };
+            assert!(
+                text.starts_with(&format!("Re-scope or split {}: ", lid(1))),
+                "{text}"
+            );
+            assert!(
+                text.contains(&format!(
+                    "Lineage {}: failed attempts {}, {}, {}.",
+                    lid(1),
+                    lid(1),
+                    lid(2),
+                    lid(3)
+                )),
+                "{text}"
+            );
+            assert!(text.contains("the description lists no callers"), "{text}");
+            assert!(!text.starts_with("try again on"));
+            // Acceptance: one bullet per repeated item, fewer than the root's three, none a root bullet.
+            let bullets = request_text_acceptance(text);
+            assert_eq!(bullets.len(), 2, "{bullets:?}");
+            assert!(bullets.contains(&"- Resolve: the description lists no callers".to_string()));
+            let root_bullets =
+                request_text_acceptance(&records.jobs[&lid(1)].request.as_ref().unwrap().text);
+            assert!(bullets.len() < root_bullets.len());
+            assert!(bullets.iter().all(|b| !root_bullets.contains(b)));
+            // Files: the finding's file, which is also one the root names.
+            assert_eq!(
+                request_text_touches(text).first().map(String::as_str),
+                Some("README.md")
+            );
+            assert!(text.contains("\nFiles: README.md\n"), "{text}");
+        }
+
+        #[test]
+        fn items_that_do_not_fit_the_acceptance_are_left_for_a_later_request() {
+            let mut jobs = lineage_of(&[REJECTED, REJECTED, REJECTED]);
+            jobs[0].request.as_mut().unwrap().text =
+                "Do it in src/x.rs\n\nAcceptance:\n- it is done\n- fmt, clippy and test pass\n"
+                    .into();
+            let jobs: Vec<JobRecords> = jobs
+                .into_iter()
+                .map(|job| {
+                    held_to(
+                        job,
+                        &[],
+                        &[
+                            ("the cache is never cleared", Some("src/x.rs:1")),
+                            ("the lock is held across the call", Some("src/x.rs:2")),
+                        ],
+                    )
+                })
+                .collect();
+            let stop = lineage_stop(&lineage_records(jobs), &lid(3)).unwrap();
+            let NarrowerAction::Queue(text) = stop.action else {
+                panic!("expected a request")
+            };
+            assert_eq!(request_text_acceptance(&text).len(), 1, "{text}");
+            assert!(
+                text.contains("Left for a later request: the lock is held across the call"),
+                "{text}"
+            );
+        }
+
+        #[test]
+        fn a_root_with_no_files_and_no_located_findings_still_gets_a_request_for_records() {
+            let jobs: Vec<JobRecords> = lineage_of(&[REJECTED, REJECTED, REJECTED])
+                .into_iter()
+                .map(|mut job| {
+                    // The root names no file.
+                    job.request.as_mut().unwrap().text = job
+                        .request
+                        .as_ref()
+                        .unwrap()
+                        .text
+                        .replace(" to README.md", "");
+                    held_to(job, &["the thing works"], &[])
+                })
+                .collect();
+            let stop = lineage_stop(&lineage_records(jobs), &lid(3)).unwrap();
+            let NarrowerAction::Queue(text) = stop.action else {
+                panic!("expected a request")
+            };
+            assert!(text.ends_with("\nFiles: records/\n"), "{text}");
+            assert_eq!(request_text_acceptance(&text), ["- Meet: the thing works"]);
+        }
+
+        #[test]
+        fn an_attempt_with_no_verification_contributes_its_closing_reason() {
+            let jobs: Vec<JobRecords> = lineage_of(&[REJECTED, REJECTED, REJECTED])
+                .into_iter()
+                .map(|mut job| {
+                    job.verification = None;
+                    job.outcome.as_mut().unwrap().reason = "the producer ran out of time".into();
+                    job
+                })
+                .collect();
+            let stop = lineage_stop(&lineage_records(jobs), &lid(3)).unwrap();
+            assert!(stop.repeated_found);
+            assert_eq!(stop.repeated, ["Finding: the producer ran out of time"]);
+        }
+
+        #[test]
+        fn a_narrower_request_already_queued_for_the_lineage_is_found_by_its_marker() {
+            let records = narrowing_records();
+            let NarrowerAction::Queue(text) = lineage_stop(&records, &lid(3)).unwrap().action
+            else {
+                panic!("expected a request")
+            };
+            let mut jobs: Vec<JobRecords> = records.jobs.values().cloned().collect();
+            jobs.push(lineage_job("20261021-090000-nn01", &text, None));
+            let records = lineage_records(jobs);
+            let stop = lineage_stop(&records, &lid(3)).unwrap();
+            assert_eq!(
+                stop.action,
+                NarrowerAction::Queued(JobId::parse("20261021-090000-nn01").unwrap())
+            );
+        }
+
+        #[test]
+        fn a_lineage_rooted_at_a_narrower_request_is_not_narrowed_again() {
+            let records = narrowing_records();
+            let NarrowerAction::Queue(text) = lineage_stop(&records, &lid(3)).unwrap().action
+            else {
+                panic!("expected a request")
+            };
+            let mut jobs = lineage_of(&[REJECTED, REJECTED, REJECTED]);
+            jobs[0].request.as_mut().unwrap().text = text;
+            let stop = lineage_stop(&lineage_records(jobs), &lid(3)).unwrap();
+            assert!(
+                matches!(&stop.action, NarrowerAction::Refused(why) if why.contains("narrower request")),
+                "{:?}",
+                stop.action
+            );
+        }
+    }
+
     fn introspection_of(
         job: &JobRecords,
         n: u32,

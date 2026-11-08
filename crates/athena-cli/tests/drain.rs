@@ -5506,6 +5506,337 @@ fn rejected_twice(
     (fx, athena, job, report)
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// The retry lineage limit: no 4th attempt, and one narrower request in its place
+
+/// A verdict that rejects on one major finding with every criterion met. No criterion is unmet, so the
+/// scope guard's repeated-criterion pause never fires and only the lineage limit can end a lineage.
+fn rejecting_on_a_finding_only() -> serde_json::Value {
+    let mut verdict = rejecting_verdict();
+    verdict["criteria"][0]["met"] = json!(true);
+    verdict
+}
+
+/// A request with three bullets that names one file.
+const LINEAGE_REQUEST: &str = "Add a greeting to README.md\n\nAcceptance:\n- README.md ends with a greeting line\n- the tests still pass\n- fmt, clippy and test pass\n\nFiles: README.md\n";
+
+/// Runs a proposed job to the end of its run, by hand, and returns how it ended.
+fn run_by_hand(athena: &Athena, job: &str) -> OutcomeState {
+    match athena.go(job, AcceptedBy::User, &Quiet).unwrap() {
+        GoResult::Finished(finished) => finished.state,
+        other => panic!("expected a finished job, got {other:?}"),
+    }
+}
+
+/// A repository whose verifier rejects every attempt on one finding, and `attempts` hand-run rejected attempts
+/// of one request: the request, then a hand `athena retry` of each attempt before it. `jobs` is oldest first.
+struct ByHand {
+    fx: Fixture,
+    athena: Athena,
+    invocations: Arc<std::sync::Mutex<Vec<Role>>>,
+    jobs: Vec<String>,
+}
+
+fn rejected_by_hand(attempts: usize) -> ByHand {
+    let fx = Fixture::new();
+    let scenario = Scenario {
+        verdict: rejecting_on_a_finding_only(),
+        ..Scenario::default()
+    };
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let mut jobs = vec![athena.ask(LINEAGE_REQUEST, &Quiet).unwrap().job.to_string()];
+    assert_eq!(run_by_hand(&athena, &jobs[0]), OutcomeState::Rejected);
+    while jobs.len() < attempts {
+        let (proposal, _) = athena.retry(jobs.last().unwrap(), &Quiet).unwrap();
+        let job = proposal.job.to_string();
+        assert_eq!(run_by_hand(&athena, &job), OutcomeState::Rejected);
+        jobs.push(job);
+    }
+    ByHand {
+        fx,
+        athena,
+        invocations,
+        jobs,
+    }
+}
+
+impl ByHand {
+    fn records(&self) -> Records {
+        Records::load(&self.fx.git, &self.fx.head()).unwrap()
+    }
+}
+
+/// Limits with room for a 4th attempt: the job limit, not the lineage rule, must not be what stops it.
+fn room_for_a_fourth() -> Limits {
+    Limits {
+        budget_usd: 100.0,
+        target_rating: 5,
+        max_jobs: 2,
+    }
+}
+
+/// The request jobs whose text carries the narrower-request marker of the lineage rooted at `root`.
+fn narrower_requests<'a>(records: &'a Records, root: &str) -> Vec<&'a JobRecords> {
+    let marker = format!("Lineage {root}:");
+    records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| j.request.as_ref().is_some_and(|r| r.text.contains(&marker)))
+        .collect()
+}
+
+/// The request jobs that ask to try `job` again.
+fn retries_of<'a>(records: &'a Records, job: &str) -> Vec<&'a JobRecords> {
+    let text = format!("try again on {job}");
+    records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| j.request.as_ref().is_some_and(|r| r.text.trim() == text))
+        .collect()
+}
+
+/// A lineage of two hand-run rejected attempts and a queued retry `q` of the second, drained with room for a
+/// 4th attempt: `q` is the third failed attempt.
+fn drain_the_third_attempt() -> (ByHand, String, Lines) {
+    let by_hand = rejected_by_hand(2);
+    let q = by_hand
+        .athena
+        .queue(&format!("try again on {}", by_hand.jobs[1]))
+        .unwrap()
+        .0
+        .to_string();
+    let lander = RecordingLander::default();
+    let ui = Lines::default();
+    let steps = real_steps_with(&by_hand.athena, &lander, &ui);
+    let report = drain::drain(&steps, room_for_a_fourth(), &ui).unwrap();
+    assert_eq!(report.landed, 0);
+    assert!(lander.0.lock().unwrap().is_empty());
+    (by_hand, q, ui)
+}
+
+#[test]
+fn the_lineage_limit_default_names_its_source_and_states_it_is_enforced_by_mechanism() {
+    let model = athena_data::DefaultsModel::parse(include_str!("../../../defaults.toml")).unwrap();
+    let limit = model.get("lineage-limit").expect("the default exists");
+    assert!(
+        limit
+            .source
+            .contains("records/interventions/2026-10/20261026-180231-tf2p.json"),
+        "{}",
+        limit.source
+    );
+    for part in [
+        "3 rejected or failed attempts",
+        "findings",
+        "narrower",
+        "enforced by mechanism",
+    ] {
+        assert!(
+            limit.statement.contains(part),
+            "{part}: {}",
+            limit.statement
+        );
+    }
+    assert!(
+        model
+            .render()
+            .lines()
+            .any(|l| l.starts_with("- lineage-limit [*]: Retries stop after 3 failed attempts.")),
+        "the reader sees the rule"
+    );
+    assert_eq!(athena_core::reading::LINEAGE_ATTEMPT_LIMIT, 3);
+}
+
+#[test]
+fn a_lineage_with_three_rejected_attempts_gets_no_fourth_attempt() {
+    let (by_hand, q, ui) = drain_the_third_attempt();
+    let records = by_hand.records();
+    let [j1, j2] = [&by_hand.jobs[0], &by_hand.jobs[1]];
+    // Three attempts, all rejected: the two by hand and the queued retry the drain ran.
+    for job in [j1, j2, &q] {
+        assert_eq!(
+            records.jobs[job.as_str()].state(),
+            JobState::Closed(OutcomeState::Rejected),
+            "{job}"
+        );
+    }
+    let attempts: Vec<String> = athena_core::reading::lineage_attempts(&records, &q)
+        .iter()
+        .map(|j| j.to_string())
+        .collect();
+    assert_eq!(attempts, [j1.clone(), j2.clone(), q.clone()]);
+    // The job limit was 2, so a 4th attempt would have been started. It was not.
+    assert!(
+        retries_of(&records, &q).is_empty(),
+        "no job tries {q} again"
+    );
+    let lines = ui.0.lock().unwrap().clone();
+    let passed: Vec<&String> = lines
+        .iter()
+        .filter(|l| {
+            l.starts_with(&format!(
+                "plan       {q} passed over: retry lineage {j1} stopped"
+            ))
+        })
+        .collect();
+    assert_eq!(passed.len(), 1, "{lines:#?}");
+    assert!(passed[0].contains("3 failed attempts"), "{}", passed[0]);
+    // Neither "failed twice" nor the job limit ended the item: the lineage rule did. (The narrower request
+    // queued in its place may then be worked with the one job left, and that one meets the job limit.)
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.contains(&q) && (l.contains("failed twice") || l.contains("job limit"))),
+        "stopped by the lineage rule alone: {lines:#?}"
+    );
+    // The scope guard did not pause the line: the lineage rule is what stopped it.
+    let lander = RecordingLander::default();
+    let steps = real_steps_with(&by_hand.athena, &lander, &Quiet);
+    assert!(steps.paused(std::slice::from_ref(&q)).is_empty());
+}
+
+#[test]
+fn the_lineage_stop_queues_one_narrower_request_that_carries_the_repeated_findings() {
+    let (by_hand, q, _ui) = drain_the_third_attempt();
+    let records = by_hand.records();
+    let j1 = &by_hand.jobs[0];
+    let queued = narrower_requests(&records, j1);
+    assert_eq!(queued.len(), 1, "exactly one narrower request");
+    let request = queued[0].request.as_ref().unwrap();
+    assert_eq!(request.channel, "cli");
+    let text = &request.text;
+    assert!(!text.starts_with("try again on"), "{text}");
+    assert!(
+        text.starts_with(&format!("Re-scope or split {j1}: ")),
+        "{text}"
+    );
+    // The finding that repeated, and the three failed attempts it repeated across.
+    assert!(text.contains("the description lists no callers"), "{text}");
+    for job in [j1, &by_hand.jobs[1], &q] {
+        assert!(text.contains(job.as_str()), "{job} missing from {text}");
+    }
+    // Narrower than its root: fewer bullets, none of them the root's, and only the root's files.
+    let bullets = athena_core::reading::request_text_acceptance(text);
+    let root_bullets = athena_core::reading::request_text_acceptance(LINEAGE_REQUEST);
+    assert!(
+        !bullets.is_empty() && bullets.len() < root_bullets.len(),
+        "{bullets:?}"
+    );
+    assert!(
+        bullets.iter().all(|b| !root_bullets.contains(b)),
+        "{bullets:?}"
+    );
+    assert_eq!(
+        athena_core::reading::request_text_touches(text)
+            .iter()
+            .filter(|p| p.as_str() == "README.md")
+            .count(),
+        1
+    );
+    assert!(text.ends_with("\nFiles: README.md"), "{text}");
+
+    // Asked again, the steps report the request that stands and queue nothing.
+    let lander = RecordingLander::default();
+    let steps = real_steps_with(&by_hand.athena, &lander, &Quiet);
+    let head = by_hand.fx.head();
+    let stops = steps.lineage_stops(std::slice::from_ref(&q));
+    let stop = &stops.first().expect("the lineage is still stopped").1;
+    assert_eq!(
+        steps.queue_narrower(stop),
+        Ok(queued[0].id().to_string()),
+        "the same request"
+    );
+    assert_eq!(by_hand.fx.head(), head, "nothing more was queued");
+}
+
+#[test]
+fn a_queued_retry_of_a_lineage_with_three_failures_is_not_read_or_run() {
+    let by_hand = rejected_by_hand(3);
+    let q = by_hand
+        .athena
+        .queue(&format!("try again on {}", by_hand.jobs[2]))
+        .unwrap()
+        .0
+        .to_string();
+    let before = by_hand.invocations.lock().unwrap().len();
+    let lander = RecordingLander::default();
+    let ui = Lines::default();
+    let steps = real_steps_with(&by_hand.athena, &lander, &ui);
+    let report = drain::drain(&steps, room_for_a_fourth(), &ui).unwrap();
+    assert_eq!(report.landed, 0);
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_eq!(
+        by_hand.invocations.lock().unwrap().len(),
+        before,
+        "no agent was called: the retry was neither read nor run"
+    );
+    let records = by_hand.records();
+    let q_records = &records.jobs[q.as_str()];
+    assert_eq!(q_records.state(), JobState::Closed(OutcomeState::Dropped));
+    assert!(q_records.readings.is_empty() && q_records.invocations.is_empty());
+    // A narrower request stands in its place, and the dropped retry's reason names it.
+    let queued = narrower_requests(&records, &by_hand.jobs[0]);
+    assert_eq!(queued.len(), 1);
+    let reason = &q_records.outcome.as_ref().unwrap().reason;
+    assert!(reason.contains(queued[0].id().as_str()), "{reason}");
+    assert!(retries_of(&records, &q).is_empty());
+    let lines = ui.0.lock().unwrap().clone();
+    let passed: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with(&format!("plan       {q} passed over: ")))
+        .collect();
+    assert_eq!(passed.len(), 1, "{lines:#?}");
+    assert!(passed[0].contains("retry lineage"), "{}", passed[0]);
+    assert!(
+        passed[0].contains(queued[0].id().as_str()),
+        "names the narrower request: {}",
+        passed[0]
+    );
+
+    // Asking again queues no second request, and changes nothing.
+    let head = by_hand.fx.head();
+    let stops = steps.lineage_stops(std::slice::from_ref(&q));
+    let stop = &stops.first().expect("the lineage is still stopped").1;
+    assert_eq!(steps.queue_narrower(stop), Ok(queued[0].id().to_string()));
+    assert_eq!(by_hand.fx.head(), head);
+}
+
+#[test]
+fn a_lineage_that_reaches_three_failures_on_the_items_second_attempt_queues_the_narrower_request() {
+    // One hand-run rejected attempt, then a queued retry: the item's first attempt is the lineage's second
+    // failure, and its own second attempt would be the third.
+    let by_hand = rejected_by_hand(1);
+    let q = by_hand
+        .athena
+        .queue(&format!("try again on {}", by_hand.jobs[0]))
+        .unwrap()
+        .0
+        .to_string();
+    let lander = RecordingLander::default();
+    let ui = Lines::default();
+    let steps = real_steps_with(&by_hand.athena, &lander, &ui);
+    drain::drain(&steps, room_for_a_fourth(), &ui).unwrap();
+    let records = by_hand.records();
+    let attempts = athena_core::reading::lineage_attempts(&records, &q);
+    assert_eq!(attempts.len(), 3, "{attempts:?}");
+    let last = attempts.last().unwrap().to_string();
+    assert!(retries_of(&records, &last).is_empty(), "no 4th attempt");
+    assert_eq!(narrower_requests(&records, &by_hand.jobs[0]).len(), 1);
+    let lines = ui.0.lock().unwrap().clone();
+    assert!(
+        !lines.iter().any(|l| l.contains("failed twice")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with(&format!(
+            "plan       {q} passed over: retry lineage {} stopped after 3 failed attempts",
+            by_hand.jobs[0]
+        ))),
+        "{lines:#?}"
+    );
+}
+
 #[test]
 fn drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_reading_it() {
     use athena_core::scope_guard::{LineMark, pause_path};

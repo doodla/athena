@@ -9,6 +9,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A retry lineage stops after 3 failed attempts, and a narrower request takes the place of the 4th. Root
+  cause: nothing counted the rejected, failed or timed-out attempts of one lineage (a request and the "try
+  again on" retries after it); the drain's two attempts are per item per run, so lineages kept running
+  across runs and hand retries, and the maintainer stopped and split them by hand at 3 to 5 attempts
+  (`records/interventions/2026-10/20261026-180231-tf2p.json`). Now `LINEAGE_ATTEMPT_LIMIT` (3),
+  `lineage_attempts` and `lineage_stops` in `athena_core::reading` count the failed attempts along the
+  existing `job_history`/`retries_by_job` chain. The drain enforces the limit in two places: the plan holds
+  an item whose lineage is already at 3 without reading it (a queued retry request of that lineage is closed
+  as dropped), and an item whose own attempt makes 3 gets no further attempt. In place of the retry it queues
+  one request, `Re-scope or split <root>: ...`, once per lineage (also when two workers stop one lineage),
+  whose text records the failed attempts and the findings that repeated and whose acceptance asks only for
+  those (fewer bullets than the original; files from the findings, kept to the original's). Repeats are
+  unmet criteria matched as the scope guard's T4 does, and blocking findings matched by file and content
+  words (so `Tests are missing` and `Docs are missing` stay apart). A lineage rooted at a narrower request is
+  stopped but not narrowed again. A hand `athena retry` is not limited. New default `lineage-limit` (enforced
+  by mechanism); because every reading records the defaults hash, each reading made before this change is
+  read again once at its next run. To keep the reader's prompt at its recorded size, the default `buy-first`
+  now shows the reader only its first sentence (a behavior change: the producer and the verifier still see
+  the whole statement). Tests: `a_lineage_with_three_rejected_attempts_gets_no_fourth_attempt`,
+  `a_queued_retry_of_a_lineage_with_three_failures_is_not_read_or_run`,
+  `the_lineage_stop_queues_one_narrower_request_that_carries_the_repeated_findings`,
+  `a_lineage_that_reaches_three_failures_on_the_items_second_attempt_queues_the_narrower_request`,
+  `narrow_queues_once_per_lineage_root`, `a_hand_retry_past_three_failed_attempts_is_still_allowed`, and the
+  `lineage` unit tests in `athena-core`.
 - The reader's brief lists the pipeline roles enabled in the effective config under "Enabled roles", and
   `READING_RULES` gains a tenth, prose-only line: brief content targets only enabled roles. Root cause:
   readings put new content into planner and critic briefs although `[job_plan]` was off, because the reader was

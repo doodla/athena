@@ -206,6 +206,20 @@
 //!   the job proposed or blocked, which `athena retry` refuses, so the second attempt runs the same reading
 //!   again. After a run that passed but did not land, it lands again. Two failures stop the loop, naming the
 //!   item.
+//! - **A retry lineage stops at 3 failed attempts.** A lineage is a request and the "try again on <job>"
+//!   retries that follow it, whether the drain or a hand `athena retry` made them. When it has
+//!   `athena_core::reading::LINEAGE_ATTEMPT_LIMIT` (3) rejected, failed or timed-out jobs, the drain makes no
+//!   further attempt of it. It asks [`Steps::lineage_stops`] at two points: when it plans (for the whole queue,
+//!   so an item of a stopped lineage is held back and never read, as an item on a paused line is) and after
+//!   each failed attempt (so the attempt that makes 3 is the last, even when the item has one of its own two
+//!   left). A stop is acted on once per lineage ([`Steps::queue_narrower`]): the findings that repeated across
+//!   the attempts go into one narrower re-scope or split request, queued in place of the retry; its title
+//!   starts `Re-scope or split`, its text carries a `Lineage <root>:` line that marks it, and its acceptance
+//!   holds only the repeated items (fewer bullets than the original). A queued retry request of the stopped
+//!   lineage is closed as dropped ([`Steps::drop_stopped`]) with the narrower request named in its reason; the
+//!   item is passed over, and the batch goes on. A lineage whose root is itself a narrower request is stopped
+//!   but not narrowed again. A hand `athena retry` is not limited. `athena plan` shows the hold and writes
+//!   nothing.
 //! - **A configuration change.** A reading stays valid across a change that does not bear on it (for
 //!   example `[parallel] max_concurrency`; see `athena_core::run::GoResult::Reread`). When a relevant change
 //!   makes `athena go` read the job again, drain accepts the new reading if its scope (capability, class
@@ -262,6 +276,7 @@ use athena_core::disk::StopCause;
 use athena_core::gh::{Checks, GhCli, PrReport};
 use athena_core::plan::{JobEnd, Plan, PlanEntry, Refusal, shared_path};
 use athena_core::pr::LinkState;
+use athena_core::reading::{LineageStop, NarrowerAction};
 use athena_core::state::{Stage, StageSink};
 pub use athena_core::status::{BUILD_PATHS, touches_build};
 use athena_core::store::Records;
@@ -710,6 +725,26 @@ pub trait Steps {
     /// stopping the batch. The default has no flagged line, as for steps that have no scope guard.
     fn flagged(&self, _jobs: &[String]) -> Vec<(String, String)> {
         Vec::new()
+    }
+    /// Which of `jobs` belong to a retry lineage that has reached
+    /// [`athena_core::reading::LINEAGE_ATTEMPT_LIMIT`] rejected, failed or timed-out attempts, each with the
+    /// stop to act on. The drain asks before it reads an item (for the whole queue at once) and after each
+    /// failed attempt, so a lineage that has used its attempts gets no further one. The default has no
+    /// limit, as for steps that have no records to count in.
+    fn lineage_stops(&self, _jobs: &[String]) -> Vec<(String, LineageStop)> {
+        Vec::new()
+    }
+    /// Queues the narrower request of `stop`, or reports the one already queued for its lineage; returns its
+    /// job. It queues at most one request per lineage, however often it is asked. The default queues
+    /// nothing and says so.
+    fn queue_narrower(&self, _stop: &LineageStop) -> Result<String, String> {
+        Err("these steps cannot queue a request".into())
+    }
+    /// Closes `item` as dropped, with `why`, when it is a request that has not run and only asks to try a
+    /// job again, so a stopped lineage's next retry is not left queued. Returns whether it was closed. The
+    /// default closes nothing.
+    fn drop_stopped(&self, _item: &str, _why: &str) -> Result<bool, String> {
+        Ok(false)
     }
 }
 
@@ -1239,6 +1274,13 @@ struct State {
     /// Items the last plan held back because their line is paused (or they wait on one that is), with the
     /// reason. Replaced by each plan: a lifted pause frees the item.
     pause_held: BTreeMap<String, String>,
+    /// Items the last plan held back because their retry lineage has used its attempts, with the stop.
+    /// Replaced by each plan. The drain (not `athena plan`) acts on them in [`Drain::queue_lineage_narrowers`].
+    lineage_held: BTreeMap<String, LineageStop>,
+    /// For each lineage root this run has stopped: the narrower request that stands for it, or why none was
+    /// queued. An entry is made before the request is queued, so two workers that stop one lineage at once
+    /// queue one request. Kept for the run: a failed queuing is tried again by the next run.
+    narrowed: BTreeMap<athena_data::JobId, Result<String, String>>,
     /// What each new plan of this run needs to remember from the ones before.
     carry: Carry,
     /// Workers whose run passed and whose job is not landed yet, in the order the runs passed.
@@ -1384,6 +1426,10 @@ enum ItemEnd {
     /// The item failed twice on a line the scope guard has flagged but not paused, with the flag reason. It is
     /// passed over for the rest of the batch, and the batch goes on to the next item.
     Flagged(String),
+    /// The item's retry lineage reached [`athena_core::reading::LINEAGE_ATTEMPT_LIMIT`] failed attempts, so no
+    /// further attempt is made. The narrower request stands in its place (or the reason none was queued is
+    /// in the text). The item is passed over and the batch goes on to the next item.
+    LineageStopped(String),
 }
 
 /// What one call of [`Drain::land`] came to.
@@ -1939,6 +1985,20 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 }
             }
             failures += 1;
+            // This attempt may have been the lineage's last: no attempt is made after that, whether or not
+            // the item has used its own two. A paused line keeps its pause text (see below).
+            if passed.is_none()
+                && self.paused_reason(item).is_none()
+                && let Some((_, stop)) = self
+                    .steps
+                    .lineage_stops(std::slice::from_ref(&*last_job))
+                    .into_iter()
+                    .next()
+            {
+                let reason = self.narrow(&item.job, &stop);
+                self.note_once(format!("item {} stopped: {reason}", item.job));
+                return ItemEnd::LineageStopped(reason);
+            }
             if failures >= ATTEMPTS {
                 // The last failure may itself have paused the line. That is the scope guard's doing: pass
                 // the item over and let the batch go on. A line the guard has only flagged (a flag still
@@ -1963,6 +2023,94 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             .into_iter()
             .next()
             .map(|(_, reason)| reason)
+    }
+
+    /// Acts on the stop of the retry lineage `item` belongs to, in place of another attempt: queues the lineage's
+    /// narrower request once (the first worker to ask does; any other, in this run or a later one, finds it),
+    /// and drops `item` when it is a retry request that has not run. Returns the reason to show for the item:
+    /// the lineage, its attempts and what stands in place of the retry.
+    fn narrow(&self, item: &str, stop: &LineageStop) -> String {
+        let first = {
+            let mut st = self.st();
+            if st.narrowed.contains_key(&stop.root) {
+                false
+            } else {
+                st.narrowed.insert(
+                    stop.root.clone(),
+                    Err("another worker is queuing it".to_string()),
+                );
+                true
+            }
+        };
+        if first {
+            // Not under the lock: queuing commits to the records.
+            let result = match &stop.action {
+                NarrowerAction::Queued(job) => Ok(job.as_str().to_string()),
+                NarrowerAction::Refused(why) => Err(why.clone()),
+                NarrowerAction::Queue(_) => self.steps.queue_narrower(stop),
+            };
+            if let Err(why) = &result {
+                self.note_once(format!(
+                    "lineage {}: no narrower request was queued: {why}",
+                    stop.root
+                ));
+            }
+            self.st().narrowed.insert(stop.root.clone(), result);
+        }
+        let result = self.st().narrowed.get(&stop.root).cloned();
+        let ids: Vec<&str> = stop.attempts.iter().map(|j| j.as_str()).collect();
+        let head = format!(
+            "retry lineage {} stopped after {} failed attempts ({}); no further attempt is made",
+            stop.root,
+            stop.attempts.len(),
+            ids.join(", ")
+        );
+        match result {
+            Some(Ok(request)) => {
+                let why = format!(
+                    "replaced by the narrower request {request}: lineage {} reached {} failed attempts",
+                    stop.root,
+                    stop.attempts.len()
+                );
+                let dropped = match self.steps.drop_stopped(item, &why) {
+                    Ok(dropped) => dropped,
+                    Err(error) => {
+                        self.note_once(format!("item {item} could not be dropped: {error}"));
+                        false
+                    }
+                };
+                let tail = if dropped {
+                    "; this retry was dropped"
+                } else {
+                    ""
+                };
+                format!(
+                    "{head}; the narrower request {request} stands in place of another retry{tail}"
+                )
+            }
+            Some(Err(why)) => format!(
+                "{head}; no narrower request was queued ({why}), so the lineage waits for a person to re-scope or split it"
+            ),
+            None => head,
+        }
+    }
+
+    /// For each item the last plan held for its retry lineage, queues the lineage's narrower request (once per
+    /// lineage) and drops the held retry item, and replaces the item's hold reason with the full one. Called
+    /// by the drain after each plan; `athena plan` shows the hold and writes nothing.
+    fn queue_lineage_narrowers(&self) {
+        let held: Vec<(String, LineageStop)> = self
+            .st()
+            .lineage_held
+            .iter()
+            .map(|(id, stop)| (id.clone(), stop.clone()))
+            .collect();
+        for (id, stop) in held {
+            let reason = self.narrow(&id, &stop);
+            if let Some(slot) = self.st().pause_held.get_mut(&id) {
+                *slot = reason;
+            }
+        }
     }
 
     /// The reason the scope guard has paused the line of `item`, if it has.
@@ -2127,13 +2275,23 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             let ids: Vec<String> = view.items.iter().map(|i| i.job.clone()).collect();
             self.steps.paused(&ids).into_iter().collect()
         };
+        // Items whose retry lineage has used its attempts, asked once for the whole queue: they get no
+        // further attempt, so they are not read to fill their plan either. A paused line keeps its pause text.
+        let lineage: BTreeMap<String, LineageStop> = {
+            let ids: Vec<String> = view.items.iter().map(|i| i.job.clone()).collect();
+            self.steps
+                .lineage_stops(&ids)
+                .into_iter()
+                .filter(|(id, _)| !paused.contains_key(id))
+                .collect()
+        };
         for idx in 0..view.items.len() {
             // An interrupted job was read before it ran; its retry reads the request again.
             if view.items[idx].read || view.items[idx].interrupted {
                 continue;
             }
             let id = view.items[idx].job.clone();
-            if paused.contains_key(&id) {
+            if paused.contains_key(&id) || lineage.contains_key(&id) {
                 continue;
             }
             // Read by an earlier plan of this run: not read or paid for again.
@@ -2203,6 +2361,21 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             .into_iter()
             .filter(|(id, _)| !forced.iter().any(|f| &f.id == id))
             .collect();
+        let mut lineage_held: BTreeMap<String, LineageStop> = BTreeMap::new();
+        for (id, stop) in lineage {
+            if forced.iter().any(|f| f.id == id) {
+                continue;
+            }
+            held.insert(
+                id.clone(),
+                format!(
+                    "its retry lineage {} has {} failed attempts, the limit; no further attempt is made",
+                    stop.root,
+                    stop.attempts.len()
+                ),
+            );
+            lineage_held.insert(id, stop);
+        }
         loop {
             let more: Vec<(String, String)> = view
                 .plan
@@ -2210,9 +2383,14 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 .filter(|e| !held.contains_key(&e.id) && !forced.iter().any(|f| f.id == e.id))
                 .filter_map(|e| {
                     let on = e.depends_on.iter().find(|d| held.contains_key(*d))?;
+                    let why = if lineage_held.contains_key(on) {
+                        "its retry lineage is stopped"
+                    } else {
+                        "its line is paused"
+                    };
                     Some((
                         e.id.clone(),
-                        format!("depends on {on}, which is held back: its line is paused"),
+                        format!("depends on {on}, which is held back: {why}"),
                     ))
                 })
                 .collect();
@@ -2274,7 +2452,10 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 plan.refused.push(Refusal::held(id, title, reason));
             }
         }
-        self.st().pause_held = held;
+        let mut st = self.st();
+        st.pause_held = held;
+        st.lineage_held = lineage_held;
+        drop(st);
         plan
     }
 
@@ -2501,6 +2682,8 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 improvement_turns: Vec::new(),
                 passed_over: BTreeSet::new(),
                 pause_held: BTreeMap::new(),
+                lineage_held: BTreeMap::new(),
+                narrowed: BTreeMap::new(),
                 carry: Carry::default(),
                 queue: LandingQueue::default(),
                 rebases: RebaseTally::default(),
@@ -2626,9 +2809,9 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 ),
             ),
             ItemEnd::Waiting => self.pass_over(&item.job, &self.last_landing(&item.job)),
-            ItemEnd::Paused(reason) | ItemEnd::Flagged(reason) => {
-                self.pass_over(&item.job, &reason)
-            }
+            ItemEnd::Paused(reason)
+            | ItemEnd::Flagged(reason)
+            | ItemEnd::LineageStopped(reason) => self.pass_over(&item.job, &reason),
             ItemEnd::Skipped => self.pass_over(
                 &item.job,
                 &format!(
@@ -3000,6 +3183,8 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     // is incomplete, or that wait on each other in a loop, are not worked.
     let reserve = d.caps.read + d.caps.run;
     let plan = d.prepare(&mut view, reserve);
+    // A retry lineage that has used its attempts gets its narrower request now, in place of another retry.
+    d.queue_lineage_narrowers();
     // Items on a paused line get their one "passed over" line now, so nothing else prints their reason.
     d.pass_over_paused();
     let first_paused: BTreeSet<String> = d.st().pause_held.keys().cloned().collect();
@@ -3067,6 +3252,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
                 next.waiting = std::mem::take(&mut view.waiting);
                 view = next;
                 plan = d.prepare(&mut view, reserve);
+                d.queue_lineage_narrowers();
                 d.pass_over_paused();
             }
             Err(error) => {
@@ -4160,6 +4346,55 @@ impl Steps for RealSteps<'_> {
                 Some((job.clone(), self.athena.flag_note(&mark)))
             })
             .collect()
+    }
+
+    /// Counts the lineage's attempts from the records ([`athena_core::reading::lineage_stops`]). Records that
+    /// cannot be loaded report no stop, as for `paused` and `flagged`.
+    fn lineage_stops(&self, jobs: &[String]) -> Vec<(String, LineageStop)> {
+        let Ok(records) = self.records() else {
+            return Vec::new();
+        };
+        athena_core::reading::lineage_stops(&records, jobs)
+    }
+
+    /// Queues the stop's narrower request as `athena ask --later` would (channel `cli`). The records are read
+    /// again first: a request that already carries the lineage's marker is returned and nothing is queued, so
+    /// asking twice (in this run or another) queues one.
+    fn queue_narrower(&self, stop: &LineageStop) -> Result<String, String> {
+        let records = self.records().map_err(|e| format!("{e:#}"))?;
+        let current = athena_core::reading::lineage_stop(
+            &records,
+            stop.attempts.last().map_or("", |j| j.as_str()),
+        );
+        match current.as_ref().map_or(&stop.action, |c| &c.action) {
+            NarrowerAction::Queued(job) => Ok(job.as_str().to_string()),
+            NarrowerAction::Refused(why) => Err(why.clone()),
+            NarrowerAction::Queue(text) => self
+                .athena
+                .queue(text)
+                .map(|(job, _)| job.as_str().to_string())
+                .map_err(|e| format!("{e:#}")),
+        }
+    }
+
+    /// Closes `item` when it is still queued and its own words only ask to try a job again
+    /// ("try again on <job>"); any other item is left as it is.
+    fn drop_stopped(&self, item: &str, why: &str) -> Result<bool, String> {
+        let records = self.records().map_err(|e| format!("{e:#}"))?;
+        let Some(job) = records.jobs.get(item) else {
+            return Ok(false);
+        };
+        let retries_only = job
+            .request
+            .as_ref()
+            .is_some_and(|r| athena_core::reading::retried_job(&records, &r.text).is_some());
+        if job.state() != athena_core::store::JobState::Queued || !retries_only {
+            return Ok(false);
+        }
+        self.athena
+            .close(item, why, self.ui)
+            .map(|_| true)
+            .map_err(|e| format!("{e:#}"))
     }
 
     fn review_passes(&self) -> Vec<String> {
@@ -6989,6 +7224,95 @@ mod landing_queue_tests {
         let ui = Watch(&lane.log);
         let report = drain_concurrent(lane, limits(), &ui, 2).unwrap();
         report.landed as usize
+    }
+
+    /// Steps whose every item is on one stopped retry lineage; it counts the requests it is asked to queue and
+    /// the items it is asked to drop.
+    struct Stopped {
+        queued: std::cell::Cell<u32>,
+        dropped: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl Steps for Stopped {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Ok(Caps {
+                read: 0.5,
+                run: 1.0,
+                rate: 0.5,
+            })
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            Ok(QueueView::default())
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn read(&self, _: ReadOf<'_>) -> Read {
+            Read::default()
+        }
+        fn run(&self, _: &str) -> Run {
+            Run::default()
+        }
+        fn land(&self, _: &str) -> Landing {
+            Landing::NotLanded(String::new())
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("stub")
+        }
+        fn check_cap(&self) -> f64 {
+            0.5
+        }
+        fn rate(&self) -> Rate {
+            Rate::default()
+        }
+        fn queue_narrower(&self, _: &LineageStop) -> Result<String, String> {
+            self.queued.set(self.queued.get() + 1);
+            Ok("20261021-090000-nn01".into())
+        }
+        fn drop_stopped(&self, item: &str, _: &str) -> Result<bool, String> {
+            self.dropped.borrow_mut().push(item.to_string());
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn narrow_queues_once_per_lineage_root() {
+        let steps = Stopped {
+            queued: std::cell::Cell::new(0),
+            dropped: std::cell::RefCell::new(Vec::new()),
+        };
+        let stop = LineageStop {
+            root: athena_data::JobId::parse("20261020-100100-aa01").unwrap(),
+            attempts: [
+                "20261020-100100-aa01",
+                "20261020-100200-aa02",
+                "20261020-100300-aa03",
+            ]
+            .iter()
+            .map(|j| athena_data::JobId::parse(j).unwrap())
+            .collect(),
+            repeated: vec!["Finding: the cache is never cleared".into()],
+            repeated_found: true,
+            action: NarrowerAction::Queue("Re-scope or split ...".into()),
+        };
+        let d = Drain::new(&steps, &athena_core::Quiet, steps.caps().unwrap(), limits());
+        // Two items of one lineage, as two workers of one run would stop them.
+        let first = d.narrow("20261020-110000-qq01", &stop);
+        let second = d.narrow("20261020-110100-qq02", &stop);
+        assert_eq!(steps.queued.get(), 1, "one request for the lineage");
+        assert_eq!(first, second, "both items get the same account");
+        assert!(first.contains("20261021-090000-nn01"), "{first}");
+        assert!(first.contains("3 failed attempts"), "{first}");
+        // Each item that is still queued is offered for dropping; asking again does not queue again.
+        assert_eq!(
+            *steps.dropped.borrow(),
+            ["20261020-110000-qq01", "20261020-110100-qq02"]
+        );
+        d.narrow("20261020-110000-qq01", &stop);
+        assert_eq!(steps.queued.get(), 1);
     }
 
     #[test]

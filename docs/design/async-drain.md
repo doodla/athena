@@ -246,6 +246,9 @@ Point 5. Records are history; their order must be stable even when jobs overlap.
 | Crash mid-flight | In-flight table re-read; producer resumes by retry; landing re-checks whether it landed |
 | Thrash | More than `max_conflict_returns` conflict returns closes the job |
 | Low disk | The guard holds a start; the drain waits (D142) |
+| Retry lineage at 3 failed attempts | No 4th attempt; the repeated findings are recorded in one narrower re-scope or split request queued in its place |
+
+The lineage limit counts the rejected, failed or timed-out jobs of one chain of "try again on" requests (`LINEAGE_ATTEMPT_LIMIT`, 3), across the drain's retries and hand-run `athena retry` alike. The drain asks before it reads an item (an item whose lineage is already at 3 is held back unread, and a queued retry request among them is closed as dropped) and after each failed attempt of an item (the attempt that makes 3 is the last). Findings count as repeated when they appear in at least 2 of the attempts: unmet criteria by the scope guard's T4 comparison, findings by file and by their content words. The narrower request names the repeated findings, asks only for them (fewer acceptance bullets than the original, never its full list), and is queued once per lineage; a lineage whose own root is a narrower request is stopped but not narrowed again. A hand `athena retry` is not limited: it is the maintainer's override.
 
 ## 11. Config block (proposed)
 

@@ -1171,6 +1171,48 @@ fn a_dispatched_job_with_a_dead_registered_process_is_interrupted_and_accepted_b
     assert!(!athena.running(&job), "retry dropped the dead entry");
 }
 
+/// A hand `athena retry` is the person's own override and is not limited by the drain's lineage limit: a
+/// fourth attempt of a lineage that already has three rejected ones is made and runs.
+#[test]
+fn a_hand_retry_past_three_failed_attempts_is_still_allowed() {
+    let fx = Fixture::new();
+    // Every attempt meets its criteria and is rejected on one finding, so the scope guard (which pauses
+    // on one unmet criterion rejected twice) does not stop the line.
+    let scenario = Scenario {
+        verdict: verdict_unmet(&[]),
+        ..Scenario::default()
+    };
+    let athena = fx.athena(scenario.script());
+    let (first, second) = reject_then_ask_again(&athena, "add a greeting");
+    assert_eq!(run_retry(&athena, &second).state, OutcomeState::Rejected);
+    let (third, _) = athena.retry(&second, &Lines::default()).unwrap();
+    assert_eq!(
+        run_retry(&athena, third.job.as_str()).state,
+        OutcomeState::Rejected
+    );
+    let before = Records::load(&fx.git, &fx.head()).unwrap();
+    let lineage = athena_core::reading::lineage_attempts(&before, third.job.as_str());
+    assert_eq!(lineage.len(), athena_core::reading::LINEAGE_ATTEMPT_LIMIT);
+    assert!(athena_core::reading::lineage_stop(&before, &first).is_some());
+
+    // The fourth attempt: asked for by hand, accepted, and run.
+    let (fourth, _) = athena
+        .retry(third.job.as_str(), &Lines::default())
+        .expect("a hand retry is not limited");
+    let finished = run_retry(&athena, fourth.job.as_str());
+    assert_eq!(
+        finished.state,
+        OutcomeState::Rejected,
+        "{}",
+        finished.reason
+    );
+    let after = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(
+        athena_core::reading::lineage_attempts(&after, &first).len(),
+        4
+    );
+}
+
 #[test]
 fn a_rejected_job_can_be_retried_twice() {
     let model = Model::default();
