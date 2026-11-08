@@ -12,6 +12,10 @@ snapshot of this job, so no figure was re-measured here.
 Labels used below: **measured** (a figure from the review request, not re-measured), **prediction** (the review's
 expected saving), **estimate** (reasoned here, not measured), **existing** (built; file named), **new** (not built).
 
+Related: throughput review `20261108-183648-5eya` named a second cause of the same stage, pull requests that carry
+other jobs' commits from a stacked local branch. It is designed in `per-job-landing-branches.md`. The two changes
+are independent in code; the later review attributes a drop to the phase it came from.
+
 ## 1. Existing code
 
 Nothing in this table is created by this note. Each row says whether the design **reuses** it as it is or
