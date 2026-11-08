@@ -469,6 +469,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `crates/athena-cli/src/display.rs` is split: the `athena status` views (`status`, `snapshot_status` and
+  their section helpers) moved to `crates/athena-cli/src/display/status_view.rs`, re-exported from `display`
+  so callers are unchanged. No output changed.
 - `crates/athena-core/src/status.rs` is split into modules and `Athena::status` is shortened. The throughput,
   waste and check-duration code moved to `status/throughput.rs`, and the planning cost, keep rule, later-harm
   and producer-settings code to `status/planning.rs`; both are re-exported, so every `crate::status::` path
