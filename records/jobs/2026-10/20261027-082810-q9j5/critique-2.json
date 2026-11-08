@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-082810-q9j5",
+  "round": 2,
+  "at": "2026-11-08T17:18:36.769993619Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "docs/system-facts.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/system-facts.md",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/design/context-engineer.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/design/context-engineer.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "With `max_jobs: 1` the drain's job cap, not the new lineage check, keeps the 4th attempt from being dispatched, so the test's main assertions pass without the behavior.",
+      "evidence": "`run_job` checks `if st.started >= self.limits.max_jobs { return RunStep::JobLimit; }` (drain.rs:1544-1546) before any read. In the in-item fixture the drain starts q (started = 1). Without the post-failure check, the loop goes back to `ReadOf::Retry(q)` (drain.rs:1878-1879), `run_job` returns JobLimit, and `attempts` returns `ItemEnd::JobLimit` (passed over as \"over the job limit\", drain.rs:2603-2605). No job `try again on <q>` is made, `lineage_attempts(q).len()` stays 3 and the Producer delta stays 1. So the plan's 'Fails without the behavior' claim for those three assertions is false. Only the passed-over-line text distinguishes the two cases. The test shows that a cap stops the 4th attempt, not that the lineage rule does. Fix: Run the in-item test with `max_jobs` of at least 2 (or `work_everything()`), so that without the check the drain would read and start `try again on <q>`. Keep the assertions that no request job has text `try again on <q>` and that the Producer delta is 1. Also assert the run did not end on the job limit (no `over the job limit` line, report stop is not JobLimit). If the narrower request might then be picked up in the same run, assert on the lineage and marker counts, not on the total job count. Re-derive the 'fails without' text from the code.",
+      "location": "Demonstrations, criterion 3: `a_lineage_with_three_rejected_attempts_gets_no_fourth_attempt` (and criterion 4(a), which reuses its fixture), `max_jobs: 1`; crates/athena-cli/src/drain.rs:1544",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The replacement request is not narrower in any defined way, and because it starts a fresh lineage it lets the drain run the same work again with a new 3-attempt allowance.",
+      "evidence": "The plan builds the request with `StewardRequest::new(None, title, body, acceptance, files)`. The title is only \"not 'try again on'\", files come from the root request (`request_text_touches`), and the plan never says where the acceptance bullets come from (`StewardRequest::new` requires at least one, steward.rs:560-563). Decision 3 itself notes that a text not starting with \"try again on\" gives `retry_reference` no parent, \"so it starts a fresh lineage at zero\". The request goes onto the drained `cli` channel, so the next drain dispatches it automatically. If its acceptance and files match the root's, the cap is laundered: the same scope gets 3 more attempts, then another 'narrower' request with a new root and a different `Lineage <root>` marker, and so on. The request asks for a narrower re-scope or split, not a renamed retry, and criterion 4's test only checks that the text carries findings and has some acceptance. Fix: Define the narrowing concretely and mechanically. For example: the title is `Re-scope or split <root>: <repeated finding>`, the acceptance bullets are the repeated unmet criteria and one bullet per repeated blocker/major finding (never the root's full list), and the files are those named in the repeated findings' locations, kept to the root's files when those exist. Record the derivation (the marker) so that when a narrower request's own lineage reaches the limit, Athena does not queue a further narrower request but passes it over for the operator. Add assertions that the queued request's acceptance differs from, and is no larger than, the root's, and a unit test that a second-generation stop queues nothing.",
+      "location": "Decision 3 / plan step 2 (`lineage_stop` request construction); Approach ('starts a fresh lineage at zero')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The second-drain idempotence check runs on a fixture where the stopped item is closed, so the stop is never re-checked and the assertion would hold without the marker lookup.",
+      "evidence": "In the in-item fixture q ends `Closed(Rejected)` and is not queued again, so a second drain never reaches `lineage_end` for this lineage. Queuing on later passes only matters for the loop-top case, where the queued `try again on <j3>` item stays queued and is passed over on every run (plan Risks). Fix: Move the second-drain idempotence check to `a_queued_retry_of_a_lineage_with_three_failures_is_not_read_or_run`: drain twice and assert exactly one marker request and that q is still not Closed. Keep the direct `steps.queue_narrower` / unchanged-head check on either fixture.",
+      "location": "Demonstration 4(a): 'Then drain again and assert the marker count is still 1'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Both file sources can be empty, and then `StewardRequest::new` refuses the request, so no replacement is ever queued for that lineage.",
+      "evidence": "steward.rs:565-567 returns Err when `files.is_empty()`. A root request may name no files, and a rejected attempt may change none. The plan then only notes the error, and every later run retries and fails the same way. Fix: Add a last fallback that always yields a path (for example the paths named in the repeated findings' locations, or the root reading's touches). Add a unit test of the no-files case showing a request is still built.",
+      "location": "Decision 3 / plan step 2: `Files:` from the root request, falling back to the last attempt's changed paths",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "By estimate both splits are needed, and splitting `lazy-requests` cuts the half of the rule that applies to the reader itself.",
+      "evidence": "Estimate, not measured: the new line `- lineage-limit [*]: A retry lineage stops after 3 rejected or failed attempts.` is about 79 bytes, about 27 tokens, against 3 tokens of headroom (system facts: reader 1997 of 2000). Splitting `buy-first` at `; ` (defaults.toml:29) saves about 19 tokens, so the reader is still over 2000 and `lazy-requests` (defaults.toml:65) must split too. The reader then sees only `Requests are short.` and loses `recover hidden requirements from the repository before asking`, which is the reader's own task. `render()` shows the reader only first sentences (defaults.rs:55-71). Fix: Pick the shortest accurate first sentence for the new entry (for example `Retry lineages stop at 3 failed attempts.`), measure before choosing what to split, and prefer splitting only `buy-first`. If `lazy-requests` must still split, say in the change description that the reader loses that clause, or choose a split point that keeps `recover hidden requirements`.",
+      "location": "Decision 5 / plan step 8 (reader budget splits)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The dependents list omits that changing defaults.toml makes every reading made before the change be read again at its next run.",
+      "evidence": "crates/athena-core/src/run/mod.rs:1018-1022 compares `reading.defaults_sha256` with the current `jc.defaults_sha256` and re-reads under the new configuration when they differ. Every accepted reading that has not yet run pays a re-read once this lands. Fix: Add this dependent, with reason: an expected, designed cost of any defaults edit. Mention it in the change description and the CHANGELOG entry.",
+      "location": "Dependents: defaults.toml content",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The design is mostly sound against the code I read. The two check points in `Drain::attempts` (drain.rs:1867-1955) are placed correctly: the loop-top check sits after `paused_reason` and before `run_job`, and the post-failure check sits after `failures += 1` and before the `failures >= ATTEMPTS` return. `ItemEnd` is matched only in `finish` (drain.rs:2546-2639). The `Steps` implementor list matches every `impl Steps for` in crates/. The lineage walk reuses `job_history`/`retries_by_job` (retry.rs:210-268) and `MAX_RETRY_DEPTH` (583). There are two major problems. First, the key in-item \"no 4th attempt\" test uses `max_jobs: 1`, so the existing job cap (`run_job`, drain.rs:1544) blocks the retry even without the new check. Most of the assertions the plan says would fail without the check would still pass. Second, the \"narrower\" request is not narrower: its acceptance source is unspecified, it copies the original request's files, and it starts a new lineage at zero. The drain then runs much the same work again with a fresh set of 3 attempts, which undoes the limit. There are also minor gaps: the idempotence check runs on the wrong fixture, the files list can be empty, the reader-budget split may cut the reader's own rule, and one dependent is missing. Athena's two scope findings (system-facts.md, context-engineer.md) are justified by the budgets test's exact-match rule and are raised as an open question; I do not repeat them."
+}

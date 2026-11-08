@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-082810-q9j5",
+  "round": 4,
+  "at": "2026-11-08T17:32:22.248848726Z",
+  "invocation_seq": 11,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The lineage stop is not applied in the planning pass, so a stopped lineage's queued retry can still be read, and test (B)'s 'still Queued, not read' claim contradicts the plan's own risk.",
+      "evidence": "Drain::prepare (crates/athena-cli/src/drain.rs:2084-2147) reads every unread request whose plan entry is incomplete before items run. It already asks `self.steps.paused(&ids)` once and skips those items so they are not read (2124-2138). The existing test at crates/athena-cli/tests/drain.rs:5527-5534 relies on this: a queued 'try again on <job>' on a paused line is passed over and `fx.head()` is unchanged ('nothing was read or run'). A bare 'try again on <job>' has no acceptance bullets, so its entry is likely incomplete and prepare reads it. The plan's risk list says 'a Reader invocation appears in the queued-retry test even when the gate works', yet test (B) is named `..._is_not_read_or_run` and asserts q is still `JobState::Queued`. A planning-pass read writes a reading and likely moves q out of Queued. It also spends a paid Reader call, against budget and the job limit, on work Athena has decided not to retry. Fix: Also ask `Steps::lineage_stop` in `Drain::prepare` next to the `paused` set (one call for the queue view, before any read). Skip reading those items and hold them back or pass them over with the lineage reason, as paused items are. Then make test (B) assert what the paused-line test asserts: no Reader call for q, no record written for q apart from the one narrower request, and q still Queued. Add the prepare call site to step 15's remove-and-confirm checks and to the dependents list.",
+      "location": "Decision 1 / Step 8 (stop points only in Drain::attempts); Demonstration criterion 3 (B); Risk 'The planning pass reads the queued retry item'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stuck queued retry is left for the operator to drop by hand, but a close API already exists.",
+      "evidence": "The request says the narrower request is queued 'in place of another retry' and that 'the operator should no longer have to stop or split lineages by hand'. The plan leaves the item queued, passed over on every run, with a note that the operator may drop it. The stated reason, 'No drain path closes a queued request', ignores `Athena::close` (crates/athena-core/src/manage.rs:74-109), which closes a Queued or Proposed job as Dropped with a reason. Fix: Have `RealSteps::queue_narrower` (or a separate step) close the tripping queued item with `Athena::close`, giving a reason that names the narrower request. Or keep the current design but give a correct reason for not closing it and raise it as an open question.",
+      "location": "Decision 3, rejected alternative 'Close or drop the queued \"try again\" item that tripped the limit'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In a concurrent drain, two workers on the same lineage could both miss the marker and queue two narrower requests.",
+      "evidence": "`lineage_stop` reads `self.records()` and looks for an existing request containing `Lineage <root>:`, then `queue_narrower` commits a new one. Two items of one lineage running in parallel workers (drain_concurrent) can both check before either commits. No lock or shared-state check is planned. Fix: Record lineages already stopped in this run in the drain's shared state (as `carry` does for readings) and check it before queuing, or state that two items of one lineage cannot run at once and cite the code that ensures it.",
+      "location": "Decision 3 marker lookup; drain_concurrent",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Counting compare_criteria's Maybe as a repeat lets common words pair different short findings at the same path.",
+      "evidence": "compare_criteria (scope_guard.rs:212-216) returns Maybe when more than half of the shorter text's words are shared, stop words included. 'Tests are missing' vs 'Docs are missing' share 2 of 3 words, so they give Maybe, and with the same path the plan lists them as one repeated finding. The plan accepts this as costing one extra bullet. But the request is capped below the root's bullet count, so a false repeat can push out a real one. Fix: Ignore common short words when counting shared words for findings, or for findings require Yes or containment rather than any Maybe. Add the 'tests/docs are missing' pair to the contrasting-pair unit test.",
+      "location": "Decision 3 'How a repeat is decided'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan says retries_by_job skips unrun retries; it skips only retries that were closed without running.",
+      "evidence": "retries_by_job (retry.rs:253-265) skips Dropped, Declined, Abandoned, Stale and Closed. A Queued retry is kept as the newest standing retry. The forward walk then reaches the queued item, which is the behaviour the plan wants. Fix: Reword the reason to 'skips retries closed without running; a queued retry is kept'.",
+      "location": "Decision 2 Reason",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly, and its named seams exist (checked by reading the snapshot): retried_job, job_history and retries_by_job in retry.rs; scope_guard::compare_criteria (public); Drain::attempts with failures += 1 at drain.rs:1941 and ATTEMPTS = 2; StewardRequest::new; Athena::queue; and the RealSteps::records/paused/flagged pattern. The reader-budget arithmetic holds: DefaultsModel::render prints `- id [applies]: first sentence`, the new line is 59 bytes and splitting buy-first removes exactly 59. Producer and verifier sets do not include the defaults, so their budgets are untouched. The two stop points and which test proves which now match the code. One major gap remains. The drain's planning pass (Drain::prepare, drain.rs:2084-2147) reads unread requests before any item reaches Drain::attempts, and already skips paused lines for exactly this reason. The plan adds no lineage check there, so a queued retry of a stopped lineage can still be read. That costs a paid Reader call, and it can turn the item into a proposal, which breaks test (B)'s 'still Queued' assertion. The plan's own risk list admits the read. Smaller points: the stuck queued item could be closed with the existing Athena::close instead of being left for the operator; concurrent drains could both queue a narrower request; and word-overlap matching can produce false repeats."
+}
