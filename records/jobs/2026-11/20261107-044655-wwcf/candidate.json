@@ -1,0 +1,130 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261107-044655-wwcf",
+  "base_commit": "5887ebab25be6bd2b181eff49de7d22a6c4560a2",
+  "base_fingerprint": "sha256:5f6b6a8c09036765c2f72be940eaa40441dd978e00947ac6aa63e03c78594e4c",
+  "previous_job": "20261106-145032-rcvz",
+  "candidate_commit": "222c267fff5b0291a8300c76f9ea054b59c39473",
+  "candidate_tree": "5eebd5b6bed6361a67e4201724784b7705b37462",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 373993
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 222366
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 288583
+    },
+    {
+      "path": "docs/design/producer-slowdown.md",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 9095
+    }
+  ],
+  "fingerprint": "sha256:d1485c0d6431c045a3a97344642d2e836c36124918251233e755c100adef016d",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause as read from code and dates (not measured; the snapshot had no records/): the producer brief told every producer on every job to run `cargo test -p athena-cli --test mirrors` before finishing. That is a test build of most of the workspace in the producer's own cold target directory, inside the producer invocation, so `role_minutes` counts it. It was added on 2026-11-06, after the previous review on 2026-11-04. It duplicated two checks that already exist: the producer loop's in-process `mirror_drift_in` (no build) and the `mirrors` target at verification. Fix: in crates/athena-context/src/briefs.rs, `MIRROR_CHECK_INSTRUCTION` is now `MIRROR_CHECK_NOTE`. It keeps the two facts (new test file needs its line in xtask/shard-timings.txt; docs/decisions.md only gains text after its last line), says Athena checks these after each report, and names no command. Two tests were added or replaced: one pins the brief text, one runs a whole job and shows the first prompt has the facts but no build command while the drift is still sent back. docs/design/producer-slowdown.md states the cause, the code paths, the quoted figures (12.7→23.5 and the others), the other candidates with the record that settles each, the stale D158 sentence, and what the next review should show. The note does not promise the whole 10.8 minutes back. A build measured in this job took 30.8 s in a partly warm target directory, so the build may explain only part of the rise. CHANGELOG.md has an entry. No timeout, slot, send-back, threshold or stage-reporting code changed. No allowed-paths line appeared in my prompt.",
+    "files": [
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "docs/design/producer-slowdown.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-context producer_briefs",
+        "result": "pass",
+        "note": "9 passed, including the new brief test"
+      },
+      {
+        "command": "cargo test -p athena-core --lib mirrors_",
+        "result": "pass",
+        "note": "12 passed, including the new run-level test; the existing mirrors_ tests are unchanged"
+      },
+      {
+        "command": "cargo test -p athena-core --lib mirrors_the_producer",
+        "result": "pass",
+        "note": "rerun after renaming the test for rustfmt"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "first run flagged the long test name; renamed, then clean"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed; it reads tracked files only, so I reread the new note against the banned words by hand"
+      },
+      {
+        "command": "cargo test -p athena-cli --test mirrors",
+        "result": "pass",
+        "note": "4 passed; compile took 30.8 s in a partly warm target directory"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A note under docs/design/ states the cause of the longer producer stage. It cites the code paths and the measured numbers (12.7 to 23.5 minutes), and labels any estimate.",
+        "status": "met",
+        "evidence": "Created docs/design/producer-slowdown.md. It quotes 12.7→23.5, 1.7→9.0, 0.3→0.7, 3.4→3.6 and 918.1→1604.8. It cites briefs.rs (`MIRROR_CHECK_INSTRUCTION`, `mirror_check_section`, `producer_brief`), athena-cli/Cargo.toml, athena.toml:80/111/195, producer.rs:76, status.rs:933 and D158. Estimates are labeled, and section 9 says no records were in the snapshot."
+      },
+      {
+        "criterion": "Run cargo test. A new or changed test fails on the old behavior and passes on the new, showing the identified cause no longer adds time to the producer stage.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-context producer_briefs` (9 pass) and `cargo test -p athena-core --lib mirrors_` (12 pass). The new tests are `producer_briefs_do_not_tell_the_producer_to_build_for_the_mirror_check` and `mirrors_the_producer_is_not_asked_to_build_and_the_loop_still_sends_the_drift_back`. Both assert the 'Files kept by hand' text has no `cargo` or `--test mirrors`, which the old text contained. I did not run the new tests against the old source. The full `cargo test` is left to Athena's checks."
+      },
+      {
+        "criterion": "Run cargo clippy and cargo fmt --check. Both are clean.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`; both exit clean."
+      },
+      {
+        "criterion": "The diff touches only the code on the cause path and its tests. It does not change stage-median reporting merely to make the numbers look better.",
+        "status": "met",
+        "evidence": "`git status --short` lists CHANGELOG.md, briefs.rs, run/tests.rs and the new note. status.rs, store.rs, main.rs, producer.rs, slots.rs and athena.toml are untouched."
+      },
+      {
+        "criterion": "The fix removes the cause itself, not a symptom such as a raised timeout or hidden timing. The note says what the next throughput review should show: a lower producer median.",
+        "status": "met",
+        "evidence": "The diff removes the instruction that made every producer run the workspace-wide test build. No timeout, slot, limit or reporting changed. Section 8 of the note says the next review should show a producer median below 23.5 minutes, with the slot-wait and CPU-contention caveat, and how to check it with `athena status` and `commands_run`."
+      }
+    ],
+    "open_issues": [
+      "The cause is not confirmed by measurement: the snapshot had no records/. The mirrors build measured in this job was 30.8 s in a partly warm directory, so it may explain only part of the 10.8-minute rise. Other candidates (send-back passes, slot waits since 2026-11-07, CPU contention from max_concurrency = 2, heavier plans) are listed in the note with the records that settle each.",
+      "Decision D158 in docs/decisions.md still says 'The producer brief gains a short note to run the target'. It is now stale. The log is append-only and outside this request's Files, so I left it. The note and CHANGELOG name it as superseded; whether to log a decision is the user's call.",
+      "Departure from the plan: I used the shorter test name `mirrors_the_producer_is_not_asked_to_build_and_the_loop_still_sends_the_drift_back` so rustfmt keeps it on one line."
+    ],
+    "mistakes": [
+      "First test name was too long for rustfmt; the first fmt check failed and I renamed it. It differs from the plan's name.",
+      "My first draft of the note said a 44 s build covered the cause. I corrected it after measuring the mirrors compile at 30.8 s, so the note now says the build may explain only part of the rise."
+    ],
+    "learnings": [
+      "The producer brief's 'Files kept by hand' section was the only per-job instruction in briefs.rs that asked for a workspace-wide test build. The boundary-scan instruction runs only the xtask policy target.",
+      "The producer loop's mirror check, `mirror_drift_in` in run/producer.rs, runs in-process without a build. It is the real coverage; the brief instruction only duplicated it.",
+      "`role_minutes` in status.rs sums producer invocation wall time, so commands the agent runs inside an invocation count and replay time between invocations does not.",
+      "rustfmt breaks a test fn name that is too long into an ugly form, so test names should keep the whole signature within 100 columns.",
+      "`cargo test -p athena-cli --test mirrors` compiled in 30.8 s in a partly warm target directory in this job, which is much less than the 10.8-minute rise."
+    ],
+    "desires": [
+      "The job records (`commands_run` and invocation durations of producer invocations since 2026-11-06) to confirm or reject the cause by measurement.",
+      "The dates and producer invocation counts of the 20 landings in the review window."
+    ]
+  }
+}

@@ -1,0 +1,255 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-044655-wwcf",
+  "round": 1,
+  "at": "2026-11-07T23:48:01.987438304Z",
+  "invocation_seq": 3,
+  "approach": "The cause is read from code, not measured, because the snapshot has no records. `StageMinutes.producer` is the sum of producer invocation wall times (`role_minutes`, status.rs). A producer's own cargo commands wait for a build slot inside that invocation. `producer_loop` (crates/athena-core/src/run/producer.rs:370) calls `loop_replay` after every parsed report, and the replay takes a producer-class slot for two workspace builds. When the loop is about to send the report back for another reason, the producer then edits the tree and that measurement is thrown away (`LoopReplay::covers` needs the same tree). With the default of one check slot and two concurrent jobs, those wasted holds queue the other job's producer. The fix is one focused change in `producer_loop`. Compute whether the report has a non-replay problem and a send-back is still available, using exactly the complement of the break at producer.rs:446. In that case skip `loop_replay` and set it to None. Otherwise call it as before. The report that leaves the loop is therefore always measured, and the hold at verification reuses it. Tests are added to the existing in-loop replay module. The note docs/design/producer-slowdown.md and a CHANGELOG entry state the cause and the size, labeled an estimate. Files outside the brief's deliverable list: the brief's Files line is `crates/`, so producer.rs and tests.rs are within it. Criterion 4 requires the diff to touch \"the code on the cause path and its tests\", and the cause path is producer.rs. status.rs only sums recorded durations, and editing it would hide the time. I read `limits_changed_files` (briefs.rs:146-222) against criterion 4's text. The `only` branch needs `may change` within 6 words, and the text has none. The other branches need `no file`, `no other file`, `test only` or `production unchanged`, and none appears. So `allowed_paths` (briefs.rs:115) returns None and no scope check flags producer.rs or tests.rs.",
+  "decisions": [
+    {
+      "choice": "Skip `loop_replay` on a report that has a non-replay problem while a send-back is still available; run it on every other report.",
+      "reason": "The tree changes after a send-back, so that measurement cannot be reused (`LoopReplay::covers`, run/mod.rs:182). Skipping removes the thrown-away slot hold and two builds. Safety is kept because the report that leaves the loop is always measured, and the hold at verification (mod.rs:2129) still backstops. This removes the cause, not a timeout or a number.",
+      "rejected": [
+        {
+          "option": "Raise `max_check_slots`, `build_wait_s` or the wrapper wait",
+          "why": "It treats the symptom, needs athena.toml (out of scope), and slot counts are sized by disk (agent-and-build-slots.md section 7)."
+        },
+        {
+          "option": "Remove the in-loop replay and keep only the hold at verification",
+          "why": "It undoes the 2026-11-06 decision that the producer sees the newly refused list while it can still act; a replay-only problem would no longer be sent back."
+        },
+        {
+          "option": "Narrow `touches_reading_rules`",
+          "why": "The compiled reading rules depend on many crates (reading.rs:24-55); no path list is provably complete and a wrong list silently skips a replay."
+        },
+        {
+          "option": "Change `StageMinutes`, `role_minutes`, the review thresholds, or exclude wait time from the producer stage",
+          "why": "Out of scope and forbidden by criterion 4; it would hide the time."
+        },
+        {
+          "option": "Edit status.rs, main.rs or store.rs to match the deliverable list",
+          "why": "Reading showed nothing there adds producer time; editing would not touch the cause and could only change reporting."
+        }
+      ]
+    },
+    {
+      "choice": "Put the condition in `producer_loop`, after `unmet`, `unchanged`, `outside`, `gate` and `mirror_drift` are computed (producer.rs:336-366) and before line 370; leave `Athena::loop_replay` unchanged.",
+      "reason": "All inputs (`send_backs`, `scope_send_backs`, `PRODUCER_SEND_BACKS`, `SCOPE_SEND_BACKS`) are in scope there. The skip condition `other_problems && !(send_backs >= PRODUCER_SEND_BACKS && !(outside non-empty && scope_send_backs < SCOPE_SEND_BACKS))` is the exact complement of the break at 446. A skipped report is always followed by another pass, so the last report is always measured.",
+      "rejected": [
+        {
+          "option": "Decide inside `Athena::loop_replay`",
+          "why": "It would need the loop counters passed in, and the replay-only tests call it as a unit."
+        }
+      ]
+    },
+    {
+      "choice": "Make the new demonstrations of criterion 3 a whole-workspace run of the two checks, with the new test code written in the same pass.",
+      "reason": "Criterion 3 is a behavior criterion, so it needs a seam and a fails_without. The seam is the two real commands over the finished tree.",
+      "rejected": [
+        {
+          "option": "Leave criterion 3 as a content-style read",
+          "why": "The finding requires fails_without and seam for it."
+        }
+      ]
+    },
+    {
+      "choice": "Add the gap script as a parameter of a new `run_loop_gap` helper that `run_loop` delegates to, with `#[allow(clippy::too_many_arguments)]` as `run_loop` already has.",
+      "reason": "The existing replay-only tests keep calling `run_loop` unchanged. Only the producer's first run(s) omit the `criteria_check` entry, and the production loop does all the judging.",
+      "rejected": [
+        {
+          "option": "Put the unmet-criterion logic in the fake",
+          "why": "The logic under test (`unmet_criteria`, the skip, the replay) must stay production code; the double only edits its report output."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "In `producer_loop`, compute `other_problems` and `will_send_back` (the complement of the break at line 446) after the problems are computed. Set `loop_replay = None` when the report will be sent back for another reason; otherwise call `self.loop_replay(ctx, &snapshot)?` as before. Add a short root-cause comment and update the doc comment at line 173.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add `run_loop_gap`, with `run_loop` delegating to it, and the two tests (a) and (b) in the in-loop replay module.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/producer-slowdown.md",
+      "action": "create",
+      "purpose": "State the cause with code citations, the quoted figures (12.7 to 23.5; planning 1.7 to 9.0 out of scope), what is code-derived versus an estimate, the fix, the cases left unchanged, the stale sentence in docs/architecture.md, and what the next throughput review should show.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a `### Changed` entry under `[Unreleased]` naming the root cause and the fix, and the note's path, as BRIEF.md asks.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/src/run/producer.rs lines 170-250 and 325-515, run/mod.rs lines 160-185 and 2250-2410, and the in-loop replay tests in run/tests.rs (1700-2110) with the helpers `run_loop`, `script_editing`, `marker_rules_while`, `seed_accepted_jobs` and `take_slot_soon`. Find the value of `PRODUCER_SEND_BACKS` and `SCOPE_SEND_BACKS`.",
+    "In producer_loop, after `unmet`, `unchanged`, `outside`, `gate` and `mirror_drift` are computed and before the replay call, compute `let other_problems = !unmet.is_empty() || !unchanged.is_empty() || gate.is_some() || !outside.is_empty() || !mirror_drift.is_empty();` and `let scope_slot_free = !outside.is_empty() && scope_send_backs < SCOPE_SEND_BACKS;`. Compute `let will_send_back = other_problems && !(send_backs >= PRODUCER_SEND_BACKS && !scope_slot_free);`. If `will_send_back`, set `loop_replay = None`; otherwise `loop_replay = self.loop_replay(ctx, &snapshot)?`. Reuse the same `scope_slot_free` at the break so the two cannot drift apart. Keep `left_criteria` and the redaction order. Add a short root-cause comment and update the doc comment at line 173.",
+    "In run/tests.rs add `run_loop_gap` (the body of `run_loop` plus a `gap_runs: usize` parameter, with `#[allow(clippy::too_many_arguments)]`), where `run_loop` calls it with 0. The gap script wraps `script_editing` and, while the producer run count is at most `gap_runs`, empties the `criteria_check` of the producer's report. Add test (a) `in_loop_replay_is_skipped_on_a_report_that_is_sent_back_for_another_reason` (gap of 1 run; asserts `prompts.len() == 2`, `candidate_calls == 10`, no in-loop line before the `producer   sent back` line, one after, state Landed). Add test (b) `in_loop_replay_still_measures_the_last_report_when_the_send_back_is_used_up` (gap larger than the runs the loop makes; asserts one replay of 10 calls on the final report and none from the hold at verification). Use `CODE`, `seed_accepted_jobs`, and `marker_rules_while` with `refuse_below` 0 so nothing is refused.",
+    "Run `cargo test -p athena-core --locked` and fix only expectations that encoded a replay on a report that is then sent back. Then run `cargo test --locked`, `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`.",
+    "Write docs/design/producer-slowdown.md: (1) the figures quoted from the request (producer 12.7 to 23.5, planning 1.7 to 9.0 out of scope, checks 0.3 to 0.7, verifier 3.4 to 3.6, median total 918.1 to 1604.8); (2) how the stage is measured (`role_minutes`, `StageMinutes::median_of`) and that the producer's wait for a build slot is inside it (slot_exec.rs, agent-and-build-slots.md); (3) the cause with code citations and dates from HISTORY.txt (5bae74b and the shim on 2026-11-05, 387255a on 2026-11-06), one slot by default (config.rs `max_check_slots`, athena.toml has no `[drain.pipeline]`) and `max_concurrency = 2`; (4) what is derived from code and what is an estimate, and that the records were not in the snapshot; (5) the change and what it leaves alone (single-pass jobs, planning, the cargo queue); (6) what the next throughput review should show (a lower producer median), how to read it, and the stale sentence in docs/architecture.md:59.",
+    "Add the CHANGELOG.md entry under `[Unreleased]` `### Changed` in the style of the neighbouring entries: the root cause (the in-loop replay measured and thrown away on reports the loop sends back, holding the only build slot), the fix, and the note's path.",
+    "Check the diff touches only producer.rs, run/tests.rs, the note and CHANGELOG.md, and that status.rs, store.rs, main.rs, slots.rs, slot_exec.rs, config.rs and athena.toml are untouched."
+  ],
+  "risks": [
+    {
+      "risk": "The fix may remove only part of the 11-minute rise; send-back jobs benefit and single-pass jobs do not, so the median may move less than hoped.",
+      "mitigation": "The note labels the size an estimate and lists what is left unchanged (single-pass jobs, planning, the cargo queue itself). The next throughput review is the check. If the producer median does not fall, the next candidate is the slot count or per-command hold, which needs athena.toml and is out of scope here."
+    },
+    {
+      "risk": "A report with both a held replay and another problem now gets the replay list one pass later. A job that uses up its send-back on the other problem could then be rejected at verification instead of fixed in the loop.",
+      "mitigation": "Accepted and documented: the replay runs on the next pass and on the last report, and the hold at verification remains the backstop. Test (b) pins that the last report is always measured."
+    },
+    {
+      "risk": "A wrong skip condition could skip the replay on the report that leaves the loop, so the hold at verification would measure from scratch (two unslotted builds).",
+      "mitigation": "The condition reuses the variables of the break at producer.rs:446 as its exact complement. Test (b) covers the exhausted send-back case; step 2 asks for a check against the break."
+    },
+    {
+      "risk": "Existing mirror, scope or gate tests with the replay seam installed may count an in-loop line or checker calls from the sent-back round.",
+      "mitigation": "Step 4 runs the full `cargo test -p athena-core --locked`. Change an assertion only where it encoded a replay on a report that is then sent back; do not weaken any assertion about the final report."
+    },
+    {
+      "risk": "If the job's scope check treated the deliverable list as a path limit, producer.rs and tests.rs would be sent back as outside the allowed paths.",
+      "mitigation": "I read `limits_changed_files` and criterion 4 does not match it, so no allowed list is derived. The producer should read the allowed-paths line of its prompt before editing and report it if present."
+    },
+    {
+      "risk": "docs/architecture.md and the producer brief still say the replay runs after each report.",
+      "mitigation": "The note quotes docs/architecture.md:59 for a maintainer follow-up; prompt and doc files outside the request's Files are not edited."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`Reported.loop_replay` value handed on from `producer_loop`",
+      "dependent": "crates/athena-core/src/run/mod.rs `replay_stage` / `replay_run` (reuse via `LoopReplay::covers`, mod.rs:182, 2208-2215)",
+      "kind": "code",
+      "test": "run/tests.rs `the_post_hoc_hold_reuses_the_in_loop_measurement_for_the_same_tree` and `producer_is_sent_back_with_the_newly_refused_list_and_share_then_the_loop_ends_under_the_limit` (unchanged); new test (b) covers the exhausted-send-back case. The report that leaves the loop is always measured, so reuse is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "Replay-held send-back (the replay list joins the send-back)",
+      "dependent": "crates/athena-core/src/run/producer.rs `send_back_text_with_replay` / `replay_problem`, `held` (lines 371, 398, 501)",
+      "kind": "code",
+      "test": "Replay-only tests (`producer_is_sent_back_with_...`, `in_loop_replay_exactly_at_the_default_limit_passes_and_one_over_is_sent_back`, `in_loop_replay_applies_the_declared_share_plus_five_points`) have no other problem, so the replay still runs and they pass unchanged. A report with both another problem and a held replay gets the replay list on the next pass, not the first (documented change).",
+      "reason": null
+    },
+    {
+      "name": "`replay     in the loop: ...` UI lines",
+      "dependent": "Tests that read them through `LoopRun::in_loop_lines` / `position` (run/tests.rs:1719-1731) and `athena go` output (mod.rs:2262-2373)",
+      "kind": "code",
+      "test": "`an_unrunnable_replay_says_no_replay_in_the_loop`, `an_empty_history_in_the_loop_is_no_replay_and_not_success` and `a_job_whose_change_touches_no_reading_rule_is_not_replayed_in_the_loop` have no send-back, so their lines are unchanged. Other tests in run/tests.rs that send back with the seam (mirror, scope, gate) may have counted an in-loop line on a sent-back round; step 4 runs `cargo test -p athena-core --locked` and changes an expectation only where it encoded the old per-round replay.",
+      "reason": null
+    },
+    {
+      "name": "`producer_loop` flow and every caller and mode that reaches it",
+      "dependent": "`Athena::go` for a fresh job, a seeded retry (`seed_commit`), a resumed kept candidate (`SnapshotRepo::BaseThenTree` / `BaseThenDir`, producer.rs:136-145), nested runs (`self.nested`), the fake driver, and the drain path under `[parallel] max_concurrency` (athena.toml:195, value 2). State read: `send_backs`, `scope_send_backs`, `PRODUCER_SEND_BACKS`, `SCOPE_SEND_BACKS`, the report's problems (`unmet`, `unchanged`, `outside`, `gate`, `mirror_drift`), `ctx.reading`, and the records history that `loop_replay` already reads for `replay_cases`.",
+      "kind": "code",
+      "test": "New tests (a) and (b); the existing scope send-back test `scope_send_back_a_change_made_outside_after_the_first_send_back_is_sent_back_again` (run/tests.rs ~3010) exercises the scope slot the condition mirrors, and the mirror and gate send-back tests exercise the other terms. The skip applies only where the break at 446 would not fire, so a skipped report is always followed by another pass. A nested run and a fake driver already return no replay (mod.rs:2400-2405). Nothing new is read from records or job state.",
+      "reason": null
+    },
+    {
+      "name": "Stage-median calculation and throughput review",
+      "dependent": "crates/athena-core/src/status.rs `StageMinutes`, `role_minutes`, `landed_jobs`, `StageMinutes::median_of`; crates/athena-core/src/hestia.rs (throughput review comparison)",
+      "kind": "code",
+      "test": "`throughput_reports_landed_per_day_stage_medians_idle_time_and_time_on_jobs_that_did_not_land` (status.rs ~3806) and the `StageMinutes::median_of` test (status.rs ~4515) pass unchanged in `cargo test --locked`.",
+      "reason": "Not changed. They sum recorded invocation durations; fewer queue waits shorten those durations without any change to how they are summed. `THROUGHPUT_WINDOW` and the review thresholds are untouched."
+    },
+    {
+      "name": "Build-slot queue, wrapper and config",
+      "dependent": "crates/athena-core/src/slots.rs (`SlotQueue`, `Class::Producer`), crates/athena-cli/src/slot_exec.rs, crates/athena-agent/src/env.rs `CargoShim`, crates/athena-data/src/config.rs `PipelineConfig` (`max_check_slots`, `build_wait_s`)",
+      "kind": "code",
+      "test": "slots.rs and slot_exec.rs unit tests and `an_in_loop_replay_waits_for_a_build_slot` run unchanged in `cargo test --locked`.",
+      "reason": "Not changed. The fix only reduces how often `loop_replay` asks for a slot; queue order, wait caps and the default of one slot keep their meaning."
+    },
+    {
+      "name": "Producer brief text about the replay and the prompt-size budgets",
+      "dependent": "crates/athena-context/src/briefs.rs `replay_while_working_section`; docs/system-facts.md budgets, checked by `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": "`system_facts_budgets_match_computed` passes unchanged in `cargo test --locked`.",
+      "reason": "No prompt or brief file changes. The brief's promise still holds for the report that leaves the loop; the note records that a sent-back report is no longer replayed."
+    },
+    {
+      "name": "Architecture description of the in-loop replay",
+      "dependent": "docs/architecture.md lines 55-72 (\"after each parsed producer report\")",
+      "kind": "rule",
+      "test": null,
+      "reason": "It becomes slightly stale. docs/ outside docs/design/ is outside the request's Files, so the plan does not edit it; the new note quotes the sentence for a follow-up."
+    },
+    {
+      "name": "Decision gate and hand-kept mirrors for the files touched",
+      "dependent": "docs/decision-links.toml and `unreconciled_in_snapshot` (run/checks.rs:447); `mirror_drift_in` (producer.rs:76)",
+      "kind": "rule",
+      "test": null,
+      "reason": "decision-links.toml names only crates/athena-git/src/snapshot.rs and crates/athena-core/src/run/candidate.rs among run/ files, so producer.rs, tests.rs, the note and CHANGELOG.md raise no unreconciled-decision send-back. No new test file is added, so xtask/shard-timings.txt needs no new line."
+    },
+    {
+      "name": "Allowed-paths scope check derived from the deliverables list",
+      "dependent": "`outside_allowed_paths` (producer.rs ~224-233), `AcceptedReading::limiting_criterion` / `allowed_paths` (crates/athena-context/src/briefs.rs:103-126), `limits_changed_files` (briefs.rs:146-222)",
+      "kind": "rule",
+      "test": "`allowed_paths_equal_the_deliverables_for_a_limiting_criterion_and_are_none_otherwise` (run_pin_tests.rs ~1353) pins the matching rule.",
+      "reason": "I read `limits_changed_files` against the brief's five criteria. Criterion 4 (\"touches only the code on the cause path and its tests\") has no `may` within 6 words after `only`, no `no file`, `no other file`, `test only` or `production unchanged`. So no allowed list is derived and producer.rs and tests.rs are not sent back as outside the deliverables."
+    },
+    {
+      "name": "Refusal or matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No parser, stem list, stop list or reading check is added or changed, so the refusal corpus does not apply. No landing, history-check or attribution rule changes either, so no commit-shape table is needed."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the note and check each cited path and symbol with Read or Grep.",
+      "command": "ls docs/design/producer-slowdown.md",
+      "observes": "The file exists. It states the cause. It cites producer.rs (`producer_loop`, the `loop_replay` call), run/mod.rs (`loop_replay`, `replay_stage`, `LoopReplay::covers`), status.rs (`role_minutes`, `StageMinutes::median_of`), slot_exec.rs, and config.rs `max_check_slots`. It quotes the measured 12.7 to 23.5 minutes (planning 1.7 to 9.0 marked out of scope) and labels every other figure an estimate. It says the records were not in the snapshot and what the next throughput review should show.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Two new tests in the in-loop replay module of crates/athena-core/src/run/tests.rs run whole jobs through `Athena::go`. They use the existing fake agent `Script`, the replay seam installed with `crate::replay_seam::install(real_rules(), marker_rules_while(..))`, and the `LoopRun`/`run_loop` harness. (a) `in_loop_replay_is_skipped_on_a_report_that_is_sent_back_for_another_reason`: the producer edits crates/demo/src/lib.rs, 10 accepted readings are seeded, and the first run omits the `criteria_check` entry so `unmet_criteria` fires; the second run reports it. Asserts: `prompts.len() == 2`, `candidate_calls == 10`, no `replay     in the loop` line before the `producer   sent back` line, exactly one after, and the state is Landed. (b) `in_loop_replay_still_measures_the_last_report_when_the_send_back_is_used_up`: the producer never reports the criterion. Asserts: after the one send-back the final report is replayed exactly once, so `candidate_calls == 10`, exactly one in-loop line, and the hold at verification does not measure again. The existing replay-only tests stay unchanged and pass.",
+      "command": "cargo test -p athena-core --locked in_loop_replay_",
+      "observes": "The two new tests and the existing `in_loop_replay_exactly_at_the_default_limit_passes_and_one_over_is_sent_back` and `in_loop_replay_applies_the_declared_share_plus_five_points` pass. Then `cargo test --locked` passes in full, including `producer_is_sent_back_with_the_newly_refused_list_and_share_then_the_loop_ends_under_the_limit` (candidate_calls == 20) and `the_post_hoc_hold_reuses_the_in_loop_measurement_for_the_same_tree`. The tests count replay measurements, each of which is two builds under one build slot; they prove the mechanism, not the minutes.",
+      "fails_without": "On the old code `producer_loop` replays after every report. Test (a) sees 20 checker calls instead of 10, and an in-loop line before the `producer   sent back` line, so it fails. Test (b) fails on a version that also skips the replay on the last report: it would see 0 calls and the hold at verification would measure from scratch.",
+      "seam": "Production entry point: `Athena::go` (`athena.go(proposal.job.as_str(), AcceptedBy::User, &ui)`), which reaches `producer_loop` in run/producer.rs and `loop_replay` in run/mod.rs. Guards: the change list touches `crates/` (`touches_reading_rules`); `replay_cases` is non-empty (history from `seed_accepted_jobs`, tests.rs:1417); `plenty_of_space` passes the disk gate; the default of one build slot is free. Fixtures: the fake agent script (`script_editing`, tests.rs:1736), the replay seam, `marker_rules_while` (tests.rs:1777) and `run_loop` (tests.rs:1800) all exist today. Step 3 adds `run_loop_gap`, a script wrapper that clears `criteria_check` for the first N producer runs. The slot, the replay, the limit and the send-back text stay production code; the double only supplies reading rules to compare and an incomplete report."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the two workspace checks on the finished tree.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Both exit 0 with no diagnostics over production and test code. The skip condition is a single named boolean with no needless clone, and `run_loop_gap` carries the `too_many_arguments` allow like `run_loop`.",
+      "fails_without": "If the new code or tests are unformatted, or trip a clippy lint (an unused `other_problems`, a needless clone, or the argument count of `run_loop_gap` without its allow), the command exits non-zero. Checks Athena runs on the result: `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`.",
+      "seam": "The real commands over the whole workspace; no double. Entry points are `cargo fmt` and `cargo clippy`, as Athena's own checks run them. They exist today. Step 4 runs them after the code and tests are written."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff and the stage-median tests.",
+      "command": "git diff --stat",
+      "observes": "The stat lists exactly crates/athena-core/src/run/producer.rs, crates/athena-core/src/run/tests.rs, docs/design/producer-slowdown.md and CHANGELOG.md. status.rs, store.rs, main.rs, slots.rs, slot_exec.rs, config.rs and athena.toml are absent, so no stage-median reporting changed. `cargo test -p athena-core --locked throughput` also passes unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the code diff and the note's closing section.",
+      "command": "git diff -- crates/athena-core/src/run/producer.rs docs/design/producer-slowdown.md",
+      "observes": "The code change removes a computation (the replay on a report the loop sends back). It does not touch `build_wait_s`, the wrapper wait, the slot count, `PRODUCER_SEND_BACKS` or timeouts. The note says the next throughput review should show a lower producer median. It lists what is not expected to move (single-pass jobs, planning) and labels the size an estimate. It says how to check it: `athena status` stage medians, the stored throughput comparison, and the invocation records of send-back jobs.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: The brief's deliverable list names status.rs, main.rs and store.rs, but reading them shows nothing on the producer's time path. This plan changes run/producer.rs and run/tests.rs instead, as criterion 4 allows. Confirm that is acceptable.",
+    "Host: Do the invocation records for jobs landed since 2026-11-05 show producer cargo commands waiting for a build slot (a slot-wait record, or long producer invocations while another job's in-loop replay ran)? The snapshot has no records/, so the plan cannot measure how much of the 10.8 minute rise this cause accounts for.",
+    "Host: Is `[drain.pipeline] max_check_slots` set in the live configuration, or is it the default of 1? athena.toml in the snapshot has no `[drain.pipeline]` section, which is what the cause analysis assumes."
+  ],
+  "producer_section_sha256": "02445d7222e7c50fde1b87df2295cf970e17c0dcc53e7141bf97ebd28b3e9ac1"
+}

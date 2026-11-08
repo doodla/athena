@@ -440,6 +440,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The change verifier, study verifier and study producer prompt sets are shorter (D166): 1154, 1195 and 1194
+  estimated tokens, down from 1298, 1296 and 1257, so each has 100 or more tokens of headroom under the unchanged
+  1300 budget. Repeated wording was removed or merged; no rule was added or changed, and the snapshot wording of the
+  verifier frame is kept.
 - An open earlier throughput design request no longer stops the throughput review. The review runs, asks the
   model, records the proposal, and notes the open request in the record and in `THROUGHPUT.md`; four of seven runs
   on 4 to 6 Nov did nothing for this reason. A proposal recorded without a design request has `request_job` unset.

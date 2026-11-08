@@ -1,0 +1,149 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261025-012029-7d79",
+  "n": 1,
+  "at": "2026-11-08T00:31:09.563026891Z",
+  "invocation_seq": 2,
+  "base_commit": "c447f53f3c961d9e68c097f1c52944cfeab50df6",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Push attribution checkpoints to the remote records branch",
+  "summary": "write_checkpoint in attribution.rs appends only to the local records branch via RecordsWriter::append, so the next write resets it away. Change it to use RecordsWriter::append_to_remote (compare-and-swap, retry) so a passing check's checkpoint reaches the remote and later landings fast-forward past it. Audience: maintainers and CI, whose incremental run should judge only commits after the checkpoint.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests plus cargo test, clippy, fmt pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix the write path so checkpoints are pushed, not the reset symptom."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests read the remote branch directly."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test/clippy/fmt."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and changelog written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-gate/src/attribution.rs: write_checkpoint (line ~727) builds a Checkpoint and calls RecordsWriter::append, which writes only the local ref; read_newest_checkpoint (~549) is the reader, and tests passing_check_writes_checkpoint, failing_check_writes_no_checkpoint, checkpoint_write_failure_keeps_verdict and put_checkpoint already exist. Read crates/athena-git/src/records_branch.rs: append_to_remote (~398) syncs from the remote, builds on the remote tip, pushes with push_if_remote_at (expected-tip guard), retries on rejection up to max_attempts, then returns RecordsError::Contended. Resolution order: sync_from(remote), fetch tip, plan, build_commit, push. Records validation: no new record or data file is added; the checkpoint is the existing HistoryRecord::Checkpoint under CHECKPOINT_DIR, already accepted by check_record_file / AnyRecord in crates/athena-data/src/records.rs, and the existing round-trip tests there cover it. The property is measured directly by reading the remote records ref in a test repo after the check, not via the local ref.",
+    "Environment: the push goes to the configured git remote's records branch (a local bare repo in tests); write permission to the records branch; reads the remote tip. No CI workflow files change.",
+    "The request lists crates/athena-core/src/gh.rs, which does not exist in the repository (no gh* under crates/athena-core/src); it is treated as not needing change, and the remote name is obtained from the existing caller context. If a remote name needs plumbing it goes through attribution.rs.",
+    "A failed push stays a reported checkpoint_error and keeps the verdict, as checkpoint_write_failure_keeps_verdict requires.",
+    "athena land also writes a checkpoint through the same write_checkpoint path, so one fix covers both; no athena.toml, defaults.toml or workflow change is needed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-gate/src/attribution.rs, run with `cargo test -p athena-gate`, shows that after a passing check the checkpoint file exists on the remote records branch (read from the bare remote, not the local ref).",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run by `cargo test -p athena-gate` shows that a later landing/records write after the checkpoint leaves the checkpoint on the remote and the remote tip is a descendant of the checkpoint commit (fast-forward only, no reset).",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run by `cargo test -p athena-gate` shows an incremental attribution run, starting from the remote checkpoint, judges only commits after its main_sha rather than replaying in full.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test in crates/athena-git/src/records_branch.rs or attribution.rs shows a checkpoint push that loses a race is retried on the new remote tip and still lands; a persistent push failure keeps the verdict and sets checkpoint_error.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Grep of crates/athena-gate/src/attribution.rs shows write_checkpoint calls append_to_remote rather than append.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing that checkpoints are now pushed to the remote records branch.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo test, cargo clippy --all-targets and cargo fmt --check all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-gate/src/attribution.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/tests/binary.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Changing the records record schema or adding record files",
+    "Changing CI workflow files",
+    "Creating crates/athena-core/src/gh.rs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 4.3
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1900.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.673289183222958,
+      "p_user_intervenes": 0.07713717693836977,
+      "cost_usd": {
+        "p10": 0.5627920000000001,
+        "p50": 1.4534939000000002,
+        "p90": 4.692336899999999
+      },
+      "wall_time_s": {
+        "p10": 567.3351135457451,
+        "p50": 2103.609475143514,
+        "p90": 4312.341914624425
+      }
+    }
+  },
+  "departures": null,
+  "hard_reason": "Changes the records writer path that landing and the history check depend on, so a mistake can silently corrupt or drop records.",
+  "producer_effort": "high"
+}
