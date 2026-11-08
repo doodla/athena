@@ -588,6 +588,7 @@ impl Athena {
                 .collect(),
             headroom: reader_headroom(self, jc),
             refusal: refusal.map(str::to_string),
+            enabled_roles: jc.config.enabled_roles(),
         });
         let capability_ids: Vec<String> = self
             .capabilities
@@ -1412,6 +1413,20 @@ mod tests {
 
     fn shipped_config() -> athena_data::Config {
         athena_data::Config::parse(include_str!("../../../athena.toml")).unwrap()
+    }
+
+    #[test]
+    fn the_reader_input_roles_come_from_the_config_job_plan_enabled_value() {
+        let mut config = shipped_config();
+        config.job_plan.as_mut().unwrap().enabled = true;
+        assert!(config.enabled_roles().contains(&"planner".to_string()));
+        assert!(config.enabled_roles().contains(&"critic".to_string()));
+        config.job_plan.as_mut().unwrap().enabled = false;
+        assert_eq!(config.enabled_roles(), ["reader", "producer", "verifier"]);
+        config.job_plan = None;
+        assert_eq!(config.enabled_roles(), ["reader", "producer", "verifier"]);
+        // read_once passes the config's roles, not a fixed list.
+        assert!(reading_source().contains("enabled_roles: jc.config.enabled_roles(),"));
     }
 
     fn close(a: f64, b: f64) -> bool {
@@ -5245,6 +5260,364 @@ mod tests {
         }
     }
 
+    /// A complete cache statement: save scope, restore scope, write rights and the ref scope.
+    const CACHE_SCOPE: &str = "Environment: the CI cache is saved by the main branch push run, restored by \
+         pull request runs of the same branch and by main, written only by main";
+
+    /// Cache statements that each lack one part, with the phrase the error must use for the missing part.
+    const CACHE_SCOPE_GAPS: [(&str, &str); 5] = [
+        (
+            "Environment: the CI cache is restored by pull request runs of the same branch and by main, \
+             written only by main",
+            "which ref and event saves it",
+        ),
+        (
+            "Environment: the CI cache is saved by the main branch push run, written only by main",
+            "which runs restore it",
+        ),
+        (
+            "Environment: the CI cache is saved by the main branch push run and restored by pull request \
+             runs of the same branch and by main",
+            "which runs may write shared entries",
+        ),
+        (
+            "Environment: the CI cache is saved by default, restored by default and written by default",
+            "the ref scope",
+        ),
+        (
+            "Environment: it is saved by the main branch push run, restored by pull request runs of the \
+             same branch and by main, written only by main",
+            "no `Environment:` assumption names",
+        ),
+    ];
+
+    /// The phrases the error uses for each part a cache statement can lack.
+    const CACHE_SCOPE_PARTS: [&str; 4] = [
+        "which ref and event saves it",
+        "which runs restore it",
+        "which runs may write shared entries",
+        "the ref scope",
+    ];
+
+    /// Asserts that every gap in [`CACHE_SCOPE_GAPS`] is refused by `check_environment_reach` with an error that
+    /// names the missing part, and that the complete statement is accepted. `base` carries the assumptions every
+    /// variant needs for the place statement.
+    fn assert_cache_scope_is_required(reading: &Reading, base: &[&str], label: &str) {
+        let with_base = |extra: &str| {
+            let mut r = reading.clone();
+            for text in base {
+                r.assumptions.push((*text).into());
+            }
+            r.assumptions.push(extra.into());
+            r
+        };
+        let bare = {
+            let mut r = reading.clone();
+            for text in base {
+                r.assumptions.push((*text).into());
+            }
+            r
+        };
+        let error = check_environment_reach(&bare).unwrap_err().to_string();
+        assert!(
+            error.contains("no `Environment:` assumption names"),
+            "{label}: {error}"
+        );
+        assert!(!error.contains("who performs it"), "{label}: {error}");
+        assert_eq!(refuser(&bare), Some("check_environment_reach"), "{label}");
+        for (text, phrase) in CACHE_SCOPE_GAPS {
+            let gap = with_base(text);
+            let error = check_environment_reach(&gap).unwrap_err().to_string();
+            assert!(error.contains(phrase), "{label}: {text}: {error}");
+            if phrase != "no `Environment:` assumption names" {
+                // Only the missing part is named in the list after "lacks".
+                let lacks = error.split(" lacks ").nth(1).unwrap_or("");
+                let lacks = lacks.split(". Repair").next().unwrap();
+                assert_eq!(lacks, phrase, "{label}: {text}: {error}");
+                for other in CACHE_SCOPE_PARTS.iter().filter(|p| **p != phrase) {
+                    assert!(!lacks.contains(other), "{label}: {text}: {error}");
+                }
+            }
+            assert_eq!(
+                refuser(&gap),
+                Some("check_environment_reach"),
+                "{label}: {text}"
+            );
+        }
+        let fixed = with_base(CACHE_SCOPE);
+        check_environment_reach(&fixed).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(refuser(&fixed), None, "{label}");
+    }
+
+    #[test]
+    fn environment_reach_cache_refuses_a_workflow_with_a_cache_without_scope() {
+        for action in [DeliverableAction::Create, DeliverableAction::Modify] {
+            let mut reading = governed_reading(
+                &["docs/guide.md", ".github/workflows/ci.yml"],
+                &[
+                    "docs/guide.md exists",
+                    ".github/workflows/ci.yml runs the build",
+                ],
+                &[],
+            );
+            reading.deliverables[1].action = action;
+            // The workflow alone, with the place statement, is accepted: no cache is mentioned.
+            let plain = with_environment(reading.clone(), CI_ENVIRONMENT);
+            check_environment_reach(&plain).unwrap();
+            assert_eq!(refuser(&plain), None);
+            // A cache word in a behavior criterion makes the cache scope a requirement (a path is no trigger).
+            add_behavior(
+                &mut reading,
+                "ci.yml saves a result cache keyed by the build fingerprint",
+            );
+            assert_cache_scope_is_required(&reading, &[CI_ENVIRONMENT], "workflow deliverable");
+            // The same for a cache named only in the summary.
+            let mut summary = governed_reading(
+                &["docs/guide.md", ".github/workflows/ci.yml"],
+                &[
+                    "docs/guide.md exists",
+                    ".github/workflows/ci.yml runs the build",
+                ],
+                &[],
+            );
+            summary.deliverables[1].action = action;
+            summary.summary = "Save an artifact between runs".into();
+            assert_cache_scope_is_required(&summary, &[CI_ENVIRONMENT], "summary");
+        }
+        // Deleting a workflow adds no cache, so a cache word beside it triggers nothing.
+        let mut deleted = workflow_reading(DeliverableAction::Delete);
+        add_behavior(
+            &mut deleted,
+            "ci.yml saves a result cache keyed by the build fingerprint",
+        );
+        check_environment_reach(&deleted).unwrap();
+    }
+
+    #[test]
+    fn environment_reach_cache_refuses_a_behavior_cache_criterion_without_scope() {
+        for text in [
+            "The CI job restores a result cache keyed by the build fingerprint",
+            "CI uploads the build artifact and later runs download it",
+            "The build uses `actions/cache@v4` keyed by the lock file",
+            "The job calls `actions/upload-artifact` for the report",
+            "The GitHub runner restores a cache",
+        ] {
+            let reading = behavior_reading(&[text]);
+            assert_cache_scope_is_required(&reading, &[], text);
+        }
+        // A CI block beside a cache sentence without write rights: the CI block's write word is not borrowed.
+        let reading =
+            behavior_reading(&["The CI job restores a result cache keyed by the fingerprint"]);
+        let mut mixed = reading.clone();
+        mixed.assumptions.push(CI_ENVIRONMENT.into());
+        mixed.assumptions.push(
+            "Environment: the CI cache is saved by the main branch push run and restored by pull request \
+             runs of the same branch"
+                .into(),
+        );
+        let error = check_environment_reach(&mixed).unwrap_err().to_string();
+        assert!(
+            error.contains("which runs may write shared entries"),
+            "{error}"
+        );
+        // The cache-only refusal names the cache questions in its tail, not the place questions.
+        assert!(
+            error.contains("which ref saves the cache or artifact"),
+            "{error}"
+        );
+        assert!(!error.contains("who performs it"), "{error}");
+        assert!(
+            error.starts_with("the reading was refused because"),
+            "{error}"
+        );
+        // The best assumption is judged: a second, complete one repairs it.
+        mixed.assumptions.push(CACHE_SCOPE.into());
+        check_environment_reach(&mixed).unwrap();
+        // A host action and a cache together need both statements; the error carries both tails.
+        let both = behavior_reading(&[
+            "Athena pushes the job branch to origin",
+            "The CI job restores a result cache keyed by the fingerprint",
+        ]);
+        let error = check_environment_reach(&both).unwrap_err().to_string();
+        assert!(error.contains("who performs it"), "{error}");
+        assert!(
+            error.contains("which ref saves the cache or artifact"),
+            "{error}"
+        );
+        let fixed = with_environment(with_environment(both, CI_ENVIRONMENT), CACHE_SCOPE);
+        check_environment_reach(&fixed).unwrap();
+    }
+
+    #[test]
+    fn environment_reach_cache_scope_covers_the_class() {
+        // Job 20261025-034731-2am0, rebuilt from the job brief: a result cache keyed by the fingerprint.
+        let fingerprint = behavior_reading(&[
+            "CI restores a result cache keyed by the fingerprint of the build paths",
+        ]);
+        assert_cache_scope_is_required(&fingerprint, &[CI_ENVIRONMENT], "2am0");
+        // Job 20261025-055626-er96, rebuilt from the job brief: no cache word and no workflow deliverable.
+        let early_push = behavior_reading(&["An early push whose CI run is reused at landing"]);
+        assert!(
+            check_environment_reach(&early_push)
+                .unwrap_err()
+                .to_string()
+                .contains("a CI result reused from another ref")
+        );
+        assert_eq!(refuser(&early_push), Some("check_environment_reach"));
+        let only_ci = with_environment(early_push.clone(), CI_ENVIRONMENT);
+        assert_eq!(refuser(&only_ci), Some("check_environment_reach"));
+        let fixed = with_environment(
+            only_ci,
+            "Environment: the CI result is saved by the early push run on the job branch, restored by the \
+             landing run of the same branch and by main, written only by main",
+        );
+        check_environment_reach(&fixed).unwrap();
+        assert_eq!(refuser(&fixed), None);
+        // No cache, no artifact, no workflow and no CI result reuse: accepted unchanged.
+        for text in [
+            "Fixed where it originates",
+            "The reader caches the survey in memory",
+            "cache.rs is not changed",
+            "`cache_dir` is kept",
+            "The GitHub API response is cached in memory",
+            "The reader caches its actions",
+            "CI runs the tests",
+            "The corpus runner caches the readings",
+            "The workflow engine caches the plan",
+            "ci restores the cache",
+            "A green CI result is reused as the job baseline when the fingerprint matches",
+            "A green CI run for the candidate SHA is reused",
+            "CI reuses the run matched by the commit",
+        ] {
+            let reading = behavior_reading(&[text]);
+            check_environment_reach(&reading).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(refuser(&reading), None, "{text}");
+        }
+        let plain = behavior_reading(&[SERVED_STATE]);
+        check_environment_reach(&plain).unwrap();
+        // A content criterion with a cache word, beside a workflow deliverable, triggers nothing.
+        let mut content = workflow_reading(DeliverableAction::Create);
+        add_content(&mut content, "The cache design is documented in the guide");
+        check_environment_reach(&with_environment(content, CI_ENVIRONMENT)).unwrap();
+        // A workflow deliverable makes a bare workflow or runner a CI place.
+        let mut runner = workflow_reading(DeliverableAction::Create);
+        add_behavior(&mut runner, "The runner restores the cache");
+        assert_cache_scope_is_required(&runner, &[CI_ENVIRONMENT], "runner beside a workflow");
+    }
+
+    #[test]
+    fn environment_reach_cache_scope_accepts_the_criteria_and_summary_of_its_own_job() {
+        let mut reading = summary_reading(
+            "Root cause: check_environment_reach makes the reader state site, permissions and data but never \
+             asks which ref saves each CI cache or artifact, which runs restore it, and which may write shared \
+             entries. Extend that check so a CI workflow deliverable or a cache or artifact behavior criterion \
+             needs an Environment: assumption stating save scope, restore scope and write rights.",
+        );
+        for text in [
+            "Run cargo test -p athena-core: a new unit test shows a reading with a created \
+             .github/workflows/ci.yml deliverable or a behavior criterion that keys a CI cache or artifact is \
+             refused when its Environment: assumption lacks cache save scope, restore scope or write rights, \
+             and is accepted when the assumption states them (for example saved by the main branch push run, \
+             restored by pull request runs of the same branch and by main, written only by main).",
+            "Run cargo test -p athena-core: a test covers the class, not one job. It uses wording from both \
+             referenced jobs (a fingerprint-keyed result cache; an early push whose CI run is reused at \
+             landing), plus a reading with no cache or artifact and no workflow, which stays accepted.",
+            "Run cargo test -p athena-core: the corpus includes the new check in the acceptance-check name \
+             list and the replay declaration test passes: the change refuses more readings, expected 3% of newly \
+             refused readings.",
+        ] {
+            add_behavior(&mut reading, text);
+        }
+        // Without the assumption the job's own text is refused; this is the rule it asks for.
+        assert!(check_environment_reach(&reading).is_err());
+        reading.assumptions.push(
+            "Environment: the check runs locally in the reader stage over the in-memory Reading with \
+             read-only access to the request and snapshot; it reaches no refs, origin or CI. The rule it \
+             enforces concerns CI (GitHub Actions) caches: a cache is saved by the ref and event that ran \
+             it, restored by runs of the same ref or its base, and shared entries are written only by the \
+             default branch."
+                .into(),
+        );
+        check_environment_reach(&reading).unwrap();
+        let declared = replay_declaration_of(&reading);
+        assert_eq!(declared.share, Some(3));
+    }
+
+    #[test]
+    fn environment_reach_cache_scope_doc_and_changelog_name_the_cause() {
+        fn collapse(text: &str) -> String {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        const CAUSE: &str = "no step asking, for each CI cache or stored artifact, which ref saves it, which \
+                             runs restore it, and which runs may write shared entries";
+        const OLD_CAUSE: &str = "no step asking who performs each action, where, with what permissions, and \
+                                 what data it reaches";
+        let before = reading_source()
+            .split("pub fn check_environment_reach(")
+            .next()
+            .unwrap();
+        let mut doc_lines: Vec<&str> = before
+            .lines()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("///"))
+            .map(|l| l.trim_start().trim_start_matches('/'))
+            .collect();
+        doc_lines.reverse();
+        let doc = collapse(&doc_lines.join(" "));
+        let unreleased = include_str!("../../../CHANGELOG.md")
+            .split("## [Unreleased]")
+            .nth(1)
+            .unwrap()
+            .split("\n## [")
+            .next()
+            .unwrap();
+        let mut items: Vec<String> = Vec::new();
+        for line in unreleased.lines() {
+            if line.starts_with("- ") {
+                items.push(line.to_string());
+            } else if let Some(last) = items.last_mut() {
+                last.push(' ');
+                last.push_str(line);
+            }
+        }
+        let items: Vec<String> = items.iter().map(|i| collapse(i)).collect();
+        let item = items
+            .iter()
+            .find(|i| i.contains(CAUSE))
+            .expect("a changelog item names the cache-scope cause");
+        assert!(
+            !item.contains(OLD_CAUSE),
+            "the new item is separate from the first one"
+        );
+        for (label, text) in [("doc comment", &doc), ("changelog item", item)] {
+            for needle in [
+                CAUSE,
+                "20261025-034731-2am0",
+                "20261025-055626-er96",
+                "20261025-050603-wrv7",
+                "20261025-065849-n99a",
+                "This check refuses more readings; the higher refusal rate is intended, expected 3% of newly \
+                 refused readings (an estimate, not measured)",
+                "`Environment:`",
+                "`actions/cache`",
+                "SHA",
+            ] {
+                let needle = collapse(needle);
+                assert!(text.contains(&needle), "the {label} lacks {needle:?}");
+            }
+        }
+        for needle in [
+            "save scope",
+            "restore scope",
+            "write rights",
+            "`check_environment_reach`",
+            "briefs.rs",
+        ] {
+            assert!(item.contains(needle), "the changelog item lacks {needle:?}");
+        }
+        assert!(doc.contains("lowercase `ci`"), "{doc}");
+    }
+
     #[test]
     fn a_governance_path_that_only_looks_like_a_name_is_not_named() {
         let bare = governed_reading(&["src/site.rs"], &["the site builds"], &["x"]);
@@ -6954,7 +7327,33 @@ mod tests {
             .join(" ");
         // D164 keeps the share it declared; the doc comment and the changelog carry the current one (D165).
         assert!(decisions.contains("expected 3% of newly refused readings"));
-        for (label, text) in [("the doc comment", &doc), ("the changelog", &changelog)] {
+        // The share is judged in the defined-terms item only: another check (`check_environment_reach`, see
+        // D165) now declares 3% in the same Unreleased section.
+        let unreleased = include_str!("../../../CHANGELOG.md")
+            .split("## [Unreleased]")
+            .nth(1)
+            .unwrap()
+            .split("\n## [")
+            .next()
+            .unwrap();
+        let mut items: Vec<String> = Vec::new();
+        for line in unreleased.lines() {
+            if line.starts_with("- ") {
+                items.push(line.to_string());
+            } else if let Some(last) = items.last_mut() {
+                last.push(' ');
+                last.push_str(line);
+            }
+        }
+        let item = items
+            .iter()
+            .map(|i| i.split_whitespace().collect::<Vec<_>>().join(" "))
+            .find(|i| {
+                i.contains("`reading::check_defined_terms`")
+                    && i.contains("expected 2% of newly refused readings")
+            })
+            .expect("a changelog item declares the share of the defined-terms check");
+        for (label, text) in [("the doc comment", &doc), ("the changelog item", &item)] {
             assert!(
                 text.contains("expected 2% of newly refused readings"),
                 "{label} lacks the current share"

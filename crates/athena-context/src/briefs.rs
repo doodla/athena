@@ -2232,7 +2232,12 @@ pub struct ReaderInputs {
     /// Why Athena refused the reading this reader returned just before, when this is the one immediate
     /// second read; the brief gives it as a correction. `None` on a first read.
     pub refusal: Option<String>,
+    /// The pipeline roles enabled in the effective config (`Config::enabled_roles`).
+    pub enabled_roles: Vec<String>,
 }
+
+/// The heading of the section that lists the pipeline roles enabled in the effective config.
+pub const ENABLED_ROLES_HEADING: &str = "# Enabled roles";
 
 /// The heading of the section that gives the reader the refusal of its previous reading. The fake reader
 /// and the tests find the section by it.
@@ -2244,7 +2249,7 @@ pub const READING_RULES_HEADING: &str = "# Reading rules";
 /// Each rule a reading must pass, one short line each. A line gives the check that enforces it; a reading
 /// that breaks a checked rule is refused and read again once, with the refusal as a correction. A line
 /// ending `(prose only)` has no check and causes no refusal.
-pub const READING_RULES: [&str; 9] = [
+pub const READING_RULES: [&str; 10] = [
     "Previous result: a retry or follow-up names each earlier job, says how its result is addressed, lists deliverables and out_of_scope, and lists or excludes the files it changed (`check_prior_result_and_scope`).",
     "Criteria evidence: each criterion rests on a command, Grep or file the verifier can check, never the producer's report (`check_criteria_evidence`).",
     "Governance files: list one as a deliverable and name it in a criterion when the request names it or a deliverable implies it, or name it in out_of_scope (`check_governance_coverage`).",
@@ -2254,6 +2259,7 @@ pub const READING_RULES: [&str; 9] = [
     "Terms: define each structural term the request uses (ladder, rung, tier, layer) in a `Term ladder: <meaning>` assumption; a quoted or cited mention needs none (`check_defined_terms`).",
     "Valid reading: class, capability and producer model from the closed lists; a decline gives a reason; a capability needs a criterion; forecasts are valid (`build_reading`).",
     "Test placement: put each test in a crate that can import the code under test; xtask has no library target, so test it in `xtask/tests/` or unit tests in `xtask/src/` (prose only).",
+    "Enabled roles: brief content targets only the roles listed under Enabled roles; a role not listed gets no new content (prose only).",
 ];
 
 /// What the reader writes before it gives behavior criteria for a code or tests change, and when a request
@@ -2437,6 +2443,11 @@ pub fn reader_brief(inputs: &ReaderInputs) -> String {
         inputs.classes.join(", "),
         inputs.producer_models.join(", "),
         inputs.producer_default
+    );
+    let _ = writeln!(
+        out,
+        "{ENABLED_ROLES_HEADING}\n\nThe effective config runs these pipeline roles: {}. Any other role does not run for this job.\n",
+        inputs.enabled_roles.join(", ")
     );
     let _ = writeln!(out, "{READING_RULES_HEADING}\n");
     for rule in READING_RULES {
@@ -4523,7 +4534,36 @@ mod tests {
             verifier_can_run: vec![("change".into(), vec!["cargo test".into()])],
             headroom: vec![],
             refusal: None,
+            enabled_roles: vec!["reader".into(), "producer".into(), "verifier".into()],
         }
+    }
+
+    fn enabled_roles_section(brief: &str) -> &str {
+        let (_, section) = brief.split_once(ENABLED_ROLES_HEADING).unwrap();
+        section.split("\n# ").next().unwrap()
+    }
+
+    #[test]
+    fn the_reader_brief_lists_only_reader_producer_and_verifier_when_job_planning_is_off() {
+        let brief = reader_brief(&reader_inputs(&reading()));
+        let section = enabled_roles_section(&brief);
+        assert!(section.contains("reader, producer, verifier."), "{section}");
+        assert!(!section.contains("planner"), "{section}");
+        assert!(!section.contains("critic"), "{section}");
+    }
+
+    #[test]
+    fn the_reader_brief_lists_planner_and_critic_when_job_planning_is_on() {
+        let mut inputs = reader_inputs(&reading());
+        inputs.enabled_roles = ["reader", "planner", "critic", "producer", "verifier"]
+            .map(String::from)
+            .to_vec();
+        let brief = reader_brief(&inputs);
+        let section = enabled_roles_section(&brief);
+        assert!(
+            section.contains("reader, planner, critic, producer, verifier."),
+            "{section}"
+        );
     }
 
     #[test]
@@ -4550,7 +4590,13 @@ mod tests {
         ] {
             assert!(section.contains(check), "no rule for {check}:\n{section}");
         }
-        assert_eq!(READING_RULES.len(), 9);
+        assert_eq!(READING_RULES.len(), 10);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Enabled roles") && l.ends_with("(prose only).")),
+            "no prose-only rule line for enabled roles:\n{section}"
+        );
         assert!(
             lines
                 .iter()
@@ -4576,9 +4622,9 @@ mod tests {
                     && l.contains("`check_design_existing_code`")),
             "no rule line names Existing code: and its check:\n{section}"
         );
-        // The section adds little to the brief: nine rule lines and the code survey guide paragraph. The
+        // The section adds little to the brief: ten rule lines and the code survey guide paragraph. The
         // section was about 2540 bytes with eight rules and measured 2718 with the ninth.
-        assert!(section.len() < 2750, "{} bytes", section.len());
+        assert!(section.len() < 2900, "{} bytes", section.len());
     }
 
     #[test]
