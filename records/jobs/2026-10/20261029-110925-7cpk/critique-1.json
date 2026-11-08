@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-110925-7cpk",
+  "round": 1,
+  "at": "2026-11-08T22:47:43.674147879Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "retry_landing, another local landing path, gets no detached-HEAD guard.",
+      "evidence": "retry_landing computes `dispatched`, takes the lock at line 554 and calls plan() without the new guard. With Dispatched::Unknown (an old record) on a detached HEAD, plan() checks only the ancestor rule and can return Tree, so the retry commits onto the detached HEAD. That is the path Decision 5 says it closes ('Leaves the commit-onto-detached-HEAD path open'). For a branch job, the bail at line 558 says the job 'can no longer land' and suggests `athena close` to abandon it, even though checking out the branch would let it land. This is the misleading kind of message the request is about. Fix: Call `crate::land::refuse_detached(&self.git, &dispatched)?` in retry_landing right after `lock_repository`, as in land_or_block. Add one lifecycle test: a blocked job retried on a detached HEAD is refused with 'detached' and `main`, and nothing is committed. The existing a_blocked_job_will_not_retry_on_another_branch tests another branch, not a detached HEAD, so it stays unchanged.",
+      "location": "Dependents: retry of a blocked landing; crates/athena-core/src/run/close.rs:552-560",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The refusal does not name the command that resumes the job.",
+      "evidence": "The planned message ends with 'Check it out, then run again'. It does not say which command resumes the job. After the bail the job has no outcome and reads as interrupted. The existing bail for another branch in the same function names the command: 'Check out the dispatch branch, then `athena retry {id}`'. Fix: Name the concrete command that resumes an interrupted verified job, checked against the code (`athena retry <id>` or `athena go <id>`). In the negative lifecycle test, check out main again and run that command, then assert the job lands. That shows the refusal loses no work.",
+      "location": "Step 1 message text; close.rs:285-289",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion-3 demonstration says a unit test catches the call's placement; it cannot.",
+      "evidence": "The demonstration says the unit test's 'order and wording assertions fail' if the call is placed inside the attempt loop. A unit test of refuse_detached cannot see where the function is called from. The lifecycle 'interrupted' assertion would also pass if the call sat after score_on or after plan(), as long as it ran before build_commit. Only the diff shows the placement. Fix: State that the placement is shown by the diff, and that the lifecycle test shows no closing or stale record was committed. To make that sharper, assert that no commit reachable from any ref after the recorded tip carries the job's Athena-Job trailer (for example with `git log --all`).",
+      "location": "Demonstration for criterion 3 ('Fails without the behavior')",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The fallback scan's sort and non-empty preference add nothing and can turn Detached into Unknown.",
+      "evidence": "job.json is written once at dispatch, so every branch holding it has the same dispatch_branch. Sorting and preferring a non-empty value adds nothing. Skipping an empty value would also turn a job recorded as Dispatched::Detached into Unknown. Both outcomes refuse a detached HEAD and name no branch, so the effect is harmless but misleading in the code. Fix: Take the first branch whose tip holds the job's job.json and map its value through Dispatched::from_record unchanged, with an empty value meaning Detached.",
+      "location": "Step 1 dispatched_from fallback; Risks bullet 3",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan should say why no commit-shape table is needed.",
+      "evidence": "The critic rules ask landing plans for a commit-shape table and a realistic-branch fixture. This plan changes no commit shape and no classification function, and its tests use the real Fixture with a main branch and real git. Fix: Add one line saying the change creates no commits and changes no classification function, so no commit-shape table applies.",
+      "location": "Plan as a whole (landing plan)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code in the snapshot. Its claims hold. `land_or_block` (close.rs:244) takes the lock at line 257 and computes `dispatched` at lines 260-265, before the `for _attempt` loop at line 266. When HEAD is detached, `plan()` returns `OtherBranch` (land.rs:97-101). If HEAD holds the job's records, `land_or_block` turns that into a stale outcome committed on the detached HEAD (close.rs:280-321). So without the guard, the planned lifecycle test sees `go` return `Ok(Stale)` and fails. The drain's `go_with_stages` (drain.rs:4371) reaches `land_or_block`. `RealSteps::land` (drain.rs:4418) then calls `PrLander` → `land_pr`, which reads records at HEAD and can fail with \"has no verification\" (gh/landing.rs:845-855). Guarding both places, with the drain-side check in drain.rs rather than gh/landing.rs, fits the request and the scope. The seams the plan names exist: `Scenario.during_verification`, the `switch_to_new_branch_during_verification` hook at lifecycle.rs:1849, `RecordingLander` at tests/drain.rs:2289, the `Steps` import in tests/drain.rs, and `pub mod land`. The drain twin test fails without the guard, because `RecordingLander` returns `Landed`. No `RealSteps` field is added, so the 35 struct-literal sites keep compiling. Only the reconcile fixtures detach HEAD, and they never reach a landing. The plan has no athena.toml change and calls no external service. The commit-shape rule does not apply: no commit shape and no classification function changes. My findings are all minor. `retry_landing` stays unguarded. The recovery hint is vague. The criterion-3 demonstration claims more than its unit test can show. The fallback scan has a small wrinkle."
+}

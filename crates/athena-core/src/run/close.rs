@@ -263,6 +263,9 @@ impl Athena {
                 .as_ref()
                 .and_then(|j| j.dispatch_branch.as_deref()),
         );
+        // A detached HEAD stops here, before any score, closing commit or stale outcome is built: a stale
+        // outcome would otherwise be committed onto the detached commit.
+        crate::land::refuse_detached(&self.git, &dispatched)?;
         for _attempt in 0..3 {
             let head = self.head()?;
             let attempt_score = score_on(&head)?;

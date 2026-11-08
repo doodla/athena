@@ -2382,6 +2382,97 @@ fn the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page() {
     );
 }
 
+/// A queued request that has been worked on `main`, and the tip `main` had before it ran.
+fn worked_request(fx: &Fixture, athena: &Athena, lander: &RecordingLander) -> (String, String) {
+    let job = queue_steward_request(athena, "Add a greeting to the README.");
+    let before = fx.head();
+    let steps = RealSteps {
+        athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander,
+    };
+    // One drain works the request and asks the lander once, with HEAD on `main`.
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    assert_eq!(report.landed, 1, "{}", display::drain(&report));
+    assert_eq!(lander.0.lock().unwrap().len(), 1);
+    (job, before)
+}
+
+#[test]
+fn the_drain_step_refuses_to_land_from_a_detached_head() {
+    // A hand command left HEAD detached in the drain's working copy. The landing step used to reach the
+    // lander and fail as a missing verification; it must stop first, naming the HEAD and the branch.
+    let fx = Fixture::new();
+    let athena = fx.athena(rated_scenario().script());
+    let lander = RecordingLander::default();
+    let (job, before) = worked_request(&fx, &athena, &lander);
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &lander,
+    };
+    let tip = fx.head();
+
+    // Detached at the tip: the job's records are here, so the dispatch branch is read from them.
+    fx.git.run(["checkout", "-q", "--detach"]).unwrap();
+    let Landing::NotLanded(why) = steps.land(&job) else {
+        panic!("a detached HEAD must not land");
+    };
+    assert!(why.contains("detached") && why.contains("`main`"), "{why}");
+    assert!(why.contains(&tip[..12]), "{why}");
+    assert!(!why.contains("verification"), "{why}");
+
+    // Detached on the commit before the job: its records are absent, and `main` still names the branch.
+    fx.git.run(["checkout", "-q", "--detach", &before]).unwrap();
+    let Landing::NotLanded(why) = steps.land(&job) else {
+        panic!("a detached HEAD must not land");
+    };
+    assert!(why.contains("detached") && why.contains("`main`"), "{why}");
+    assert!(why.contains(&before[..12]), "{why}");
+
+    assert_eq!(lander.0.lock().unwrap().len(), 1, "the lander was reached");
+    assert_eq!(fx.git.run(["rev-parse", "main"]).unwrap().trim(), tip);
+}
+
+#[test]
+fn the_drain_step_refuses_to_land_from_another_branch() {
+    let fx = Fixture::new();
+    let athena = fx.athena(rated_scenario().script());
+    let lander = RecordingLander::default();
+    let (job, _) = worked_request(&fx, &athena, &lander);
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &lander,
+    };
+    fx.git.run(["checkout", "-q", "-b", "other"]).unwrap();
+    let Landing::NotLanded(why) = steps.land(&job) else {
+        panic!("another branch must not land");
+    };
+    assert!(why.contains("`other`") && why.contains("`main`"), "{why}");
+    assert_eq!(lander.0.lock().unwrap().len(), 1, "the lander was reached");
+}
+
+#[test]
+fn the_drain_step_lands_from_the_dispatch_branch() {
+    let fx = Fixture::new();
+    let athena = fx.athena(rated_scenario().script());
+    let lander = RecordingLander::default();
+    let (job, _) = worked_request(&fx, &athena, &lander);
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &lander,
+    };
+    assert_eq!(fx.git.current_branch().unwrap().as_deref(), Some("main"));
+    assert!(matches!(steps.land(&job), Landing::Landed { .. }));
+    assert_eq!(lander.0.lock().unwrap().len(), 2);
+}
+
 /// An idle job whose build directory the tests plant.
 const IDLE_JOB: &str = "20260101-000000-abcd";
 

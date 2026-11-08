@@ -1933,6 +1933,91 @@ fn a_job_finished_on_a_branch_with_its_records_goes_stale() {
     assert!(error.to_string().contains("interrupted"), "{error}");
 }
 
+/// A hook that, the first time verification runs, detaches HEAD where it is and stores the tip.
+fn detach_head_during_verification(fx: &Fixture, scenario: &mut Scenario) -> Arc<Mutex<String>> {
+    let tip = Arc::new(Mutex::new(String::new()));
+    let seen = tip.clone();
+    let root = fx.root().to_path_buf();
+    let once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    scenario.during_verification = Some(Arc::new(move || {
+        if once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let git = athena_git::Git::at(&root);
+        *seen.lock().unwrap() = git.head().unwrap().unwrap();
+        git.run(["checkout", "-q", "--detach"]).unwrap();
+    }));
+    tip
+}
+
+#[test]
+fn a_detached_head_at_landing_is_refused_naming_the_head_and_the_branch() {
+    // A hand command left HEAD detached in the working copy while the job was verified. Landing must stop
+    // with an error that names the detached HEAD and the dispatch branch, and must land and record nothing:
+    // no stale outcome is committed onto the detached commit, and the error is not about a verification.
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    let detached_at = detach_head_during_verification(&fx, &mut scenario);
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let error = athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+        .unwrap_err();
+    let text = format!("{error:#}");
+    let tip = detached_at.lock().unwrap().clone();
+    assert!(text.contains("detached"), "{text}");
+    assert!(text.contains("`main`"), "{text}");
+    assert!(text.contains(&tip[..12]), "{text}");
+    assert!(text.contains("nothing landed"), "{text}");
+    assert!(!text.contains("verification"), "{text}");
+
+    // HEAD is still detached at the tip, `main` is unchanged, and no landing commit exists.
+    assert_eq!(fx.git.current_branch().unwrap(), None);
+    assert_eq!(fx.head(), tip);
+    assert_eq!(fx.git.run(["rev-parse", "main"]).unwrap().trim(), tip);
+    assert!(!fx.file("README.md").unwrap().contains("Hello, reader."));
+    assert!(
+        !fx.git
+            .path_exists(
+                &fx.head(),
+                &format!("{}/outcome-landed.json", proposal.job.dir())
+            )
+            .unwrap()
+    );
+
+    // Back on `main` the job has no outcome: it shows as interrupted.
+    fx.git.run(["checkout", "-q", "main"]).unwrap();
+    let status = athena.status().unwrap();
+    assert!(
+        status
+            .open
+            .iter()
+            .any(|l| l.id == proposal.job.as_str() && l.state == "interrupted"),
+        "{:?}",
+        status.open
+    );
+}
+
+#[test]
+fn a_job_lands_when_head_is_on_the_dispatch_branch() {
+    // The same run with HEAD left on `main` lands as before: the tip advances and carries the change.
+    let fx = Fixture::new();
+    let before = fx.head();
+    let athena = fx.athena(Scenario::default().script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert_eq!(fx.git.current_branch().unwrap().as_deref(), Some("main"));
+    assert_ne!(fx.head(), before);
+    assert_eq!(fx.git.run(["rev-parse", "main"]).unwrap().trim(), fx.head());
+    assert!(fx.git.is_ancestor(&before, &fx.head()).unwrap());
+    assert!(fx.file("README.md").unwrap().contains("Hello, reader."));
+}
+
 #[test]
 fn a_job_finished_on_a_branch_without_its_records_changes_nothing() {
     // `other` was cut before the job was dispatched, so it lacks the job's records. Recording a stale

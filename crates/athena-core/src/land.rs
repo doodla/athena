@@ -17,6 +17,9 @@
 //! branch job finished on a detached HEAD does not land either. A job record made before the field
 //! existed has no dispatch branch, and that job keeps the older rule: only the ancestor check applies.
 //!
+//! Before any of this, landing needs the working copy on a branch: [`refuse_detached`] stops a detached
+//! HEAD with an error naming the commit and the branch the job needs, so nothing is recorded or committed.
+//!
 //! The caller adds the closing records to the tree, gates the commit, and fast-forwards; a refused
 //! fast-forward makes the job `blocked`.
 //!
@@ -28,10 +31,12 @@
 //! job stale is unchanged.
 
 use crate::gh::verification_id;
+use crate::store::Records;
 use crate::verify::Verified;
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
 use athena_data::history::LandingKind;
+use athena_data::records::AnyRecord;
 use athena_data::{JobId, RecordId};
 use athena_gate::invariant::classify_pre_merge;
 use athena_git::Git;
@@ -70,6 +75,56 @@ impl Dispatched {
             Some(name) => Dispatched::Branch(name.to_string()),
         }
     }
+}
+
+/// The working-copy precondition of landing: HEAD must be on a branch. A detached HEAD stops landing with
+/// an error that names the commit HEAD is at and the branch the job needs, before any record or commit is
+/// built. Without this check a detached HEAD surfaced further on as a stale outcome committed onto the
+/// detached commit, or as a job without a verification.
+///
+/// A different checked-out branch is not refused here: `plan` handles it with its own text.
+pub fn refuse_detached(git: &Git, expected: &Dispatched) -> Result<()> {
+    if git.current_branch()?.is_some() {
+        return Ok(());
+    }
+    let at = git.head()?.unwrap_or_default();
+    let at = &at[..at.len().min(12)];
+    let wanted = match expected {
+        Dispatched::Branch(name) => format!("branch `{name}` (the job's dispatch branch)"),
+        Dispatched::Detached | Dispatched::Unknown => "a checked-out branch".to_string(),
+    };
+    bail!(
+        "the working copy's HEAD is detached at {at}; landing needs {wanted} checked out; nothing \
+         landed. Check the branch out, then run again"
+    )
+}
+
+/// The branch `id` was dispatched from, read from its job record at `head`. A `head` that lacks the job
+/// (a HEAD detached on an older commit) falls back to the first local branch, in name order, whose tip
+/// holds a job record with a dispatch branch. The result is `Unknown` when no record names one.
+pub fn dispatched_from(git: &Git, head: &str, id: &JobId) -> Result<Dispatched> {
+    let records = Records::load(git, head)?;
+    if let Some(job) = records.jobs.get(id.as_str()).and_then(|j| j.job.as_ref()) {
+        return Ok(Dispatched::from_record(job.dispatch_branch.as_deref()));
+    }
+    let path = format!("{}/job.json", id.dir());
+    let listed = git.run(["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
+    let mut branches: Vec<&str> = listed.lines().filter(|b| !b.is_empty()).collect();
+    branches.sort_unstable();
+    for branch in branches {
+        let Some(bytes) = git.show_file(branch, &path)? else {
+            continue;
+        };
+        if let Ok(AnyRecord::Job(job)) = AnyRecord::parse(&path, &bytes)
+            && job
+                .dispatch_branch
+                .as_deref()
+                .is_some_and(|b| !b.is_empty())
+        {
+            return Ok(Dispatched::from_record(job.dispatch_branch.as_deref()));
+        }
+    }
+    Ok(Dispatched::Unknown)
 }
 
 /// Decides how `verified` lands on `head`, the tip of the checked-out branch. A job dispatched from a
@@ -665,6 +720,53 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(decided, Plan::OtherBranch(_)), "{decided:?}");
+    }
+
+    #[test]
+    fn a_working_copy_on_a_branch_passes_the_precondition() {
+        let (_dir, git, ..) = base_and_candidate();
+        for expected in [
+            Dispatched::Branch("main".into()),
+            Dispatched::Detached,
+            Dispatched::Unknown,
+        ] {
+            refuse_detached(&git, &expected).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_detached_head_is_refused_naming_the_commit_and_the_branch() {
+        let (_dir, git, p, ..) = base_and_candidate();
+        git.run(["checkout", "-q", "--detach"]).unwrap();
+        let error = refuse_detached(&git, &Dispatched::Branch("main".into())).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("detached"), "{text}");
+        assert!(text.contains(&p[..12]), "{text}");
+        assert!(text.contains("`main`"), "{text}");
+        assert!(text.contains("nothing landed"), "{text}");
+        assert!(!text.contains("verification"), "{text}");
+    }
+
+    #[test]
+    fn a_detached_head_is_refused_when_the_dispatch_branch_is_not_known() {
+        let (_dir, git, p, ..) = base_and_candidate();
+        git.run(["checkout", "-q", "--detach"]).unwrap();
+        for expected in [Dispatched::Detached, Dispatched::Unknown] {
+            let text = format!("{:#}", refuse_detached(&git, &expected).unwrap_err());
+            assert!(
+                text.contains("detached") && text.contains(&p[..12]),
+                "{text}"
+            );
+            assert!(text.contains("a checked-out branch"), "{text}");
+            assert!(!text.contains("verification"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_job_with_no_record_anywhere_has_an_unknown_dispatch_branch() {
+        let (_dir, git, p, ..) = base_and_candidate();
+        let id = JobId::parse("20261010-120000-abcd").unwrap();
+        assert_eq!(dispatched_from(&git, &p, &id).unwrap(), Dispatched::Unknown);
     }
 
     #[test]
