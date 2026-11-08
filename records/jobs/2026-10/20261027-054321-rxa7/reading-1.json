@@ -1,0 +1,150 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-054321-rxa7",
+  "n": 1,
+  "at": "2026-11-08T22:40:49.397102294Z",
+  "invocation_seq": 1,
+  "base_commit": "e0b26609cfdf2b4f098850ef4c226f0bea8d6a25",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Verify the whole verifier-snapshot lock holds before the verifier runs",
+  "summary": "Root cause: `Snapshot::lock` in crates/athena-git/src/snapshot.rs treats the lock as held after probing only two places (creating a file at the root, appending to .git/HEAD). The immutable attribute is applied best-effort with `chattr -R`, so a partial lock can pass the probe while other paths (objects, refs, work-tree files) stay writable. The verifier can then change HEAD or the tree, as in jobs 20261015-031159-xx7n and 20261015-033631-x3a1. The fix makes the lock check every directory and file in the tree and fail if any accepts a write, so a verifier never starts on a partly locked snapshot. The audience is the Athena operator, who gets verdicts that are not wrongly voided.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "The fix is in `Snapshot::lock`, which all snapshot locking goes through, not in one job's verifier run."
+    },
+    {
+      "id": "tested",
+      "how": "A new test fails on the old lock and passes on the new one. fmt, clippy and test must pass."
+    },
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the lock check and its tests."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that a partly locked snapshot is refused, not that a function exists."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check behind the work is that a snapshot reported as locked refuses writes everywhere."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-git/src/snapshot.rs (`Snapshot::lock`, `probe_write`, `set_tree_writable`, `set_immutable`, `work_tree_tree`, and the tests at about lines 755-790) and crates/athena-core/src/run/verification.rs (the verifier loop at about lines 198-346 locks, invokes, unlocks, compares HEAD and tree to `prepared`, and reruns once). The entry point is `verification.rs` calling `vsnap.lock()` before `invoke_and_record`. The change adds no record or data file under crates/, so no `check_record_file`, `AnyRecord` or round-trip test is involved. The property is measured directly, by attempting writes at every path of a real locked snapshot rather than through a stand-in.",
+    "Environment: none. The change is local code and tests. It touches no CI workflow, push or PR, and no records or history reads.",
+    "The rerun-once and tree-comparison logic in verification.rs already exists and stays as it is. The leftover cause is that `lock()` can report success while part of the snapshot is still writable, so the fix belongs in `lock()`.",
+    "Job 20261015-031159-xx7n (the firstmate explainer rating) was rejected only because of the snapshot-change blocker. Its minor and nit findings about the page content are not addressed here. Its candidate files (CHANGELOG.md, docs/design/explainer-site.md, studies/firstmate-work-handling/intro.json, xtask/src/site.rs) are dropped from this change. Job 20261015-033631-x3a1 was a retry with the same blocker. Its candidate files (the four above plus studies/firstmate-work-handling/findings.json and model.json) are also dropped. The retry of those content jobs is separate work.",
+    "Tests must run as whatever user the test runner is. A test of the new check should make part of the tree writable after a partial lock, for example by restoring a write bit on one nested directory or file, and assert that the check reports it. It must not depend on `chattr` being available."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The `lock()` doc comment or the CHANGELOG.md [Unreleased] entry names the root cause: a lock probed at only two places can be taken for held while other paths in the snapshot remain writable, so the verifier could change its snapshot.",
+      "kind": "content"
+    },
+    {
+      "text": "In crates/athena-git/src/snapshot.rs, `Snapshot::lock` checks every directory and file under the snapshot, `.git` included, with a check that writes nothing permanent. The check does not stop at the first two probes. If any path would accept a write, `lock()` unlocks and returns an error naming that path.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-git`. A new test partly unlocks a nested directory or file of a locked snapshot, or simulates a partial lock, and asserts the full-tree check reports that path. The test fails when `lock()` is reverted to the two-place probe and passes with the change. It does not rely on `chattr`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-git` and `cargo test -p athena-core`. The existing tests pass: `a_locked_snapshot_refuses_edits_and_commits_and_keeps_head_and_tree` in athena-git and the snapshot-change rerun tests in crates/athena-core/src/run_pin_tests.rs.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`. All pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an [Unreleased] entry describing the fix, since it is a user-visible change in verification behavior.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Retrying the firstmate explainer content: studies/firstmate-work-handling/*, xtask/src/site.rs, docs/design/explainer-site.md. The earlier candidates' changes to these files are dropped.",
+    "Changing the rerun-once policy or the tree comparison in verification.rs, except to surface a lock failure.",
+    "Hashing gitignored files such as target/ in the before/after fingerprint.",
+    "Changes to records/, governance files (athena.toml, defaults.toml, workflows) or prompts."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6784968684759917,
+      "p_user_intervenes": 0.07306967984934086,
+      "cost_usd": {
+        "p10": 0.5684779573158363,
+        "p50": 1.4780460000000002,
+        "p90": 4.855811209265523
+      },
+      "wall_time_s": {
+        "p10": 569.7555344196123,
+        "p50": 2110.0096338949816,
+        "p90": 4325.902200008642
+      }
+    }
+  },
+  "departures": "The reference forecast is kept. The change touches a safety-critical lock, which slightly lowers the chance of verification passing, and I expect a modest cost because the area is already well tested.",
+  "urgent_reason": "It cuts rejected attempts and redo work: two jobs (20261015-031159-xx7n and 20261015-033631-x3a1) were rejected because the verifier changed its snapshot.",
+  "hard_reason": "It changes the lock that guards the verifier's snapshot, which is part of the verification pipeline and the gate that judges other jobs, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
