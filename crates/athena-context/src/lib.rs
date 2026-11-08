@@ -401,8 +401,9 @@ mod tests {
             assert!(check_budget(set, &composed).is_ok(), "{}", frame.id);
             // The planner frame gained the required dependents rule and the critic frame its "what else does
             // this break" question; both then gained the commit-shape rule (bound raised from 700 to 800 for
-            // it); each stays well inside the 1300-token budget checked above.
-            assert!(estimate_tokens(frame.text) < 800, "{} is short", frame.id);
+            // it); the planner frame then gained the caller-and-test search line (bound raised from 800 to
+            // 900 for it); each stays inside the 1300-token budget checked above.
+            assert!(estimate_tokens(frame.text) < 900, "{} is short", frame.id);
         }
     }
 
