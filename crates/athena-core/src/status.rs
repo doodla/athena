@@ -15,6 +15,12 @@ use athena_git::Git;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod planning;
+mod throughput;
+
+pub use planning::*;
+pub use throughput::*;
+
 /// The paths the installed binary is built from: Athena's own code and the files that build and install it. A
 /// change to one of them after the build commit leaves the installed binary stale.
 ///
@@ -124,1293 +130,6 @@ pub fn plan_state(job: &JobRecords) -> Option<PlanState> {
             && last.request_reading_mismatch.is_none(),
         round: last.round,
     })
-}
-
-/// How many planned jobs the first planning round accepted and stopped.
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct FirstRoundCounts {
-    pub accepted: usize,
-    pub stopped: usize,
-}
-
-/// Planning spent per landed job over a group of landed jobs: the whole retry chain that led to each landing
-/// (its own planning plus that of every job it retried), and the landed job's own planning beside it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
-pub struct PlanningGroup {
-    /// Landed, planned jobs in the group; each retry chain is counted once, at its landed job.
-    pub jobs: usize,
-    /// Mean planning rounds (job-plan records) over the chain.
-    pub mean_rounds: f64,
-    /// Mean planner and critic cost in USD over the chain.
-    pub mean_cost_usd: f64,
-    /// Mean planning rounds of the landed job alone.
-    pub own_mean_rounds: f64,
-    /// Mean planner and critic cost in USD of the landed job alone.
-    pub own_mean_cost_usd: f64,
-}
-
-/// Planning rounds and cost per landed job, measured from the records and split at the first resumed plan.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct PlanningCost {
-    /// Landed jobs dispatched before the first resumed planning, or all of them when none resumed.
-    pub before: PlanningGroup,
-    /// Landed jobs dispatched at or after the first resumed planning; empty when none resumed.
-    pub after: PlanningGroup,
-    /// The first job whose plan resumed from a kept plan, with its dispatch time; the cutover.
-    pub first_resumed: Option<(String, String)>,
-}
-
-/// Whether the first planning round of `job` accepted without a reading mismatch; `None` for a job with no critique.
-fn first_round_accepted(job: &JobRecords) -> Option<bool> {
-    let first = job.critiques.first()?;
-    Some(first.final_verdict == CritiqueVerdict::Accept && first.request_reading_mismatch.is_none())
-}
-
-/// Planned jobs up to which the early keep rule applies (job-planning.md section 9, D110): the landed share is
-/// held at the baseline through the first 30 planned jobs.
-pub const KEEP_RULE_EARLY_JOBS: usize = 30;
-/// Planned jobs at which the keep / turn off / inconclusive decision is taken (job-planning.md section 9, D110).
-/// Between the two thresholds the early rule continues: the rule states nothing else, and this keeps a breach
-/// visible until the decision.
-pub const KEEP_RULE_DECISION_JOBS: usize = 100;
-/// The landed share planning is held to, and at or below which it is turned off at the decision
-/// (job-planning.md section 9, D110).
-pub const KEEP_RULE_BASELINE_SHARE: f64 = 0.64;
-/// The landed share needed at the decision to keep planning, with the cost ceiling met
-/// (job-planning.md section 9, D110).
-pub const KEEP_RULE_TARGET_SHARE: f64 = 0.72;
-/// The cost per landed job, in USD, that must not be exceeded to keep planning at the decision
-/// (job-planning.md section 9, D110).
-pub const KEEP_RULE_COST_CEILING_USD: f64 = 2.50;
-
-/// What the job-planning keep rule says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum KeepVerdict {
-    Keep,
-    Breach,
-    TurnOff,
-    Inconclusive,
-}
-
-/// The job-planning keep rule (job-planning.md section 9, D110) evaluated over the records.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct KeepRule {
-    /// Planned jobs that were dispatched; a job stopped in planning counts here and not as landed.
-    pub planned: usize,
-    pub landed: usize,
-    /// `landed / planned`.
-    pub share: f64,
-    pub baseline_share: f64,
-    /// All invocation cost of the planned jobs, in USD.
-    pub total_cost_usd: f64,
-    /// `total_cost_usd / landed`; none when nothing landed.
-    pub cost_per_landed_usd: Option<f64>,
-    pub first_round_accepted: usize,
-    /// Planned jobs with a critique.
-    pub first_round_planned: usize,
-    pub first_round_accept_rate: Option<f64>,
-    pub verdict: KeepVerdict,
-    /// Landings later cited as the cause of a failure, a revert or a fix job, for planned and unplanned jobs,
-    /// reported beside the landed share. Reported only; the verdict above still rests on share and cost.
-    pub later_harm: LaterHarm,
-}
-
-/// How one later record cites a landed job as a cause of trouble (job-planning.md section 9, D143).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LaterCause {
-    /// An introspection of a later failure or rejection names the job in its cause or account of what happened.
-    Failure,
-    /// A later request that asks for a revert names the job.
-    Revert,
-    /// A later request that asks for a fix names the job.
-    Fix,
-}
-
-/// Whether `text` holds a word that is one of `words`, ignoring case; a word is a run of letters.
-fn has_word(text: &str, words: &[&str]) -> bool {
-    text.split(|c: char| !c.is_ascii_alphabetic())
-        .any(|w| words.iter().any(|x| w.eq_ignore_ascii_case(x)))
-}
-
-/// The ways later records cite the landed job `landed` as a cause, read from the records and never from the
-/// job's own: a later introspection (a record id after the job's, about another job) that names it in its
-/// cause or account of what happened; a later request job whose request text names it and asks for a revert or
-/// a fix. A request that names the job without asking for either (a retry, a follow-up, a citation) is not a
-/// cause. Whole-id matching only, so no record is ever rewritten and no new record kind is needed.
-fn later_causes(records: &Records, landed: &JobRecords) -> Vec<LaterCause> {
-    let id = landed.id();
-    let mut found = Vec::new();
-    let failed = records.introspections.iter().any(|i| {
-        i.id.as_str() > id.as_str()
-            && i.job.as_ref() != Some(id)
-            && [i.cause.as_deref(), i.what_happened.as_deref()]
-                .into_iter()
-                .flatten()
-                .any(|text| text_cites_job(text, id))
-    });
-    if failed {
-        found.push(LaterCause::Failure);
-    }
-    let mut revert = false;
-    let mut fix = false;
-    for later in records.request_jobs() {
-        if later.id().as_str() <= id.as_str() {
-            continue;
-        }
-        let Some(text) = later.request.as_ref().map(|r| r.text.as_str()) else {
-            continue;
-        };
-        if !text_cites_job(text, id) {
-            continue;
-        }
-        revert |= has_word(text, &["revert", "reverts", "reverted", "reverting"]);
-        fix |= has_word(text, &["fix", "fixes", "fixed", "fixing"]);
-    }
-    if revert {
-        found.push(LaterCause::Revert);
-    }
-    if fix {
-        found.push(LaterCause::Fix);
-    }
-    found
-}
-
-/// The landed share of one group of dispatched jobs, and how many of its landings were later cited as the
-/// cause of a failure, a revert or a fix job.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
-pub struct LaterHarmGroup {
-    /// Dispatched jobs in the group (a planned job stopped in planning counts here, not as landed).
-    pub jobs: usize,
-    pub landed: usize,
-    /// `landed / jobs`; none for an empty group.
-    pub share: Option<f64>,
-    /// Landings cited at least once, in any of the three ways below.
-    pub cited: usize,
-    /// Landings a later introspection names as the cause of a failure or rejection.
-    pub failures: usize,
-    /// Landings a later request asks to revert.
-    pub reverts: usize,
-    /// Landings a later request asks to fix.
-    pub fixes: usize,
-}
-
-/// The measure the keep rule adds to the landed share: landings that later caused harm, for planned and for
-/// unplanned jobs. Landed share counts a landing as a success even when it later stops drains or has to be
-/// reverted, as job 20261027-054211-a2n5 did; this counts those landings against the group they came from.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
-pub struct LaterHarm {
-    pub planned: LaterHarmGroup,
-    pub unplanned: LaterHarmGroup,
-}
-
-/// Whether a job counts as planned for the keep rule: it has plans and was dispatched or stopped in planning.
-fn is_planned(job: &JobRecords) -> bool {
-    !job.plans.is_empty() && (job.job.is_some() || plan_state(job).is_some_and(|s| !s.accepted))
-}
-
-/// Landings that later caused harm, per planned and unplanned dispatched job. Unplanned means dispatched with
-/// no plan record, as every job is when planning is off or the job is not hard.
-pub fn later_harm(records: &Records) -> LaterHarm {
-    let mut harm = LaterHarm::default();
-    for job in records.request_jobs() {
-        let planned = is_planned(job);
-        // Not planned and not dispatched (queued, proposed, declined): in neither group.
-        if !planned && job.job.is_none() {
-            continue;
-        }
-        let group = if planned {
-            &mut harm.planned
-        } else {
-            &mut harm.unplanned
-        };
-        group.jobs += 1;
-        if !matches!(job.state(), JobState::Closed(OutcomeState::Landed)) {
-            continue;
-        }
-        group.landed += 1;
-        let causes = later_causes(records, job);
-        group.cited += usize::from(!causes.is_empty());
-        group.failures += usize::from(causes.contains(&LaterCause::Failure));
-        group.reverts += usize::from(causes.contains(&LaterCause::Revert));
-        group.fixes += usize::from(causes.contains(&LaterCause::Fix));
-    }
-    for group in [&mut harm.planned, &mut harm.unplanned] {
-        group.share = (group.jobs > 0).then(|| group.landed as f64 / group.jobs as f64);
-    }
-    harm
-}
-
-/// The verdict of the keep rule for `planned` jobs with the given share and cost per landed job.
-fn keep_verdict(planned: usize, share: f64, cost_per_landed: Option<f64>) -> KeepVerdict {
-    if planned < KEEP_RULE_DECISION_JOBS {
-        return if share < KEEP_RULE_BASELINE_SHARE {
-            KeepVerdict::Breach
-        } else {
-            KeepVerdict::Keep
-        };
-    }
-    if share >= KEEP_RULE_TARGET_SHARE
-        && cost_per_landed.is_some_and(|c| c <= KEEP_RULE_COST_CEILING_USD)
-    {
-        KeepVerdict::Keep
-    } else if share <= KEEP_RULE_BASELINE_SHARE {
-        KeepVerdict::TurnOff
-    } else {
-        KeepVerdict::Inconclusive
-    }
-}
-
-/// Evaluates the keep rule over the planned, dispatched jobs. `None` when no job was planned and dispatched.
-pub fn keep_rule(records: &Records) -> Option<KeepRule> {
-    let planned: Vec<&JobRecords> = records
-        .request_jobs()
-        .into_iter()
-        .filter(|j| is_planned(j))
-        .collect();
-    if planned.is_empty() {
-        return None;
-    }
-    let landed = planned
-        .iter()
-        .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
-        .count();
-    let total_cost_usd: f64 = planned.iter().map(|j| j.spent_usd()).sum();
-    let share = landed as f64 / planned.len() as f64;
-    let cost_per_landed_usd = (landed > 0).then(|| total_cost_usd / landed as f64);
-    let rounds: Vec<bool> = planned
-        .iter()
-        .filter_map(|j| first_round_accepted(j))
-        .collect();
-    let first_round_accepted = rounds.iter().filter(|a| **a).count();
-    Some(KeepRule {
-        planned: planned.len(),
-        landed,
-        share,
-        baseline_share: KEEP_RULE_BASELINE_SHARE,
-        total_cost_usd,
-        cost_per_landed_usd,
-        first_round_accepted,
-        first_round_planned: rounds.len(),
-        first_round_accept_rate: (!rounds.is_empty())
-            .then(|| first_round_accepted as f64 / rounds.len() as f64),
-        verdict: keep_verdict(planned.len(), share, cost_per_landed_usd),
-        later_harm: later_harm(records),
-    })
-}
-
-/// The most predecessors followed back from a landed job.
-const MAX_CHAIN: usize = 16;
-
-/// Planner and critic cost of the invocations of `job`, in USD.
-fn planning_usd(job: &JobRecords) -> f64 {
-    job.invocations
-        .iter()
-        .filter(|i| matches!(i.role, Role::Planner | Role::Critic))
-        .map(|i| i.cost.best_lower())
-        .sum()
-}
-
-/// When `job` was dispatched, from its job record; the time of its first resumed plan if that is missing.
-fn dispatched_at(job: &JobRecords) -> Option<jiff::Timestamp> {
-    job.job.as_ref().and_then(|j| j.dispatched_at).or_else(|| {
-        job.plans
-            .iter()
-            .find(|p| p.resumed_from.is_some())
-            .map(|p| p.at)
-    })
-}
-
-/// Planning rounds and cost per landed job, with chain totals over the jobs each landing retried. `None` when
-/// no landed job was planned. The split is at the dispatch of the first job with a resumed plan, so that
-/// 'after' reads 'since the first resumed planning'. A landed job with no recorded dispatch time counts as before.
-pub fn planning_cost(records: &Records) -> Option<PlanningCost> {
-    let cutover = records
-        .request_jobs()
-        .into_iter()
-        .filter(|j| j.plans.iter().any(|p| p.resumed_from.is_some()))
-        .filter_map(|j| dispatched_at(j).map(|at| (at, j.id().as_str().to_string())))
-        .min();
-    let mut sums = [PlanningGroup::default(); 2];
-    for job in records.request_jobs() {
-        if job.plans.is_empty() || !matches!(job.state(), JobState::Closed(OutcomeState::Landed)) {
-            continue;
-        }
-        let mut rounds = job.plans.len();
-        let mut cost = planning_usd(job);
-        let own = (rounds as f64, cost);
-        let mut seen = vec![job.id().as_str().to_string()];
-        let mut current = job;
-        for _ in 0..MAX_CHAIN {
-            let Some(text) = current.request.as_ref().map(|r| r.text.as_str()) else {
-                break;
-            };
-            let Some(earlier) = crate::reading::retried_job(records, text)
-                .filter(|id| !seen.iter().any(|s| s == id.as_str()))
-                .and_then(|id| records.jobs.get(id.as_str()))
-            else {
-                break;
-            };
-            seen.push(earlier.id().as_str().to_string());
-            rounds += earlier.plans.len();
-            cost += planning_usd(earlier);
-            current = earlier;
-        }
-        let after = match (&cutover, dispatched_at(job)) {
-            (Some((cut, _)), Some(at)) => at >= *cut,
-            _ => false,
-        };
-        let group = &mut sums[usize::from(after)];
-        group.jobs += 1;
-        group.mean_rounds += rounds as f64;
-        group.mean_cost_usd += cost;
-        group.own_mean_rounds += own.0;
-        group.own_mean_cost_usd += own.1;
-    }
-    if sums[0].jobs + sums[1].jobs == 0 {
-        return None;
-    }
-    for group in &mut sums {
-        if group.jobs > 0 {
-            let n = group.jobs as f64;
-            group.mean_rounds /= n;
-            group.mean_cost_usd /= n;
-            group.own_mean_rounds /= n;
-            group.own_mean_cost_usd /= n;
-        }
-    }
-    let [before, after] = sums;
-    Some(PlanningCost {
-        before,
-        after,
-        first_resumed: cutover.map(|(at, id)| (id, at.to_string())),
-    })
-}
-
-/// The effort shown for a producer invocation recorded before effort was kept.
-pub const EFFORT_UNRECORDED: &str = "unrecorded";
-
-/// How dispatched jobs fared under one producer model and effort.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ProducerSettingStats {
-    pub model: String,
-    pub effort: String,
-    /// Dispatched jobs whose first producer invocation ran with this model and effort.
-    pub jobs: usize,
-    /// Jobs with a verification record, and how many of them passed at their first verifier run.
-    pub verified: usize,
-    pub first_pass: usize,
-    /// `first_pass / verified`; none when no job was verified.
-    pub first_pass_rate: Option<f64>,
-    pub landed: usize,
-    /// `landed / jobs`.
-    pub landed_share: f64,
-    /// All invocation cost of the jobs, in USD.
-    pub total_cost_usd: f64,
-    /// `total_cost_usd / landed`; none when nothing landed, never a division by zero.
-    pub cost_per_landed_usd: Option<f64>,
-}
-
-/// First-pass verification, landed share and cost per landed job for each producer model and effort, measured
-/// from the records of dispatched request jobs. A job counts under the model and effort of its first producer
-/// invocation; a job that never ran a producer is left out. Sorted by model, then effort.
-pub fn producer_settings(records: &Records) -> Vec<ProducerSettingStats> {
-    use athena_data::records::Verdict;
-    let mut buckets: BTreeMap<(String, String), ProducerSettingStats> = BTreeMap::new();
-    for job in records.request_jobs() {
-        if job.job.is_none() {
-            continue;
-        }
-        let Some(producer) = job.invocations.iter().find(|i| i.role == Role::Producer) else {
-            continue;
-        };
-        let effort = producer
-            .effort
-            .clone()
-            .unwrap_or_else(|| EFFORT_UNRECORDED.to_string());
-        let key = (producer.model.clone(), effort);
-        let b = buckets
-            .entry(key.clone())
-            .or_insert_with(|| ProducerSettingStats {
-                model: key.0.clone(),
-                effort: key.1.clone(),
-                jobs: 0,
-                verified: 0,
-                first_pass: 0,
-                first_pass_rate: None,
-                landed: 0,
-                landed_share: 0.0,
-                total_cost_usd: 0.0,
-                cost_per_landed_usd: None,
-            });
-        b.jobs += 1;
-        b.total_cost_usd += job.spent_usd();
-        if let Some(v) = &job.verification {
-            b.verified += 1;
-            let verifier_runs = job
-                .invocations
-                .iter()
-                .filter(|i| i.role == Role::Verifier)
-                .count();
-            if v.final_verdict == Verdict::Pass && verifier_runs <= 1 {
-                b.first_pass += 1;
-            }
-        }
-        if matches!(job.state(), JobState::Closed(OutcomeState::Landed)) {
-            b.landed += 1;
-        }
-    }
-    buckets
-        .into_values()
-        .map(|mut b| {
-            b.first_pass_rate = (b.verified > 0).then(|| b.first_pass as f64 / b.verified as f64);
-            b.landed_share = b.landed as f64 / b.jobs as f64;
-            b.cost_per_landed_usd = (b.landed > 0).then(|| b.total_cost_usd / b.landed as f64);
-            b
-        })
-        .collect()
-}
-
-/// How many of the newest jobs with a measured test check the durations report reads.
-pub const CHECK_DURATION_JOBS: usize = 20;
-
-/// The share of the check time limit above which the slowest test check is flagged.
-pub const CHECK_DURATION_FLAG: f64 = 0.8;
-
-/// How long the `test` check took over the newest jobs, against the limit a check is killed at. A suite that
-/// creeps toward the limit shows here before a run is killed.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct CheckDurations {
-    /// The configured `check_timeout_s`.
-    pub limit_s: u64,
-    /// Jobs counted: the newest ones with a measured `test` run, at most [`CHECK_DURATION_JOBS`].
-    pub jobs: usize,
-    pub median_s: f64,
-    pub slowest_s: f64,
-    /// The job of the slowest run.
-    pub slowest_job: String,
-    /// True when the slowest run took more than [`CHECK_DURATION_FLAG`] of the limit.
-    pub flagged: bool,
-}
-
-impl CheckDurations {
-    /// The line `athena status` prints.
-    pub fn text(&self) -> String {
-        let mut line = format!(
-            "checks     test: median {:.0}s · slowest {:.0}s ({}) of {}s limit over last {} jobs",
-            self.median_s, self.slowest_s, self.slowest_job, self.limit_s, self.jobs
-        );
-        if self.flagged {
-            line.push_str(&format!(
-                " · over {:.0}% of the limit",
-                CHECK_DURATION_FLAG * 100.0
-            ));
-        }
-        line
-    }
-}
-
-/// The seconds the `test` check took in a job, or none when the job ran no such check. A check that did not
-/// run (a skipped check or the placeholder of a nested run, both measured as `not run`) has no duration.
-fn test_check_seconds(job: &JobRecords) -> Option<f64> {
-    let check = job
-        .verification
-        .as_ref()?
-        .checks
-        .iter()
-        .find(|c| c.name == "test")?;
-    if check.duration.basis() == "not run" {
-        return None;
-    }
-    check.duration.value()
-}
-
-/// Median and slowest `test` check duration over the newest [`CHECK_DURATION_JOBS`] request jobs that ran
-/// one, against `limit_s`. Jobs with no measured `test` run are skipped and do not use up the window. None
-/// when no job qualifies. An even count takes the mean of the two middle values.
-pub fn check_durations(records: &Records, limit_s: u64) -> Option<CheckDurations> {
-    let runs: Vec<(&JobRecords, f64)> = records
-        .request_jobs()
-        .into_iter()
-        .filter_map(|j| test_check_seconds(j).map(|s| (j, s)))
-        .take(CHECK_DURATION_JOBS)
-        .collect();
-    let (slowest_job, slowest_s) = runs
-        .iter()
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(j, s)| (j.id().as_str().to_string(), *s))?;
-    let mut seconds: Vec<f64> = runs.iter().map(|(_, s)| *s).collect();
-    seconds.sort_by(f64::total_cmp);
-    let mid = seconds.len() / 2;
-    let median_s = if seconds.len() % 2 == 1 {
-        seconds[mid]
-    } else {
-        (seconds[mid - 1] + seconds[mid]) / 2.0
-    };
-    Some(CheckDurations {
-        limit_s,
-        jobs: runs.len(),
-        median_s,
-        slowest_s,
-        slowest_job,
-        flagged: slowest_s > CHECK_DURATION_FLAG * limit_s as f64,
-    })
-}
-
-/// How many of the newest landed jobs the throughput medians read. The throughput review compares the same
-/// median from one review to the next, so the trigger and the status line share this window.
-pub const THROUGHPUT_WINDOW: usize = 20;
-
-/// Minutes a job spent in each stage. Reading is the reader's invocations; planning the planner's and the
-/// critic's; producer and verifier their own. Checks is the sum of the durations Athena measured for the
-/// job's checks. Landing and rebuild is one stage: the time from the end of the job's last invocation (the
-/// verifier, which runs after the checks) to the later of the landing outcome and the landing record
-/// (`landings/`, written after the merge), and never below zero. A job with no landing record ends at its outcome.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
-pub struct StageMinutes {
-    pub reading: f64,
-    pub planning: f64,
-    pub producer: f64,
-    pub checks: f64,
-    pub verifier: f64,
-    pub landing_and_rebuild: f64,
-}
-
-impl StageMinutes {
-    /// The six stages, named and in pipeline order.
-    pub fn named(&self) -> [(&'static str, f64); 6] {
-        [
-            ("reading", self.reading),
-            ("planning", self.planning),
-            ("producer", self.producer),
-            ("checks", self.checks),
-            ("verifier", self.verifier),
-            ("landing and rebuild", self.landing_and_rebuild),
-        ]
-    }
-
-    /// The minutes of the whole job: the sum of the six stages.
-    pub fn total(&self) -> f64 {
-        self.named().iter().map(|(_, m)| m).sum()
-    }
-
-    /// The median of each stage over `window`, stage by stage. The throughput section and the throughput
-    /// review's comparison with the previous review share this one definition, so the two compare like with
-    /// like. All zero for an empty window.
-    pub fn median_of(window: &[LandedJob]) -> StageMinutes {
-        let column = |pick: fn(&StageMinutes) -> f64| -> f64 {
-            median(&window.iter().map(|j| pick(&j.stages)).collect::<Vec<_>>())
-        };
-        StageMinutes {
-            reading: column(|s| s.reading),
-            planning: column(|s| s.planning),
-            producer: column(|s| s.producer),
-            checks: column(|s| s.checks),
-            verifier: column(|s| s.verifier),
-            landing_and_rebuild: column(|s| s.landing_and_rebuild),
-        }
-    }
-}
-
-/// One landed job with the minutes it spent in each stage.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct LandedJob {
-    pub id: String,
-    /// The end of landing and rebuild: the later of the landing outcome and the landing record.
-    pub landed_at: jiff::Timestamp,
-    /// Whether a landing record (`landings/`) was found for the job; when not, `landed_at` is the outcome time.
-    pub landing_found: bool,
-    pub stages: StageMinutes,
-}
-
-/// Landed jobs per UTC day.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DayCount {
-    /// `YYYY-MM-DD`, in UTC.
-    pub day: String,
-    pub landed: usize,
-}
-
-/// How fast jobs go through the pipeline, computed from the job records alone.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Throughput {
-    /// Request jobs that landed.
-    pub landed_total: usize,
-    /// Landed jobs per UTC day, oldest day first.
-    pub landed_per_day: Vec<DayCount>,
-    /// Landed jobs the medians cover: the newest ones with a measured stage, at most [`THROUGHPUT_WINDOW`].
-    pub window_jobs: usize,
-    /// The median of those jobs' total minutes; 0 when there are none.
-    pub median_minutes: f64,
-    /// The median of each stage over the same jobs.
-    pub median_stages: StageMinutes,
-    /// How many of the window's jobs have a landing record; the others end at their landing outcome.
-    pub window_with_landing_record: usize,
-    /// Minutes between jobs: the gaps between the merged busy intervals (invocations, checks, landing wait) of
-    /// all request jobs.
-    pub idle_minutes: f64,
-    /// Request jobs that did not land but did work: closed rejected, failed or abandoned, or stopped in planning.
-    pub unlanded_jobs: usize,
-    /// Their time spent: invocation wall times plus measured check durations, not the time the job stayed open.
-    pub unlanded_minutes: f64,
-    /// Time checks waited for a build slot, over all request jobs; none when no check recorded a wait.
-    pub build_wait: Option<BuildWait>,
-    /// Wasted work over the newest [`THROUGHPUT_WINDOW`] landings (fewer when fewer have landed).
-    pub waste: WasteWindow,
-    /// The same figures over the [`THROUGHPUT_WINDOW`] landings before those; none until 20 more have landed.
-    pub waste_previous: Option<WasteWindow>,
-    /// The median minutes over the measured landed jobs before the newest window; none until 20 more exist.
-    pub median_previous: Option<f64>,
-    /// The noise between recent windows, and the smallest change one job can make, per measure.
-    pub bars: Bars,
-}
-
-/// Wasted work over one window of landings: attempts per landed change, money spent on attempts that did not
-/// land, and the share of landed changes that landed on their first attempt.
-///
-/// A landing is a request job that landed. An attempt that did not land is a request job that ran a model
-/// and failed, was closed unlanded, or was stopped in planning ([`did_not_land`]); one that never ran is not
-/// an attempt. A window holds the landings and the unlanded attempts that closed between the cut times of
-/// its landings (by closing outcome, or by the end of the last invocation when there is none). A landing is a
-/// first-attempt landing unless its request is "try again on <job>" and that job ran a model.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct WasteWindow {
-    /// Landings in the window; fewer than the window size only for the newest, partial window.
-    pub landings: usize,
-    /// Landings plus the attempts that did not land.
-    pub attempts: usize,
-    /// Attempts that ran a model and did not land.
-    pub unlanded_attempts: usize,
-    /// Landings that were not a retry of a job that ran a model.
-    pub first_attempt_landings: usize,
-    /// What the unlanded attempts cost, in US dollars (the lower bound of each invocation's best cost).
-    pub wasted_usd: f64,
-    /// What each unlanded attempt cost, for the one-job floor of the spend measure.
-    #[serde(skip)]
-    unlanded_costs: Vec<f64>,
-}
-
-impl WasteWindow {
-    /// Attempts per landing; 0 for a window with no landing.
-    pub fn attempts_per_landing(&self) -> f64 {
-        if self.landings == 0 {
-            return 0.0;
-        }
-        self.attempts as f64 / self.landings as f64
-    }
-
-    /// The share of landings that landed on the first attempt, from 0 to 1; 0 for a window with no landing.
-    pub fn first_attempt_share(&self) -> f64 {
-        if self.landings == 0 {
-            return 0.0;
-        }
-        self.first_attempt_landings as f64 / self.landings as f64
-    }
-
-    /// The three figures, as a throughput review stores them.
-    pub fn figures(&self) -> athena_data::records::WasteFigures {
-        athena_data::records::WasteFigures {
-            attempts_per_landing: self.attempts_per_landing().max(1.0),
-            wasted_usd: self.wasted_usd,
-            first_attempt_share: self.first_attempt_share(),
-        }
-    }
-}
-
-/// How large a change in one measure must be before it counts as more than the noise between recent windows.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct Bar {
-    /// The largest difference between two adjacent windows older than the newest one: `|w1 - w2|` and, when
-    /// there is a fourth window, `|w2 - w3|`. None unless the newest three windows are full (60 landings).
-    pub noise: Option<f64>,
-    /// How many differences the noise is the largest of (1 or 2); 0 when there is no noise figure.
-    pub differences: usize,
-    /// The smallest change one job can make to the measure; a change at or below it is never counted.
-    pub floor: f64,
-}
-
-impl Bar {
-    /// The size a change must exceed, or None when the noise cannot be estimated.
-    pub fn bar(&self) -> Option<f64> {
-        self.noise.map(|n| n.max(self.floor))
-    }
-}
-
-/// The [`Bar`] of each measure the throughput review watches.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct Bars {
-    pub median_minutes: Bar,
-    pub attempts_per_landing: Bar,
-    pub wasted_usd: Bar,
-    pub first_attempt_share: Bar,
-}
-
-/// One measure in the newest window and in the window before it, with its bar.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Measure {
-    pub name: &'static str,
-    pub unit: &'static str,
-    /// The figure over the newest window, and over the window before it (None until that window is full).
-    pub now: f64,
-    pub before: Option<f64>,
-    /// Whether a rise is the bad direction (true for all but the first-attempt share).
-    pub higher_is_worse: bool,
-    pub bar: Bar,
-}
-
-impl Measure {
-    /// How much worse `now` is than `before`; negative when it is better. None without a window before.
-    pub fn worsening(&self) -> Option<f64> {
-        let before = self.before?;
-        Some(if self.higher_is_worse {
-            self.now - before
-        } else {
-            before - self.now
-        })
-    }
-}
-
-/// The time checks waited for a build slot: the sum of `queued_s` over the checks of every request job's
-/// `verification.json` that took a slot (a reused or skipped check has none). The basis is the athena
-/// monotonic clock, which measures each wait.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct BuildWait {
-    /// Checks that took a slot and recorded how long they waited.
-    pub checks: usize,
-    /// The sum of their waits, in seconds.
-    pub total_s: f64,
-    /// The longest single wait, in seconds.
-    pub longest_s: f64,
-}
-
-impl BuildWait {
-    /// Sums `queued_s` over the checks of every request job's verification. None when no check has one.
-    fn of(records: &Records) -> Option<BuildWait> {
-        let waits: Vec<f64> = records
-            .request_jobs()
-            .into_iter()
-            .filter_map(|j| j.verification.as_ref())
-            .flat_map(|v| v.checks.iter())
-            .filter_map(|c| c.queued_s)
-            .filter(|s| s.is_finite() && *s >= 0.0)
-            .collect();
-        if waits.is_empty() {
-            return None;
-        }
-        Some(BuildWait {
-            checks: waits.len(),
-            total_s: waits.iter().sum(),
-            longest_s: waits.iter().copied().fold(0.0, f64::max),
-        })
-    }
-}
-
-/// The median of `values`; an even count takes the mean of the two middle values; 0 for none.
-pub fn median(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    let mid = sorted.len() / 2;
-    if sorted.len() % 2 == 1 {
-        sorted[mid]
-    } else {
-        (sorted[mid - 1] + sorted[mid]) / 2.0
-    }
-}
-
-fn minutes_between(from: jiff::Timestamp, to: jiff::Timestamp) -> f64 {
-    to.duration_since(from).as_secs_f64() / 60.0
-}
-
-/// The outcome that closed a job, the later one first.
-fn closing_outcome(job: &JobRecords) -> Option<&athena_data::records::Outcome> {
-    job.later_outcome.as_ref().or(job.outcome.as_ref())
-}
-
-/// The minutes of a job's invocations in the roles `roles`.
-fn role_minutes(job: &JobRecords, roles: &[Role]) -> f64 {
-    crate::store::positive_zero(
-        job.invocations
-            .iter()
-            .filter(|i| roles.contains(&i.role))
-            .map(|i| minutes_between(i.started_at, i.ended_at).max(0.0))
-            .sum(),
-    )
-}
-
-/// The minutes the job's checks took, as measured; a check that did not run counts nothing.
-fn check_minutes(job: &JobRecords) -> f64 {
-    job.verification.as_ref().map_or(0.0, |v| {
-        crate::store::positive_zero(
-            v.checks
-                .iter()
-                .filter(|c| c.duration.basis() != "not run")
-                .filter_map(|c| c.duration.value())
-                .sum::<f64>()
-                / 60.0,
-        )
-    })
-}
-
-/// When the landing record for `job` was written: the newest `landings/` record with a job-landing commit
-/// of the job. None when there is none.
-fn landing_record_time(records: &Records, job: &JobRecords) -> Option<jiff::Timestamp> {
-    records
-        .landings
-        .iter()
-        .filter(|l| {
-            l.commits.iter().any(|c| {
-                c.kind == athena_data::history::LandingKind::JobLanding
-                    && c.job.as_ref() == Some(job.id())
-            })
-        })
-        .map(|l| l.created_at)
-        .max()
-}
-
-/// The end of a landed job's landing and rebuild: the later of the landing outcome and the landing record.
-/// The second value is whether a landing record was found.
-fn landing_end(records: &Records, job: &JobRecords) -> Option<(jiff::Timestamp, bool)> {
-    let outcome = closing_outcome(job)?.at;
-    Some(match landing_record_time(records, job) {
-        Some(t) => (outcome.max(t), true),
-        None => (outcome, false),
-    })
-}
-
-/// The intervals in which the job was worked: each invocation, its checks (placed by estimate, ending when the
-/// verifier started, or when the last invocation ended if there is no verifier), and, for a landed job, the
-/// wait from the last invocation's end to the landing end.
-fn busy_intervals(records: &Records, job: &JobRecords) -> Vec<(jiff::Timestamp, jiff::Timestamp)> {
-    let mut out: Vec<_> = job
-        .invocations
-        .iter()
-        .filter(|i| i.ended_at >= i.started_at)
-        .map(|i| (i.started_at, i.ended_at))
-        .collect();
-    let Some(last) = job.invocations.iter().map(|i| i.ended_at).max() else {
-        return out;
-    };
-    let checks = check_minutes(job);
-    if checks > 0.0 {
-        let end = job
-            .invocations
-            .iter()
-            .filter(|i| i.role == Role::Verifier)
-            .map(|i| i.started_at)
-            .min()
-            .unwrap_or(last);
-        if let Ok(start) = end.checked_sub(jiff::SignedDuration::from_secs_f64(checks * 60.0)) {
-            out.push((start, end));
-        }
-    }
-    if matches!(job.state(), JobState::Closed(OutcomeState::Landed))
-        && let Some((end, _)) = landing_end(records, job)
-        && end > last
-    {
-        out.push((last, end));
-    }
-    out
-}
-
-/// The minutes a job was worked: invocation wall times, plus measured check durations, plus (landed jobs) the
-/// wait for the landing record. Time the job sat open between those counts nothing.
-fn time_spent(records: &Records, job: &JobRecords) -> f64 {
-    let invocations: f64 = job
-        .invocations
-        .iter()
-        .map(|i| minutes_between(i.started_at, i.ended_at).max(0.0))
-        .sum();
-    let landing_wait = if matches!(job.state(), JobState::Closed(OutcomeState::Landed)) {
-        let last = job.invocations.iter().map(|i| i.ended_at).max();
-        match (last, landing_end(records, job)) {
-            (Some(last), Some((end, _))) => minutes_between(last, end).max(0.0),
-            _ => 0.0,
-        }
-    } else {
-        0.0
-    };
-    crate::store::positive_zero(invocations + check_minutes(job) + landing_wait)
-}
-
-/// The landed jobs whose stages were measured, oldest landing first (ties by id). A landed job that ran no
-/// model has nothing to measure and is left out.
-pub fn landed_jobs(records: &Records) -> Vec<LandedJob> {
-    let mut landed: Vec<LandedJob> = records
-        .request_jobs()
-        .into_iter()
-        .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
-        .filter_map(|j| {
-            let (landed_at, landing_found) = landing_end(records, j)?;
-            let last_end = j.invocations.iter().map(|i| i.ended_at).max()?;
-            let checks = check_minutes(j);
-            Some(LandedJob {
-                id: j.id().as_str().to_string(),
-                landed_at,
-                landing_found,
-                stages: StageMinutes {
-                    reading: role_minutes(j, &[Role::Reader]),
-                    planning: role_minutes(j, &[Role::Planner, Role::Critic]),
-                    producer: role_minutes(j, &[Role::Producer]),
-                    checks,
-                    verifier: role_minutes(j, &[Role::Verifier]),
-                    landing_and_rebuild: minutes_between(last_end, landed_at).max(0.0),
-                },
-            })
-        })
-        .collect();
-    landed.sort_by(|a, b| (a.landed_at, &a.id).cmp(&(b.landed_at, &b.id)));
-    landed
-}
-
-/// The measured landed jobs among the first `landings` request jobs to land, oldest first.
-///
-/// A throughput review stores `landings`, the count of every landed request job at that time
-/// (`Throughput::landed_total`), but [`landed_jobs`] leaves out landed jobs that ran no model. Cutting
-/// `landed_jobs` by that count would mix the two sets and drift forward by the number of unmeasured jobs. So
-/// the cut is made over all landed request jobs, ordered as [`landed_jobs`] orders them (landing end, then id),
-/// and only then are the unmeasured ones dropped. The result is a reconstruction of what that review saw: a
-/// landing record written after the review can move a job's landing end and so its rank.
-pub fn landed_jobs_among_first(records: &Records, landings: usize) -> Vec<LandedJob> {
-    let first: BTreeSet<String> = ranked_landings(records)
-        .into_iter()
-        .take(landings)
-        .map(|(_, id)| id)
-        .collect();
-    landed_jobs(records)
-        .into_iter()
-        .filter(|j| first.contains(&j.id))
-        .collect()
-}
-
-/// Every landed request job as (landing end, id), oldest first: the order [`landed_jobs`] uses, over all
-/// landed jobs and not only the measured ones.
-fn ranked_landings(records: &Records) -> Vec<(jiff::Timestamp, String)> {
-    let mut ranked: Vec<(jiff::Timestamp, String)> = records
-        .request_jobs()
-        .into_iter()
-        .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
-        .filter_map(|j| Some((landing_end(records, j)?.0, j.id().as_str().to_string())))
-        .collect();
-    ranked.sort();
-    ranked
-}
-
-/// Whether `job` ran a model and did not land: it failed, was closed unlanded, or was stopped in planning. A
-/// job that never ran a model is not an attempt, and a job still open is neither landed nor wasted yet.
-fn did_not_land(job: &JobRecords) -> bool {
-    if job.invocations.is_empty() {
-        return false;
-    }
-    let state = job.state();
-    let stopped = plan_state(job).is_some_and(|s| !s.accepted);
-    let failed = matches!(state, JobState::Closed(s) if s != OutcomeState::Landed);
-    failed || (stopped && state != JobState::Closed(OutcomeState::Landed))
-}
-
-/// Windows of wasted work, the newest first: the newest `window` landings (all of them when fewer have
-/// landed) and up to three full windows of `window` landings before it. Each holds its landings and the
-/// attempts that did not land ([`did_not_land`]) that closed from the end of the window's oldest landing up
-/// to the end of the next newer window's oldest landing; an attempt that closed before the oldest reported
-/// landing is in no window. An attempt is placed by its closing outcome, or by the end of its last invocation
-/// when it has none. Empty when nothing has landed.
-///
-/// The figures are a reconstruction from job and invocation records: a landing record written later can move
-/// a landing end and so a cut.
-pub fn waste_windows(records: &Records, window: usize) -> Vec<WasteWindow> {
-    let ranked = ranked_landings(records);
-    let n = ranked.len();
-    if n == 0 || window == 0 {
-        return Vec::new();
-    }
-    // The (start, end) of each window in `ranked`.
-    let mut spans: Vec<(usize, usize)> = Vec::new();
-    for k in 0..4 {
-        let end = n.saturating_sub(k * window);
-        if end == 0 || (k > 0 && end < window) {
-            break;
-        }
-        spans.push((end.saturating_sub(window), end));
-    }
-    let attempts: Vec<((jiff::Timestamp, String), f64)> = records
-        .request_jobs()
-        .into_iter()
-        .filter(|j| did_not_land(j))
-        .filter_map(|j| {
-            let at = closing_outcome(j)
-                .map(|o| o.at)
-                .or_else(|| j.invocations.iter().map(|i| i.ended_at).max())?;
-            Some(((at, j.id().as_str().to_string()), j.spent_usd()))
-        })
-        .collect();
-    let did_work = |id: &str| {
-        records
-            .jobs
-            .get(id)
-            .is_some_and(|j| !j.invocations.is_empty())
-    };
-    spans
-        .iter()
-        .enumerate()
-        .map(|(k, &(start, end))| {
-            let lower = &ranked[start];
-            let upper = k.checked_sub(1).map(|newer| &ranked[spans[newer].0]);
-            let costs: Vec<f64> = attempts
-                .iter()
-                .filter(|(key, _)| key >= lower && upper.is_none_or(|u| key < u))
-                .map(|(_, cost)| *cost)
-                .collect();
-            let first_attempt_landings = ranked[start..end]
-                .iter()
-                .filter(|(_, id)| {
-                    let retried = records
-                        .jobs
-                        .get(id.as_str())
-                        .and_then(|j| j.request.as_ref())
-                        .and_then(|r| crate::reading::retried_job(records, &r.text));
-                    !retried.is_some_and(|r| r.as_str() != id && did_work(r.as_str()))
-                })
-                .count();
-            WasteWindow {
-                landings: end - start,
-                attempts: end - start + costs.len(),
-                unlanded_attempts: costs.len(),
-                first_attempt_landings,
-                wasted_usd: crate::store::positive_zero(costs.iter().sum()),
-                unlanded_costs: costs,
-            }
-        })
-        .collect()
-}
-
-/// The median of the total minutes in the newest `window` measured landed jobs and in up to three full
-/// windows before it, newest first. `measured` is [`landed_jobs`], oldest first.
-fn median_windows(measured: &[LandedJob], window: usize) -> Vec<f64> {
-    let mut out = Vec::new();
-    for k in 0..4 {
-        let end = measured.len().saturating_sub(k * window);
-        if end == 0 || (k > 0 && end < window) {
-            break;
-        }
-        let jobs = &measured[end.saturating_sub(window)..end];
-        out.push(median(
-            &jobs.iter().map(|j| j.stages.total()).collect::<Vec<_>>(),
-        ));
-    }
-    out
-}
-
-/// The bar of a measure from its windows, newest first: the noise is the largest difference between
-/// adjacent windows older than the newest, which needs the newest three (so 60 landings).
-fn bar_of(values: &[f64], floor: f64) -> Bar {
-    if values.len() < 3 {
-        return Bar {
-            noise: None,
-            differences: 0,
-            floor,
-        };
-    }
-    let differences: Vec<f64> = values[1..]
-        .windows(2)
-        .map(|p| (p[0] - p[1]).abs())
-        .collect();
-    Bar {
-        noise: differences.iter().copied().reduce(f64::max),
-        differences: differences.len(),
-        floor,
-    }
-}
-
-impl Throughput {
-    /// Measures `records`. None when no request job landed, so a new repository shows no section.
-    pub fn compute(records: &Records) -> Option<Throughput> {
-        let landed_total = records
-            .request_jobs()
-            .into_iter()
-            .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
-            .count();
-        if landed_total == 0 {
-            return None;
-        }
-        let mut per_day: BTreeMap<String, usize> = BTreeMap::new();
-        for job in records.request_jobs() {
-            if matches!(job.state(), JobState::Closed(OutcomeState::Landed))
-                && let Some(outcome) = closing_outcome(job)
-            {
-                let day: String = outcome.at.to_string().chars().take(10).collect();
-                *per_day.entry(day).or_default() += 1;
-            }
-        }
-        let measured = landed_jobs(records);
-        let window = &measured[measured.len().saturating_sub(THROUGHPUT_WINDOW)..];
-        let median_stages = StageMinutes::median_of(window);
-        let median_minutes = median(&window.iter().map(|j| j.stages.total()).collect::<Vec<_>>());
-
-        let mut spans: Vec<(jiff::Timestamp, jiff::Timestamp)> = Vec::new();
-        let mut unlanded_jobs = 0;
-        let mut unlanded_minutes = 0.0;
-        for job in records.request_jobs() {
-            if job.invocations.is_empty() {
-                continue;
-            }
-            spans.extend(busy_intervals(records, job));
-            if did_not_land(job) {
-                unlanded_jobs += 1;
-                unlanded_minutes += time_spent(records, job);
-            }
-        }
-        spans.sort();
-        let mut idle_minutes = 0.0;
-        let mut reach: Option<jiff::Timestamp> = None;
-        for (start, end) in spans {
-            if let Some(reach_end) = reach {
-                if start > reach_end {
-                    idle_minutes += minutes_between(reach_end, start);
-                }
-                reach = Some(reach_end.max(end));
-            } else {
-                reach = Some(end);
-            }
-        }
-        let windows = waste_windows(records, THROUGHPUT_WINDOW);
-        let waste = windows.first().cloned()?;
-        let medians = median_windows(&measured, THROUGHPUT_WINDOW);
-        let one_job = 1.0 / THROUGHPUT_WINDOW as f64;
-        let costs: Vec<f64> = windows
-            .iter()
-            .filter(|w| w.landings == THROUGHPUT_WINDOW)
-            .flat_map(|w| w.unlanded_costs.iter().copied())
-            .collect();
-        let series =
-            |pick: fn(&WasteWindow) -> f64| -> Vec<f64> { windows.iter().map(pick).collect() };
-        let bars = Bars {
-            median_minutes: bar_of(&medians, 1.0),
-            attempts_per_landing: bar_of(&series(WasteWindow::attempts_per_landing), one_job),
-            wasted_usd: bar_of(&series(|w| w.wasted_usd), median(&costs)),
-            first_attempt_share: bar_of(&series(WasteWindow::first_attempt_share), one_job),
-        };
-        Some(Throughput {
-            waste,
-            waste_previous: windows.get(1).cloned(),
-            median_previous: medians.get(1).copied(),
-            bars,
-            landed_total,
-            landed_per_day: per_day
-                .into_iter()
-                .map(|(day, landed)| DayCount { day, landed })
-                .collect(),
-            window_jobs: window.len(),
-            median_minutes,
-            median_stages,
-            window_with_landing_record: window.iter().filter(|j| j.landing_found).count(),
-            idle_minutes,
-            unlanded_jobs,
-            unlanded_minutes,
-            build_wait: BuildWait::of(records),
-        })
-    }
-
-    /// The four measures the throughput review watches, each in the newest window and in the one before it,
-    /// with its bar: median minutes per landed job, attempts per landed change, money spent on attempts that
-    /// did not land, and the share of changes that landed on the first attempt.
-    pub fn measures(&self) -> Vec<Measure> {
-        let before = self.waste_previous.as_ref();
-        vec![
-            Measure {
-                name: "median minutes per landed job",
-                unit: "min",
-                now: self.median_minutes,
-                before: self.median_previous,
-                higher_is_worse: true,
-                bar: self.bars.median_minutes,
-            },
-            Measure {
-                name: "attempts per landed change",
-                unit: "",
-                now: self.waste.attempts_per_landing(),
-                before: before.map(WasteWindow::attempts_per_landing),
-                higher_is_worse: true,
-                bar: self.bars.attempts_per_landing,
-            },
-            Measure {
-                name: "spent on attempts that did not land",
-                unit: "USD",
-                now: self.waste.wasted_usd,
-                before: before.map(|w| w.wasted_usd),
-                higher_is_worse: true,
-                bar: self.bars.wasted_usd,
-            },
-            Measure {
-                name: "share landed on the first attempt",
-                unit: "",
-                now: self.waste.first_attempt_share(),
-                before: before.map(WasteWindow::first_attempt_share),
-                higher_is_worse: false,
-                bar: self.bars.first_attempt_share,
-            },
-        ]
-    }
-
-    /// The lines `athena status` prints, and the section the throughput review is given.
-    pub fn text(&self) -> String {
-        let waste = &self.waste;
-        let landings = waste.landings;
-        let earlier = |show: &dyn Fn(&WasteWindow) -> String| {
-            self.waste_previous.as_ref().map_or_else(String::new, |p| {
-                format!("; the {} landings before: {}", p.landings, show(p))
-            })
-        };
-        let waste_lines = format!(
-            "\n           attempts per landed change: {:.2} over the last {landings} landing(s){}\n           basis: landings plus attempts that ran a model and did not land (failed, closed unlanded or stopped), placed by when they closed; jobs still open and requests that never ran are not counted\n           spent on attempts that did not land: {:.2} USD over the last {landings} landing(s){}\n           basis: the cost recorded for the invocations of those attempts, lower bound\n           landed on the first attempt: {:.0}% over the last {landings} landing(s){}\n           basis: landed changes whose request is not 'try again on' a job that ran a model, out of all landed changes",
-            waste.attempts_per_landing(),
-            earlier(&|w| format!("{:.2}", w.attempts_per_landing())),
-            waste.wasted_usd,
-            earlier(&|w| format!("{:.2} USD", w.wasted_usd)),
-            waste.first_attempt_share() * 100.0,
-            earlier(&|w| format!("{:.0}%", w.first_attempt_share() * 100.0)),
-        );
-        let stages = self
-            .median_stages
-            .named()
-            .iter()
-            .map(|(name, m)| format!("{name} {m:.1}"))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let days = self
-            .landed_per_day
-            .iter()
-            .map(|d| format!("{} {}", d.day, d.landed))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let landing_basis = if self.window_with_landing_record == self.window_jobs {
-            "landing record (landings/) found for each".to_string()
-        } else if self.window_with_landing_record == 0 {
-            "no landing record (landings/) found, so landing ends at the landing outcome"
-                .to_string()
-        } else {
-            format!(
-                "landing record (landings/) found for {} of {}, the rest end at the landing outcome",
-                self.window_with_landing_record, self.window_jobs
-            )
-        };
-        let build_wait = self.build_wait.map_or_else(String::new, |w| {
-            format!(
-                "\n           build wait {:.1} s over {} check(s), longest {:.1} s\n           basis: queued_s of each check in verification.json, athena monotonic clock; a check that took no build slot is not counted",
-                w.total_s, w.checks, w.longest_s
-            )
-        });
-        format!(
-            "throughput {} landed ({days})\n           basis: landed jobs counted by their landing outcome's UTC day\n           median per landed job over the last {} measured: {:.1} min ({stages})\n           basis: invocation wall times, measured check durations, and landing and rebuild from the verifier's end to the later of the outcome and the landing record; {landing_basis}\n           idle between jobs {:.1} min\n           basis: gaps between merged busy intervals of all jobs (invocations, checks placed by estimate before the verifier, landing wait), not the time a job stayed open\n           did not land: {} job(s), {:.1} min\n           basis: time spent (invocation wall times plus measured check durations), not the time from dispatch to close{waste_lines}{build_wait}",
-            self.landed_total,
-            self.window_jobs,
-            self.median_minutes,
-            self.idle_minutes,
-            self.unlanded_jobs,
-            self.unlanded_minutes
-        )
-    }
 }
 
 /// One class's forecast headline.
@@ -2049,6 +768,118 @@ fn invocation_line(i: &Invocation) -> InvocationLine {
     }
 }
 
+/// What one pass over the request jobs collects for [`StatusView`]: counts by state, the newest lines, the open
+/// lines and the first planning round's outcome counts.
+#[derive(Default)]
+struct JobScan {
+    jobs_by_state: BTreeMap<String, usize>,
+    recent: Vec<JobLine>,
+    open: Vec<JobLine>,
+    first_round: Option<FirstRoundCounts>,
+}
+
+/// Interventions counted by category and by class of work, in that order.
+fn intervention_counts(records: &Records) -> (BTreeMap<String, usize>, BTreeMap<String, usize>) {
+    let mut by_category: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_class: BTreeMap<String, usize> = BTreeMap::new();
+    for i in &records.interventions {
+        *by_category.entry(i.category.as_str().into()).or_default() += 1;
+        *by_class.entry(i.class_of_work.clone()).or_default() += 1;
+    }
+    (by_category, by_class)
+}
+
+/// The forecast headline of each class of work: the reader's and the reference's mean Brier score over the
+/// latest score of every job of that class.
+fn class_forecasts(records: &Records) -> Vec<ClassHeadline> {
+    let mut per_class: BTreeMap<String, Vec<&athena_data::records::Score>> = BTreeMap::new();
+    for job in records.request_jobs() {
+        if let (Some(score), Some(class)) = (job.latest_score(), job.class()) {
+            per_class.entry(class.to_string()).or_default().push(score);
+        }
+    }
+    per_class
+        .into_iter()
+        .map(|(class, scores)| {
+            let agg = athena_score::aggregate(&scores);
+            let mean = |name: &str| {
+                agg.per_forecaster
+                    .get(name)
+                    .filter(|t| t.events > 0)
+                    .map(|t| t.event_brier_sum / t.events as f64)
+            };
+            ClassHeadline {
+                class,
+                scored_jobs: scores.len(),
+                reader_mean_brier: mean("reader"),
+                reference_mean_brier: mean("reference"),
+            }
+        })
+        .collect()
+}
+
+/// The quantities that are not known yet, each with the resolution record that settles it, if any.
+fn pending_views(records: &Records, set: &athena_gate::records::RecordSet) -> Vec<Pending> {
+    let resolutions: BTreeMap<(String, String), String> = records
+        .resolutions
+        .iter()
+        .map(|r| {
+            (
+                (r.target_path.clone(), r.target_field.clone()),
+                format!("records/resolutions/{}/{}.json", r.id.month(), r.id),
+            )
+        })
+        .collect();
+    pending_quantities(set)
+        .into_iter()
+        .map(|(record, field, basis)| {
+            let resolved_by = resolutions.get(&(record.clone(), field.clone())).cloned();
+            Pending {
+                record,
+                field,
+                basis,
+                resolved_by,
+            }
+        })
+        .collect()
+}
+
+/// The bootstrap section of the status view for a range of unverified commits.
+fn bootstrap_view(range: &BootstrapRange) -> Bootstrap {
+    match range {
+        BootstrapRange::Open => Bootstrap {
+            range_open: true,
+            through_commit: None,
+            note: format!(
+                "OPEN: commits labeled Athena-Job: bootstrap may still change governed content unverified. The bootstrap \
+                 closes its range by adding {BOOTSTRAP_OUTCOME}, naming its last commit (docs/records.md)."
+            ),
+        },
+        BootstrapRange::ClosedThrough(through) => Bootstrap {
+            range_open: false,
+            through_commit: Some(through.clone()),
+            note: "closed: governed content changes only through verified landings and declared interventions".into(),
+        },
+    }
+}
+
+/// The next-step lines for the defaults proposals and the work proposals waiting for a decision.
+fn proposal_next_lines(
+    proposals: &[ProposalView],
+    work_proposals: &[WorkProposalView],
+) -> Vec<String> {
+    let mut next = Vec::new();
+    for p in proposals {
+        let id = &p.id;
+        next.push(format!("athena accept-proposal {id}   # runs a job that edits defaults.toml · or: athena reject-proposal {id} --why \"...\""));
+    }
+    for w in work_proposals {
+        let id = &w.id;
+        next.push(format!("athena approve-work {id}   # submits a job that carries the proposal's cited content · or: athena reject-work {id} --why \"...\""));
+    }
+    next
+}
+
 impl Athena {
     /// Whether a process of the registry still works on `job`.
     pub fn running(&self, job: &str) -> bool {
@@ -2075,22 +906,16 @@ impl Athena {
         Ok(mistake_report(&Records::load(&self.git, &head)?))
     }
 
-    /// The state of the work.
-    pub fn status(&self) -> Result<StatusView> {
-        self.state.registry().reap();
-        let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
-        let set = athena_gate::records::RecordSet::load(&self.git, &head)?;
-        let mut jobs_by_state: BTreeMap<String, usize> = BTreeMap::new();
-        let mut recent = Vec::new();
-        let mut open = Vec::new();
-        let mut first_round: Option<FirstRoundCounts> = None;
-        let retries = crate::reading::retries_by_job(&records);
+    /// Walk every request job once: count jobs by state, keep the ten most recent non-queued lines and the open
+    /// ones, and count the first planning round's outcomes. Marks the hold of a proposed or interrupted job.
+    fn scan_jobs(&self, records: &Records) -> JobScan {
+        let mut scan = JobScan::default();
+        let retries = crate::reading::retries_by_job(records);
         for job in records.request_jobs() {
             if let Some(accepted) = first_round_accepted(job)
                 && let Some(state) = plan_state(job)
             {
-                let counts = first_round.get_or_insert(FirstRoundCounts {
+                let counts = scan.first_round.get_or_insert(FirstRoundCounts {
                     accepted: 0,
                     stopped: 0,
                 });
@@ -2102,7 +927,7 @@ impl Athena {
                 }
             }
             let state = self.state_name(job);
-            *jobs_by_state.entry(state.clone()).or_default() += 1;
+            *scan.jobs_by_state.entry(state.clone()).or_default() += 1;
             let mut line = job_line(job, &state);
             if state == "interrupted" {
                 line.retried_as = retries.get(job.id().as_str()).cloned();
@@ -2112,90 +937,23 @@ impl Athena {
                 line.hold = crate::disk::read_any_hold(&self.state, job.id()).map(|h| h.text());
             }
             // Queued requests have not run; they show under open work.
-            if recent.len() < 10 && state != "queued" {
-                recent.push(line.clone());
+            if scan.recent.len() < 10 && state != "queued" {
+                scan.recent.push(line.clone());
             }
             if matches!(
                 state.as_str(),
                 "queued" | "proposed" | "declined" | "interrupted" | "running" | "blocked"
             ) {
-                open.push(line);
+                scan.open.push(line);
             }
         }
-        let mut by_category: BTreeMap<String, usize> = BTreeMap::new();
-        let mut by_class: BTreeMap<String, usize> = BTreeMap::new();
-        for i in &records.interventions {
-            *by_category.entry(i.category.as_str().into()).or_default() += 1;
-            *by_class.entry(i.class_of_work.clone()).or_default() += 1;
-        }
-        let mut per_class: BTreeMap<String, Vec<&athena_data::records::Score>> = BTreeMap::new();
-        for job in records.request_jobs() {
-            if let (Some(score), Some(class)) = (job.latest_score(), job.class()) {
-                per_class.entry(class.to_string()).or_default().push(score);
-            }
-        }
-        let forecasts = per_class
-            .into_iter()
-            .map(|(class, scores)| {
-                let agg = athena_score::aggregate(&scores);
-                let mean = |name: &str| {
-                    agg.per_forecaster
-                        .get(name)
-                        .filter(|t| t.events > 0)
-                        .map(|t| t.event_brier_sum / t.events as f64)
-                };
-                ClassHeadline {
-                    class,
-                    scored_jobs: scores.len(),
-                    reader_mean_brier: mean("reader"),
-                    reference_mean_brier: mean("reference"),
-                }
-            })
-            .collect();
-        let resolutions: BTreeMap<(String, String), String> = records
-            .resolutions
-            .iter()
-            .map(|r| {
-                (
-                    (r.target_path.clone(), r.target_field.clone()),
-                    format!("records/resolutions/{}/{}.json", r.id.month(), r.id),
-                )
-            })
-            .collect();
-        let pending: Vec<Pending> = pending_quantities(&set)
-            .into_iter()
-            .map(|(record, field, basis)| {
-                let resolved_by = resolutions.get(&(record.clone(), field.clone())).cloned();
-                Pending {
-                    record,
-                    field,
-                    basis,
-                    resolved_by,
-                }
-            })
-            .collect();
-        let range = bootstrap_range(&self.git, &head)?;
-        let bootstrap = match &range {
-            BootstrapRange::Open => Bootstrap {
-                range_open: true,
-                through_commit: None,
-                note: format!(
-                    "OPEN: commits labeled Athena-Job: bootstrap may still change governed content unverified. The bootstrap \
-                     closes its range by adding {BOOTSTRAP_OUTCOME}, naming its last commit (docs/records.md)."
-                ),
-            },
-            BootstrapRange::ClosedThrough(through) => Bootstrap {
-                range_open: false,
-                through_commit: Some(through.clone()),
-                note: "closed: governed content changes only through verified landings and declared interventions".into(),
-            },
-        };
-        let kill_switch_on = self.state.registry().stopped();
+        scan
+    }
+
+    /// The next-step lines for the open jobs, one per job that has a next step, in the order of `open`.
+    fn open_job_next_lines(&self, records: &Records, open: &[JobLine]) -> Vec<String> {
         let mut next = Vec::new();
-        if kill_switch_on {
-            next.push("athena start   # the kill switch is on; new work is blocked".into());
-        }
-        for line in &open {
+        for line in open {
             let id = &line.id;
             match line.state.as_str() {
                 "queued" => next.push(format!("athena go {id}   # reads it first, then asks to run it · or: athena close {id} --why \"...\"")),
@@ -2208,7 +966,7 @@ impl Athena {
                             .get(new.as_str())
                             .map_or("unknown", |j| j.state().name());
                         let follow_up = crate::reading::retry_follow_up(
-                            &records,
+                            records,
                             new,
                             self.running(new),
                         );
@@ -2220,6 +978,25 @@ impl Athena {
                 _ => {}
             }
         }
+        next
+    }
+
+    /// The state of the work.
+    pub fn status(&self) -> Result<StatusView> {
+        self.state.registry().reap();
+        let head = self.head()?;
+        let records = Records::load(&self.git, &head)?;
+        let set = athena_gate::records::RecordSet::load(&self.git, &head)?;
+        let scan = self.scan_jobs(&records);
+        let (by_category, by_class) = intervention_counts(&records);
+        let pending = pending_views(&records, &set);
+        let bootstrap = bootstrap_view(&bootstrap_range(&self.git, &head)?);
+        let kill_switch_on = self.state.registry().stopped();
+        let mut next = Vec::new();
+        if kill_switch_on {
+            next.push("athena start   # the kill switch is on; new work is blocked".into());
+        }
+        next.extend(self.open_job_next_lines(&records, &scan.open));
         // Marks that no longer hold under the current attempts are not shown.
         let lines = self.live_marks(&records);
         for l in lines.iter().filter(|l| l.is_pause()) {
@@ -2256,9 +1033,7 @@ impl Athena {
         }
         // A spec that cannot be read or parsed lists nothing here; the sweep's spec pass reports it.
         let spec_gaps = crate::hestia::spec_gaps_at(&self.git, &head).unwrap_or_default();
-        for g in &spec_gaps {
-            next.push(g.next_line());
-        }
+        next.extend(spec_gaps.iter().map(|g| g.next_line()));
         let open_interventions = open_interventions(&records);
         for i in &open_interventions {
             next.push(format!(
@@ -2273,15 +1048,8 @@ impl Athena {
             next.push(format!("resolve {}#{}: add an athena.resolution/1 record (docs/records.md, \"Resolving a pending quantity\")", p.record, p.field));
         }
         let proposals = proposal_views(&records);
-        for p in &proposals {
-            let id = &p.id;
-            next.push(format!("athena accept-proposal {id}   # runs a job that edits defaults.toml · or: athena reject-proposal {id} --why \"...\""));
-        }
         let work_proposals = work_proposal_views(&records);
-        for w in &work_proposals {
-            let id = &w.id;
-            next.push(format!("athena approve-work {id}   # submits a job that carries the proposal's cited content · or: athena reject-work {id} --why \"...\""));
-        }
+        next.extend(proposal_next_lines(&proposals, &work_proposals));
         let unreviewed = crate::labeled::unreviewed(&records.introspections, &records.class_labels);
         if let Some(oldest) = unreviewed.first() {
             next.push(format!(
@@ -2308,10 +1076,10 @@ impl Athena {
             nested: self.nested.clone(),
             focus: records.current_focus().map(|f| f.text.clone()),
             bootstrap,
-            jobs_by_state,
-            recent,
-            open,
-            planning: first_round,
+            jobs_by_state: scan.jobs_by_state,
+            recent: scan.recent,
+            open: scan.open,
+            planning: scan.first_round,
             planning_cost: planning_cost(&records),
             keep_rule: keep_rule(&records),
             producer_settings: producer_settings(&records),
@@ -2327,7 +1095,7 @@ impl Athena {
             mistakes: mistake_report(&records),
             open_interventions,
             restarts: records.restarts.len(),
-            forecasts,
+            forecasts: class_forecasts(&records),
             pending,
             unreviewed_introspections: unreviewed.len(),
             proposals,
