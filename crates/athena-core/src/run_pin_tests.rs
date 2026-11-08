@@ -1622,7 +1622,7 @@ fn the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets(
     );
     assert!(brief.contains(&verifier), "{brief}");
     let reader = format!(
-        "- reader: composes contract, frame.reader, defaults, catalog; {} of 2000 tokens used",
+        "- reader: composes contract, frame.reader, defaults, catalog; {} of 2200 tokens used",
         athena_context::compose(&[
             athena_context::CONTRACT.into(),
             athena_context::READER_FRAME.into(),
