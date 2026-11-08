@@ -466,6 +466,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `crates/athena-cli/src/drain.rs` is split into child modules under `drain/` (`engine`, `item_work`, `rounds`,
+  `lander`, `lifecycle`, `real_steps`) to bring it under the code-health size limits. Measured before the
+  split, the file had 4585 production lines (everything before its first test module); it now has 1192, and
+  each new file is under 1100. Code is moved unchanged. The only edits are `pub(super)` visibility on moved
+  items, fields and methods, and `mod` and `pub use` lines in `drain.rs`, so every `crate::drain` path used by
+  `main.rs` and `display.rs` is the same and no test changed.
 - `crates/athena-data/src/records.rs` is split into submodules under `records/` (`core`, `introspection`,
   `work`, `throughput`, `plan`) to bring it under the code-health size limits. Every item is moved unchanged
   and re-exported, so all `athena_data::records::*` paths, serde formats and schemas are the same.
