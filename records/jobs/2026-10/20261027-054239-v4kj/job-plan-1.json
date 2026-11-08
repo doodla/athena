@@ -1,0 +1,341 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-054239-v4kj",
+  "round": 1,
+  "at": "2026-11-08T15:25:04.258864184Z",
+  "invocation_seq": 3,
+  "approach": "Add `check_subjective_method(reading, request)` to crates/athena-core/src/reading/surveys.rs and one `step!(check_subjective_method(reading, request));` line at the end of `refusing_check` (after `check_reading_references`, so no pinned adjacency test moves). The check finds a subjective-quality outcome in the request's plain prose (existing `plain_request_prose` and `plain_line` in terms.rs, which drop quoted spans, paths, example lists and generated lines) or in the reading summary: a whole-word subjective phrase (newcomer, clear to/for, how clear, clarity, easy to follow/understand/read, understandable, readable) on the same line as an audience-facing artifact noun (page, document, docs, guide, explainer, readme, tutorial, article, site, manual). It refuses unless ONE criterion names all four parts of a method: an independent or fresh model reader that had no part in building the work, a persona, a 1 to 5 rating, and a pass threshold. The error names the missing parts and says to state the method before the build. Requests holding the root-cause anchor are skipped, since the cited failure is the subject of the fix. Root cause named in the doc comment: no required verification method for subjective quality at the reading gate (jobs 20261014-163844-c2kt and 20261015-064153-wekz). Tests: unit tests in reading.rs, refusal-corpus cases with input-form tags, a doc/changelog/declared-share corpus test, a reading-rules line in briefs.rs, a CHANGELOG entry and a C8 row in defaults-loop.md section 3.6. Criterion 8 (fmt, clippy, test) is shown by the three whole-repo commands, each tied to a named failure that happens if the change is missing or incomplete (see the demonstration).",
+  "decisions": [
+    {
+      "choice": "Put the check at the reading gate as one new `step!` line at the end of `refusing_check`, not in any prompt, defaults.toml or either job's code.",
+      "reason": "The fault starts where a reading with a subjective outcome and no method is accepted (`refusing_check`, checks.rs). `check_reading_acceptance` is the one gate for the build path (reading.rs:679), the text-only replay and `athena check-reading` (replay.rs:55), so one step covers all. The corpus test `every_acceptance_check_has_a_refusing_corpus_case` forces a refusing case. Appending at the end keeps the adjacency tests (governance→outcome, outcome→reach, reach→defined_terms, survey→history_fixture) passing.",
+      "rejected": [
+        {
+          "option": "Add a prompt or defaults.toml text telling the reader to state the method",
+          "why": "The reader set has 3 tokens of headroom, defaults.toml is governance and not a deliverable, and prose does not refuse a reading (defaults `mechanism`)."
+        },
+        {
+          "option": "Redo the newcomer.rs gate in athena-cap-study or wire the audience rating into the ship path",
+          "why": "Out of scope in the brief; those act after the build, and the cause is at admission."
+        },
+        {
+          "option": "Insert the step next to check_outcome_state",
+          "why": "Tests assert exact neighbours of several steps; inserting there breaks them."
+        }
+      ]
+    },
+    {
+      "choice": "Trigger only when a subjective phrase and an artifact noun sit on the same line of plain prose (reusing `plain_request_prose`/`plain_line`); read the reading summary through `plain_line` too.",
+      "reason": "Criterion 6: ordinary code requests must not be refused. Bare 'clear' ('clear the cache') and 'human-readable output' have no artifact noun. `plain_request_prose` already drops quoted spans, backtick spans, paths, example lists and generated lines.",
+      "rejected": [
+        {
+          "option": "Trigger on any occurrence of 'clear' or 'readable'",
+          "why": "Would refuse 'clear the cache' and 'human-readable output'; fails criterion 6."
+        },
+        {
+          "option": "Ask a model to classify whether the outcome is subjective",
+          "why": "Adds a model call to a deterministic gate; every sibling check is deterministic."
+        }
+      ]
+    },
+    {
+      "choice": "Skip the check when the request holds `ROOT_CAUSE_ANCHOR` (\"The same cause has produced failures in more than one job.\").",
+      "reason": "This job's own request and any future root-cause fix for this class quote 'a page is clear to a newcomer' as the cause; the reading changes code and must not be refused for the cited failure. terms.rs uses the same anchor for the same reason. Limit stated in the doc comment.",
+      "rejected": [
+        {
+          "option": "Scan root-cause requests like any other",
+          "why": "Would refuse this very job on a retry, and any fix to the check."
+        }
+      ]
+    },
+    {
+      "choice": "Satisfied by one criterion (any kind) holding all four parts; the error names the parts missing from the closest criterion (most parts; all four if none). Detection is lowercase phrase matching: independent (independent, fresh, 'no part in', 'did not build', separate) with (reader, model, reviewer, judge); persona (persona, 'as a ', 'as an ', newcomer, novice, beginner); scale ('1 to 5', '1-5', en dash, 'out of 5', '/5', '5-point', 'five-point'); threshold (at least, minimum, below, 'or above', 'or higher', threshold, blocks, 'no less than') plus a digit.",
+      "reason": "A method is one check; parts spread over criteria give no single check a verifier can run. Persona is in the brief's accepted reading and the outcome-check default.",
+      "rejected": [
+        {
+          "option": "Accept parts spread across several criteria",
+          "why": "No single criterion tells a verifier how to rate; the error could not name what is missing."
+        },
+        {
+          "option": "Require the threshold to be at least 4",
+          "why": "The user did not ask the gate to fix a number; left as an open question."
+        }
+      ]
+    },
+    {
+      "choice": "Add a tenth reading rule to `READING_RULES` in briefs.rs and update its test (count 9→10, check list, byte bound 2750→3000 with the measured size in the comment).",
+      "reason": "briefs.rs is a listed deliverable and the rules list names every check. The reader budget set is CONTRACT, READER_FRAME, defaults and catalog (crates/athena-cli/tests/budgets.rs), not the brief, so the 3-token headroom is untouched.",
+      "rejected": [
+        {
+          "option": "Leave briefs.rs unchanged",
+          "why": "The reader would learn the rule only from the refusal."
+        }
+      ]
+    },
+    {
+      "choice": "Show criterion 8 with the three whole-repo check commands and tie each to a concrete failure the change would cause if incomplete, rather than a vague 'all pass'.",
+      "reason": "Findings 1 and 2: a behavior criterion needs fails_without and a named seam. The checks are the production gate commands Athena itself runs; the seam is the repository's own workspace and test suites, which exist today.",
+      "rejected": [
+        {
+          "option": "Add a new test that shells out to cargo fmt/clippy",
+          "why": "Duplicates CI and the commands themselves are the evidence; adds a slow recursive test."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/surveys.rs",
+      "action": "modify",
+      "purpose": "Add SUBJECTIVE_PHRASES and AUDIENCE_ARTIFACTS, helpers (triggering line, four method parts of a criterion) and `pub fn check_subjective_method` with the doc comment naming the root cause, both jobs, the skip, limits, the intended higher refusal rate and the 5% estimate.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "purpose": "Add `step!(check_subjective_method(reading, request));` after check_reading_references and a link in the `check_reading_acceptance` doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Unit tests: refusal and error text, full method accepted, partial methods refused, ordinary requests unaffected, one step line and doc link.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add `subjective_cases()` chained in `cases()`, five INPUT_FORMS tags (41→46) and `subjective_method_refusal_is_declared_intended`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add the tenth reading rule naming `check_subjective_method` and update the rules test (count, check list, byte bound and comment).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased/Added entry naming the root cause, both jobs, `check_subjective_method`, the intended higher refusal rate, 'expected 5% of newly refused readings', and that the c2kt gate and wekz findings are not redone.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/defaults-loop.md",
+      "action": "modify",
+      "purpose": "Section 3.6: add case C8 (subjective-quality outcome with no stated check method, class acceptance-method-unspecified-needs-user-answer, prevented by a code check at the reading gate) and extend the 'Reading the table' sentence.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/src/reading/surveys.rs around check_criteria_evidence and terms.rs (`plain_request_prose`, `plain_line`, `ROOT_CAUSE_ANCHOR`) so the new code reuses them via `use super::*`.",
+    "In surveys.rs add `SUBJECTIVE_PHRASES` and `AUDIENCE_ARTIFACTS`, a helper returning the first plain-prose line (from `plain_request_prose(request)` lines and `plain_line(&reading.summary)`, lowercased) holding a phrase (`has_phrase`) and an artifact noun, and a helper returning four booleans for a criterion text (independent reader, persona, 1-to-5 scale, threshold). Add `pub fn check_subjective_method(reading: &Reading, request: &str) -> Result<()>`: Ok when capability is None, a question is set, deliverables are empty, the request contains ROOT_CAUSE_ANCHOR, or no line triggers; Ok when any criterion has all four; otherwise `bail!` with 'the reading was refused because the request states a subjective-quality outcome (...)', the parts missing from the closest criterion, and 'state the method before the build: one criterion naming an independent model reader that had no part in building the work, the persona it reads as, a rating from 1 to 5, and the minimum rating that passes; `athena audience` rates a live page this way'.",
+    "Write the function's doc comment: the root cause (no required verification method for subjective quality), jobs 20261014-163844-c2kt and 20261015-064153-wekz, the trigger, the four parts, the skips and limits, 'This check refuses more readings; the higher refusal rate is intended.' and that the 5% share is an estimate.",
+    "In checks.rs append `step!(check_subjective_method(reading, request));` after the check_reading_references step and add the link to the `check_reading_acceptance` doc list.",
+    "Run `cargo test -p athena-core` to confirm every existing reading and corpus test still passes before adding tests; if one is refused, narrow the trigger, not the test.",
+    "In reading.rs, next to the defined-terms tests, add `subjective_method_missing_is_refused_and_named`, `subjective_method_stated_is_accepted`, `subjective_method_partial_is_refused`, `subjective_method_ignores_other_requests`.",
+    "In reading.rs add `subjective_method_has_one_step_line` (one step line in the `refusing_check` body, found as in `history_fixture_has_one_step_line`, and the doc link in the acceptance doc).",
+    "In refusal_corpus.rs add five tags to INPUT_FORMS (41→46), `subjective_cases()` chained into `cases()` with the case ids listed under criterion 5 (set `bullets_expected` to what `request_text_acceptance` finds; build the root-cause case like `generated_root_cause_request`), and `subjective_method_refusal_is_declared_intended` copying `environment_reach_refusal_is_declared_intended`.",
+    "In briefs.rs add the tenth rule line to READING_RULES (array length 10, ≤220 characters, containing `check_subjective_method`) and update `the_reader_brief_names_each_reading_rule_in_one_short_line` (count 10, check list, byte bound 3000, comment).",
+    "Add the CHANGELOG.md Unreleased/Added entry and the defaults-loop.md section 3.6 row C8 and sentence; keep banned words and email-like text out.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` and `cargo test -p athena-core --test refusal_corpus`; fix any failure in the new code."
+  ],
+  "risks": [
+    {
+      "risk": "The trigger list is wrong and refuses ordinary code requests, or misses real subjective wording.",
+      "mitigation": "Whole-word phrases need an artifact noun on the same plain-prose line; quoted spans, paths, example lists and generated lines are dropped; four accepted ordinary-request corpus cases and unit cases pin this; the 5% share is declared so replay does not hold the job. Step 5 runs the full athena-core suite before tests are added; if an existing case is refused, narrow the trigger, not the test."
+    },
+    {
+      "risk": "This job's own request (and any retry) quotes 'clear to a newcomer' and would be refused.",
+      "mitigation": "The check skips requests that hold `ROOT_CAUSE_ANCHOR`; a unit test and corpus case subjective-cited-in-root-cause-request cover a request built like the generator's."
+    },
+    {
+      "risk": "The method criterion trips an earlier check (criteria evidence, environment reach, outcome state) in the Accept cases.",
+      "mitigation": "The method criterion is a Behavior criterion citing a command (`athena audience`), so it passes check_criteria_evidence; a corpus Accept case proves the pair passes the whole gate. If another check refuses the fixture wording, the producer rewords the fixture, not the check."
+    },
+    {
+      "risk": "The corpus case for 20261015-064153-wekz is rebuilt from the brief and may differ from the recorded request.",
+      "mitigation": "Records are absent from the snapshot; the case source says 'rebuilt from the job brief' and uses the introspection's stated shape. The cases pin the rule's behavior, not the job's wording."
+    },
+    {
+      "risk": "The briefs.rs byte-size assertion (<2750, measured 2718) fails with the new rule line.",
+      "mitigation": "Raise the bound once to 3000 with the measured size in the comment; the line stays ≤220 characters."
+    },
+    {
+      "risk": "A root-cause request whose fix also delivers a subjective page escapes the gate.",
+      "mitigation": "The doc comment states the limit and the CHANGELOG records the cause; such requests are rare and the ordinary path is gated."
+    },
+    {
+      "risk": "Clippy or fmt fails on new code at the final run (criterion 8).",
+      "mitigation": "Step 11 runs `cargo fmt --all` then the three exact check commands; helpers are all used by the check so no dead-code warning."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusing_check / check_reading_acceptance gain a step",
+      "dependent": "crates/athena-core/src/reading.rs:679 (`Athena::read` path calling `check_reading_acceptance` with the real request text and repo files)",
+      "kind": "code",
+      "test": "subjective_method_missing_is_refused_and_named and subjective_method_stated_is_accepted (reading.rs); existing reading.rs tests calling check_reading_acceptance with 'add a greeting', G6VY_REQUEST, 'Publish the explainer page', LADDER_REQUEST hold none of the trigger phrases",
+      "reason": null
+    },
+    {
+      "name": "text-only reading rules used by the replay",
+      "dependent": "crates/athena-core/src/reading/replay.rs:55 `check_reading_text` (athena check-reading in crates/athena-cli/src/main.rs:652; loop replay at crates/athena-core/src/run/mod.rs:2385; run/tests.rs:1813,1820,2138)",
+      "kind": "code",
+      "test": "subjective_method_refusal_is_declared_intended (declared share parses to 5); cargo test -p athena-core run::tests",
+      "reason": "A past reading with a subjective page outcome and no method is newly refused; intended and declared as 'expected 5% of newly refused readings' (replay_declaration). The run/tests.rs fixtures use requests with no trigger phrase (searched)."
+    },
+    {
+      "name": "queued proposed work re-checked by the same rules",
+      "dependent": "crates/athena-core/src/steward.rs:421 (`queued_work` re-checks a stored reading with check_reading_text), steward.rs:2420 test",
+      "kind": "code",
+      "test": "cargo test -p athena-core steward and the refusal corpus",
+      "reason": "A queued proposal with a subjective page outcome and no method is held until a person runs athena go, as for check_defined_terms. Steward tests use requests without trigger phrases."
+    },
+    {
+      "name": "refusal corpus mechanism and INPUT_FORMS list (41 → 46)",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs: corpus_cases_get_the_expected_outcome, the_wrapper_agrees_with_refusing_check_on_every_case, every_acceptance_check_has_a_refusing_corpus_case, an_extra_check_with_no_case_is_reported, no_check_bypasses_refusing_check, corpus_covers_the_listed_input_forms, delivery_verb_replay_over_the_cited_jobs, defined_terms_replay_over_the_cited_jobs",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "`acceptance_check_names` finds the new step because the line starts `step!(check_`; the anchor for `an_extra_check_with_no_case_is_reported` (`step!(check_reading_references(`) is unchanged; existing accepted cases hold no trigger phrase."
+    },
+    {
+      "name": "order of step! lines in refusing_check",
+      "dependent": "crates/athena-core/src/reading.rs tests pinning step order: defined_terms_has_one_step_line_after_environment_reach, the outcome/governance adjacency tests, history_fixture_has_one_step_line",
+      "kind": "code",
+      "test": "those same tests, unchanged, in cargo test -p athena-core",
+      "reason": "The new line is appended after check_reading_references, so no pinned neighbour changes."
+    },
+    {
+      "name": "READING_RULES list and reading-rules section size",
+      "dependent": "crates/athena-context/src/briefs.rs: READING_RULES, reader_brief, test the_reader_brief_names_each_reading_rule_in_one_short_line and other reader_brief tests; reader_brief caller reading.rs:567",
+      "kind": "code",
+      "test": "cargo test -p athena-context",
+      "reason": "One line (≤220 characters) is added and that test's count, check list and byte bound are updated in the same step; other reader_brief tests do not assert the section size; reading.rs:567 only sends the text."
+    },
+    {
+      "name": "reader prompt token budget",
+      "dependent": "docs/system-facts.md budget lines and crates/athena-cli/tests/budgets.rs `system_facts_budgets_match_computed` (reader 1997 of 2000)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Unaffected: the budget set is CONTRACT + READER_FRAME + defaults + catalog; READING_RULES is in the brief, outside the sets. No prompt, defaults.toml or frame text is edited."
+    },
+    {
+      "name": "banned words and email-like text in tracked files",
+      "dependent": "xtask/tests/policy.rs boundary_words scan and the personal_data allow-list in athena.toml",
+      "kind": "rule",
+      "test": "cargo test -p xtask",
+      "reason": "New text avoids the banned list and contains no email-like text; fixtures use the words page, reader, newcomer only."
+    },
+    {
+      "name": "CHANGELOG.md Unreleased section",
+      "dependent": "reading.rs tests with include_str! of CHANGELOG.md (history_fixture_doc_and_changelog_name_the_cause, defined_terms_doc_and_changelog_name_the_cause) and refusal_corpus.rs sibling tests",
+      "kind": "code",
+      "test": "cargo test -p athena-core (those tests unchanged)",
+      "reason": "The new item is a separate bullet in the existing '### Added' list; item-parsing tests search for their own check names."
+    },
+    {
+      "name": "audience role that rates a live page as a newcomer",
+      "dependent": "crates/athena-core/src/audience.rs and `athena audience` (lib.rs:58)",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged and not a reading check; the refusal text only names it as one way to run the method."
+    },
+    {
+      "name": "cases table C1-C7 and 'Reading the table'",
+      "dependent": "docs/design/defaults-loop.md section 3.6",
+      "kind": "rule",
+      "test": null,
+      "reason": "Documentation only; no test reads this file. Adds row C8 and updates the sentence after the table."
+    },
+    {
+      "name": "whole-repo fmt, clippy and test commands (criterion 8)",
+      "dependent": ".github/workflows/ci.yml and the Athena result checks (fmt, clippy, test)",
+      "kind": "host_setting",
+      "test": "cargo fmt --all --check; cargo clippy --all-targets --locked -- -D warnings; cargo test --locked",
+      "reason": "Config is unchanged; the change only adds code and tests that these commands cover."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff for `pub fn check_subjective_method(reading: &Reading, request: &str) -> Result<()>` and its `///` block. The corpus test `subjective_method_refusal_is_declared_intended` (step 8) reads the shipped source through the existing `reading_source()` and asserts the doc block above `pub fn check_subjective_method(` contains 'no required verification method for subjective quality', '20261014-163844-c2kt', '20261015-064153-wekz', 'This check refuses more readings; the higher refusal rate is intended.' and 'estimate'.",
+      "command": "git diff -- crates/athena-core/src/reading/surveys.rs; cargo test -p athena-core --test refusal_corpus subjective_method_refusal_is_declared_intended",
+      "observes": "The diff shows the new function with a doc comment naming the cause and both jobs; the test passes.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "The diff adds exactly one line `step!(check_subjective_method(reading, request));` as the last step before `None` in `refusing_check`, and adds `[`check_subjective_method`]` to the `check_reading_acceptance` doc list. Unit test `subjective_method_has_one_step_line` (step 7, reading.rs next to `defined_terms_has_one_step_line_after_environment_reach`) uses `reading_source()` and the same body-splitting code to assert one step line and the doc link.",
+      "command": "git diff -- crates/athena-core/src/reading/checks.rs; cargo test -p athena-core subjective_method_has_one_step_line",
+      "observes": "One new step line in the diff; the test passes (it would fail with zero or two lines).",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test `subjective_method_missing_is_refused_and_named` in crates/athena-core/src/reading.rs. Build a reading with `terms_reading(&[])` (a docs reading that passes every check, reading.rs:6614), summary 'Write an explainer page that is clear to a newcomer.'; request 'Write an explainer page on how firstmate handles work that is clear to a newcomer.'; criteria give no method. Call `refuser_for(&reading, request)` (reading.rs:6609, wrapper over production `refusing_check`) and production `check_subjective_method`. Assert refuser is Some(\"check_subjective_method\"), the error starts 'the reading was refused because', contains 'independent', 'rating', 'threshold' and 'before the build', and `check_reading_acceptance` is an Err.",
+      "command": "cargo test -p athena-core subjective_method_missing_is_refused_and_named",
+      "observes": "The gate refuses under the check's own name and the error names the missing independent model reader, persona, 1 to 5 rating and pass threshold.",
+      "fails_without": "Without the `step!` line, `refuser_for` returns None and the Some(\"check_subjective_method\") assert fails. Without the function, or with a trigger that misses 'clear to a newcomer', `check_subjective_method` returns Ok and `unwrap_err()` panics. If the error lacks the missing parts, the string asserts fail.",
+      "seam": "Entry points `refusing_check`, `check_reading_acceptance`, `check_subjective_method`; fixtures `terms_reading` and `refuser_for` exist (reading.rs:6609-6618); the function and step line are added by steps 2 and 4, the test by step 6. No double: the reading is a plain struct value built in the test."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit tests `subjective_method_stated_is_accepted`, `subjective_method_partial_is_refused`, `subjective_method_ignores_other_requests` in reading.rs. (a) Same reading and request as criterion 3 plus a Behavior criterion 'Run `athena audience`: an independent model reader that had no part in building the page reads it as a newcomer and rates it from 1 to 5; a rating below 4 blocks completion.' `check_reading_acceptance(&reading, request, None, &[], None)` is Ok. (b) Variants dropping one at a time the independent reader, persona, scale, threshold are each refused by `check_subjective_method`, and the error names exactly the dropped part. (c) Plain requests 'Refactor the page renderer into two functions', 'Clear the cache when the page reloads', 'Make the JSON output human-readable', a quoted mention (Rename the \"newcomer\" page template), and a root-cause request with the anchor sentence and the newcomer cause are all accepted.",
+      "command": "cargo test -p athena-core subjective_method",
+      "observes": "The full method is accepted, each partial method is refused naming the gap, ordinary requests pass.",
+      "fails_without": "If the check demanded more than the four parts or detected none, the accept assertions fail; if the trigger ignored the artifact noun or phrase boundaries, the unaffected readings are refused and the test fails; if it refused every reading, the plain-refactor assertion fails.",
+      "seam": "Same production entry points as criterion 3; `Reading` built with existing `terms_reading`; request strings are inputs; no double. Tests added by step 6."
+    },
+    {
+      "criterion": 5,
+      "method": "Add `subjective_cases()` to refusal_corpus.rs, chained in `cases()`, built with existing `case(...)` and `base_reading`, run through `refusing_check` by `run` (refusal_corpus.rs:2039). Case ids added: subjective-explainer-page-no-method (source 20261014-163844-c2kt, rebuilt from the job brief; Refuse check_subjective_method); subjective-explainer-page-method-stated (Accept); subjective-loop-page-no-method (source 20261015-064153-wekz shape, rebuilt from the brief: a loop improving the explainer page until it is easy to follow; Refuse); subjective-loop-page-method-stated (Accept); subjective-method-without-threshold and subjective-method-without-independent-reader (Refuse); subjective-word-clear-the-cache, subjective-human-readable-output, subjective-plain-refactor, subjective-quoted-newcomer (Accept); subjective-cited-in-root-cause-request (built like generated_root_cause_request; Accept). Five new INPUT_FORMS tags (41→46) map to these ids. I cannot run the file; I cite only ids I add.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "Every new Refuse case is refused by exactly check_subjective_method, accepted counterparts pass, coverage tests pass with 46 input forms.",
+      "fails_without": "Without the step line the new Refuse cases return 'accepted' and `corpus_cases_get_the_expected_outcome` fails; `every_acceptance_check_has_a_refusing_corpus_case` fails if no case refuses by this check; `corpus_covers_the_listed_input_forms` fails if a new tag has no case.",
+      "seam": "Entry point `refusing_check` via corpus `run`; fixtures `case`, `base_reading`, `repo_files` exist (refusal_corpus.rs); cases and tags are added by step 8."
+    },
+    {
+      "criterion": 6,
+      "method": "Corpus test `subjective_method_refusal_is_declared_intended` mirrors `environment_reach_refusal_is_declared_intended` (refusal_corpus.rs:2265): `athena_core::reading::replay_declaration` on a Behavior criterion 'The change refuses more readings: expected 5% of newly refused readings' gives share Some(5); collapsed CHANGELOG (include_str!) holds 'check_subjective_method', 'higher refusal rate is intended', 'expected 5% of newly refused readings'; the doc comment says the 5% is an estimate. The narrow trigger is shown by the four accepted ordinary-request corpus cases.",
+      "command": "cargo test -p athena-core --test refusal_corpus subjective_method_refusal_is_declared_intended",
+      "observes": "Declared share parses as 5; text is in doc and changelog; ordinary requests accepted.",
+      "fails_without": "If the changelog or doc omits the declared share, or the parser reads another number, the test fails; the accepted ordinary-request cases fail if the trigger is too wide.",
+      "seam": "`replay_declaration` is public and exists (used at refusal_corpus.rs:2217); CHANGELOG read with include_str! as sibling tests do; test added by step 8."
+    },
+    {
+      "criterion": 7,
+      "method": "git status and git diff --stat list only the seven deliverables: none of crates/athena-cap-study/*, athena-cli/*, README.md, docs/architecture.md, docs/design/explainer-site.md, steward.rs, lib.rs, Cargo.lock appear. The criterion-3 unit test asserts the error holds 'before the build'. The CHANGELOG entry says the c2kt gate and wekz land/retry findings are not redone here.",
+      "command": "git diff --stat; cargo test -p athena-core subjective_method_missing_is_refused_and_named",
+      "observes": "Only the seven deliverables changed; the refusal text tells the reader to state the method before the build.",
+      "fails_without": "If the error text lacked the instruction to state the method before the build, the unit test's 'before the build' assertion fails.",
+      "seam": "Same as criterion 3 for the text assertion (exists once steps 2 and 6 land); git reads the working tree."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three checks Athena runs on the result, from the repository root, as separate whole commands (fmt, clippy, test; the command field shows the chain). The test run includes athena-context briefs tests (updated rule count and byte bound), athena-core unit tests, the refusal corpus, athena-cli budgets test (unchanged because READING_RULES is outside the budget sets) and xtask policy scans (new text holds no banned word and no email-like text). Step 11 runs `cargo fmt --all` first so the check is clean.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0 with no warnings and no failed test.",
+      "fails_without": "fmt fails if the new code in surveys.rs, checks.rs, reading.rs, refusal_corpus.rs or briefs.rs is not rustfmt-formatted. clippy fails (-D warnings) on an unused constant or helper if the step line is missing, or on any needless allocation in the new code. cargo test fails if the change is incomplete: `the_reader_brief_names_each_reading_rule_in_one_short_line` fails if the rules list and its test disagree on the count or the check name; `every_acceptance_check_has_a_refusing_corpus_case` fails if the step exists with no refusing case; `corpus_covers_the_listed_input_forms` fails if a tag has no case; `system_facts_budgets_match_computed` fails if the reader prompt set was grown; the xtask policy scan fails if a banned word or email-like text is added; and every existing reading and corpus test fails if the trigger is too wide.",
+      "seam": "Production entry points are the workspace's own `cargo fmt`, `cargo clippy` and `cargo test` over every crate, the same commands Athena runs on the result; the fixtures are the existing test suites and corpus (exist today, read in crates/athena-context/src/briefs.rs tests, crates/athena-core/tests/refusal_corpus.rs, crates/athena-cli/tests/budgets.rs, xtask/tests/policy.rs). No double or injection; the suites are changed by steps 6-9 and the full run is step 11."
+    },
+    {
+      "criterion": 9,
+      "method": "The diff adds an item under '## [Unreleased]' / '### Added' that names the root cause (no required verification method for subjective quality at the reading gate), the two jobs, `check_subjective_method` and the declared 5% share. The corpus test asserts `changelog.contains(\"check_subjective_method\")` on the collapsed text.",
+      "command": "git diff -- CHANGELOG.md; cargo test -p athena-core --test refusal_corpus subjective_method_refusal_is_declared_intended",
+      "observes": "The entry is present and the test passes.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: Should the check later require the stated pass threshold to be at least 4 of 5, as the outcome-check default says, or is any stated threshold enough? This plan accepts any stated threshold and only requires that one exists."
+  ],
+  "producer_section_sha256": "b788adf5a238ccaa136fc4c7458b9994880b632d5c64b1d76fbff49ced22df57"
+}
