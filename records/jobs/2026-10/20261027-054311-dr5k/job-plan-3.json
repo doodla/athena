@@ -1,0 +1,337 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-054311-dr5k",
+  "round": 3,
+  "at": "2026-11-08T17:12:44.122602536Z",
+  "invocation_seq": 7,
+  "approach": "Extend `check_environment_reach` in crates/athena-core/src/reading/surveys.rs with a CI cache-scope trigger and a completeness block. No new `step!` line, no new check, no change to `scan_segments`. Three lexical trigger forms, read only from behavior criteria and the summary (never the request, content criteria, assumptions or out_of_scope). D1: a behavior-criterion segment has a cache/artifact word and a CI place. D2: a segment has a CI place, a reuse word, a result noun and a cross-ref word (early, push, branch, landing, another, previous, base), and no sha/commit word. This is the er96 early-push shape, and it leaves Athena's SHA-matched reuse of green CI runs alone. D3: a created or modified `.github/workflows/` deliverable exists and a behavior criterion or the summary has a cache/artifact word. `actions/cache`, `actions/upload-artifact` and `actions/download-artifact` (version suffix after `@` stripped) are found by a small separate token test, not by `scan_segments`, and count as both CI place and cache word. When a trigger fires, an `Environment:` assumption that names the cache, artifact or result must state five parts: noun, save, restore, write rights, scope. Completeness and the error's missing parts are judged on the best such assumption (fewest missing parts), not the union of all `Environment:` assumptions, so the shared CI block cannot hide a missing write-rights part. The final bail! tail is built from the problems that fired, so a cache-only refusal names save scope, restore scope and write rights. Add unit tests, corpus cases, a declaration test and a CHANGELOG item. The reader rule line in briefs.rs stays as is and is named as a follow-up.\n\nInput forms the rule handles (all mapped to corpus cases below): CI workflow deliverable with a cache criterion; behavior criterion with a CI cache or artifact; `actions/cache` named in a criterion; early-push CI result reuse (er96 wording, no cache word); SHA-matched CI result reuse (accepted); in-process cache; cache word inside a path or backtick; GitHub API response cached; lowercase `ci` (documented miss).",
+  "decisions": [
+    {
+      "choice": "Extend check_environment_reach; add no new check or step! line.",
+      "reason": "The accepted reading says to extend it. Cache save, restore and write scope is a fourth fact of the same Environment: statement. `refusing_check`, `environment_reach_has_one_step_line` (reading.rs:5178) and the acceptance doc list stay as they are, and the check is already in `acceptance_check_names`, so criterion 5 is met by the declaration test with share 3.",
+      "rejected": [
+        {
+          "option": "A new check_cache_scope with its own step!",
+          "why": "It adds a step line and a second refusal case requirement, and splits one Environment: statement across two checks with two error texts."
+        },
+        {
+          "option": "Add cache words to the site/permission/data lists",
+          "why": "Those lists test one word each and cannot say which of save scope, restore scope or write rights is missing."
+        }
+      ]
+    },
+    {
+      "choice": "Narrow trigger D2 (finding 1). D2 needs CI place + reuse word (reuse, reuses, reused, reusing) + result noun (run, runs, pass, passes, result, results, status) + a cross-ref word (early, earlier, push, pushes, pushed, pushing, branch, branches, land, lands, landing, another, previous, base, ref, refs) in one segment, and fires only if the segment has no sha, commit or commits word.",
+      "reason": "Athena reuses a green CI run matched by commit SHA as an ordinary feature (routing.rs, verify.rs, records.rs). Those are not branch-scoped caches. The er96 sentence 'an early push whose CI run is reused at landing' has 'early', 'push' and 'landing', so it fires. The fe1df4f sentence 'a green CI result is reused as the job baseline when the fingerprint matches' has no cross-ref word ('baseline' is one word, not 'base'), and 'a green CI run for the candidate SHA is reused' has no cross-ref word and names a SHA, so both stay accepted. Both are added as accept controls in unit tests and in the corpus, and the doc comment says SHA-matched reuse is deliberately not a trigger. The 3% estimate excludes them.",
+      "rejected": [
+        {
+          "option": "Keep D2 as CI place + reuse + result noun",
+          "why": "It refuses ordinary routing and verification readings that say a CI result is reused, and the five-part statement does not fit them."
+        },
+        {
+          "option": "Drop D2 and rely on cache words",
+          "why": "The er96 wording has no cache word, so the class would be missed."
+        }
+      ]
+    },
+    {
+      "choice": "Judge completeness on the Environment: assumptions that name a cache, artifact or result noun, and report the missing parts of the best one (fewest missing of save, restore, write rights, scope). If no assumption names such a noun, report the missing noun and list all four other parts as to be stated; never use the union.",
+      "reason": "Finding 2: CI_ENVIRONMENT (reading.rs:4469) holds 'write' and 'refs'. A union would let a separate cache line without write rights pass, or make the error say 'state it in one assumption' instead of naming the missing write-rights part. The assumption noun set is the cache words plus result, results, status, pass, passes (not 'run'), so CI_ENVIRONMENT is never a candidate. A new test adds CI_ENVIRONMENT plus a cache sentence without write rights and asserts the error contains 'which runs may write shared entries'. A pasted CI block that happens to hold a write word still passes the write part; this is stated as a lexical limit.",
+      "rejected": [
+        {
+          "option": "Union of all Environment: assumptions (previous plan)",
+          "why": "It hides a missing write-rights or scope part in the common case where a CI block is also present."
+        }
+      ]
+    },
+    {
+      "choice": "Build the bail! tail from the problems that fired. The existing wording ('nothing in the reading says who performs it, where, with what permissions and what data it reaches') is kept byte for byte when the old block or the evidence block fired. When the cache block fired, it adds 'which ref saves the cache or artifact, which runs restore it and which runs may write shared entries'. When both fired, the two are joined with 'or'.",
+      "reason": "Finding 3: the old tail describes the wrong problem for a cache-only refusal. Existing tests on message text (reading.rs:4840-4856, `starts_with('the reading was refused because')`, `contains('`Environment:`')`) are unchanged for non-cache readings.",
+      "rejected": [
+        {
+          "option": "Leave the tail unchanged",
+          "why": "It misdescribes a cache-only refusal."
+        }
+      ]
+    },
+    {
+      "choice": "Detect `actions/cache`, `actions/upload-artifact` and `actions/download-artifact` with a small token test in surveys.rs (split the text on white space, backticks, commas and parentheses, trim punctuation, cut at `@`, compare in lowercase). A match counts as both CI place and cache word, for behavior criteria (D1) and for the summary under D3. `scan_segments` is not changed.",
+      "reason": "Finding 4: `scan_segments` splits at any token with '/' (surveys.rs:454), so 'actions/cache' is dropped. Changing the shared scanner would alter every other check that uses it (names_source, has_host_action). The separate test is local and tested by a unit test and a corpus case.",
+      "rejected": [
+        {
+          "option": "Keep 'actions/cache' in scan_segments like 'api.github.com'",
+          "why": "It changes segmentation for every caller of scan_segments."
+        },
+        {
+          "option": "List it as a limit only",
+          "why": "It is the usual way to name a GitHub cache, so the miss would be common."
+        }
+      ]
+    },
+    {
+      "choice": "Scope words are branch, branches, ref, refs, main, pr, prs, scope, scoped, plus 'default' only when followed by branch, branches, ref or refs, and 'pull' only when followed by request or requests. CI place = `CI` written exactly, workflow(s), runner(s) or the phrase GitHub Actions. Bare github, actions and lowercase ci are not CI places. Segments come from scan_segments, so paths, identifiers and non-command backticks trigger nothing.",
+      "reason": "Finding 5: 'by default' and 'main loop' would otherwise meet the scope part. 'main' is kept because the brief's example says 'written only by main'. The check stays lexical, which the doc comment states, including the lowercase `ci` miss, as it does for lowercase `pr`.",
+      "rejected": [
+        {
+          "option": "Accept bare default and pull",
+          "why": "A sentence could meet the scope part without naming a ref."
+        },
+        {
+          "option": "Reuse ENV_SITE_WORDS as the CI list",
+          "why": "It holds github, local, reader and producer, so a plain product cache would fire."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the old doc paragraph and the old CHANGELOG item. Add a new paragraph and a new Unreleased item whose cause sentence is 'no step asking, for each CI cache or stored artifact, which ref saves it, which runs restore it, and which runs may write shared entries'. Reword only the 'It reads four things and nothing else' sentence so it lists the added input.",
+      "reason": "`environment_reach_doc_and_changelog_name_the_cause` (reading.rs:5205-5261) and `environment_reach_refusal_is_declared_intended` (refusal_corpus.rs:2265-2309) find their text by the old CAUSE string and assert the 8% needles. Leaving them intact keeps them passing. The new item must not contain the old CAUSE string, so the old lookup still finds the old item.",
+      "rejected": [
+        {
+          "option": "Rewrite the old paragraph to include the new cause",
+          "why": "It breaks the old needles or blurs which share (8% or 3%) belongs to which change."
+        }
+      ]
+    },
+    {
+      "choice": "Leave READING_RULES[5] in crates/athena-context/src/briefs.rs unchanged and name the follow-up in the CHANGELOG item and in open_questions.",
+      "reason": "briefs.rs is a prompt-side file outside the four listed deliverables, and the line is near the 220-byte limit tested by `the_reader_brief_names_each_reading_rule_in_one_short_line`. The line stays true, and the refusal error tells the reader what to write, so the cost is one retry.",
+      "rejected": [
+        {
+          "option": "Edit briefs.rs in this change",
+          "why": "It adds an unlisted prompt file and the budget and line-length tests with it."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/surveys.rs",
+      "action": "modify",
+      "purpose": "Add ENV_CACHE_WORDS, ENV_CI_PLACE_WORDS, ENV_REUSE_WORDS, ENV_RESULT_WORDS, ENV_CROSS_REF_WORDS, ENV_SAVE_WORDS, ENV_RESTORE_WORDS, ENV_WRITE_RIGHTS_WORDS, ENV_SCOPE_WORDS beside the ENV_* lists; helpers `segment_has_cache_scope_trigger` and `names_actions_cache`; a cache-scope trigger and best-assumption completeness block in check_environment_reach; a tail built from the problems that fired; doc comment reworded and a new cause paragraph with ids, limits and the 3% sentence.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add the unit tests of criteria 1 to 4 in the tests module after `environment_reach_doc_and_changelog_name_the_cause`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add four INPUT_FORMS tags (array length 45), the refuse and accept cases in environment_cases(), and `environment_cache_scope_refusal_is_declared_intended`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased Added item naming the cause and the cache-scope requirement, with 'expected 3% of newly refused readings' and the briefs.rs follow-up.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In surveys.rs, after ENV_ABSENT_WORDS, add constants. ENV_CACHE_WORDS: cache, caches, cached, caching, artifact, artifacts. ENV_CI_PLACE_WORDS: workflow, workflows, runner, runners. ENV_REUSE_WORDS: reuse, reuses, reused, reusing. ENV_RESULT_WORDS (trigger side): run, runs, pass, passes, result, results, status. ENV_CROSS_REF_WORDS: early, earlier, push, pushes, pushed, pushing, branch, branches, land, lands, landing, another, previous, base, ref, refs. ENV_SAVE_WORDS: save, saves, saved, saving, store, stores, stored, upload, uploads, uploaded. ENV_RESTORE_WORDS: restore, restores, restored, restoring, download, downloads, downloaded, reuse, reuses, reused, reusing. ENV_WRITE_RIGHTS_WORDS: write, writes, written, writable, readonly, permission, permissions (plain `read` is excluded). ENV_SCOPE_WORDS: branch, branches, ref, refs, main, pr, prs, scope, scoped. Also an assumption-side noun list: the cache words plus result, results, status, pass, passes (not `run`).",
+    "In surveys.rs, add `segment_has_cache_scope_trigger(seg: &[EnvWord]) -> bool` next to segment_has_host_action. A CI place is a word with `ci` set, a word in ENV_CI_PLACE_WORDS, or `github` followed by `actions`. It returns true for D1 (CI place and a cache word), or for D2 (CI place, a reuse word, a result word and a cross-ref word, and no `sha`, `commit` or `commits` word in the segment). Add `names_actions_cache(text: &str) -> bool`: split on white space, backticks, commas and parentheses, trim punctuation, cut at `@`, compare in lowercase with actions/cache, actions/upload-artifact and actions/download-artifact. Add a scope test over plain_words that takes `default` only before branch, branches, ref or refs and `pull` only before request or requests. Do not change scan_segments.",
+    "In check_environment_reach compute `cache_trigger`: D1/D2 on any behavior-criterion segment, or `names_actions_cache` on a behavior criterion, or (D3) a non-delete workflow deliverable exists and a behavior criterion or the summary has a cache word in a scanned segment (or names actions/cache). Add `&& !cache_trigger` to the early return. After the old block and before the evidence block, when cache_trigger holds, push a trigger text naming CI caches, stored artifacts and reused CI results. Candidates are the Environment: assumptions whose plain_words hold a noun from the assumption-side list. An assumption is complete if it holds a save, restore, write-rights and scope word. If none is complete, take the candidate with the fewest missing parts and push a problem naming each missing part in the repair wording ('which ref and event saves it', 'which runs restore it', 'which runs may write shared entries', 'the ref scope'). If there are no candidates, name the missing cache, artifact or result and list all four parts as to be stated in one assumption. Quote the brief's example sentence in the repair text.",
+    "In check_environment_reach build the bail! tail from the problems that fired: the old tail wording unchanged when the old block or the evidence block fired, the cache tail ('which ref saves the cache or artifact, which runs restore it and which runs may write shared entries') when the cache block fired, joined with 'or' when both did. Then edit the doc comment: reword 'It reads four things and nothing else' to list the added input (behavior criteria and the summary read for a CI cache, artifact, actions/cache name or reused CI result under the three forms). Add a paragraph with the root cause 'no step asking, for each CI cache or stored artifact, which ref saves it, which runs restore it, and which runs may write shared entries', jobs 20261025-034731-2am0 and 20261025-055626-er96, introspections 20261025-050603-wrv7 and 20261025-065849-n99a. State the limits (lexical, lowercase `ci` missed, SHA-matched reuse of CI results deliberately not a trigger, a pasted CI block can meet the write and scope words) and end with: 'This check refuses more readings; the higher refusal rate is intended, expected 3% of newly refused readings (an estimate, not measured).' Leave the old paragraphs and their 8% sentence untouched.",
+    "In reading.rs tests, after `environment_reach_doc_and_changelog_name_the_cause`, add: `environment_reach_cache_refuses_a_workflow_with_a_cache_without_scope`, `environment_reach_cache_refuses_a_behavior_cache_criterion_without_scope` (including the actions/cache form, the CI-block-plus-cache-sentence-without-write-rights case and the cache-only tail assertion), `environment_reach_cache_scope_covers_the_class` (both job shapes plus the controls, including the fe1df4f and SHA routing sentences), `environment_reach_cache_scope_accepts_the_criteria_and_summary_of_its_own_job` and `environment_reach_cache_scope_doc_and_changelog_name_the_cause` (finds the new item by the new cause string). Fixtures put the cache word in a behavior criterion.",
+    "In refusal_corpus.rs, add `ci-cache-criterion`, `ci-result-reuse-criterion`, `cache-scope-assumption` and `cache-word-in-product-or-path` to INPUT_FORMS and change `[&str; 41]` to `[&str; 45]`. Add the twelve cases listed in demonstration 5 to environment_cases() with sources naming jobs 20261025-034731-2am0 and 20261025-055626-er96, 'rebuilt from the job brief'. Tag the workflow cases ci-workflow-deliverable and environment-assumption, the path case trigger-word-inside-other-word, and the GitHub API response case pr-or-api-wording. Add `environment_cache_scope_refusal_is_declared_intended` (name present in acceptance_check_names, replay_declaration gives Some(3), doc comment and CHANGELOG needles).",
+    "In CHANGELOG.md add an Unreleased Added item at the top. It names the cause (no step asking, for each CI cache or stored artifact, which ref saves it, which runs restore it, and which runs may write shared entries), the extension of `check_environment_reach`, the required `Environment:` assumption stating save scope, restore scope and write rights, the test names, the follow-up to add the cache clause to the reader rule line in briefs.rs within 220 bytes, and 'This check refuses more readings; the higher refusal rate is intended, expected 3% of newly refused readings.' Do not include the old CAUSE sentence.",
+    "Run cargo fmt --all, then cargo test -p athena-core, cargo test -p athena-core --test refusal_corpus, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked. Fix fixture wording until all pass; do not weaken the check to make a fixture pass."
+  ],
+  "risks": [
+    {
+      "risk": "False positives push the refusal share above 3%: a CI place plus a cache word with no CI cache involved, or a reused CI result that is not a ref-scoped stored result.",
+      "mitigation": "CI place needs `CI` written exactly, workflow(s), runner(s), GitHub Actions or an actions/* cache name. D2 needs a cross-ref word and excludes sha and commit. scan_segments drops paths, identifiers and non-command backticks. Accept controls cover the in-process cache, a path, the GitHub API response cache, 'CI runs the tests', the fe1df4f sentence and the SHA routing sentence. The replay at verification measures the real share; 3% is labelled an estimate that was not measured, because the records are absent from the snapshot."
+    },
+    {
+      "risk": "D2 still fires on text such as 'the CI run is reused after the push' that is SHA-matched in fact.",
+      "mitigation": "The doc comment states the limit; the error tells the reader what to write, so the cost is one retry. The sha/commit exclusion covers the wording that names the matching key."
+    },
+    {
+      "risk": "A fixture trips an earlier check in refusing_check before check_environment_reach, or the older host-action block (e.g. 'main branch push run' in the own-job text), so `refuser` names another check or the fixture is refused for the wrong reason.",
+      "mitigation": "Build fixtures from workflow_reading and behavior_reading, which the existing environment tests already pass, assert check_environment_reach directly as well as refuser, and include the site, permission, refs and no-origin statements in fixtures that need them. Adjust fixture wording, not the check."
+    },
+    {
+      "risk": "A pasted CI block that holds a write word and a scope word, combined with a cache noun, still satisfies the write-rights and scope parts without saying who writes shared entries.",
+      "mitigation": "State it as a lexical limit in the doc comment, as the existing check does. The save and restore parts are still required in the same assumption, and the repair text quotes the brief's example."
+    },
+    {
+      "risk": "The new doc paragraph or CHANGELOG item breaks the old doc/changelog tests, which find their item by the old CAUSE string and assert 8%.",
+      "mitigation": "Keep the old paragraph and item as they are; give the new ones a different cause sentence. Run `cargo test -p athena-core environment_reach` and the corpus test."
+    },
+    {
+      "risk": "The reader learns the rule only from a refusal, because the rule line in briefs.rs is not updated.",
+      "mitigation": "The error text states what to write and quotes an example. The CHANGELOG item names the follow-up and open_questions asks the user to decide."
+    },
+    {
+      "risk": "The records of jobs 2am0 and er96 are not in the snapshot, so test and corpus wording is rebuilt.",
+      "mitigation": "State 'rebuilt from the job brief' in each corpus case's source, as the existing environment cases do, and use the er96 sentence from the brief unchanged."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "check_environment_reach outcome for workflow deliverables",
+      "dependent": "crates/athena-core/src/reading.rs tests with lint.yml deliverables and CI_ENVIRONMENT (around 4422, 4464, 4840-4856)",
+      "kind": "code",
+      "test": "cargo test -p athena-core environment_reach",
+      "reason": "None of these readings has a cache, artifact or actions/cache word in a behavior criterion or the summary, so D1 to D3 do not fire; the old site/permission/data block and its error text are unchanged."
+    },
+    {
+      "name": "check_environment_reach outcome for host-action and records-read behavior criteria",
+      "dependent": "crates/athena-core/src/reading.rs tests `environment_reach_*` (about 4859-5175), including `environment_reach_accepts_the_criteria_and_summary_of_its_own_job` (5143)",
+      "kind": "code",
+      "test": "cargo test -p athena-core environment_reach",
+      "reason": "Those fixtures have no cache or artifact word. The 'early PR is reused by land' line (4868) has no CI place, so D2 does not fire."
+    },
+    {
+      "name": "D2 trigger on reused CI results",
+      "dependent": "crates/athena-core/src/reading.rs `history_fixture_leaves_unrelated_readings_alone`, case 'ci baseline' (7437-7513, criterion at 7445: 'a green CI result is reused as the job baseline when the fingerprint matches')",
+      "kind": "code",
+      "test": "cargo test -p athena-core history_fixture_leaves_unrelated_readings_alone",
+      "reason": "With the narrowed D2 this sentence has no cross-ref word, so check_environment_reach still accepts it. The test also only asserts that check_history_fixture is not the refuser. A new accept control repeats the sentence for check_environment_reach."
+    },
+    {
+      "name": "Ordinary SHA-matched reuse of CI results in Athena's own features",
+      "dependent": "crates/athena-core/src/routing.rs (reused CI result for the candidate SHA), verify.rs, run/verification.rs, records.rs",
+      "kind": "code",
+      "test": "cargo test -p athena-core environment_reach_cache_scope_covers_the_class",
+      "reason": "These are product code, not readings; the check reads only a reading's behavior criteria and summary. A reading that says a green CI run for the candidate SHA is reused fires no trigger (no cross-ref word, and a sha word excludes D2); the new control asserts it."
+    },
+    {
+      "name": "Corpus cases and declaration for check_environment_reach",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `environment_cases()` (1728), `environment_reach_refusal_is_declared_intended` (2265), `every_acceptance_check_has_a_refusing_corpus_case`, `corpus_covers_the_listed_input_forms`",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": null
+    },
+    {
+      "name": "INPUT_FORMS length and tags",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `INPUT_FORMS: [&str; 41]` (line 90) and the known-tag check in `corpus_covers_the_listed_input_forms`",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus corpus_covers_the_listed_input_forms",
+      "reason": null
+    },
+    {
+      "name": "Doc comment of check_environment_reach, 'It reads four things and nothing else' (surveys.rs:711)",
+      "dependent": "crates/athena-core/src/reading.rs `environment_reach_doc_and_changelog_name_the_cause` (5205) and refusal_corpus.rs:2279-2301, which assert needles and not that sentence",
+      "kind": "code",
+      "test": "cargo test -p athena-core environment_reach_doc_and_changelog_name_the_cause",
+      "reason": "The old needles (old CAUSE, three old ids, 8% sentence, `Environment:`) stay in the old paragraph."
+    },
+    {
+      "name": "bail! message of check_environment_reach",
+      "dependent": "reading.rs tests that assert error text (4844-4850 and the `environment_reach_*` tests) and the briefs.rs reader text that names `check_environment_reach`",
+      "kind": "code",
+      "test": "cargo test -p athena-core environment_reach",
+      "reason": "The tail is byte for byte the old one when only the old block or the evidence block fires; it changes only when the cache block fires."
+    },
+    {
+      "name": "Reader rule line READING_RULES[5]",
+      "dependent": "crates/athena-context/src/briefs.rs:2258 and `the_reader_brief_names_each_reading_rule_in_one_short_line` (220-byte limit, READING_RULES.len() == 10)",
+      "kind": "code",
+      "test": null,
+      "reason": "The file is not edited. The line stays true because a CI workflow still needs an Environment: assumption. The follow-up is stated in the CHANGELOG item and in open_questions."
+    },
+    {
+      "name": "Check order and step list",
+      "dependent": "`refusing_check` in crates/athena-core/src/reading/checks.rs (`step!(check_environment_reach(reading))`) and `environment_reach_has_one_step_line` (reading.rs:5178)",
+      "kind": "code",
+      "test": "cargo test -p athena-core environment_reach_has_one_step_line",
+      "reason": "No step is added or moved."
+    },
+    {
+      "name": "Replay of stored readings and the declared share",
+      "dependent": "crates/athena-core/src/reading/replay.rs `replay_declaration`, `replay_declaration_of`, `replay_limit_percent` (a job that newly refuses more than 10% is held unless a share is declared)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus environment_cache_scope_refusal_is_declared_intended",
+      "reason": null
+    },
+    {
+      "name": "Callers of check_environment_reach outside athena-core",
+      "dependent": "Greps of crates/ for check_environment_reach, refusing_check and check_reading_acceptance find users only in athena-core (reading.rs, reading/checks.rs, reading/replay.rs, tests/refusal_corpus.rs) and rule text in briefs.rs",
+      "kind": "code",
+      "test": "cargo test --locked",
+      "reason": "The function signature is unchanged; cap-change, cap-study and cli reach it only through check_reading_acceptance."
+    },
+    {
+      "name": "CHANGELOG.md Unreleased section",
+      "dependent": "include_str! readers: reading.rs:5224 (finds its item by the old CAUSE string) and refusal_corpus.rs:2302-2308 (plain contains on the collapsed text)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus && cargo test -p athena-core environment_reach",
+      "reason": null
+    },
+    {
+      "name": "ci.yml, xtask BUILD_PATHS and the fingerprint",
+      "dependent": "crates/athena-core/src/mirrors.rs and crates/athena-cli/tests/mirrors.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No file under .github/ or xtask/ changes and the fingerprint is out of scope, so these read unchanged input."
+    },
+    {
+      "name": "System-facts budget lines",
+      "dependent": "docs/system-facts.md budget lines and crates/athena-cli/tests/budgets.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt file or always-loaded set changes, so the computed budgets do not change."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A content test in reading.rs modelled on `environment_reach_doc_and_changelog_name_the_cause` (reading.rs:5205). It collects the contiguous `///` lines before `pub fn check_environment_reach(` from `reading_source()` and collapses white space. It asserts each needle: the new cause sentence, the four ids, 'This check refuses more readings; the higher refusal rate is intended, expected 3% of newly refused readings (an estimate, not measured)', and the words SHA-matched, `actions/cache` and lowercase `ci` as limits.",
+      "command": "cargo test -p athena-core environment_reach_cache_scope_doc_and_changelog_name_the_cause",
+      "observes": "The doc comment holds 'no step asking, for each CI cache or stored artifact, which ref saves it, which runs restore it, and which runs may write shared entries'; ids 20261025-034731-2am0, 20261025-055626-er96, 20261025-050603-wrv7 and 20261025-065849-n99a; and the 3% sentence. The old test still passes on the old paragraph.",
+      "fails_without": "Without the new paragraph in surveys.rs the needle assertions fail on the missing text.",
+      "seam": "Production entry: the source text of surveys.rs read by `reading_source()` (reading.rs:1369), as the existing doc test does. Exists. Step 4 writes the text the test reads."
+    },
+    {
+      "criterion": 2,
+      "method": "The same test reads CHANGELOG.md with `include_str!(\"../../../CHANGELOG.md\")`. It splits at '## [Unreleased]', joins continuation lines into items (as reading.rs:5232-5241 does) and finds the item containing the new cause sentence.",
+      "command": "cargo test -p athena-core environment_reach_cache_scope_doc_and_changelog_name_the_cause",
+      "observes": "That item exists, holds 'cache', 'save', 'restore' and 'write', names `check_environment_reach`, requires an `Environment:` assumption, names the briefs.rs follow-up, and contains 'expected 3% of newly refused readings'. It does not contain the old CAUSE string.",
+      "fails_without": "Without the item in CHANGELOG.md, the `.expect` on the item lookup fails.",
+      "seam": "CHANGELOG.md read through `include_str!`, as reading.rs:5224 does. Exists. Step 7 adds the item."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in reading.rs call `check_environment_reach(&reading)` and `refuser(&reading)` (reading.rs:4835) on readings built with the existing fixtures. (a) `environment_reach_cache_refuses_a_workflow_with_a_cache_without_scope`: `workflow_reading(Create)` with the deliverable path set to `.github/workflows/ci.yml` and a behavior criterion 'ci.yml saves a result cache keyed by the fingerprint' (a path, so D3 fires and D1 does not), plus CI_ENVIRONMENT. (b) `environment_reach_cache_refuses_a_behavior_cache_criterion_without_scope`: `behavior_reading(&[\"The CI job restores a result cache keyed by the build fingerprint\"])`, the artifact form 'CI uploads the build artifact and later runs download it', and 'The build uses `actions/cache@v4` keyed by the lock file'. Each is combined with the full sentence 'Environment: the CI cache is saved by the main branch push run, restored by pull request runs of the same branch and by main, written only by main' and with one variant per dropped part: save, restore, write rights, scope (the sentence with 'by default' as its only scope text), cache noun. Each variant is refused and the error contains the matching repair phrase ('which ref and event saves it', 'which runs restore it', 'which runs may write shared entries', 'the ref scope', 'the cache, artifact or result'). A separate case puts CI_ENVIRONMENT beside a cache sentence that lacks write rights and asserts the error names 'which runs may write shared entries' (finding 2). A cache-only refusal asserts the error tail names save scope, restore scope and write rights and not 'who performs it' (finding 3). The full sentence is accepted in each; the lint.yml workflow reading with CI_ENVIRONMENT and no cache word stays accepted.",
+      "command": "cargo test -p athena-core environment_reach_cache",
+      "observes": "`check_environment_reach` errs and `refuser` returns Some(\"check_environment_reach\") for every incomplete variant, with the error naming only the parts the best cache assumption lacks. With the full sentence it returns Ok and `refuser` returns None. The no-cache workflow control stays accepted.",
+      "fails_without": "With the trigger and completeness block removed, check_environment_reach returns Ok and refuser returns None for the incomplete variants, so every refuse assertion fails.",
+      "seam": "Production entries: `check_environment_reach` and `refusing_check` through `refuser`. Fixtures `workflow_reading`, `behavior_reading`, `with_environment`, `add_behavior` and `CI_ENVIRONMENT` exist (reading.rs:4469, 4799-4837). Readings are built by the test; no double holds logic. Step 5 adds the tests."
+    },
+    {
+      "criterion": 4,
+      "method": "Test `environment_reach_cache_scope_covers_the_class`. Two job shapes, with wording rebuilt from the job ids and the plan brief because the records are absent from the snapshot: (i) 2am0: 'CI restores a result cache keyed by the fingerprint of the build paths'; (ii) er96, unchanged: 'An early push whose CI run is reused at landing', with no cache word and no workflow deliverable. Each is refused with only CI_ENVIRONMENT and accepted with a full cache-scope sentence. Accept controls with no cache assumption: 'Fixed where it originates'; 'The reader caches the survey in memory'; 'cache.rs is not changed'; a backticked `cache_dir`; 'The GitHub API response is cached in memory'; 'The reader caches its actions'; 'CI runs the tests'; lowercase 'ci restores the cache' (a documented miss); the fe1df4f sentence 'a green CI result is reused as the job baseline when the fingerprint matches'; the routing sentence 'a green CI run for the candidate SHA is reused'; and a content criterion with a cache word and a workflow deliverable. Test `environment_reach_cache_scope_accepts_the_criteria_and_summary_of_its_own_job` builds this job's criteria 3 and 4 and summary with its Environment: assumption text ('...a cache is saved by the ref and event that ran it, restored by runs of the same ref or its base, and shared entries are written only by the default branch', with the no-origin sentence) and requires Ok, as `environment_reach_accepts_the_criteria_and_summary_of_its_own_job` (reading.rs:5143) does for its job.",
+      "command": "cargo test -p athena-core environment_reach_cache_scope",
+      "observes": "Both job shapes are refused without scope and accepted with it; every control and this job's own text pass `check_environment_reach`.",
+      "fails_without": "Without the check, (i) and (ii) are accepted, so the refuse assertions fail. If the trigger were too broad (bare github or actions, lowercase ci, paths, content criteria, D2 without a cross-ref word), the control and own-job assertions fail instead. If D2 were missing, (ii) fails.",
+      "seam": "Same entries and fixtures as criterion 3; all exist. Step 5 adds the tests. If the own-job fixture trips the older host-action block ('main branch push run' puts `branch` beside `push`), its Environment: text already carries the site, permission, refs and no-origin statement, so the producer states that in the fixture and does not change the check."
+    },
+    {
+      "criterion": 5,
+      "method": "In refusal_corpus.rs add the four tags to INPUT_FORMS (length 41 to 45) and the cases to `environment_cases()` (line 1728) with the existing `add`, `behavior`, `assume` closures and a workflow helper for a `.github/workflows/ci.yml` deliverable. Refuse: environment-cache-workflow-without-cache-scope (D3), environment-cache-criterion-without-cache-scope (D1), environment-actions-cache-criterion-without-cache-scope, environment-ci-result-reuse-without-cache-scope (er96 sentence, D2), environment-cache-assumption-without-write-rights (CI block plus cache sentence). Accept: environment-cache-workflow-with-cache-scope, environment-cache-criterion-with-cache-scope, environment-ci-result-reuse-with-cache-scope, environment-ci-result-reuse-by-sha-accepted, environment-cache-word-in-product-code-accepted, environment-cache-word-inside-a-path-accepted, environment-github-api-response-cached-accepted. Sources name jobs 20261025-034731-2am0 and 20261025-055626-er96, 'rebuilt from the job brief'. New test `environment_cache_scope_refusal_is_declared_intended` asserts `acceptance_check_names(reading_source())` contains check_environment_reach, `replay_declaration` of a Behavior criterion with 'expected 3% of newly refused readings' gives Some(3), and the doc comment and CHANGELOG hold the new text. I read these cases and helpers but did not run the corpus, so no result is cited.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "The corpus passes: the refuse cases are refused by check_environment_reach, the accept cases pass the gate, every tag is in INPUT_FORMS and carried by a case, and the declared share reads as 3.",
+      "fails_without": "Without the check, the five refuse cases are accepted by the gate and fail the Expected::Refuse comparison. Without the 3% sentence in the doc comment or CHANGELOG the declaration test fails. If D2 lacked its cross-ref narrowing, the by-sha accept case fails.",
+      "seam": "Entries: `refusing_check` through the corpus runner and `athena_core::reading::replay_declaration`, both used in this file (line 2267). `case`, `deliverable`, `acceptance_check_names`, `reading_source` exist. Step 6 adds the cases, tags and test."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks over the workspace. `cargo test --locked` includes the new unit tests, the new corpus cases and declaration test, every existing `environment_reach_*` test, and the tests that read surveys.rs and CHANGELOG.md with include_str!.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0; the output lists `environment_reach_cache*`, `environment_reach_cache_scope*` and `environment_cache_scope_refusal_is_declared_intended` as ok.",
+      "fails_without": "If the check is removed, cargo test fails in the new refuse assertions and corpus refuse cases. If the trigger is too broad, it fails in the existing workflow accept tests and the new accept controls. Unformatted code fails fmt and any new warning fails clippy -D warnings.",
+      "seam": "Cargo over the workspace with the production check and the fixtures of criteria 3 to 5; no double. Exists."
+    }
+  ],
+  "open_questions": [
+    "User: Should the reader rule line READING_RULES[5] in crates/athena-context/src/briefs.rs:2258 get the cache clause in a follow-up job? This plan leaves it unchanged because briefs.rs is outside the listed deliverables and prompt files are out of scope."
+  ],
+  "producer_section_sha256": "95c3ea75b4eafca72fed1ee8548e42fe7654e715331b53dffc5f420b1e1b79aa"
+}

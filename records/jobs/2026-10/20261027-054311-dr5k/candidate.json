@@ -1,0 +1,128 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261027-054311-dr5k",
+  "base_commit": "1b87bde8ed907869e69e92d05293aed1268dcc3e",
+  "base_fingerprint": "sha256:097d3a27ec632040feafd210bdbaad077143d6a7a8c21ebeab3ec46db5bdb20a",
+  "previous_job": "20261027-054242-08bg",
+  "candidate_commit": "41923ec27d8886eca0792fdf84c81a0c606891be",
+  "candidate_tree": "29bd7923409ce347fc5abc3ce630c0243cf97d98",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 386262
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 350220
+    },
+    {
+      "path": "crates/athena-core/src/reading/surveys.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 56824
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 125795
+    }
+  ],
+  "fingerprint": "sha256:354dd5f50b3e6068e27ea119b1cd7f422e089e4192f7e894a307f7a8e291bd1e",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: the reading stage had no step asking, for each CI cache or stored artifact, which ref saves it, which runs restore it, and which runs may write shared entries. This came from jobs 20261025-034731-2am0 and 20261025-055626-er96. I fixed it where it originates, by extending `check_environment_reach` in `surveys.rs`; I added no new step or check.\n\nThe check now fires on three shapes, read only from behavior criteria and the summary:\n- A behavior criterion that ties a CI place to a cache or artifact word, or names `actions/cache`, `actions/upload-artifact` or `actions/download-artifact`.\n- A behavior criterion that reuses a CI run or result across refs (a reuse word, a result noun and a cross-ref word such as early, push or landing). A criterion that names a sha or commit is excluded.\n- A created or modified `.github/workflows/` deliverable with a cache or artifact word in a behavior criterion or the summary.\n\nWhen one fires, the reading needs one `Environment:` assumption that names the cache, artifact or result and states the save scope, restore scope, write rights and ref scope. The check judges the best such assumption, not the union of all, so a CI block cannot hide a missing part. The error lists the missing parts and quotes the brief's example. The error tail is unchanged for non-cache refusals.\n\nI added a doc-comment paragraph with the cause, the four ids, the limits and the 3% sentence, and an Unreleased CHANGELOG item. I scoped `defined_terms_refusal_is_declared_intended` to its own changelog item, because it forbade the 3% sentence anywhere in CHANGELOG.md.\n\nTests added:\n- Five unit tests in `reading.rs`.\n- Four INPUT_FORMS tags and 13 corpus cases, plus `environment_cache_scope_refusal_is_declared_intended`.",
+    "files": [
+      "crates/athena-core/src/reading/surveys.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/tests/refusal_corpus.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core -- --quiet",
+        "result": "pass",
+        "note": "1203 lib tests passed (1 ignored), 2 external_calls_guard, 23 refusal_corpus"
+      },
+      {
+        "command": "cargo test -p athena-core --lib environment_reach",
+        "result": "pass",
+        "note": "after the first fixes: all environment_reach tests including the five new ones"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after cargo fmt --all"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed"
+      },
+      {
+        "command": "cargo test -p athena-cli --test mirrors",
+        "result": "pass",
+        "note": "4 passed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "The doc comment of check_environment_reach in crates/athena-core/src/reading/surveys.rs names the root cause (the reading has no step asking, for each CI cache or stored artifact, which ref saves it, which runs restore it, and which runs may write shared entries), cites jobs 20261025-034731-2am0 and 20261025-055626-er96 and introspections 20261025-050603-wrv7 and 20261025-065849-n99a, and says: This check refuses more readings; the higher refusal rate is intended, expected 3% of newly refused readings (an estimate, not measured).",
+        "status": "met",
+        "evidence": "I added a paragraph to the doc comment with all four ids, the cause sentence and the 3% sentence. The unit test environment_reach_cache_scope_doc_and_changelog_name_the_cause asserts each of them on the collapsed doc comment. It passed in cargo test -p athena-core."
+      },
+      {
+        "criterion": "CHANGELOG.md Unreleased has an item naming the cause and the cache-scope requirement, with the sentence 'expected 3% of newly refused readings'.",
+        "status": "met",
+        "evidence": "I added an Unreleased Added item at the top. It has the cause sentence, the Environment: requirement (save scope, restore scope, write rights) and 'expected 3% of newly refused readings'. The same test finds the item and asserts those needles. The corpus test environment_cache_scope_refusal_is_declared_intended checks the changelog text too. I also scoped defined_terms_refusal_is_declared_intended to its own item so its negative 3% assertion does not fail on the new item. Both pass."
+      },
+      {
+        "criterion": "Run cargo test -p athena-core: a new unit test in crates/athena-core/src/reading.rs shows a reading with a created .github/workflows/ci.yml deliverable or a behavior criterion that keys a CI cache or artifact is refused when its Environment: assumption lacks cache save scope, restore scope or write rights, with an error naming the missing part, and is accepted when the assumption states them (for example saved by the main branch push run, restored by pull request runs of the same branch and by main, written only by main). The test fails when the new check is removed.",
+        "status": "met",
+        "evidence": "environment_reach_cache_refuses_a_workflow_with_a_cache_without_scope and environment_reach_cache_refuses_a_behavior_cache_criterion_without_scope run, through assert_cache_scope_is_required, a ci.yml deliverable (created and modified) and five criterion shapes (CI cache, artifact upload, actions/cache, actions/upload-artifact, GitHub runner). For each, a statement missing save, restore, write rights, scope or the cache noun is refused. The error's 'lacks' list names exactly the missing part, and refuser returns check_environment_reach. The brief's example sentence is accepted. Every refuse assertion calls unwrap_err on check_environment_reach, so removing the new block makes it return Ok and the tests fail. I did not remove the check to run this. Both tests pass."
+      },
+      {
+        "criterion": "Run cargo test -p athena-core: a test covers the class, not one job. It uses wording from both referenced jobs (a fingerprint-keyed result cache; an early push whose CI run is reused at landing), plus a reading with no cache or artifact and no workflow, which stays accepted unchanged.",
+        "status": "met",
+        "evidence": "environment_reach_cache_scope_covers_the_class uses 'CI restores a result cache keyed by the fingerprint of the build paths' and 'An early push whose CI run is reused at landing'. Each is refused with only the CI block and accepted with a full cache-scope statement. It also runs 13 accept controls (the reader's in-memory cache, a path, a lowercase ci, the corpus runner, a SHA-matched reuse and others) and a plain reading with no cache, artifact or workflow. environment_reach_cache_scope_accepts_the_criteria_and_summary_of_its_own_job adds this job's own criteria. It passes."
+      },
+      {
+        "criterion": "Run cargo test -p athena-core: crates/athena-core/tests/refusal_corpus.rs includes the new check in the acceptance-check name list and the replay declaration test passes with the declared share of 3%.",
+        "status": "met",
+        "evidence": "check_environment_reach was already in the acceptance-check name list, and the new test environment_cache_scope_refusal_is_declared_intended asserts that. It asserts replay_declaration gives Some(3) and checks the doc comment and changelog needles. I added 4 INPUT_FORMS tags (45 in total) and 13 corpus cases (5 refuse, 8 accept). The refusal_corpus run shows 23 passed."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran cargo fmt --all --check and cargo clippy --all-targets --locked -- -D warnings (both clean). I ran cargo test -p athena-core in full, plus the xtask policy and athena-cli mirrors tests, all green. I did not run the whole-workspace cargo test."
+      }
+    ],
+    "open_issues": [
+      "The reader rule line READING_RULES[5] in crates/athena-context/src/briefs.rs is unchanged (prompt file, outside the deliverables, near its 220-byte limit). The reader learns the cache rule only from the refusal text. The CHANGELOG item names the follow-up; the user decides whether to schedule it.",
+      "The 3% share is an estimate not measured, since records are absent from the snapshot. The replay at verification measures it.",
+      "Lexical limits are documented in the doc comment: lowercase ci is missed; D2 can still fire on a SHA-matched reuse written without a sha or commit word; a pasted CI block that holds a write word and a scope word beside a cache noun can meet those two parts.",
+      "I did not run the whole-workspace cargo test; I ran cargo test -p athena-core in full plus the xtask policy and athena-cli mirrors tests."
+    ],
+    "mistakes": [
+      "My first fixtures used a short 'declared share of 3%' phrase and a changelog name `reading::check_environment_reach` that did not match the test needles; the first run failed on both, and I fixed the wording, not the check.",
+      "I wrote a placeholder method name in a test (to_string_lossy_for_test) before replacing it with to_string; it never reached a build."
+    ],
+    "learnings": [
+      "check_environment_reach is the single place where reader readings are checked for place statements, and scan_segments drops any token containing '/', so actions/cache needs a separate token test (names_actions_cache).",
+      "The old and new check texts share words: the cache-only error tail also contains 'which runs restore it', so tests must read the 'lacks' list, not the whole error, to prove only the missing part is named.",
+      "defined_terms_refusal_is_declared_intended collapsed the whole CHANGELOG and forbade the 3% sentence, so any new 3% changelog item needed that test scoped to its own item."
+    ],
+    "desires": [
+      "A way to run the pre-change source against the new tests, to show they fail without the check, without hand-reverting edits."
+    ]
+  }
+}

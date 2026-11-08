@@ -87,7 +87,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 41] = [
+const INPUT_FORMS: [&str; 45] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -129,6 +129,10 @@ const INPUT_FORMS: [&str; 41] = [
     "ambiguous-name-plain-prose",
     "ambiguous-name-defined",
     "ambiguous-name-quoted-or-generated",
+    "ci-cache-criterion",
+    "ci-result-reuse-criterion",
+    "cache-scope-assumption",
+    "cache-word-in-product-or-path",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -1936,6 +1940,152 @@ fn environment_cases() -> Vec<Case> {
             behavior(c, "The record is written in the records branch");
         },
     );
+    // CI caches, stored artifacts and CI results reused across refs: the reading must say which ref saves the
+    // entry, which runs restore it and which runs may write shared entries.
+    const TWO_AM0: &str = "job 20261025-034731-2am0, a result cache keyed by a fingerprint with no ref scope; rebuilt from the job brief";
+    const ER96: &str = "job 20261025-055626-er96, an early push whose CI run is reused at landing; rebuilt from the job brief";
+    const CACHE_SCOPE: &str = "Environment: the CI cache is saved by the main branch push run, restored by pull \
+                               request runs of the same branch and by main, written only by main";
+    const RESULT_SCOPE: &str = "Environment: the CI result is saved by the early push run on the job branch, \
+                                restored by the landing run of the same branch and by main, written only by main";
+    let ci_workflow = |c: &mut Case| {
+        c.reading.deliverables.push(deliverable(
+            ".github/workflows/ci.yml",
+            DeliverableAction::Create,
+        ));
+        c.reading.acceptance_criteria.push(Criterion {
+            text: ".github/workflows/ci.yml runs the build".into(),
+            kind: CriterionKind::Content,
+        });
+        c.reading.acceptance_criteria.push(Criterion {
+            text: "ci.yml saves a result cache keyed by the build fingerprint".into(),
+            kind: CriterionKind::Behavior,
+        });
+    };
+    let fingerprint = "CI restores a result cache keyed by the fingerprint of the build paths";
+    add(
+        "environment-cache-workflow-without-cache-scope",
+        TWO_AM0,
+        &["ci-workflow-deliverable", "environment-assumption"],
+        Expected::Refuse(refuse),
+        &|c| {
+            ci_workflow(c);
+            assume(c, CI);
+        },
+    );
+    add(
+        "environment-cache-workflow-with-cache-scope",
+        TWO_AM0,
+        &["ci-workflow-deliverable", "cache-scope-assumption"],
+        Expected::Accept,
+        &|c| {
+            ci_workflow(c);
+            assume(c, CI);
+            assume(c, CACHE_SCOPE);
+        },
+    );
+    add(
+        "environment-cache-criterion-without-cache-scope",
+        TWO_AM0,
+        &["ci-cache-criterion"],
+        Expected::Refuse(refuse),
+        &|c| behavior(c, fingerprint),
+    );
+    add(
+        "environment-cache-criterion-with-cache-scope",
+        TWO_AM0,
+        &["ci-cache-criterion", "cache-scope-assumption"],
+        Expected::Accept,
+        &|c| {
+            behavior(c, fingerprint);
+            assume(c, CACHE_SCOPE);
+        },
+    );
+    add(
+        "environment-actions-cache-criterion-without-cache-scope",
+        TWO_AM0,
+        &["ci-cache-criterion"],
+        Expected::Refuse(refuse),
+        &|c| {
+            behavior(
+                c,
+                "The build uses `actions/cache@v4` keyed by the lock file",
+            )
+        },
+    );
+    add(
+        "environment-ci-result-reuse-without-cache-scope",
+        ER96,
+        &["ci-result-reuse-criterion"],
+        Expected::Refuse(refuse),
+        &|c| behavior(c, "An early push whose CI run is reused at landing"),
+    );
+    add(
+        "environment-ci-result-reuse-with-cache-scope",
+        ER96,
+        &["ci-result-reuse-criterion", "cache-scope-assumption"],
+        Expected::Accept,
+        &|c| {
+            behavior(c, "An early push whose CI run is reused at landing");
+            assume(c, RESULT_SCOPE);
+        },
+    );
+    add(
+        "environment-ci-result-reuse-by-sha-accepted",
+        ER96,
+        &["ci-result-reuse-criterion"],
+        Expected::Accept,
+        &|c| behavior(c, "A green CI run for the candidate SHA is reused"),
+    );
+    add(
+        "environment-cache-assumption-without-write-rights",
+        TWO_AM0,
+        &["cache-scope-assumption", "environment-assumption"],
+        Expected::Refuse(refuse),
+        &|c| {
+            behavior(c, fingerprint);
+            assume(c, CI);
+            assume(
+                c,
+                "Environment: the CI cache is saved by the main branch push run and restored by pull request \
+                 runs of the same branch",
+            );
+        },
+    );
+    add(
+        "environment-cache-word-in-product-code-accepted",
+        TWO_AM0,
+        &["cache-word-in-product-or-path"],
+        Expected::Accept,
+        &|c| {
+            behavior(c, "The reader caches the survey in memory");
+            behavior(c, "CI runs the tests");
+        },
+    );
+    add(
+        "environment-cache-word-inside-a-path-accepted",
+        TWO_AM0,
+        &["trigger-word-inside-other-word"],
+        Expected::Accept,
+        &|c| {
+            behavior(c, "cache.rs is not changed");
+            behavior(c, "`cache_dir` is kept");
+        },
+    );
+    add(
+        "environment-github-api-response-cached-accepted",
+        TWO_AM0,
+        &["pr-or-api-wording"],
+        Expected::Accept,
+        &|c| behavior(c, "The GitHub API response is cached in memory"),
+    );
+    add(
+        "environment-corpus-runner-cache-accepted",
+        TWO_AM0,
+        &["cache-word-in-product-or-path"],
+        Expected::Accept,
+        &|c| behavior(c, "The corpus runner caches the readings"),
+    );
     // The dash-bullet request names a push and a PR in a content criterion, which the check does not read.
     let bullet_request = lines(&["Update the guide.", "- Push to origin when the PR is ready"]);
     let mut c = case(
@@ -2306,6 +2456,54 @@ fn environment_reach_refusal_is_declared_intended() {
     assert!(changelog.contains("check_environment_reach"));
     assert!(changelog.contains("higher refusal rate is intended"));
     assert!(changelog.contains("expected 8% of newly refused readings"));
+}
+
+#[test]
+fn environment_cache_scope_refusal_is_declared_intended() {
+    // The declared share is read from the criterion text by the replay.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: "The change refuses more readings: expected 3% of newly refused readings".into(),
+            kind: CriterionKind::Behavior,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(3));
+    // The check is one of the acceptance checks, and its doc comment names the cause, the jobs and the estimate.
+    assert!(
+        acceptance_check_names(reading_source()).contains(&"check_environment_reach".to_string())
+    );
+    let collapse = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let doc = collapse(
+        &reading_source()
+            .split("pub fn check_environment_reach(")
+            .next()
+            .unwrap()
+            .lines()
+            .rev()
+            .take_while(|l| l.starts_with("///"))
+            .map(|l| l.trim_start_matches('/').trim())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let changelog = collapse(include_str!("../../../CHANGELOG.md"));
+    for (label, text) in [("the doc comment", &doc), ("the changelog", &changelog)] {
+        for needle in [
+            "no step asking, for each CI cache or stored artifact, which ref saves it, which runs restore it, \
+             and which runs may write shared entries",
+            "20261025-034731-2am0",
+            "20261025-055626-er96",
+            "20261025-050603-wrv7",
+            "20261025-065849-n99a",
+            "higher refusal rate is intended, expected 3% of newly refused readings",
+            "estimate, not measured",
+        ] {
+            assert!(text.contains(&collapse(needle)), "{label} lacks {needle:?}");
+        }
+    }
 }
 
 #[test]

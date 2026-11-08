@@ -694,6 +694,128 @@ pub(super) const ENV_LOCAL_SITE_WORDS: [&str; 5] =
 pub(super) const ENV_ABSENT_WORDS: [&str; 8] = [
     "no", "without", "missing", "absent", "none", "non", "always", "lacks",
 ];
+/// Words that name a stored copy a later run can restore: a cache or a stored artifact.
+pub(super) const ENV_CACHE_WORDS: [&str; 6] = [
+    "cache",
+    "caches",
+    "cached",
+    "caching",
+    "artifact",
+    "artifacts",
+];
+/// Words that name a CI place only beside `github`, or when the reading has a workflow deliverable.
+pub(super) const ENV_WEAK_CI_PLACE_WORDS: [&str; 4] =
+    ["workflow", "workflows", "runner", "runners"];
+/// Verbs of using a stored CI result again.
+pub(super) const ENV_REUSE_WORDS: [&str; 4] = ["reuse", "reuses", "reused", "reusing"];
+/// Nouns of a CI result, on the trigger side.
+pub(super) const ENV_RESULT_WORDS: [&str; 7] = [
+    "run", "runs", "pass", "passes", "result", "results", "status",
+];
+/// Words that tie a reused CI result to another ref or an earlier run, not to one commit.
+pub(super) const ENV_CROSS_REF_WORDS: [&str; 16] = [
+    "early", "earlier", "push", "pushes", "pushed", "pushing", "branch", "branches", "land",
+    "lands", "landing", "another", "previous", "base", "ref", "refs",
+];
+/// Nouns a cache statement in an `Environment:` assumption names: the cache words and a stored CI result.
+pub(super) const ENV_CACHE_NOUN_WORDS: [&str; 11] = [
+    "cache",
+    "caches",
+    "cached",
+    "caching",
+    "artifact",
+    "artifacts",
+    "result",
+    "results",
+    "status",
+    "pass",
+    "passes",
+];
+/// Words that say a ref or event saves an entry.
+pub(super) const ENV_SAVE_WORDS: [&str; 10] = [
+    "save", "saves", "saved", "saving", "store", "stores", "stored", "upload", "uploads",
+    "uploaded",
+];
+/// Words that say which runs restore an entry.
+pub(super) const ENV_RESTORE_WORDS: [&str; 11] = [
+    "restore",
+    "restores",
+    "restored",
+    "restoring",
+    "download",
+    "downloads",
+    "downloaded",
+    "reuse",
+    "reuses",
+    "reused",
+    "reusing",
+];
+/// Words that say who may write shared entries (plain `read` is not one).
+pub(super) const ENV_WRITE_RIGHTS_WORDS: [&str; 7] = [
+    "write",
+    "writes",
+    "written",
+    "writable",
+    "readonly",
+    "permission",
+    "permissions",
+];
+/// Words that name the ref scope of a cache; `default` and `pull` count only in a pair, see [`names_ref_scope`].
+pub(super) const ENV_SCOPE_WORDS: [&str; 9] = [
+    "branch", "branches", "ref", "refs", "main", "pr", "prs", "scope", "scoped",
+];
+
+/// Whether `words` name a ref scope: a scope word, `default` before branch, branches, ref or refs, or `pull`
+/// before request or requests.
+pub(super) fn names_ref_scope(words: &[String]) -> bool {
+    words.iter().enumerate().any(|(i, w)| {
+        let next = words.get(i + 1).map_or("", String::as_str);
+        ENV_SCOPE_WORDS.contains(&w.as_str())
+            || (w == "default" && matches!(next, "branch" | "branches" | "ref" | "refs"))
+            || (w == "pull" && matches!(next, "request" | "requests"))
+    })
+}
+
+/// Whether `text` names one of the cache and artifact actions of GitHub Actions (`actions/cache`,
+/// `actions/upload-artifact`, `actions/download-artifact`), with or without a version after `@`.
+pub(super) fn names_actions_cache(text: &str) -> bool {
+    text.split(|c: char| c.is_whitespace() || matches!(c, '`' | ',' | '(' | ')'))
+        .map(|token| token.trim_matches(|c: char| !c.is_alphanumeric()))
+        .map(|token| token.split('@').next().unwrap_or("").to_lowercase())
+        .any(|token| {
+            matches!(
+                token.as_str(),
+                "actions/cache" | "actions/upload-artifact" | "actions/download-artifact"
+            )
+        })
+}
+
+/// Whether one run of words ties a CI cache, a stored artifact or a reused CI result to a ref: a CI place (`CI`
+/// written exactly, `github actions`, or a workflow or runner beside `github` or in a reading with a workflow
+/// deliverable) with a cache word, or with a reuse word, a result noun and a cross-ref word and no `sha` or
+/// `commit` word (a result matched by commit is not scoped to a ref).
+pub(super) fn segment_has_cache_scope_trigger(
+    seg: &[EnvWord],
+    has_workflow_deliverable: bool,
+) -> bool {
+    let has = |list: &[&str]| seg.iter().any(|w| list.contains(&w.lower.as_str()));
+    let github = seg.iter().any(|w| w.lower == "github");
+    let ci_place = seg.iter().enumerate().any(|(i, w)| {
+        w.ci || (w.lower == "github" && seg.get(i + 1).is_some_and(|n| n.lower == "actions"))
+            || (ENV_WEAK_CI_PLACE_WORDS.contains(&w.lower.as_str())
+                && (github || has_workflow_deliverable))
+    });
+    if !ci_place {
+        return false;
+    }
+    if has(&ENV_CACHE_WORDS) {
+        return true;
+    }
+    has(&ENV_REUSE_WORDS)
+        && has(&ENV_RESULT_WORDS)
+        && has(&ENV_CROSS_REF_WORDS)
+        && !has(&["sha", "commit", "commits"])
+}
 
 /// Refuses a reading that assigns an action or a measurement to a place without saying who performs it, where,
 /// with what permissions and what data it can reach.
@@ -708,8 +830,9 @@ pub(super) const ENV_ABSENT_WORDS: [&str; 8] = [
 /// 20261024-220314-yjtg, 20261025-070613-4vfa and 20261026-011842-889s traced all three to the same missing
 /// step.
 ///
-/// It applies when the reading has a capability and no question. It reads four things and nothing else (not the
-/// request, a content criterion, an assumption or `out_of_scope`, so the repair text cannot trigger it):
+/// It applies when the reading has a capability and no question. It reads four things for the place statement,
+/// and a fifth for the cache statement described below, and nothing else (not the request, a content criterion,
+/// an assumption or `out_of_scope`, so the repair text cannot trigger it):
 /// (A) a created or modified deliverable under `.github/workflows/`; (B) a behavior criterion with a host
 /// action: a `git` or `gh` command, a push with a ref, branch or origin, a fetch, clone or pull from a remote,
 /// a pull request or `PR` (written exactly so) with an opening, creating, raising, merging, reusing, pushing or
@@ -749,6 +872,29 @@ pub(super) const ENV_ABSENT_WORDS: [&str; 8] = [
 /// basis is that few stored readings carry a workflow deliverable, a push or pull request action, or records
 /// cited in the summary. The replay at verification measures it.
 ///
+/// Root cause of the cache rule: the reading had no step asking, for each CI cache or stored artifact, which ref
+/// saves it, which runs restore it, and which runs may write shared entries. It worked from the request text and
+/// the local repository view, so two plans (jobs 20261025-034731-2am0 and 20261025-055626-er96) designed a
+/// result cache keyed by a fingerprint and an early push whose CI run is reused at landing without asking
+/// which ref saves the entry or which runs can restore it. Introspections 20261025-050603-wrv7 and
+/// 20261025-065849-n99a traced both to that missing step. The fifth input is a cache trigger in a behavior
+/// criterion or the summary: (D1) a behavior criterion with a CI place (`CI` written exactly, `github actions`,
+/// or a workflow or runner beside `github` or in a reading with a workflow deliverable) and a cache or artifact
+/// word, or naming `actions/cache`, `actions/upload-artifact` or `actions/download-artifact`; (D2) a behavior
+/// criterion with a CI place, a reuse word, a result noun and a cross-ref word (early, push, branch, landing and
+/// the like) and no `sha` or `commit` word; (D3) a created or modified `.github/workflows/` deliverable with a
+/// cache or artifact word in a behavior criterion or the summary. The reading then needs one `Environment:`
+/// assumption that names the cache, artifact or result and says which ref and event saves it, which runs
+/// restore it, which runs may write shared entries, and the ref scope. The best such assumption (fewest parts
+/// missing) is judged; the union of all `Environment:` assumptions is not, so a CI block cannot hide a missing
+/// part. Limits: the check is lexical; a lowercase `ci` is missed; a CI result matched by commit SHA is
+/// deliberately not a trigger; a bare `runner` or `workflow` is not a CI place; a pasted CI block that holds a
+/// write word and a scope word beside a cache noun can meet the write and scope parts without saying who
+/// writes shared entries.
+///
+/// This check refuses more readings; the higher refusal rate is intended, expected 3% of newly refused readings
+/// (an estimate, not measured).
+///
 /// The error says which trigger fired and which part is missing, and tells the reader what to write.
 pub fn check_environment_reach(reading: &Reading) -> Result<()> {
     if reading.capability.is_none() || reading.question.is_some() {
@@ -772,12 +918,33 @@ pub fn check_environment_reach(reading: &Reading) -> Result<()> {
     let located_read = behavior
         .iter()
         .any(|s| names_source(s, &ENV_LOCATED_SOURCES, false));
-    let evidence = names_source(
-        &scan_segments(&reading.summary),
-        &ENV_EVIDENCE_SOURCES,
-        true,
-    );
-    if workflows.is_empty() && !host_action && !located_read && !evidence {
+    let summary = scan_segments(&reading.summary);
+    let evidence = names_source(&summary, &ENV_EVIDENCE_SOURCES, true);
+    // A cache or stored artifact is tied to a ref: D1 a CI place with a cache word, D2 a reused CI result tied
+    // to another ref, D3 a workflow deliverable with a cache word in a behavior criterion or the summary.
+    let names_action = reading
+        .acceptance_criteria
+        .iter()
+        .filter(|c| c.kind == CriterionKind::Behavior)
+        .any(|c| names_actions_cache(&c.text));
+    let mentions_cache = |segments: &[Vec<EnvWord>]| {
+        segments.iter().any(|seg| {
+            seg.iter()
+                .any(|w| ENV_CACHE_WORDS.contains(&w.lower.as_str()))
+        })
+    };
+    let has_workflow = !workflows.is_empty();
+    let cache_trigger = names_action
+        || behavior.iter().any(|segments| {
+            segments
+                .iter()
+                .any(|seg| segment_has_cache_scope_trigger(seg, has_workflow))
+        })
+        || (has_workflow
+            && (behavior.iter().any(|s| mentions_cache(s))
+                || mentions_cache(&summary)
+                || names_actions_cache(&reading.summary)));
+    if workflows.is_empty() && !host_action && !located_read && !evidence && !cache_trigger {
         return Ok(());
     }
     let environments = environment_assumptions(reading);
@@ -857,13 +1024,71 @@ pub fn check_environment_reach(reading: &Reading) -> Result<()> {
             );
         }
     }
+    let place_problems = problems.len();
+    if cache_trigger {
+        triggers.push(
+            "it describes a CI cache, a stored artifact or a CI result reused from another ref"
+                .into(),
+        );
+        let has =
+            |words: &[String], list: &[&str]| words.iter().any(|w| list.contains(&w.as_str()));
+        // The best `Environment:` assumption that names the cache, artifact or result: the one lacking the
+        // fewest parts. The union of all of them would let a CI block hide a missing part.
+        let best = environments
+            .iter()
+            .map(|text| plain_words(text))
+            .filter(|words| has(words, &ENV_CACHE_NOUN_WORDS))
+            .map(|words| {
+                let mut lacks: Vec<&str> = Vec::new();
+                if !has(&words, &ENV_SAVE_WORDS) {
+                    lacks.push("which ref and event saves it");
+                }
+                if !has(&words, &ENV_RESTORE_WORDS) {
+                    lacks.push("which runs restore it");
+                }
+                if !has(&words, &ENV_WRITE_RIGHTS_WORDS) {
+                    lacks.push("which runs may write shared entries");
+                }
+                if !names_ref_scope(&words) {
+                    lacks.push("the ref scope");
+                }
+                lacks
+            })
+            .min_by_key(Vec::len);
+        let repair = "Repair: add one assumption that starts `Environment:`, names the cache, artifact or \
+                      result and states its save scope, restore scope and write rights, for example \
+                      \"Environment: the CI cache is saved by the main branch push run, restored by pull \
+                      request runs of the same branch and by main, written only by main\"";
+        match best {
+            Some(lacks) if lacks.is_empty() => {}
+            Some(lacks) => problems.push(format!(
+                "the `Environment:` assumption that names the cache, artifact or result lacks {}. {repair}",
+                lacks.join("; ")
+            )),
+            None => problems.push(format!(
+                "no `Environment:` assumption names the cache, artifact or result; it must state which ref \
+                 and event saves it; which runs restore it; which runs may write shared entries; the ref \
+                 scope. {repair}"
+            )),
+        }
+    }
     if problems.is_empty() {
         return Ok(());
     }
+    let mut tails: Vec<&str> = Vec::new();
+    if place_problems > 0 {
+        tails.push("who performs it, where, with what permissions and what data it reaches");
+    }
+    if problems.len() > place_problems {
+        tails.push(
+            "which ref saves the cache or artifact, which runs restore it and which runs may write \
+             shared entries",
+        );
+    }
     bail!(
-        "the reading was refused because {}, and nothing in the reading says who performs it, where, with \
-         what permissions and what data it reaches: {}",
+        "the reading was refused because {}, and nothing in the reading says {}: {}",
         triggers.join("; and "),
+        tails.join(", or "),
         problems.join("; and ")
     )
 }
