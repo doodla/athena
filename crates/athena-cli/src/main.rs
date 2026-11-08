@@ -455,8 +455,10 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
     /// matching intent and no landing is pending for 15 minutes). It reads `athena/records` (fetch it first)
     /// and never a commit message. Exit 2 on a finding. It judges only the commits and records added since
     /// the newest checkpoint on `athena/records` (a full replay when there is none or its check version
-    /// differs), and on a pass on the main branch writes a new checkpoint to the local records branch. It
-    /// writes nothing when CI is set in the environment, with `--no-checkpoint`, or off the main branch.
+    /// differs), and on a pass on the main branch pushes a new checkpoint to the `athena/records` branch on
+    /// `origin`, so CI starts from it. The records it judged must already be on `origin`; otherwise no
+    /// checkpoint is written and the reason is printed. It writes nothing when CI is set in the environment,
+    /// with `--no-checkpoint`, or off the main branch.
     /// It prints the seconds taken and the commits and records judged.
     Check {
         #[arg(long)]
@@ -815,7 +817,8 @@ fn run_json(
 }
 
 /// After a landing record: runs the attribution check incrementally on `landed` (the merged commit) with
-/// checkpoint writing on. A pass writes a checkpoint to the local records branch; the verdict never changes
+/// checkpoint writing on. A pass pushes a checkpoint to the `athena/records` branch on `origin` (the remote
+/// landing publishes its records to), so CI's incremental run can start from it; the verdict never changes
 /// the landing's own outcome.
 fn checkpoint_after_landing(
     git: &athena_git::Git,
@@ -2151,6 +2154,19 @@ mod tests {
             HistoryRecord::Landing(landing),
         );
         let before = git.rev_parse(RECORDS_REF).unwrap().unwrap();
+        // The records the landing wrote have reached the remote, which the checkpoint is pushed to.
+        let remote_dir = tempfile::tempdir().unwrap();
+        let remote = Git::isolated(remote_dir.path());
+        remote.run(["init", "-q", "--bare", "-b", "main"]).unwrap();
+        git.run([
+            "remote",
+            "add",
+            "origin",
+            remote_dir.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        git.push_branch("origin", "athena/records", &before)
+            .unwrap();
 
         let run = checkpoint_after_landing(&git, &landed, now).unwrap();
         assert!(run.report.passed(), "{:?}", run.report.findings);
@@ -2163,6 +2179,16 @@ mod tests {
         assert_eq!(cp.verifier_version, athena_gate::attribution::CHECK_VERSION);
         assert_ne!(git.rev_parse(RECORDS_REF).unwrap().unwrap(), before);
         assert!(checkpoint_note(&run).starts_with("checkpoint written"));
+        // The checkpoint is on the remote records branch, read from the remote.
+        let remote_tip = remote.rev_parse(RECORDS_REF).unwrap().unwrap();
+        assert_eq!(remote_tip, git.rev_parse(RECORDS_REF).unwrap().unwrap());
+        assert_eq!(remote.parents(&remote_tip).unwrap(), vec![before.clone()]);
+        assert!(
+            remote
+                .show_file(&remote_tip, &format!("checkpoints/{}.json", cp.id))
+                .unwrap()
+                .is_some()
+        );
 
         // A landing the records do not name writes nothing and says so.
         std::fs::write(dir.path().join("c.txt"), "c\n").unwrap();

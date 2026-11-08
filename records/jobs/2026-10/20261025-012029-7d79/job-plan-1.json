@@ -1,0 +1,276 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261025-012029-7d79",
+  "round": 1,
+  "at": "2026-11-08T00:34:58.006532329Z",
+  "invocation_seq": 3,
+  "approach": "Fault: `write_checkpoint` (attribution.rs:727) calls `RecordsWriter::append`, which writes only the local `athena/records` ref. The next `append_to_remote` (landing, via `sync_from`, records_branch.rs:374) resets the local ref to the remote tip, so the unpushed checkpoint is dropped and CI never finds one. Fix at that call. `write_checkpoint` takes a remote name and does two things. First it fetches the remote records tip and refuses (an `Err` string, so `checkpoint_error`) if the remote has no records branch or the records tip the check judged is not an ancestor of the remote tip. Without this guard the sync would silently discard unpushed local records and the checkpoint's `records_sha` would name a commit the remote lacks. Then it calls `RecordsWriter::append_to_remote(remote, \"checkpoint\", ...)`, which already does sync, compare-and-swap push (`push_if_remote_at`), rebuild-and-retry up to 8 attempts, and `Contended`. `Options` gains a `remote` field (default `\"origin\"`, the literal `land_pr` uses at gh/landing.rs:743) so both callers (`check --attribution`, `checkpoint_after_landing`) reach the remote with no signature change to `Options::new`. A failed push stays `checkpoint_error` and the verdict is kept. The existing tests write records locally and then expect checkpoints, so they get a bare `origin` and a `publish` helper (a plain, non-forced `push_branch` of the local records tip, as test setup). The new tests read the bare remote directly. `crates/athena-core/src/gh.rs` is not touched (gh/ is a directory; the remote literal already exists there).",
+  "decisions": [
+    {
+      "choice": "Guard in write_checkpoint: the judged records tip must be an ancestor of the fetched remote tip, else return an error string (no write).",
+      "reason": "`append_to_remote` first resets the local branch to the remote. If local were ahead (records never pushed), those commits would be lost and the checkpoint's `records_sha` would name a commit the remote lacks, so every later incremental run would fall back at attribution.rs:627-637. If the judged tip is an ancestor, nothing is lost and a remote that moved ahead is fine, because the checkpoint is built on the newer tip with the older `records_sha` and the next run judges the records in between. The remote only moves by fast-forward, so the ancestry still holds at push time.",
+      "rejected": [
+        {
+          "option": "Call append_to_remote with no guard",
+          "why": "Silently drops local-only records and can publish a checkpoint whose records_sha is not on the remote."
+        },
+        {
+          "option": "Push the local records branch first, then append",
+          "why": "The check would publish landing and intent records it did not write, and a push race here has no retry."
+        }
+      ]
+    },
+    {
+      "choice": "Add `remote: String` to `Options` (default `DEFAULT_REMOTE = \"origin\"`, builder `with_remote`), keep `Options::new(mode, write)` unchanged.",
+      "reason": "Call sites at main.rs:830, main.rs:1542 and about 15 tests keep compiling. `origin` is the remote name `land_pr` already hard-codes (gh/landing.rs:743), and records_branch.rs:38 hard-codes `refs/remotes/origin`. There is no remote config key to read.",
+      "rejected": [
+        {
+          "option": "Option<String> remote where None means local-only",
+          "why": "It keeps the silent-drop path alive for any caller that forgets the remote, which is the bug."
+        },
+        {
+          "option": "Read the remote name from athena.toml",
+          "why": "It adds a governance config key, which is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Do not make `append_to_remote_with_hook` public. Show the lost-race retry in a records_branch.rs test with a checkpoint-shaped put. In attribution.rs show a remote that moved ahead before the write, plus a persistent push failure via an unusable `remote.origin.pushurl`.",
+      "reason": "Criterion 5 asks that write_checkpoint call `append_to_remote` itself. The hook is private and exists for tests. A broken pushurl leaves fetch and ls-remote working and makes push fail with the remote tip unmoved, which `append_to_remote` treats as a plain error (records_branch.rs:450-452). No hook script is needed.",
+      "rejected": [
+        {
+          "option": "A pre-receive hook script on the bare remote to force a race",
+          "why": "Writing executables in tests is policed (athena-testkit no_in_process_exec_writes) and it is flaky."
+        },
+        {
+          "option": "Make the hook method pub and call it from write_checkpoint",
+          "why": "Widens the public API, and write_checkpoint would no longer call append_to_remote literally."
+        }
+      ]
+    },
+    {
+      "choice": "Replace the lock-file failure injection in `checkpoint_write_failure_keeps_verdict` with the broken pushurl.",
+      "reason": "With the remote writer, a lock on the local ref only fails `set_ref` after the push already succeeded (records_branch.rs:444-446). That would report an error for a checkpoint that is on the remote. A broken push is the real failure the test is about.",
+      "rejected": [
+        {
+          "option": "Keep the lock-file test",
+          "why": "It now tests a post-push local failure, not a failed publish."
+        }
+      ]
+    },
+    {
+      "choice": "Update docs/design/records-history.md lines ~388-389 (\"appended locally only: the check never pushes\") to say the checkpoint is pushed.",
+      "reason": "Otherwise the design doc contradicts the code for an outside reader.",
+      "rejected": [
+        {
+          "option": "Leave the doc",
+          "why": "Stale and contradicts the new behavior."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-gate/src/attribution.rs",
+      "action": "modify",
+      "purpose": "Add `DEFAULT_REMOTE`, the `Options.remote` field and `with_remote`; change `write_checkpoint` to take the remote, fetch the remote tip, guard that the judged records tip is an ancestor, and call `append_to_remote`. Update the doc comments of `run_check` (\"never pushes\") and `write_checkpoint`. Add the new tests and the `add_remote`/`publish`/`checked` helpers. Adapt the existing checkpoint tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/records_branch.rs",
+      "action": "modify",
+      "purpose": "Update the module doc (checkpoint writes use `append_to_remote`) and add the test `a_checkpoint_shaped_push_that_loses_the_race_is_rebuilt_on_the_new_remote_tip_and_lands`. No behavior change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Fix the doc comments at ~458 and ~818 (checkpoint goes to the remote records branch). Adapt the unit test `checkpoint_after_landing_writes_a_checkpoint_naming_the_landed_commit` with a bare `origin` and an `append_to_remote` `put`, asserting the remote holds the checkpoint.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/binary.rs",
+      "action": "modify",
+      "purpose": "In `mod incremental`: add a `remote_for(fx)` helper (bare repo plus `git remote add origin`), switch `put` to `append_to_remote(\"origin\")`, extend `check_attribution_writes_checkpoint` to read the bare remote, assert CI and --no-checkpoint leave it unchanged, and add `check_attribution_push_failure_keeps_the_verdict` (pushurl pointing at a missing path).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased entry (Fixed): checkpoints from `athena check --attribution` and `athena land` are pushed to the remote `athena/records` with compare-and-swap and retry. State the root cause (the local-only append was reset by the next remote write), the refusal when the judged tip is not on the remote, and that CI's incremental run now judges only later commits.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "Change the sentence at ~388-389 (\"appended locally only: the check never pushes\") to say the checkpoint is pushed to the remote records branch with the records writer.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "attribution.rs: add `pub const DEFAULT_REMOTE: &str = \"origin\"` with a doc comment saying it matches the remote `land_pr` uses (gh/landing.rs:743). Add `pub remote: String` to `Options`, set to `DEFAULT_REMOTE` in `Options::new`, and add `with_remote(self, remote)`. Update the field docs.",
+    "attribution.rs: change `write_checkpoint` to `(git, remote, main_sha, records_sha, now, version)`. Fetch the remote tip with `git.fetch_remote_branch(remote, RECORDS_BRANCH)`; map an Err to a string, and map None to \"<remote> has no athena/records branch; push it first\". Check `git.is_ancestor(records_sha, &remote_tip)` and return a clear Err string if false. Then call `RecordsWriter::new(git).append_to_remote(remote, \"checkpoint\", &[Change::put(...)], &[])`, mapping errors to strings. Pass `&options.remote` from `run_check` (line ~707). Keep the `from != Some(RECORDS_REF)` branch. Rewrite the doc comments of `run_check` (\"never pushes\") and `write_checkpoint`; import `RECORDS_BRANCH`.",
+    "records_branch.rs: update the module doc (lines 22-24) to say checkpoints also use `append_to_remote`. Add the test `a_checkpoint_shaped_push_that_loses_the_race_is_rebuilt_on_the_new_remote_tip_and_lands`, modelled on the test at line 871 but putting `checkpoints/cp.json`, and assert both files are on the bare remote.",
+    "attribution.rs tests: add helpers `add_remote(git) -> (TempDir, Git)` (bare repo via `Git::isolated` and `init -q --bare -b main`, then `remote add origin <bare dir>`), `publish(git)` (`git.push_branch(\"origin\", RECORDS_BRANCH, &records_tip(git))`) and `checked(git, main, opts)` (publish, then `run_check`). Do not touch `crate::testutil` in lib.rs.",
+    "attribution.rs tests: adapt the seven existing checkpoint-writing tests (listed in dependents) to call `add_remote` and `checked`. Rewrite `checkpoint_write_failure_keeps_verdict` to break the push with `git config remote.origin.pushurl <missing path>` and assert the remote tip and verdict are unchanged. Add `checkpoint_reaches_the_remote_records_branch`, `a_later_landing_fast_forwards_past_the_remote_checkpoint`, `ci_incremental_run_from_the_remote_checkpoint_judges_only_later_commits` and `checkpoint_lands_on_a_remote_that_moved_ahead_of_the_checked_tip` (rival clone made with the same `add_remote` pointing at the same bare repo). Also add a test that a local-ahead records tip gives `checkpoint_error` and leaves the remote untouched.",
+    "main.rs: update the doc comments at ~458 and ~818. In the unit test module, add a bare `origin` and make `put` use `append_to_remote(\"origin\", ...)`. Assert the bare remote's tip holds the checkpoint after `checkpoint_after_landing`.",
+    "binary.rs (`mod incremental`): add `remote_for(fx)`, call it in each test after `Fixture::new()`, switch `put` to `append_to_remote(\"origin\", ...)`, extend `check_attribution_writes_checkpoint` and `check_attribution_in_ci_writes_nothing` to read the bare remote, and add `check_attribution_push_failure_keeps_the_verdict`.",
+    "docs/design/records-history.md: update the checkpoint sentence at ~388-389. CHANGELOG.md: add the Unreleased entry.",
+    "Run `cargo fmt --all`, then `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`; fix any test that still writes records locally and then expects a checkpoint."
+  ],
+  "risks": [
+    {
+      "risk": "A developer clone whose local `athena/records` is ahead of the remote (an unpushed landing record) now writes no checkpoint, where before it wrote a local one.",
+      "mitigation": "The guard returns a `checkpoint_error` string and writes nothing. The next check (after the records are pushed or fetched) writes the checkpoint. The error text names the judged tip and the remote."
+    },
+    {
+      "risk": "If the push succeeds but the local `set_ref` then fails (records_branch.rs:445), the run reports an error although the remote has the checkpoint.",
+      "mitigation": "Accepted: `checkpoint_error` is set and the checkpoint is on the remote, so the next `sync_from` realigns the local ref. The changelog and doc comment say the local ref is updated after a successful push. A test of this edge is not added."
+    },
+    {
+      "risk": "Adapting about seven existing gate tests to a bare remote may break a count or parent assertion, and per-record pushes in the 200-landing timing test would be slow.",
+      "mitigation": "Step 5 keeps `publish` as a plain, non-forced push, so a non-fast-forward test setup fails loudly. The 200-landing test keeps local puts and publishes once."
+    },
+    {
+      "risk": "A repo with no `origin` (or one only readable) now cannot write a checkpoint.",
+      "mitigation": "The error is reported as `checkpoint_error` with the git message, and the verdict and exit code are unchanged. `athena land` prints the note to stderr only."
+    },
+    {
+      "risk": "Checkpoints already written locally (for example 5c314d0) were dropped by earlier resets; the fix does not recover them.",
+      "mitigation": "The changelog entry says checkpoints are never retroactively pushed. A maintainer's next passing check on main writes a new one, and the weekly full replay still runs."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "run_check checkpoint writing (now pushes to the remote)",
+      "dependent": "crates/athena-cli/src/main.rs:826-831 `checkpoint_after_landing` (athena land path, main.rs:1285) calls `run_check` with `Options::new(Mode::Incremental, true)`",
+      "kind": "code",
+      "test": "main.rs unit test `checkpoint_after_landing_writes_a_checkpoint_naming_the_landed_commit`, changed to add a bare `origin` and write its records with `append_to_remote`. It asserts the remote tip holds the checkpoint. The same test's rogue-commit case still asserts nothing is written.",
+      "reason": null
+    },
+    {
+      "name": "Options::new signature and the new `remote` field",
+      "dependent": "crates/athena-cli/src/main.rs:1542-1543 (`athena check --attribution`) builds `Options::new(mode, no_write.is_none())`; CI sets `CI`, so `no_write` is Some and `write_checkpoint` is false",
+      "kind": "code",
+      "test": "binary.rs `check_attribution_writes_checkpoint` (extended to read the remote) and `check_attribution_in_ci_writes_nothing` (asserts the remote tip is unchanged under CI=true and --no-checkpoint).",
+      "reason": null
+    },
+    {
+      "name": "RunReport.checkpoint_error and checkpoint_written",
+      "dependent": "crates/athena-cli/src/main.rs:774-786, 809-811, 844-859 (`checkpoint_line`, `run_json`, `checkpoint_note`) render `checkpoint_error` and `checkpoint_written`",
+      "kind": "code",
+      "test": "binary.rs `check_attribution_push_failure_keeps_the_verdict` (exit 0, \"checkpoint not written: ...\", JSON `checkpoint_error` is a string) and `check_attribution_reports_seconds_and_counts` (JSON `checkpoint_written` is a string).",
+      "reason": null
+    },
+    {
+      "name": "Remote records branch now carries checkpoint commits",
+      "dependent": ".github/workflows/ci.yml:632-672 attribution job (fetches `athena/records:athena/records`, runs `athena check --attribution` with CI set, so it never writes) and the history job (ci.yml:532-548)",
+      "kind": "rule",
+      "test": "Criterion 3 test covers the CI read; test `a_later_landing_fast_forwards_past_the_remote_checkpoint` covers the audit (`audit_history` empty).",
+      "reason": "No workflow change. CI already fetches the branch and the incremental run reads the newest checkpoint (attribution.rs:549, 594-597). The checkpoint is the existing `HistoryRecord::Checkpoint` under `checkpoints/`, which the importer and audit already accept. Attribution excludes `checkpoints/` from the records it judges (attribution.rs:338). The audit sees only fast-forward commits."
+    },
+    {
+      "name": "Remote records branch content (new checkpoint commits) and the shape of the local ref",
+      "dependent": "crates/athena-core/src/gh/records.rs:156 and :365 (`GitLandingRecords` landing writes via `append_to_remote`, with `sync_from` at :102, :329, :400) and crates/athena-core/src/records_import.rs:129,198",
+      "kind": "code",
+      "test": "`a_later_landing_fast_forwards_past_the_remote_checkpoint`; the existing records_branch tests at 838-1004.",
+      "reason": "These writers sync to the remote tip and build on it, and a checkpoint is an ordinary extra file in a fast-forward commit. They add paths that never clash with `checkpoints/`. `plan` refuses only the same path with different bytes, and checkpoint ids are unique."
+    },
+    {
+      "name": "Local athena/records tip after a check (now equals the remote tip)",
+      "dependent": "crates/athena-core/src/store.rs:289 and crates/athena-core/src/snapshot.rs:8, which read landings from the local records tip",
+      "kind": "code",
+      "test": "Covered by the unchanged landing and store tests in `cargo test --locked`.",
+      "reason": "They read only landing files, and a checkpoint commit adds none. After the write the local ref equals the remote tip, which is a descendant of what it held."
+    },
+    {
+      "name": "Tests that expect `checkpoint_written` Some after local-only `put`/`land`",
+      "dependent": "crates/athena-gate/src/attribution.rs tests (`incremental_run_judges_only_new_commits`, `intent_before_checkpoint_landing_after_passes`, `check_version_change_forces_full_replay`, `passing_check_writes_checkpoint`, `full_replay_ignores_checkpoints_and_read_only_never_writes`, `timing_on_synthetic_200_landings`, `checkpoint_write_failure_keeps_verdict`)",
+      "kind": "code",
+      "test": "Each is adapted: `add_remote` plus a `checked(...)` wrapper that calls `publish(&git)` and then `run_check`. The assertions on counts and parents are kept; `passing_check_writes_checkpoint` also asserts the remote tip equals the local tip.",
+      "reason": null
+    },
+    {
+      "name": "attribution.rs public functions other than run_check/Options",
+      "dependent": "crates/athena-gate/src/legacy.rs:221 and history.rs:50 call `attribution::walk`, `cutover_state` and `check_attribution`, not `run_check` or `write_checkpoint`",
+      "kind": "code",
+      "test": null,
+      "reason": "They are unchanged; only `run_check`, `Options` and the private `write_checkpoint` change."
+    },
+    {
+      "name": "Documented behavior \"checkpoint appended locally only; the check never pushes\"",
+      "dependent": "docs/design/records-history.md lines ~388-389 and the CLI help at main.rs:458",
+      "kind": "rule",
+      "test": "Reviewed in the diff; no automated test reads these. The boundary and budget tests run in `cargo test --locked` and must still pass (no banned words, and the prompt budgets in docs/system-facts.md are unaffected because no always-loaded prompt text changes).",
+      "reason": null
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New unit test `attribution::tests::checkpoint_reaches_the_remote_records_branch`. Build a repo with a bare `origin` (a helper `add_remote(&git)` that runs `init --bare` and `remote add origin <path>`), land two commits with `land()`, call `publish(&git)`, then run `run_check(&git, &head, now(), &incremental())`. Read the bare repo directly: `bare.rev_parse(RECORDS_REF)` equals the local tip and `bare.show_file(remote_tip, \"checkpoints/<cp.id>.json\")` parses to `HistoryRecord::Checkpoint(cp)` with `main_sha` = head and `records_sha` = the tip before the write. The remote tip's only parent is the old tip.",
+      "command": "cargo test -p athena-gate attribution::tests::checkpoint_reaches_the_remote_records_branch",
+      "observes": "The checkpoint file exists on the bare remote's `athena/records` tip, read from the remote and not the local ref. `run.checkpoint_written` is Some and `checkpoint_error` is None.",
+      "fails_without": "With `RecordsWriter::append` the bare remote has no `checkpoints/` file and the show_file/remote-tip assertion fails.",
+      "seam": "Production entry point `athena_gate::attribution::run_check` with `Options::new(Mode::Incremental, true)` (remote defaults to \"origin\"). The fixture is a local bare git repo added as `origin` by the new test helper `add_remote` (step 5), which also adds `publish`. `run_check`, the `Options.remote` field and the `append_to_remote` call are added by steps 1-3. The bare repo is real git, not a double."
+    },
+    {
+      "criterion": 2,
+      "method": "New test `attribution::tests::a_later_landing_fast_forwards_past_the_remote_checkpoint`. After the criterion-1 setup, write a landing record through the production writer: `RecordsWriter::new(&git).append_to_remote(\"origin\", \"landing\", &[Change::put(\"landings/x.json\", ..)], &[])`. Read the bare remote: `checkpoints/<cp.id>.json` is still in the tip's tree, `bare.is_ancestor(checkpoint_commit, new_tip)` is true, `git.parents(new_tip) == [checkpoint_commit]`, and `audit_history(&bare, new_tip)` is empty. Also assert the local ref equals the remote tip (not reset).",
+      "command": "cargo test -p athena-gate attribution::tests::a_later_landing_fast_forwards_past_the_remote_checkpoint",
+      "observes": "The remote tip descends from the checkpoint commit with the checkpoint file intact, and nothing was reset.",
+      "fails_without": "With the old local `append`, `append_to_remote`'s `sync_from` resets the local ref to the remote tip, the checkpoint file is absent from the remote, and the file-present assertion fails.",
+      "seam": "Production entry points `run_check` then `RecordsWriter::append_to_remote`, which exists (records_branch.rs:398). The fixture is the bare `origin` from `add_remote` (step 5). The checkpoint commit id is the return of the check's remote tip read right after `run_check`."
+    },
+    {
+      "criterion": 3,
+      "method": "New test `attribution::tests::ci_incremental_run_from_the_remote_checkpoint_judges_only_later_commits`. Land 3 commits and check them (checkpoint pushed). Land 2 more with the landing records written by `append_to_remote`. Simulate CI's fresh state: `git update-ref -d refs/heads/athena/records`, then `git fetch origin athena/records:athena/records` (the same fetch ci.yml:646 runs). Run `run_check(&git, &head, now(), &Options::new(Mode::Incremental, false))`. Assert `mode == Incremental`, `started_from.main_sha` equals the third commit, `commits_judged() == 2`, `records_judged() == 4` (checkpoints are excluded at attribution.rs:338), and `fallback_reason` is None. A second run on the same repo with the checkpoint absent (a control remote with no checkpoint) is a full replay of 5 commits.",
+      "command": "cargo test -p athena-gate attribution::tests::ci_incremental_run_from_the_remote_checkpoint_judges_only_later_commits",
+      "observes": "The incremental run starts from the checkpoint that came from the remote and judges only the two later commits and their four records, not all five.",
+      "fails_without": "Without the push, the fetched local ref has no checkpoint, so `mode` is FullReplay, `fallback_reason` is \"no checkpoint on the records branch\" and `commits_judged` is 5, which fails the assertions.",
+      "seam": "Production entry point `run_check` with write off (CI mode), reading the local ref fetched from the bare remote. The fixture is the bare `origin` from `add_remote` and the fetch command above, run through `git.run`. The fetch is test setup and the logic under test (`run_check`) is not doubled. `add_remote` and `publish` are added in step 5."
+    },
+    {
+      "criterion": 4,
+      "method": "Three tests. (a) records_branch.rs `a_checkpoint_shaped_push_that_loses_the_race_is_rebuilt_on_the_new_remote_tip_and_lands`: `append_to_remote_with_hook` with `Change::put(\"checkpoints/cp.json\", ..)`, where hook attempt 1 has a rival clone push, then assert 2 attempts, the commit's parent is the rival tip, and both files are on the bare remote. (b) attribution.rs `checkpoint_lands_on_a_remote_that_moved_ahead_of_the_checked_tip`: a rival clone pushes a record to the bare remote after the local clone last synced, then `run_check` passes with `checkpoint_written` Some. The remote tip's parent is the rival tip, `records_sha` is the older judged tip, and the rival record is kept. (c) attribution.rs `checkpoint_write_failure_keeps_verdict` rewritten: after `git config remote.origin.pushurl <missing path>`, `run_check` returns `report.passed()` true, `checkpoint_written` None, `checkpoint_error` Some, and the bare remote tip is unchanged. A CLI test in binary.rs does the same through the binary: `athena check --attribution` exits 0 and prints \"checkpoint not written\".",
+      "command": "cargo test -p athena-git records_branch::tests::a_checkpoint_shaped_push_that_loses_the_race_is_rebuilt_on_the_new_remote_tip_and_lands && cargo test -p athena-gate attribution::tests::checkpoint_lands_on_a_remote_that_moved_ahead_of_the_checked_tip && cargo test -p athena-gate attribution::tests::checkpoint_write_failure_keeps_verdict && cargo test -p athena-cli --test binary incremental::check_attribution_push_failure_keeps_the_verdict",
+      "observes": "A lost push race is retried on the new remote tip and the checkpoint lands. A remote that moved ahead is built upon. A persistent push failure leaves the verdict and exit code unchanged and sets `checkpoint_error`, with the remote untouched.",
+      "fails_without": "(a) without the rebuild-and-retry in `append_to_remote` the second attempt would not occur and the checkpoint would not land. (b) without the remote-tip build, the checkpoint would be based on the stale local tip and the push would be rejected. (c) without an error path, `checkpoint_error` would be None, or the verdict would flip.",
+      "seam": "(a) Existing private `append_to_remote_with_hook` (records_branch.rs:410) with a rival `RecordsWriter` on a second clone and the existing helpers `bare_remote`/`clone_of`, as in the existing test at line 871. (b) and (c) use `run_check` and the bare `origin` from `add_remote`; the pushurl is set with `git config` in the test (step 5). For the CLI, the binary runs against the Fixture plus a bare remote added by the new `remote_for` helper in binary.rs (step 7)."
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the diff of write_checkpoint.",
+      "command": "git diff -- crates/athena-gate/src/attribution.rs",
+      "observes": "Inside `fn write_checkpoint` the call is `RecordsWriter::new(git).append_to_remote(remote, \"checkpoint\", ...)`; the `.append(` call is gone and the doc comment no longer says \"local\".",
+      "fails_without": null,
+      "seam": "None. This is a content criterion."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the changelog diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new bullet under `## [Unreleased]` / `### Fixed` (or Added if there is no Fixed heading under Unreleased) states that the passing-check and `athena land` checkpoints are pushed to the remote `athena/records` with compare-and-swap and retry. It also states that the check refuses to write when its judged records tip is not on the remote and reports `checkpoint_error`, and that a later landing fast-forwards past it so CI's incremental run judges only later commits. It names the root cause: the local-only append was reset by the next remote write.",
+      "fails_without": null,
+      "seam": "None. This is a content criterion."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three checks Athena runs on the result.",
+      "command": "cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --all --check",
+      "observes": "All pass, including the changed tests in athena-gate, athena-git and athena-cli (binary.rs, main.rs unit tests) and the budgets and boundary tests in athena-cli and xtask.",
+      "fails_without": "A missed test adaptation (a local `put` followed by a checkpoint-expecting run with no `publish`, or a CLI test with no `origin`) fails in cargo test.",
+      "seam": "None. These are the repository's own checks."
+    }
+  ],
+  "open_questions": [
+    "User: `crates/athena-core/src/gh.rs` is listed in the request but is not a file (`crates/athena-core/src/gh/` is a directory). This plan treats it as needing no change, because the remote name `origin` already appears at gh/landing.rs:743 and `Options` defaults to it. Say if a change in `gh/` was intended."
+  ],
+  "producer_section_sha256": "b10a431ca8ac29bf983718ebf0992df25ff2497932176e784b53ba4d18d37661"
+}

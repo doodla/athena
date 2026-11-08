@@ -386,9 +386,12 @@ Measuring: record, per run, seconds and the number of records and commits judged
 - `--full-replay` ignores checkpoints for judging. It adds a finding when the newest checkpoint names a commit
   the replay fails or one not on main, and the run exits 2.
 - A checkpoint is written only after a pass with no pending commit, from the local `athena/records` ref, and is
-  appended locally only: the check never pushes. If the append fails, the report says so and the verdict and
-  exit code are unchanged. A checkpoint written locally reaches CI when the records branch is pushed by the
-  existing flow; until then CI's incremental run finds none and runs a full replay, saying so.
+  pushed to the records branch on `origin` by the records writer used for landing (`append_to_remote`:
+  compare-and-swap push, rebuild on the new remote tip and retry on a lost race). A later landing then
+  fast-forwards past it, and CI's incremental run starts from it. The writer resets the local branch to the
+  remote first, so the check refuses to write, and says so, when the records tip it judged is not already on
+  the remote. If the push fails, the report says so and the verdict and exit code are unchanged. Until a
+  checkpoint is on the remote, CI's incremental run finds none and runs a full replay, saying so.
 - No write happens when `CI` is set and not empty, with `--no-checkpoint`, or when HEAD is not on `main`. CI's
   workflow token is `contents: read`, so the rule is enforced by the token and by the code.
 - Accepted bound: an incremental run trusts the newest checkpoint; a forged checkpoint is caught by the weekly
