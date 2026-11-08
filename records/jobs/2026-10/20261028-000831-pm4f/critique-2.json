@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-000831-pm4f",
+  "round": 2,
+  "at": "2026-11-08T21:20:34.062225867Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/manage.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/manage.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/hestia.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/hestia.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The rule \"a dispatched job with no registry process belongs to nobody\" is false. A job another athena process is running has no registry entry between agent processes, so dropping the channel filter lets the drain retry live off-channel jobs.",
+      "evidence": "`Athena::running` (status.rs:885) only checks `registry().entries()`. Registry entries are per process group: `Registry::register(pgid, job, what)` is called for each agent or check process. Meanwhile `go_job` holds the job lock (`try_lock_job`, run/mod.rs:443) for the whole of `dispatch`, including git work, planning between rounds, preflight and CI waits, when no group may be registered. `Athena::retry` does not take the original's lock; the only `try_lock_job` calls are in run/mod.rs:443 (the new job), manage.rs:96, landing.rs:728 and disk.rs. The codebase already treats the free job lock as the liveness signal for interrupted jobs: the `reclaim_interrupted` doc at drain.rs:573 says \"dispatched, no process, free job lock\", and disk.rs:188 and 233 check it. Today a cli job run by a parallel `athena go` can already be picked up mid-run. Removing `DRAINED_CHANNELS` from `interrupted_work` extends this to every channel, for example a web consumer's live job, and the drain would dispatch a duplicate retry. `Athena::close` is lock-safe, but the retry path is not. The final-pass Hold line would also call a live job \"not worked\". Fix: Define \"no process\" as no registry entry and the job lock not held (`!running(j) && !state.job_lock_held(id)`). Pass that closure to `interrupted_work`, `settle_interrupted` and the drain's queue view. Add a real-steps test: a dispatched job on a non-drained channel whose lock is held, with no registry entry, is neither retried nor reported as left behind. State the lock rule in decision 3 instead of the registry-only rule.",
+      "location": "Decision 3 and steps 4 and 6 (`running` closure for `interrupted_work` and `settle_interrupted`); crates/athena-core/src/status.rs:885, crates/athena-agent/src/procs.rs:338-397, crates/athena-core/src/run/mod.rs:443",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`recover_interrupted` makes up a `Missing` producer invocation, charged at the full producer cap, when no planner, critic or producer invocation is found. An in-process error before the producer starts, with planning off, would book a phantom producer cost.",
+      "evidence": "manage.rs:285-306: `if !planned && !invocations.iter().any(|i| i.role == Role::Producer)` pushes a record with `cap_usd: config.budget.producer_usd` and the detail \"no trace of the producer survived\". This is right for a dead process. In `dispatch` the process is alive and knows the producer never ran, for example when the worktree setup or preflight in `produce_and_verify` fails before the spawn. Fix: In the error close, collect only live records and partial-usage files (split the synthesis out of `recover_interrupted`, or add a flag). Better still, keep the in-flight `Closing` reachable on the error path so its invocations are used directly. Add a test where an error before the producer, with planning off, records no producer invocation.",
+      "location": "Decision 1 and step 2 (`close_after_error` fills `new_invocations` from `recover_interrupted`); crates/athena-core/src/manage.rs:280-307",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A deterministic post-dispatch error now ends `failed`, and failed jobs can be retried. The plan does not show what bounds a chain of failed retries of the same request.",
+      "evidence": "The plan says a failed job can be retried (retry.rs:38-47) and that the drain's failure handling can run it again. No test or rule shows that a request whose run errors the same way every time is not retried in every drain beyond `MAX_RETRY_DEPTH`. Fix: Name the existing bound (the retry depth or the scope guard pause) that stops repeated failed retries, and add one assertion in the error-after-dispatch drain test that a second drain does not start an unbounded chain.",
+      "location": "Decision 1 risk 'deterministic error' / criterion 1 retry loop",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The three files outside the reading's deliverables are justified (a test file, a visibility change, a shared constant). Status.rs and retry.rs are listed as deliverables but left unedited, and the plan explains why.",
+      "evidence": "Plan risk on the deliverables list; manage.rs:240 `fn recover_interrupted` is private; hestia.rs:342 `const REQUEUE_CLOSE_REASON` is private. Fix: No change needed beyond keeping the CHANGELOG line that explains why status.rs is unchanged.",
+      "location": "Files list: run/tests.rs, manage.rs, hestia.rs (Athena's findings 1-3)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code at the places the plan cites (run/mod.rs dispatch and go_job, steward.rs interrupted_work and queued_work, manage.rs close and recover_interrupted, state.rs write_live and the lock functions, invocation.rs invoke_and_record, hestia.rs closed_by_person, procs.rs Registry, drain.rs queue and Steps) and the test helpers it names. The plan's claims check out. Errors after the Dispatch commit (plan_round `?`, and `finish_dispatched` closing only on Ok) leave a dispatched job with no outcome. `interrupted_work` filters by channel and hides any retried job. The test seam works: `write_live` fails when a regular file named `records` stands in the live directory, and the partial-usage file survives because `sink.finish()` runs only after the write succeeds. The helpers (`interrupt`, `killing_producer`, `request_on`, `real_steps`, `repo_with_planning`, `planning_script`) exist. The defaulted Steps hook leaves the existing stubs as they are. The hold, kill-switch and resume-mark guards keep resumable work out of the error close, and the dependents list is thorough. One major soundness problem remains. The plan treats a dispatched job with no registry entry as abandoned, but registry entries exist only while an agent or check process group is alive. The job lock, held for the whole dispatch, is the real liveness signal, and the code already uses it for reclaiming interrupted jobs. Dropping the channel filter on a registry-only test lets the drain retry jobs another process is running on any channel. The plan should add the job-lock probe to the `running` test and add a test for it. Two minor points: the error close can book a phantom producer cost through `recover_interrupted`, and the plan does not show what bounds repeated failed retries. Verdict: revise."
+}

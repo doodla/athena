@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-000831-pm4f",
+  "round": 5,
+  "at": "2026-11-08T21:40:36.460484735Z",
+  "invocation_seq": 12,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/manage.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/manage.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/decisions.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/decisions.md",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The wrapper also catches an error from the normal closing commit (`close_dispatched` inside `finish_dispatched`). It then writes a failed outcome with an `environment:` reason, so a gate refusal of the real closing commit is recorded as an environment stop that the scope guard never counts.",
+      "evidence": "`finish_dispatched` is `run.and_then(|closing| self.close_dispatched(ctx, closing))`. Under step 5 an Err from that commit reaches `close_after_error`, which calls `close_dispatched` again with a fresh Closing that has no candidate. That fallback commit can pass the gate where the real one did not. `StopCause::of` then reads the reason as OtherEnvironment (disk.rs:479-480), and `verdict_of` excludes it from T1, T2 and T5. Fix: Apply the error close only to errors raised before the closing commit: wrap up to the end of `produce_and_verify`/`resume_candidate`/`plan_round`, and call `finish_dispatched` outside the wrapper. Or skip the error close when the Err came from `close_dispatched`. Add a run/tests.rs case for it.",
+      "location": "Decision 3 / step 5 (close_after_error wraps finish_dispatched); run/mod.rs:1342-1345",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`recover_traces(&self, job)` as written lacks the config that the usage-file branch needs.",
+      "evidence": "`recover_interrupted(&self, job: &JobRecords, config: &athena_data::Config)` passes `config` to `interrupted_record(self, id, &partial, config)` at manage.rs:273. The plan's signature takes only `job`. Fix: Keep the `(job: &JobRecords, config: &Config)` arguments. In `dispatch`, pass `ctx.jc`'s config and `ctx.job`.",
+      "location": "Decision 4 / step 3 (recover_traces signature); manage.rs:240-279",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan says the failure close records `verification_passed` None, but `failure()` sets Some(false).",
+      "evidence": "`fn failure(&self, ctx, reason) -> Happened { ... verification_passed: Some(false), ... }` at run/mod.rs:2448-2452. Fix: State which value the error close records. Either use `failure()` as it is (Some(false), as `stop_planning` does) or override the field and say why. Assert the chosen value in the core test.",
+      "location": "Step 5 (`happened = self.failure(ctx, reason)` with verification_passed None); run/mod.rs:2448-2452",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The listing half of the status test would pass on today's code. Only the post-drain half (drain behavior) and the lock half (`has_process`) can fail without the change.",
+      "evidence": "status.rs:889-892 shows every Dispatched job with no registry entry as 'interrupted', and scan_jobs (status.rs:932-947, 975) puts it in `open` with an `athena retry` hint, whatever its channel. Fix: Say in the demonstration that request acceptance (2) is already met by `scan_jobs`, and that the new test pins it as a regression guard. The lock-held 'running' assertion is the half that the new code makes true.",
+      "location": "Demonstration for criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`athena retry` still decides liveness with the registry-only `running`, so a person who runs it on a job whose lock another process holds is not refused there.",
+      "evidence": "`earlier_attempt_with(records, request, redactor, running)` treats Dispatched && !running as interrupted (retry.rs:34). The plan passes `has_process` only to `interrupted_work`, `settle_interrupted` and `state_name`. Fix: Record this as a known gap in the CHANGELOG or D167. Or, if it stays within the scope of one focused change, pass `has_process` to `Athena::retry`'s liveness check and cover it with the lock-held test.",
+      "location": "Decision 2 (has_process used only by the queue view, settle and state_name); reading/retry.rs:22-37",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 5. I checked the plan's load-bearing claims against the snapshot by reading and grepping; I ran nothing. Confirmed in the code: the Dispatch commit is at run/mod.rs:1249-1257 and any later `?` leaves the job dispatched with no outcome. `interrupted_work` (steward.rs:447-480) filters on DRAINED_CHANNELS and hides any job a later request retries. `scan_jobs` (status.rs:911-976) already lists every Dispatched job without a registry entry, on every channel. `StopCause::of` maps any other `environment:` reason to OtherEnvironment (disk.rs:469-481), `resumable_stop` accepts a failed job with such a reason (disk.rs:522-525), and the drain's ItemEnd::Failed ends the run only for ProducerAuth, UsageLimit and LowDisk (drain.rs:2589-2594). `retries_by_job` counts a failed retry as standing and an abandoned one as not (retry.rs:246-268). `close` refuses a job whose lock is held and recovers traces (manage.rs:96, 145-157). `job_lock_held` is a probe that creates no lock file (state.rs:153). `FileSink` writes the partial usage file on start and removes it only after `write_live` succeeds (invocation.rs:52-71, 259-261), so the planner-role trigger leaves a usage trace that `recover_traces` can book. The plan fixes both causes where they start: the post-dispatch error in `dispatch`, and the listing in steward. It keeps one liveness signal (registry entry or held job lock), puts the operator step before the first drain on the new build, and its tests drive real entry points with only the scripted agent and lander as doubles. Its dependents list matches what I grepped. Remaining findings are minor: (1) every unknown post-dispatch error, including a gate refusal of the normal closing commit, is recorded as an environment stop that the scope guard never counts; (2) the `recover_traces` signature drops the config that `interrupted_record` needs; (3) step 5 says `verification_passed` None, but `failure()` sets Some(false); (4) criterion 3's listing half already passes on today's code; (5) `athena retry` still uses the registry-only `running` check. None blocks."
+}

@@ -660,6 +660,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Both snapshot locks, the verifier snapshot's (`Snapshot::lock` in athena-git) and the evidence snapshot's
+  (`lock` in athena-core), now attempt a write at every directory and file, the work tree's `.git` included, and
+  fail naming the path that accepted it. Before, each lock tried a new file at the root and one existing file, so
+  a path elsewhere in the tree could stay writable without the lock failing. The two copies now call one routine,
+  `athena_git::snapshot::writable_paths`, which creates and removes a probe file in each directory and opens each
+  regular file for appending, so it binds root too. The error says apart a path that accepted a write from one
+  that could not be checked (not listable, not a regular file), and a lock with either is undone and refused.
 - Attribution checkpoints are now pushed to the remote `athena/records` branch. `athena check --attribution` on
   main and `athena land` wrote the checkpoint commit to the local records branch only, and the next write to
   the records branch (a landing, which first resets the local branch to the remote tip) dropped it, so CI never

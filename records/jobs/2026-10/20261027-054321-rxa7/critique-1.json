@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-054321-rxa7",
+  "round": 1,
+  "at": "2026-11-08T22:44:53.368989122Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Run as root, the new tests also pass against the old two-place probe, so they do not show that the fix works for the user the real component runs as.",
+      "evidence": "Every partial lock in the plan comes from `set_write_bits` (snapshot.rs:437-447). Root bypasses mode bits. When the suite runs as root, which is how Athena runs here, the closure leaves everything writable. The old `probe_write` (snapshot.rs:184) then creates the root probe file, and `lock` returns Err with `self.dir.display()` in the message (lines 167-171). The plan asserts only 'Err naming a path under the snapshot dir' for root, so the test passes on the old code. Its 'fails without' rests on compile failure and on a non-root run. Test (a) asserting 'contains both nested paths' also passes as root for any function that just lists every path. defaults-loop.md §3.7 and the behavior-evidence default require the protection test to run as the real user (root) and to fail, not pass silently, where the environment cannot enforce the protection. Fix: Build the partial lock so that it binds root as well. In the `lock_using` harden closure, call `set_immutable(dir, true)`. Then undo the lock on one nested path only: `set_immutable(dir/.git/objects, false)` together with `set_write_bits(dir/.git/objects, true)`. The root file and `.git/HEAD` stay locked, so the old probe returns Ok as root and as non-root alike. Then assert, for every user, that the error names exactly `.git/objects`. As root without chattr, the root path is writable and that exact assertion fails, which matches the existing locked-snapshot test. As non-root, chattr fails quietly and the write bits do the work, so non-root runs still do not need chattr. Give the `writable_paths` nested test the same construction and assert exact equality for every user, so a function that just lists every path fails.",
+      "location": "Demonstrations, criteria 2 and 3 (tests `lock_checks_every_path_and_names_the_writable_one` and `writable_paths_reports_a_nested_path_left_writable`); Risks bullet 4",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A second copy of the same two-place-probe lock, the evidence snapshot's lock in athena-core, is left unfixed, so the whole class is not prevented.",
+      "evidence": "crates/athena-core/src/snapshot.rs `lock` has the same defect. It removes write bits, applies `chattr` best-effort, then `probe_write` tries only a root file and `HISTORY_FILE` (lines 155-168). It locks the evidence snapshot that the verifier reads during verification. The request says 'fix it there, so the whole class is prevented; do not work around one instance', and its file scope is `crates/`. The reading's premise that all snapshot locking goes through `Snapshot::lock` is false, as the plan itself found. The plan makes `writable_paths` pub only so that a follow-up can adopt it. Fix: In this change, have `athena_core::snapshot::lock` call `athena_git::snapshot::writable_paths(dir, 1)` in place of its own `probe_write`, and delete that `probe_write`. Add crates/athena-core/src/snapshot.rs to Files and Dependents, and add a test there with the same root-binding partial-lock construction, or one test of a shared helper both locks call. It is about ten lines and stays within one producer run.",
+      "location": "Decision 5, second rejected alternative; Open question 1; crates/athena-core/src/snapshot.rs:133-169",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The CHANGELOG bullet blames the two earlier jobs on the two-place probe without evidence that the lock existed when they ran.",
+      "evidence": "The bullet says the two-place probe let a verifier change HEAD or the tree in jobs 20261015-031159-xx7n and 20261015-033631-x3a1. The request records those jobs' cause as 'nothing enforces that the snapshot is read-only', and CHANGELOG.md:3267-3276 records adding `Snapshot::lock` as the fix for exactly that cause. The plan offers no evidence that the lock existed when those jobs ran, and HISTORY.txt does not reach back far enough to show it. Fix: Describe the leftover gap without asserting that the two-place probe caused those jobs. For example: 'a lock probed at only two places could be taken for held while other paths stayed writable'. Mention the jobs only as the failure class this hardens against.",
+      "location": "Step 5 (CHANGELOG bullet) and step 3 (doc comment)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test that no probe file is left behind runs only on an unlocked tree, not on the real lock path that the later tree comparison sees.",
+      "evidence": "The control checks for a leftover probe file only on an unlocked tree. On the real path, `lock()` runs the probe on a locked tree before the verifier starts, and verification.rs:297-299 later compares `work_tree_tree` to `prepared`. A stray probe file there would show up as a false snapshot change. Fix: Also assert in the lock-level test (or extend the existing locked-snapshot test) that after `lock()` and then `unlock()`, no `.athena-lock-probe` file exists anywhere in the tree and `work_tree_tree` equals its value from before the lock.",
+      "location": "Demonstration for criterion 3, test (b) `an_unlocked_tree_reports_its_paths_and_leaves_no_probe_behind`",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The lock error cannot tell a path that accepted a write apart from a path that could not be checked.",
+      "evidence": "Step 2 lists an 'unverified' path as one more hit inside the `limit` result, with the label typed as `&'static str`. The lock error then cannot tell 'a write succeeded' apart from 'the path could not be checked'. Fix: Give the 'could not be checked' case a distinct label in the error, for example 'could not be listed: <io error>', so an operator can tell a permissions hole from an unreadable directory.",
+      "location": "Decision 3 / step 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The reading says that all snapshot locking goes through `Snapshot::lock`. It does not: crates/athena-core/src/snapshot.rs has its own two-probe `lock` for the evidence snapshot the verifier reads. The request asks for the whole class to be fixed within crates/, so the reading's scope leaves out one instance of the same cause.",
+  "summary": "I read crates/athena-git/src/snapshot.rs (lock, probe_write, walk_one, set_write_bits, set_immutable, and the tests at lines 725-811), crates/athena-core/src/snapshot.rs (lock and probe_write at lines 127-169), verification.rs lines 195-346, CHANGELOG.md and docs/design/defaults-loop.md §3.7. The plan's claims about the code hold. `lock()` probes only a new file at the root and `.git/HEAD`. verification.rs:241-247 already turns a lock error into `Incomplete` before the verifier is invoked. The callers of `Snapshot::lock` are the ones the plan lists. Fixing this in `lock()` with an attempted write at every path is sound, and better than checking mode bits or adding more sample probes. Two things make the plan fall short, so the verdict is revise. (1) The tests build the partial lock from write bits only, which root ignores. The real component runs as root, as the job's own ~ working directory shows. Run as root, the lock-level test also passes against the old two-place probe: the old probe creates a file at the root, errors, and its message names the snapshot dir. The nested-path test passes trivially too, because as root every path is writable. So the \"fails without the change\" claim holds only for a non-root run, and only through compile failure. (2) The same two-place-probe lock is copied in crates/athena-core/src/snapshot.rs, for the evidence snapshot the verifier reads. The plan names it but defers it to the user. The request asks for the whole class to be fixed, and the scope is all of crates/."
+}

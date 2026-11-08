@@ -155,20 +155,27 @@ impl Snapshot {
     ///
     /// Write bits come off every file and directory, which stops every user but root. Where the process may
     /// set it (root, on a file system that supports it), the immutable attribute goes on as well, which
-    /// stops root too. The lock is then probed: a file is created and an existing one opened for writing.
-    /// If either probe succeeds the snapshot is unlocked again and the call fails, so a lock that does not
-    /// hold is never taken for one that does.
+    /// stops root too. The lock is then probed by [`writable_paths`]: a write is attempted at every
+    /// directory and every file, `.git` included. If any attempt works, or a path cannot be tried, the
+    /// snapshot is unlocked again and the call fails naming the paths, so a lock that does not hold is never
+    /// taken for one that does.
     pub fn lock(&self) -> Result<()> {
+        self.lock_with(|_| {})
+    }
+
+    /// [`Snapshot::lock`] with a hook between applying the lock and probing it, so a test can reopen one
+    /// path with the real unlock and see the real probe find it.
+    fn lock_with(&self, after_apply: impl FnOnce(&Path)) -> Result<()> {
         set_tree_writable(&self.dir, false)?;
         // Best effort: without the privilege or file system support the probe below decides.
         let _ = set_immutable(&self.dir, true);
-        if let Some(how) = self.probe_write() {
+        after_apply(&self.dir);
+        let findings = writable_paths(&self.dir);
+        if !findings.is_clean() {
             let _ = self.unlock();
-            return Err(crate::GitError::Refused(format!(
-                "the snapshot lock does not hold: {how} succeeded in {}; run as a user the permission bits \
-                 bind, or on a file system that supports the immutable attribute",
-                self.dir.display()
-            )));
+            return Err(crate::GitError::Refused(
+                findings.refusal("the snapshot", &self.dir),
+            ));
         }
         Ok(())
     }
@@ -176,24 +183,6 @@ impl Snapshot {
     /// Undoes [`Snapshot::lock`], so the snapshot can be changed and removed again.
     pub fn unlock(&self) -> Result<()> {
         unlock_dir(&self.dir)
-    }
-
-    /// The first write that works on a locked snapshot, if any (what it did is undone).
-    fn probe_write(&self) -> Option<&'static str> {
-        let fresh = self.dir.join(".athena-lock-probe");
-        if std::fs::write(&fresh, b"x").is_ok() {
-            let _ = std::fs::remove_file(&fresh);
-            return Some("creating a file");
-        }
-        let existing = self.dir.join(".git").join("HEAD");
-        if std::fs::OpenOptions::new()
-            .append(true)
-            .open(existing)
-            .is_ok()
-        {
-            return Some("opening a git file for writing");
-        }
-        None
     }
 
     /// Everything that changed in the work tree since the base commit, without rename detection.
@@ -382,6 +371,155 @@ fn copy_files_below(from: &Path, to: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The name of the file a write probe creates in a directory and removes at once.
+pub const LOCK_PROBE: &str = ".athena-lock-probe";
+
+/// What [`writable_paths`] found on a tree that was meant to be locked.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct WriteFindings {
+    /// Paths where a write was accepted (a directory took a new file, a file opened for appending).
+    pub accepted: Vec<PathBuf>,
+    /// Paths where a write could not be tried, with the reason (not listable, not a regular file, an
+    /// unexpected error). A path that cannot be checked is not taken for a locked one.
+    pub unchecked: Vec<(PathBuf, String)>,
+}
+
+impl WriteFindings {
+    /// True when every path refused the write.
+    pub fn is_clean(&self) -> bool {
+        self.accepted.is_empty() && self.unchecked.is_empty()
+    }
+
+    /// The error text of a lock that does not hold: the paths that accepted a write and, apart, the paths
+    /// that could not be checked, relative to `root`. Empty findings give a text with no path.
+    pub fn refusal(&self, what: &str, root: &Path) -> String {
+        let shown = |p: &Path| {
+            let rel = p.strip_prefix(root).unwrap_or(p);
+            if rel.as_os_str().is_empty() {
+                "`.`".to_string()
+            } else {
+                format!("`{}`", rel.display())
+            }
+        };
+        let mut parts = Vec::new();
+        if !self.accepted.is_empty() {
+            let paths: Vec<String> = self.accepted.iter().map(|p| shown(p)).collect();
+            parts.push(format!("a write was accepted at {}", paths.join(", ")));
+        }
+        if !self.unchecked.is_empty() {
+            let paths: Vec<String> = self
+                .unchecked
+                .iter()
+                .map(|(p, why)| format!("{} ({why})", shown(p)))
+                .collect();
+            parts.push(format!("could not be checked: {}", paths.join(", ")));
+        }
+        format!(
+            "{what} lock does not hold: {}; run as a user the permission bits bind, or on a file system \
+             that supports the immutable attribute",
+            parts.join("; ")
+        )
+    }
+}
+
+/// Attempts a write at every directory and every file under `dir`, `dir` and `.git` included, and reports
+/// where it worked. Symlinks are skipped, as the lock walks skip them.
+///
+/// A directory is tried by creating [`LOCK_PROBE`] in it (removed at once); a regular file is tried by
+/// opening it for appending, which changes no content. A refusal (permission denied, read-only file system)
+/// means the path is locked. A path that vanished during the walk is skipped. Any other outcome, such as an
+/// unlistable directory or a socket, cannot show the path is locked and is reported as unchecked. The attempt
+/// is real, so it binds root, which mode bits do not.
+pub fn writable_paths(dir: &Path) -> WriteFindings {
+    let mut findings = WriteFindings::default();
+    probe_path(dir, &mut findings);
+    findings
+}
+
+/// Whether an error from a write attempt shows the path refuses writes.
+fn refuses_writes(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    )
+}
+
+fn probe_path(path: &Path, findings: &mut WriteFindings) {
+    use std::io::ErrorKind::NotFound;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == NotFound => return,
+        Err(e) => {
+            findings
+                .unchecked
+                .push((path.to_path_buf(), format!("could not be examined: {e}")));
+            return;
+        }
+    };
+    let kind = meta.file_type();
+    if kind.is_symlink() {
+        return;
+    }
+    if kind.is_dir() {
+        // Children are listed before the probe file exists, so the probe is never walked.
+        let listed = std::fs::read_dir(path).and_then(|entries| {
+            entries
+                .map(|e| e.map(|e| e.path()))
+                .collect::<std::io::Result<Vec<_>>>()
+        });
+        let mut children = match listed {
+            Ok(children) => children,
+            Err(e) if e.kind() == NotFound => return,
+            Err(e) => {
+                findings
+                    .unchecked
+                    .push((path.to_path_buf(), format!("could not be listed: {e}")));
+                return;
+            }
+        };
+        children.sort();
+        let probe = path.join(LOCK_PROBE);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(file) => {
+                drop(file);
+                findings.accepted.push(path.to_path_buf());
+                if let Err(e) = std::fs::remove_file(&probe) {
+                    findings.unchecked.push((
+                        path.to_path_buf(),
+                        format!("the probe file could not be removed: {e}"),
+                    ));
+                }
+            }
+            Err(e) if refuses_writes(&e) || e.kind() == NotFound => {}
+            Err(e) => findings
+                .unchecked
+                .push((path.to_path_buf(), format!("the probe failed: {e}"))),
+        }
+        for child in children {
+            probe_path(&child, findings);
+        }
+    } else if kind.is_file() {
+        match std::fs::OpenOptions::new().append(true).open(path) {
+            Ok(file) => {
+                drop(file);
+                findings.accepted.push(path.to_path_buf());
+            }
+            Err(e) if refuses_writes(&e) || e.kind() == NotFound => {}
+            Err(e) => findings
+                .unchecked
+                .push((path.to_path_buf(), format!("the probe failed: {e}"))),
+        }
+    } else {
+        findings
+            .unchecked
+            .push((path.to_path_buf(), "not a regular file".to_string()));
+    }
 }
 
 /// Clears the immutable attribute under `dir` and gives every file and directory its owner write bit back.
@@ -785,6 +923,133 @@ mod tests {
         snap.lock().unwrap();
         snap.unlock().unwrap();
         std::fs::remove_dir_all(snap.dir()).unwrap();
+    }
+
+    /// Every path under `dir`, `.git` included, symlinks not followed.
+    fn all_paths(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            out.push(entry.path());
+            if entry.file_type().unwrap().is_dir() {
+                all_paths(&entry.path(), out);
+            }
+        }
+    }
+
+    /// Unlocks a directory when a test ends, even by a panic, so the temporary directory can be removed.
+    struct Unlock(PathBuf);
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            let _ = unlock_dir(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_lock_with_one_nested_path_left_writable_is_refused_naming_it() {
+        // The tree is locked for real; one empty directory is then reopened with the real unlock, so it
+        // takes a file even from root. The old probe (a new file at the root, an append to .git/HEAD) saw
+        // only locked paths and let this lock pass.
+        let (_parent, snap) = verifier_snapshot("snap-partly-locked");
+        std::fs::create_dir(snap.dir().join(".git/objects/leaf")).unwrap();
+        let err = snap
+            .lock_with(|dir| unlock_dir(&dir.join(".git/objects/leaf")).unwrap())
+            .expect_err("a partly locked snapshot must be refused");
+        let crate::GitError::Refused(message) = err else {
+            panic!("expected a refusal, got {err:?}");
+        };
+        assert!(message.contains("`.git/objects/leaf`"), "{message}");
+        assert_eq!(
+            message.matches('`').count(),
+            2,
+            "exactly one path is named: {message}"
+        );
+        assert!(message.contains("accepted"), "{message}");
+        assert!(!message.contains("could not be checked"), "{message}");
+        // A failed lock leaves the snapshot unlocked, so it can be removed.
+        assert_eq!(try_writes(&snap), (true, true, true));
+    }
+
+    #[test]
+    fn writable_paths_tries_a_write_at_every_directory_and_file() {
+        let (_parent, snap) = verifier_snapshot("snap-all-writable");
+        let findings = writable_paths(snap.dir());
+        assert!(findings.unchecked.is_empty(), "{findings:?}");
+        for expected in ["", ".git", ".git/objects", ".git/HEAD", "src/main.rs"] {
+            let path = snap.dir().join(expected);
+            assert!(
+                findings.accepted.contains(&path),
+                "{expected:?} missing from {findings:?}"
+            );
+        }
+        let message = findings.refusal("the snapshot", snap.dir());
+        assert!(message.contains("`.git/HEAD`"), "{message}");
+        assert!(message.contains("`.`"), "{message}");
+    }
+
+    #[test]
+    fn a_lock_then_unlock_leaves_no_probe_file_and_the_tree_unchanged() {
+        let (_parent, snap) = verifier_snapshot("snap-no-probe");
+        let tree = snap.work_tree_tree().unwrap();
+        let no_probe = |when: &str| {
+            let mut paths = Vec::new();
+            all_paths(snap.dir(), &mut paths);
+            assert!(!paths.is_empty());
+            let left: Vec<_> = paths
+                .iter()
+                .filter(|p| p.file_name().is_some_and(|n| n == LOCK_PROBE))
+                .collect();
+            assert!(left.is_empty(), "{when}: probe files left: {left:?}");
+        };
+        snap.lock().expect("the snapshot lock must hold");
+        snap.unlock().unwrap();
+        no_probe("after lock then unlock");
+        assert_eq!(snap.work_tree_tree().unwrap(), tree);
+        // The probe also creates and removes a file in every directory of an unlocked tree.
+        assert!(!writable_paths(snap.dir()).accepted.is_empty());
+        no_probe("after probing an unlocked tree");
+        assert_eq!(snap.work_tree_tree().unwrap(), tree);
+    }
+
+    #[test]
+    fn the_lock_error_text_differs_for_an_accepted_write_and_an_unchecked_path() {
+        // A path that took a write.
+        let open = tempfile::tempdir().unwrap();
+        write_files(open.path(), &[("file.txt", "x")]);
+        let accepted = writable_paths(open.path());
+        assert!(accepted.unchecked.is_empty(), "{accepted:?}");
+        assert!(
+            accepted.accepted.contains(&open.path().join("file.txt")),
+            "{accepted:?}"
+        );
+        let accepted_text = accepted.refusal("the snapshot", open.path());
+        assert!(accepted_text.contains("accepted"), "{accepted_text}");
+        assert!(accepted_text.contains("`file.txt`"), "{accepted_text}");
+        assert!(
+            !accepted_text.contains("could not be checked"),
+            "{accepted_text}"
+        );
+
+        // A path that cannot be tried: a Unix socket is no file to open for appending.
+        let closed = tempfile::tempdir().unwrap();
+        let _guard = Unlock(closed.path().to_path_buf());
+        drop(std::os::unix::net::UnixListener::bind(closed.path().join("sock")).unwrap());
+        set_tree_writable(closed.path(), false).unwrap();
+        let _ = set_immutable(closed.path(), true);
+        let unchecked = writable_paths(closed.path());
+        assert!(
+            unchecked
+                .unchecked
+                .iter()
+                .any(|(p, why)| p == &closed.path().join("sock") && why.contains("not a regular")),
+            "{unchecked:?}"
+        );
+        let unchecked_text = unchecked.refusal("the snapshot", closed.path());
+        assert!(
+            unchecked_text.contains("could not be checked"),
+            "{unchecked_text}"
+        );
+        assert!(unchecked_text.contains("`sock`"), "{unchecked_text}");
+        assert_ne!(accepted_text, unchecked_text);
     }
 
     #[test]

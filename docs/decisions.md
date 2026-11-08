@@ -4802,3 +4802,20 @@ should replace those estimates with its figures.
   (`accept_request`), `crates/athena-core/src/run/tests.rs`, and the two introspections' proposed preventions.
   Measured: unit and corpus cases that call `refusing_check` and assert the refusing check by name. Not measured: the
   share of past readings newly refused; the loop replay records it at verification.
+
+## D167 · Both snapshot locks attempt a write at every path through one routine; D08 stands
+
+- **Case:** The verifier snapshot's lock (`Snapshot::lock` in `crates/athena-git/src/snapshot.rs`) and the evidence
+  snapshot's lock (`lock` in `crates/athena-core/src/snapshot.rs`) each probed two places, a new file at the root
+  and one existing file, so a path elsewhere in the tree could stay writable and the lock still passed. The change
+  replaces both probes with `writable_paths`, which touches a path D08 governs.
+- **Decision:** Amends D08 in prose only: D08 was checked for the `crates/athena-git/src/snapshot.rs` change and
+  stands. Snapshots are still detached directories with their own throwaway repository. Only the check that the
+  lock holds changed: it now attempts a write at every directory and file, `.git` included, and the lock fails
+  naming the path that accepted one, or the path that could not be checked.
+- **Alternatives:** Patch each probe to try a third path: still a fixed sample, and the two copies drift. Read mode
+  bits: root bypasses them. Treat an unexaminable path as locked: fails open.
+- **Tradeoff:** The probe visits every path of a snapshot, a single pass over a source-sized tree, and a special
+  file such as a socket now fails the lock.
+- **Reversal cost:** Low; restore the two-place probes.
+- **Provenance:** Read: D08, D156, both `snapshot.rs` files. Measured: the new tests in both crates.

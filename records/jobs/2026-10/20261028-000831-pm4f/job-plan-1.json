@@ -1,0 +1,342 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-000831-pm4f",
+  "round": 1,
+  "at": "2026-11-08T21:11:44.634579842Z",
+  "invocation_seq": 3,
+  "approach": "Fix the class where it starts: the listing and settling of dispatched jobs that have no process. `steward::interrupted_work` drops a dispatched job in four ways. (1) It keeps only the `cli` and `steward` channels (steward.rs:467). (2) It hides every job that any later request retries, whatever became of that retry (steward.rs:448-460), while `athena status` uses `retries_by_job`, where a dropped retry does not stand (reading/retry.rs:246-267). (3) Nothing closes the original once its retry ends, so status shows it as \"retried as X\" for ever. (4) `Drain::prepare` skips reading interrupted items (drain.rs:2132) but still passes their old plan entry to `Plan::build_improving`, which refuses an incomplete entry. The change: (a) `interrupted_work` drops the channel filter and excludes jobs that `retries_by_job` says a retry stands for. (b) A new pure `steward::settle_interrupted(records, running)` returns Close(reason) or Hold(reason) per dispatched job with no process. (c) A new defaulted `Steps::settle_interrupted` hook; `RealSteps` implements it with the existing `Athena::close`. Drain calls it before `queue()` and after `sweep`, and notes every line. (d) `prepare` removes the incomplete plan entry of an interrupted item so its retry re-reads the request. status.rs is not edited, since it already lists every dispatched job with no process; tests pin that. hestia.rs is NOT edited (revision finding 3): the settle reason starts with the literal `re-queued as `, the same text hestia itself writes (hestia.rs:2409) and tests for (hestia.rs:342-354); a steward unit test pins the literal. The six live jobs get operator commands against the live records, outside the diff.",
+  "decisions": [
+    {
+      "choice": "Fix the class in `steward::interrupted_work` plus a new pure `steward::settle_interrupted`, called from drain through a defaulted `Steps` hook.",
+      "reason": "One listing function causes the gap, so fixing it covers every job, not six. A defaulted trait method leaves the many test stubs (tests/drain.rs Stub, Unaccepted, Replay, WithRealCheck, Shared, Rebasing; drain.rs test steps) unedited, as `reclaim_interrupted` does (drain.rs:576). The decision logic is a pure function over `Records`, unit-tested without a model.",
+      "rejected": [
+        {
+          "option": "Sweep inside `RealSteps::queue`",
+          "why": "`queue()` is also used by `athena plan`, which must stay read-only; closing there hides a side effect."
+        },
+        {
+          "option": "A new required `Steps` method",
+          "why": "Forces edits to every stub and widens the diff."
+        }
+      ]
+    },
+    {
+      "choice": "Drop the channel filter for interrupted jobs only; keep `DRAINED_CHANNELS` for `queued_work` (steward.rs:414).",
+      "reason": "A queued request on another channel may belong to another consumer that will start it. A dispatched job with no registry process belongs to nobody. The existing test at tests/drain.rs:5122 asserts the opposite and is rewritten.",
+      "rejected": [
+        {
+          "option": "Remove the channel filter from `queued_work` too",
+          "why": "Changes unrelated queued-request behavior; the brief says not to change unrelated stages."
+        },
+        {
+          "option": "Keep the filter and only close off-channel jobs with a reason",
+          "why": "Discards resumable work; resuming is the first choice."
+        }
+      ]
+    },
+    {
+      "choice": "Close with the existing `Athena::close` (abandoned outcome with a stated reason). The reason for a job whose retry ended is `re-queued as <retry>, which ended <state>`, built from a private literal prefix `re-queued as ` in steward.rs. hestia.rs is not edited.",
+      "reason": "`close` already recovers invocation records, scores, cleans the job and commits under the gate, so no new record or schema is added. Hestia's `closed_by_person` (hestia.rs:346-354) treats an abandoned job whose reason lacks the `re-queued as ` prefix as a person's close and skips the cause; a system settle must not look like a person's. Using the same literal text keeps that rule true without widening scope to hestia.rs (the constant is private there, hestia.rs:342). A steward unit test pins the literal prefix; hestia already writes the same text at hestia.rs:2409.",
+      "rejected": [
+        {
+          "option": "Make `REQUEUE_CLOSE_REASON` `pub(crate)` in hestia.rs and share it",
+          "why": "hestia.rs is not a listed deliverable; the finding says it widens scope. The shared text is a one-line literal pinned by a test."
+        },
+        {
+          "option": "A new OutcomeState or record kind",
+          "why": "Touches athena-data, the gate and round-trip tests for no gain."
+        },
+        {
+          "option": "Write outcome files directly",
+          "why": "Bypasses the gate; hand-written job records are detected (commit d1358ed)."
+        }
+      ]
+    },
+    {
+      "choice": "Settle follows a chain of retries that are themselves interrupted and closes them together in one pass, with a depth cap.",
+      "reason": "`retries_by_job` treats an abandoned retry as not standing (retry.rs:253-262). Closing only the middle job of Z, A (retry of Z), B (retry of A, landed) would make Z reappear unretried and be retried again.",
+      "rejected": [
+        {
+          "option": "Close only the direct original",
+          "why": "Re-lists the grandparent next pass."
+        }
+      ]
+    },
+    {
+      "choice": "Exempt interrupted items with an incomplete plan entry from the plan (remove their entry in `prepare`) instead of refusing them.",
+      "reason": "Their first attempt is `athena retry`, which re-reads the request (drain.rs:1860), so the old reading's plan fields are irrelevant; `prepare` never reads them to fill the gap (drain.rs:2132).",
+      "rejected": [
+        {
+          "option": "Read interrupted items in `prepare` to fill the plan",
+          "why": "Spends a model call on a job the retry reads again anyway."
+        },
+        {
+          "option": "Close such items as unrunnable",
+          "why": "Throws away resumable work."
+        }
+      ]
+    },
+    {
+      "choice": "Leave status.rs unchanged and pin its behavior with tests.",
+      "reason": "`state_name` marks every dispatched job with no registry process as `interrupted`, and `scan_jobs` (status.rs:889-948, 962-976) puts it in `open` for every channel with an `athena retry` or `retried as` next line. Existing tests tests/retry.rs 1031, 1072, 1110, 1139 cover it; a new test adds an off-channel job and the post-drain state.",
+      "rejected": [
+        {
+          "option": "A new status section for dispatched jobs",
+          "why": "Duplicates the open list."
+        }
+      ]
+    },
+    {
+      "choice": "Guard the unrelated-behavior criterion with an explicit steward unit test that `queued_work` still skips other channels, next to the one rewritten drain test.",
+      "reason": "The most likely over-reach is removing the channel filter from both listing functions; a named test makes criterion 6 fail if that happens.",
+      "rejected": [
+        {
+          "option": "Rely only on 'existing tests pass'",
+          "why": "The existing off-channel test is the one rewritten, so it cannot guard queued work; the finding asks for what fails without the behavior."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "purpose": "`interrupted_work`: drop the channel filter, exclude jobs in `reading::retries_by_job`. Add `Settlement` and `settle_interrupted(records, running)` with the `re-queued as ` reason. Unit tests (including `queued_work_still_leaves_other_channels_alone`). Update doc comments.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add the defaulted `Steps::settle_interrupted`, implement it in `RealSteps` via `steward::settle_interrupted` and `Athena::close`, call it in `drain_with` before `queue()` and after `sweep`, note each line. In `prepare`, drop the incomplete plan entry of an interrupted item. Update the module doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Rewrite the off-channel test at 5122; add real-steps tests (dropped retry, landed retry, no dispatched job left, status listing) and Stub tests (incomplete entry, settle notes, paused guard); extend `Stub` with `settled`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under [Unreleased]: cause, fix, failure class, the six job ids.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/src/steward.rs 440-480, reading/retry.rs 196-270, manage.rs 72-235, drain.rs 560-580, 1855-1925, 2084-2245, 2947-3090, 4178-4232 and 4358, and tests/drain.rs 4968-5214. Confirm the four skip paths against the code before editing and fix whichever differ from this plan.",
+    "In steward.rs: remove the `DRAINED_CHANNELS` filter and the `retried` set from `interrupted_work`; exclude jobs in `reading::retries_by_job(records)`. Keep the sort by `received_at` then job id. Update the doc comment.",
+    "In steward.rs: add `Settlement { Close { job, why }, Hold { job, why } }` and `settle_interrupted(records, running)`. For each dispatched request job with no process: no request record gives Close; a standing retry gives the chain's outcome (Closed gives Close citing the final retry and its state, with a reason starting the literal `re-queued as `; otherwise Hold with the retry's state); no standing retry gives nothing. Cap the chain depth. Do not edit hestia.rs.",
+    "In steward.rs tests: add `settle_*` unit tests with the `add` helper (no request, closed retry, open retry, dropped retry not standing, running job, chain Z-A-B, `settle_reason_starts_with_the_requeue_prefix`), `interrupted_work` tests for an off-channel job and a dropped retry, and `queued_work_still_leaves_other_channels_alone`.",
+    "In drain.rs: add the defaulted `Steps::settle_interrupted(&self) -> Vec<String>` next to `reclaim_interrupted`. In `RealSteps`, reap the registry, load records, call `steward::settle_interrupted` with `self.athena.running`, and for each Close call `self.athena.close(job, &why, self.ui)`. Return one line per Close, Hold or error ('closed <job>: <why>', 'held <job>: <why>', 'could not close <job>: <err>').",
+    "In `drain_with`: call `steps.settle_interrupted()` right after `steps.reclaim_interrupted()` and before `steps.queue()`, and again right after `d.sweep(..)`; pass every line to `d.note`.",
+    "In `Drain::prepare`: after the read loop and before `held` and `entries` are built, find items with `interrupted == true` whose plan entry has a non-empty `missing()`; remove those entries from `view.plan` and `note_once` that the retry re-reads the request. Update the module doc at drain.rs 112-118 and 201-208.",
+    "In tests/drain.rs: rewrite the test at 5122 as `drain_resumes_an_interrupted_job_on_any_channel`. Add the real-steps tests (dropped retry, landed retry, no dispatched job left after the drain, status listing) and the Stub field and tests. Assert in each real-steps test that the interrupted job has no invocation and no outcome before the drain.",
+    "Add the CHANGELOG.md entry under [Unreleased] (cause, fix, failure class, the six job ids).",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix what they show. Do not edit records/, athena.toml, defaults.toml, workflows or hestia.rs.",
+    "After merge, as an operator against the live records: for each of the six jobs read brief-producer.md and `git log`, then `athena close <job> --why \"landed through <job id> as <hash>\"` where the work landed (5874b1f and 612c27f are candidates only) or `athena retry <job>` / let the next drain retry it. Check with `athena status`."
+  ],
+  "risks": [
+    {
+      "risk": "Closing an original too early could lose work, or retry it twice.",
+      "mitigation": "Settle closes only when the standing retry (followed through interrupted retries) has an outcome, or the job has no request record. An open retry gives a Hold note, no close. Unit tests cover running, open, closed and chained cases; a drain test asserts the retried original is not retried twice."
+    },
+    {
+      "risk": "`retries_by_job` treats an abandoned retry as not standing, so closing a middle job could re-list its parent for a second retry.",
+      "mitigation": "`settle_interrupted` follows the chain and closes every interrupted job in it in one pass, with a depth cap like `MAX_RETRY_DEPTH`. A unit test covers Z-A-B."
+    },
+    {
+      "risk": "Hestia would read a settle close as a person's and skip the cause, since the prefix text is now duplicated, not shared (hestia.rs is not edited).",
+      "mitigation": "The reason starts with the literal `re-queued as `, the same text hestia writes at hestia.rs:2409. The steward test `settle_reason_starts_with_the_requeue_prefix` pins it, and the producer must not change hestia.rs."
+    },
+    {
+      "risk": "Resuming off-channel jobs reverses a documented rule and an existing test.",
+      "mitigation": "The rewrite is explicit and called out in the CHANGELOG. `queued_work` keeps its channel filter, pinned by a new test. The change applies only to dispatched jobs with no registry process."
+    },
+    {
+      "risk": "Closing during a parallel drain could race with a worker.",
+      "mitigation": "Settle errors become notes and never fail the drain. `close` takes the job lock and refuses a job another process runs. The final call comes after all workers finish (after `sweep`)."
+    },
+    {
+      "risk": "The `interrupt` helper might leave an invocation record, so the fixture would not show 'stopped before the producer'.",
+      "mitigation": "Each test asserts the job has no invocation and no outcome before the drain; the producer reads lifecycle.rs 1309-1320 first. If the shapes cannot be separated, use the low-disk hold before the producer (`go_with_disk`, tests/drain.rs:2424), which leaves the job dispatched with no candidate."
+    },
+    {
+      "risk": "The actual cause for the six live jobs may be one of the four paths and not the others.",
+      "mitigation": "Each path has its own test, so a wrong guess on one leaves none untested. The real cause is named in open_questions as a host fact."
+    },
+    {
+      "risk": "The six outcomes cannot be written by the diff because records/ is excluded.",
+      "mitigation": "The diff contains only code, tests and CHANGELOG. Demonstration 4 is an operator step after merge, each close citing a hash found by reading the job's brief and git log."
+    },
+    {
+      "risk": "The expected-deliverables list names status.rs, run/mod.rs, reading/retry.rs, which this plan does not edit.",
+      "mitigation": "Not editing them is safe: status.rs already lists every dispatched job, `retries_by_job` is reused unchanged, run/mod.rs is unrelated to the fault. If the producer finds a reason to touch them, it says why in the CHANGELOG entry."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "steward::interrupted_work (channel filter and retried set)",
+      "dependent": "crates/athena-cli/src/drain.rs:4212 `RealSteps::queue` calls `steward::interrupted_work`",
+      "kind": "code",
+      "test": "tests/drain.rs `drain_resumes_an_interrupted_job_on_any_channel` (rewrite of 5122), `a_job_with_a_dead_registered_process_is_listed_and_retried_by_the_drain` (5176), `an_interrupted_job_whose_retry_gave_no_reading_is_read_again_not_retried_twice` (5217), `drain_start_reclaims_the_build_directory_of_an_interrupted_job...` (5268)",
+      "reason": null
+    },
+    {
+      "name": "Off-channel interrupted jobs are left alone",
+      "dependent": "crates/athena-cli/tests/drain.rs:5122-5162 asserts a `web` job is left dispatched",
+      "kind": "code",
+      "test": "Rewritten to the opposite expectation; the check at line 5161 (queue empty once a retry stands) is kept and still holds.",
+      "reason": null
+    },
+    {
+      "name": "DRAINED_CHANNELS and queued_work",
+      "dependent": "crates/athena-core/src/steward.rs:414 `queued_work`; crates/athena-cli/tests/drain.rs:5334",
+      "kind": "code",
+      "test": "New steward unit test `queued_work_still_leaves_other_channels_alone` plus tests/drain.rs:5334; the constant and `queued_work` are not changed.",
+      "reason": null
+    },
+    {
+      "name": "reading::retries_by_job",
+      "dependent": "crates/athena-core/src/status.rs:913 (`scan_jobs`) and 962-976",
+      "kind": "code",
+      "test": "tests/retry.rs `status_shows_retried_as_and_no_retry_hint` (1031), `status_names_the_follow_up_of_a_rejected_retry` (1072), `a_dropped_retry_does_not_block_a_new_retry` (1110). The function is only read, not changed; drain now uses the same definition as status.",
+      "reason": null
+    },
+    {
+      "name": "Status listing of interrupted jobs",
+      "dependent": "crates/athena-core/src/status.rs `state_name`, `scan_jobs`, `open_job_next_lines`; crates/athena-cli/src/display.rs:1251",
+      "kind": "code",
+      "test": "New `status_lists_every_dispatched_job_with_no_outcome_whatever_its_channel`; tests/retry.rs:1139 `a_dispatched_job_with_a_dead_registered_process_is_interrupted_and_accepted_by_retry`. Not edited; a settled original is closed and leaves `open` after the next drain.",
+      "reason": null
+    },
+    {
+      "name": "The `Steps` trait (new defaulted method `settle_interrupted`)",
+      "dependent": "Every `impl Steps`: drain.rs:4134 RealSteps; tests/drain.rs Stub (127), Unaccepted (1760), Replay (5837), WithRealCheck (6761), Shared (7389), Rebasing (8306); drain.rs test steps Stub (4655), Capped (4722), Housekeeping (4834), World (5972), Lane (6895)",
+      "kind": "code",
+      "test": null,
+      "reason": "The new method has a default body that does nothing, as `reclaim_interrupted` does (drain.rs:576), so no implementor needs an edit. Only RealSteps and the extended Stub implement it."
+    },
+    {
+      "name": "Athena::close on a dispatched job",
+      "dependent": "crates/athena-core/src/manage.rs:74 `Athena::close`; other callers: the `athena close` command in crates/athena-cli/src/main.rs, hestia's backfill, tests/retry.rs",
+      "kind": "code",
+      "test": "tests/retry.rs `a_dropped_retry_does_not_block_a_new_retry` and the new settle tests. `close` is called unchanged, only for a dispatched job with no process; it checks the lock and process itself (manage.rs:96, 146-154).",
+      "reason": null
+    },
+    {
+      "name": "Hestia's skip of causes a person closed",
+      "dependent": "crates/athena-core/src/hestia.rs:342-354 `REQUEUE_CLOSE_REASON` and `closed_by_person` (abandoned with a reason not starting `re-queued as ` counts as a person's close); hestia.rs:2409 writes the same prefix",
+      "kind": "rule",
+      "test": "steward unit test `settle_reason_starts_with_the_requeue_prefix` pins the literal; hestia's own tests at hestia.rs:4172 and 4386 keep passing unchanged.",
+      "reason": "hestia.rs is not edited. The settle reason starts with the literal `re-queued as `, so a settled original is not read as a person's close."
+    },
+    {
+      "name": "Dispatched-with-no-process state used to reclaim build directories",
+      "dependent": "crates/athena-core/src/disk.rs:216 `reclaim_interrupted_targets`; drain.rs:2955 and 1637 `reclaim_interrupted`",
+      "kind": "code",
+      "test": "tests/drain.rs `drain_start_reclaims_the_build_directory_of_an_interrupted_job_and_keeps_its_work_and_candidate`. A closed job leaves the dispatched set and `close` cleans its job directory (manage.rs:227); unsettled jobs keep their handling.",
+      "reason": null
+    },
+    {
+      "name": "Gate handling of an abandoned outcome",
+      "dependent": "crates/athena-gate/src/jobs.rs:704 and the scope guard",
+      "kind": "rule",
+      "test": "Full `cargo test --locked`, including real-steps drain tests that commit through the gate.",
+      "reason": "The gate already accepts the outcome and score that `athena close` writes for a dispatched job (manage.rs:155-216); the scope guard counts do not mention Abandoned."
+    },
+    {
+      "name": "Plan refusal of incomplete entries",
+      "dependent": "crates/athena-core/src/plan.rs `Plan::build_improving` (refuses `missing()` entries) and `batches_for` (drain.rs:2915)",
+      "kind": "rule",
+      "test": "New Stub test `drain_works_an_interrupted_item_whose_plan_entry_is_incomplete`; existing plan.rs refusal tests (1324-1398) unaffected.",
+      "reason": "Unchanged for every non-interrupted item; `prepare` removes only the incomplete entry of an interrupted item, which `batches_for` then runs as an entry-less item."
+    },
+    {
+      "name": "Drain::prepare used by `athena plan`",
+      "dependent": "the `plan` function in crates/athena-cli/src/drain.rs, which runs `prepare` and works nothing",
+      "kind": "code",
+      "test": "Existing `athena plan` tests in tests/drain.rs and tests/job_plan.rs.",
+      "reason": "The plan command only gains a note for an incomplete interrupted entry; nothing is run or written."
+    },
+    {
+      "name": "Documented interrupted-job rule",
+      "dependent": "drain.rs module doc lines 112-118 and 201-208; CHANGELOG.md lines 2932-2938 ('drained channels only', 'left as it is')",
+      "kind": "rule",
+      "test": null,
+      "reason": "The module doc is updated in the same change and a new CHANGELOG entry supersedes the old one; the old entry is history and stays."
+    },
+    {
+      "name": "Refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not touched: `retry_reference` and `retried_job` are only called, and no parser, stop list or reading check is added or changed, so no corpus case is needed."
+    },
+    {
+      "name": "Budgets and system-facts",
+      "dependent": "crates/athena-cli/tests/budgets.rs `system_facts_budgets_match_computed`",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt set or docs/system-facts.md line changes; the plan touches no crates/athena-context file."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Real-steps drain tests that stop jobs where the six jobs stopped. The `interrupt` helper runs the job under a producer script that kills it, then resets history to just before the closing commit. Invocations are committed in the closing commit (lifecycle.rs:1309-1320), so the job keeps job.json and the producer brief but has no invocation and no outcome. Each test first asserts the job is dispatched with no invocation and no outcome. Tests: (a) rewrite tests/drain.rs:5122 as `drain_resumes_an_interrupted_job_on_any_channel`: interrupt a `cli` and a `web` job, assert both are listed with `interrupted == true`, run the drain, assert both get a passing retry and both originals end `Closed(Abandoned)` with a reason starting `re-queued as <retry>`. (b) `an_interrupted_job_whose_retry_was_dropped_is_listed_again`: interrupt, `athena.retry`, `athena.close` the retry, assert `steps.queue()` lists the original. (c) `an_interrupted_job_with_a_landed_retry_is_closed_by_the_drain`. (d) pure unit tests `steward::tests::settle_*`: no request, retry closed, retry open (Hold), retry dropped (nothing), running job (nothing), chain Z-A-B, and `settle_reason_starts_with_the_requeue_prefix` pinning the literal `re-queued as `.",
+      "command": "cargo test --locked -p athena-cli --test drain -- interrupted && cargo test --locked -p athena-core steward::",
+      "observes": "Each stopped job ends with an outcome record: resumed (a new job passes and lands) and then the original closed citing the retry, or closed with a stated reason. The drain notes carry the settle lines.",
+      "fails_without": "Without the change `interrupted_work` hides the `web` job, so the queue lists only the `cli` job and the web job stays dispatched with no outcome. A job whose retry was dropped is never re-listed, and a job whose retry landed stays dispatched. Each new test asserts the opposite and fails.",
+      "seam": "Production entry point `drain::drain(&steps, limits(100.0), &Quiet)` with `RealSteps` from `real_steps(&athena, &lander)`. Fixture `Fixture::new()` and `fx.athena(killing_producer(kill))` with a `RecordingLander` injected into `real_steps`. Helpers `interrupt`, `request_on`, `real_steps` exist (tests/drain.rs:4968, 5094-5119, 4365); steward.rs `add` helper at 2118-2216 exists for the unit tests. The plan steps that add `Steps::settle_interrupted`, `steward::settle_interrupted` and the new `interrupted_work` make them pass. The only doubles are the producer kill script and the lander; the listing and settle logic is production code."
+    },
+    {
+      "criterion": 2,
+      "method": "(a) Real-steps: after the drain in test 1(a), load the records and assert no request job is `Dispatched` unless the report notes name it with a reason. (b) Stub test `drain_works_an_interrupted_item_whose_plan_entry_is_incomplete`: `Stub { interrupted: vec![\"a\"], plan: vec![PlanEntry { rung: None, ..planned(\"a\", ..) }], outcomes: passing(), .. }`; drain; assert the log has `reread a` then `run a-retry` and a note says the retry reads the request again. (c) Stub test `drain_notes_what_settling_interrupted_jobs_did`: a new `Stub.settled: Vec<&'static str>` field returned by its `settle_interrupted` impl; assert both the start and end calls reach `Report::notes`. (d) Stub test that an interrupted item held by `paused` still gets its pass-over line.",
+      "command": "cargo test --locked -p athena-cli --test drain -- interrupted",
+      "observes": "Drain runs the retry of the interrupted item, closes it with a reason, or reports it held with a reason in its notes or pass-over lines. It never ends with a dispatched job silently skipped.",
+      "fails_without": "Without the incomplete-plan exemption, the Stub test shows item `a` refused ('item a is not worked') and never reread. Without the settle hook, a retried-and-landed original stays dispatched and the 'no dispatched job without an outcome' assertion fails; the notes test fails because nothing is noted.",
+      "seam": "`drain::drain` against the `Stub` implementing `Steps` (tests/drain.rs:41-326, exists) plus the real-steps fixture of criterion 1. A step extends `Stub` with `settled` and its `settle_interrupted` impl. The incomplete entry is built with the existing `planned(..)` and `PlanEntry`. The double supplies only the world (queue, outcomes, log); the exemption and notes are drain.rs logic."
+    },
+    {
+      "criterion": 3,
+      "method": "`status_lists_every_dispatched_job_with_no_outcome_whatever_its_channel`: interrupt a `cli` job and a `web` job via `interrupt` and `request_on`. Call `athena.status()` and assert both ids are in `view.open` with state `interrupted`, `view.next` has an `athena retry <id>` line for each, and `display::status(&view)` contains each id. Then run the drain and assert `athena.status()` lists neither original in `open`.",
+      "command": "cargo test --locked -p athena-cli --test drain -- status_lists_every_dispatched_job",
+      "observes": "Status lists each dispatched job with no outcome and no process, with its id and a next-step line; after the drain none remain open.",
+      "fails_without": "The post-drain half fails on old code: the settled original is still listed as `interrupted` ('retried as X') because nothing closed it. The first half guards existing behavior: a channel filter or a missing next line in status would break it.",
+      "seam": "`Athena::status()` (status.rs:985) and `display::status`, on the real `Fixture` and `killing_producer`; the helpers exist. No new seam."
+    },
+    {
+      "criterion": 4,
+      "method": "Operator step after merge, against the live records (absent from the snapshot; the diff cannot contain them). For each of the six jobs, read `brief-producer.md` and `git log` to see whether another job landed its work. If so, `athena close <job> --why \"landed through <job id> as <hash>\"` with the hash from git log (5874b1f for the Transport row and 612c27f for the run.rs rename are candidates seen in HISTORY.txt; confirm against the brief). Otherwise `athena retry <job>` or let the next drain retry it. g63s is expected to be re-queued.",
+      "command": "cargo run --locked -p athena-cli -- status",
+      "observes": "None of the six ids is in the `open` list as an unretried job. Each has an outcome.json (closed, with the hash in the reason) or a standing retry shown as 'retried as <job>'.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Content check of the new CHANGELOG.md entry under [Unreleased] (### Fixed). It names the cause (a dispatched job with no outcome was skipped by drain and not closed once its retry ended; status already listed it), the fix (all channels, the retry that stands, the settle step, the plan exemption), the failure class and the six job ids.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The diff contains the entry with the words 'dispatched', 'no outcome', 'drain' and 'status'.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks. The only existing test whose expectation changes is the rewritten off-channel drain test (tests/drain.rs:5122). A new steward unit test, `queued_work_still_leaves_other_channels_alone`, pins that `queued_work` (steward.rs:414) keeps `DRAINED_CHANNELS`, so the change cannot spread to queued requests. Also covered: tests/retry.rs (status and retry hints unchanged), tests/lifecycle.rs, tests/budgets.rs (no prompt-set change), hestia unit tests (hestia.rs untouched). The diff has no change under crates/athena-context, run/, reading/retry.rs, status.rs, hestia.rs or the agent crates; `git diff --stat` shows it.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "fmt, clippy and test pass; the one rewritten drain test and the new tests are the only expectation changes.",
+      "fails_without": "If the channel filter were also removed from `queued_work`, `queued_work_still_leaves_other_channels_alone` and the DRAINED_CHANNELS assertion at tests/drain.rs:5334 fail. If a plan-exemption or settle change broke an unrelated stub-driven drain test (tests/drain.rs Stub tests), that test fails in the full run. A formatting or lint slip fails fmt or clippy.",
+      "seam": "Production entry points are the three cargo commands over the workspace. The fixtures are the existing test suites (`Stub` in tests/drain.rs, `Fixture` real-steps tests, steward.rs `add` helper) and the new `queued_work_still_leaves_other_channels_alone`, which calls `steward::queued_work` on records built with `add`; the helper exists (steward.rs:2118-2216) and the test is added in the steward test step."
+    }
+  ],
+  "open_questions": [
+    "User: May a job that was interrupted and whose standing retry ended rejected or failed be closed as abandoned with the reason `re-queued as <retry>, which ended <state>`? The plan does so, because the retry carries the work forward and the original would otherwise stay dispatched for ever. The alternative is to leave it listed as 'retried as X' until a person closes it.",
+    "Host: Which of the six jobs' work already landed through another job, and which commit hashes should be cited? The live job records and full git log are not in the snapshot. HISTORY.txt shows 5874b1f (Transport row to gh/transport.rs) and 612c27f (run.rs to run/mod.rs), both 2026-10-27. Jobs 20261027-123701-77zh, 20261027-054206-w1y3 and 20261027-054209-z7sj are not identified by any evidence in the snapshot.",
+    "Host: What channel and retry history do the six live jobs have? The records are absent from the snapshot, so which of the four skip paths applied to them is not shown by the code; the plan fixes all four and tests each."
+  ],
+  "producer_section_sha256": "59cc9c5ee49282eb4caa7a9ae29b887562f7a3b12ad31b1d2f29c96498eedac3"
+}

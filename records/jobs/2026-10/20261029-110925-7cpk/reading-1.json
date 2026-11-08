@@ -1,0 +1,155 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261029-110925-7cpk",
+  "n": 1,
+  "at": "2026-11-08T22:40:44.682096075Z",
+  "invocation_seq": 1,
+  "base_commit": "e0b26609cfdf2b4f098850ef4c226f0bea8d6a25",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Refuse landing with a clear error when the working copy is off-branch",
+  "summary": "Before a verified job lands, Athena checks that the working copy is on a branch (HEAD not detached) and that it is the expected branch (the one the job was dispatched from, which drain works on). If not, landing stops with an error naming the actual HEAD state and the expected branch, lands nothing, and no longer surfaces as a missing verification. Audience: the operator running drain.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Change and tests are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests for detached and on-branch landing; fmt, clippy, test criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that detach HEAD and check nothing landed."
+    },
+    {
+      "id": "root-cause",
+      "how": "Check sits at the landing precondition rather than patching the symptom message."
+    },
+    {
+      "id": "small",
+      "how": "One focused precondition change."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/land.rs (plan() already returns Plan::OtherBranch for a branch mismatch or detached HEAD against the job's recorded dispatch_branch), crates/athena-core/src/run/close.rs (land_or_block takes the repository lock, computes head, calls plan; OtherBranch is turned into a stale outcome or a bail when the branch lacks the job's records), crates/athena-cli/src/commands.rs (drain entry, open(true)), crates/athena-cli/src/drain.rs (drain_with, Steps landing) and crates/athena-git/src/lib.rs (Git::current_branch returns None when detached). The records validation allow-list and AnyRecord are untouched because no record or data file is added.",
+    "Reading of 'drain branch': the branch the job was dispatched from (job record dispatch_branch), which is the branch the drain works on. No separate drain-branch setting exists in the code I read. If the job record has no dispatch branch (old record), the expected branch is the branch the drain started on only if cheaply available; otherwise the check only rejects a detached HEAD.",
+    "Today a detached HEAD at landing is routed through Plan::OtherBranch into a recorded stale outcome or a generic bail, which the drain reports as a failed/missing verification. The fix is a precondition before landing (early in land_or_block, before any commit is built) that bails with a message such as 'working copy HEAD is detached at <short sha>; expected branch `main`; nothing landed'. The existing tests a_branch_job_finished_on_a_detached_head_is_refused and a_job_dispatched_on_a_detached_head_never_lands in land.rs may need adjusting only if the message or path changes; their intent stays.",
+    "Tests go in crates/athena-cli/tests/lifecycle.rs or crates/athena-core (whichever fixture can detach HEAD with git and run the landing); they must exercise the real landing path, not just plan().",
+    "Out of scope: the --pr landing path, rebase logic, stale-detection rules, and drain stop/retry policy."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test detaches HEAD in the working copy of a verified job and attempts landing: it fails with an error containing 'detached' and the expected branch name (e.g. `main`), and afterwards the branch tip is unchanged and no landing commit exists. Check: cargo test, naming the test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test with HEAD on the expected branch lands the verified job as before (landing commit present, tip advanced). Check: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The error for the detached case is raised before any closing commit or stale outcome is built, and does not read as a missing verification: the message does not contain 'verification' wording about a missing record. Check: diff of crates/athena-core/src/run/close.rs / land.rs and the test assertion.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy (all targets, warnings denied as configured) and cargo test for the whole workspace pass, including the existing land.rs and lifecycle/drain tests.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The diff changes only landing precondition code and its tests, plus a CHANGELOG.md line if the repo convention requires one; no other landing behavior (stale rules, merge-tree, fingerprint) changes.",
+      "kind": "content"
+    },
+    {
+      "text": "The refusal narrows landing only for an off-branch working copy; expected 0% of newly refused readings, since past readings are not affected by the branch check and the higher refusal of off-branch landings is intended.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "The --pr landing path (gh/landing.rs)",
+    "Changing stale-detection, rebase or fingerprint rules",
+    "Editing records/introspections/2026-10/20261029-045649-k845.json (a source note, not a deliverable)",
+    "Governance files such as athena.toml and defaults.toml"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1900.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6784968684759917,
+      "p_user_intervenes": 0.07306967984934086,
+      "cost_usd": {
+        "p10": 0.5684779573158363,
+        "p50": 1.4780460000000002,
+        "p90": 4.855811209265523
+      },
+      "wall_time_s": {
+        "p10": 569.7555344196123,
+        "p50": 2110.0096338949816,
+        "p90": 4325.902200008642
+      }
+    }
+  },
+  "departures": "Landing partly handles detached HEAD already via Plan::OtherBranch, so the change is a reshaping of an existing path; slight added risk of existing-test conflicts.",
+  "hard_reason": "Adds a rule that refuses landing and changes the landing step of the run pipeline, so a mistake is costly.",
+  "producer_effort": "high"
+}
