@@ -23,7 +23,7 @@ use athena_agent::policy::{Decision, Policy, evaluate};
 use athena_data::config::PersonalData;
 use athena_data::records::{
     ChangeStatus, CriterionKind, DeliverableAction, Demonstration, Finding, FindingSource, JobPlan,
-    PlanDependent, PolicyViolation, Reading, Severity,
+    PlanDependent, PlanRisk, PolicyViolation, Reading, Severity,
 };
 use athena_data::{Config, DefaultsModel};
 use athena_gate::content::disallowed_emails;
@@ -167,6 +167,9 @@ fn athena_finding(
 ///   not a directory in the base (`is_directory` says whether a path is one); a major finding otherwise.
 /// - every open question begins `User:` or `Host:` (only a user decision or a host fact stays open) and does
 ///   not say the code answers it; a major finding otherwise (see `open_questions_findings`).
+/// - no risk and no dependent's test or reason defers the search for callers and tests to the producer
+///   ("producer to check existing tests"); a major finding at `risks` or `dependents, dependent N` otherwise
+///   (see `risks_findings`).
 ///
 /// A major finding sends the plan back to the planner without a critic call.
 pub fn plan_findings(
@@ -309,7 +312,195 @@ pub fn plan_findings(
     }
     findings.extend(dependents_findings(&plan.dependents));
     findings.extend(open_questions_findings(&plan.open_questions));
+    findings.extend(risks_findings(&plan.risks));
+    findings.extend(dependents_deferral_findings(&plan.dependents));
     findings
+}
+
+/// The risks rule. Root cause it addresses: planning was not required to settle caller and test impact, and
+/// a risk (or a dependent) could say "producer to check", so a plan passed the gate with the existing callers
+/// and tests of a changed path still unfound. The producer then met them as failures (job
+/// 20261025-055626-er96: the risk "Existing go tests would call real gh" was left to the producer, and the
+/// lifecycle tests that assert no warning were missed). `open_questions_findings` never read the risks, and
+/// the planner brief told the planner to list callers in prose only.
+///
+/// A risk whose `risk` or `mitigation` defers the discovery of callers, readers or tests to the producer
+/// (see `defers_to_producer`) is a major finding at location `risks`, one per risk, numbered from 1. A risk
+/// whose mitigation states a found answer with file and line, a risk that names a command the producer runs,
+/// and an empty list add no finding. The plan returns to the planner without a critic call.
+///
+/// What the rule cannot see: it refuses written deferrals only. An omission with no deferral written (job
+/// 20261026-193430-avnq: a move broke an `include_str!` read of `display.rs` that no one searched for) is
+/// covered only by the planner brief line that requires the search, which is prose. Known misses of the
+/// wording check: the passive ("callers to be checked by the producer"), an adverb between the auxiliary and
+/// the verb ("producer to carefully check"), and the singular `test` as the only impact word. The critic
+/// still reviews what passes.
+///
+/// The rule refuses more plans: expected 5% of newly refused plans (the reading's estimate, not a
+/// measurement). The higher refusal rate is intended, because those plans cost critic rounds on impact the
+/// planner can find by searching.
+fn risks_findings(risks: &[PlanRisk]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (i, r) in risks.iter().enumerate() {
+        let number = i + 1;
+        if defers_to_producer(&r.risk) || defers_to_producer(&r.mitigation) {
+            findings.push(athena_finding(
+                Severity::Major,
+                "risks".into(),
+                format!(
+                    "Risk {number} defers its impact to the producer: {}",
+                    r.risk.trim()
+                ),
+                DEFERRAL_DETAIL.into(),
+            ));
+        }
+    }
+    findings
+}
+
+/// The same refusal for the dependents section, so a deferral cannot move from `risks` into a dependent's
+/// `test` or `reason`. One major finding per offending entry at `dependents, dependent N`.
+fn dependents_deferral_findings(dependents: &[PlanDependent]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (i, d) in dependents.iter().enumerate() {
+        let number = i + 1;
+        let deferring = [d.test.as_deref(), d.reason.as_deref()]
+            .into_iter()
+            .flatten()
+            .find(|text| defers_to_producer(text));
+        if let Some(text) = deferring {
+            findings.push(athena_finding(
+                Severity::Major,
+                format!("dependents, dependent {number}"),
+                format!(
+                    "Dependent {number} ({}) defers its impact to the producer: {}",
+                    d.name.trim(),
+                    text.trim()
+                ),
+                DEFERRAL_DETAIL.into(),
+            ));
+        }
+    }
+    findings
+}
+
+const DEFERRAL_DETAIL: &str = "Search the tests and the other crates yourself for the callers of the changed path, for `include_str!` or fs reads of any file it moves, and for output assertions. State the answer with file and line, and list the callers and tests in `dependents`. Do not leave the search to the producer.";
+
+/// Words that name the thing a producer would be asked to find.
+fn is_impact_word(word: &str) -> bool {
+    const WORDS: [&str; 13] = [
+        "caller",
+        "callers",
+        "reader",
+        "readers",
+        "tests",
+        "existing",
+        "crates",
+        "impact",
+        "dependent",
+        "dependents",
+        "usage",
+        "usages",
+        "references",
+    ];
+    WORDS.contains(&word) || word.contains("include_str")
+}
+
+/// Words that show a sentence is about running a check, not about finding callers.
+fn is_procedural_word(word: &str) -> bool {
+    const WORDS: [&str; 9] = [
+        "cargo", "pass", "passes", "passing", "green", "fmt", "clippy", "succeed", "succeeds",
+    ];
+    WORDS.contains(&word)
+}
+
+/// True when `text` hands the discovery of callers, readers or tests to the producer.
+///
+/// The text is normalized to words: lowercase, `*` and backticks removed, edge punctuation trimmed, and a
+/// trailing `'s` or `’s` stripped (`producer's` reads as `producer`). Two forms match:
+///
+/// - the word `producer`, zero or more auxiliaries (to, should, will, must, needs, has, also, then, can, may),
+///   a discovery verb (check, verify, search, find, grep, determine, their `-s` forms, look(s) for), and
+///   within the next eight words an impact word and no procedural word (cargo, pass, fmt, clippy and so on);
+/// - the phrase `left to the producer`, `leave to the producer` or `leave it to the producer` in a text that
+///   also holds an impact word.
+///
+/// `read`, `confirm`, `review` and `inspect` are not discovery verbs here. The check is a declaration scan,
+/// not proof; a misspelled or passive deferral gets past it.
+fn defers_to_producer(text: &str) -> bool {
+    const AUXILIARIES: [&str; 10] = [
+        "to", "should", "will", "must", "needs", "has", "also", "then", "can", "may",
+    ];
+    const VERBS: [&str; 12] = [
+        "check",
+        "checks",
+        "verify",
+        "verifies",
+        "search",
+        "searches",
+        "find",
+        "finds",
+        "grep",
+        "greps",
+        "determine",
+        "determines",
+    ];
+    let lowered = text.to_lowercase().replace(['*', '`'], "");
+    let words: Vec<String> = lowered
+        .split_whitespace()
+        .map(|w| {
+            let w = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+            let w = w
+                .strip_suffix("'s")
+                .or_else(|| w.strip_suffix("’s"))
+                .unwrap_or(w);
+            w.to_string()
+        })
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has_impact = words.iter().any(|w| is_impact_word(w));
+    for (at, word) in words.iter().enumerate() {
+        if word != "producer" {
+            continue;
+        }
+        let mut next = at + 1;
+        while words
+            .get(next)
+            .is_some_and(|w| AUXILIARIES.contains(&w.as_str()))
+        {
+            next += 1;
+        }
+        let Some(verb) = words.get(next).map(String::as_str) else {
+            continue;
+        };
+        let start = if VERBS.contains(&verb) {
+            next + 1
+        } else if matches!(verb, "look" | "looks")
+            && words.get(next + 1).is_some_and(|w| w == "for")
+        {
+            next + 2
+        } else {
+            continue;
+        };
+        let window = &words[start.min(words.len())..(start + 8).min(words.len())];
+        if window.iter().any(|w| is_impact_word(w)) && !window.iter().any(|w| is_procedural_word(w))
+        {
+            return true;
+        }
+    }
+    if has_impact {
+        const PHRASES: [&[&str]; 3] = [
+            &["left", "to", "the", "producer"],
+            &["leave", "to", "the", "producer"],
+            &["leave", "it", "to", "the", "producer"],
+        ];
+        for phrase in PHRASES {
+            if words.windows(phrase.len()).any(|w| w == phrase) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The open-questions rule. Root cause it addresses: `plan_findings` let code-answerable open questions
@@ -323,7 +514,9 @@ pub fn plan_findings(
 /// that itself says the code answers it. A prefixed question may cite a path: a scope question about a file
 /// is legitimate. The prefix is a declaration, not proof; the critic still reviews what passes. Whether a
 /// planner listed every caller and mode that reaches a changed function cannot be checked without the
-/// repository, so that half stays prose in the planner brief, backed by the dependents shape check.
+/// repository, so the completeness of that search stays prose in the planner brief, backed by the dependents
+/// shape check; a deferral of it to the producer is refused by `risks_findings` and
+/// `dependents_deferral_findings`.
 ///
 /// The rule refuses more plans: expected 5% of newly refused plans (the reading's estimate, not a
 /// measurement). The higher refusal rate is intended, because those plans spent critic rounds on questions
@@ -867,9 +1060,45 @@ mod tests {
         .collect()
     }
 
+    /// Athena's findings at 'risks' on a plan whose dependents are complete and whose only variable part is
+    /// the list of `(risk, mitigation)` pairs.
+    fn risk_findings_for(risks: Vec<(&str, &str)>) -> Vec<Finding> {
+        let risks = risks
+            .into_iter()
+            .map(|(risk, mitigation)| PlanRisk {
+                risk: risk.into(),
+                mitigation: mitigation.into(),
+            })
+            .collect();
+        plan_findings_with(vec![complete_dependent()], vec![], risks)
+            .into_iter()
+            .filter(|f| f.location.as_deref() == Some("risks"))
+            .collect()
+    }
+
+    /// Athena's findings at 'dependents, dependent N' for one dependent that is the only variable part.
+    fn dependent_findings_for(entry: PlanDependent) -> Vec<Finding> {
+        plan_findings_with(vec![entry], vec![], vec![])
+            .into_iter()
+            .filter(|f| {
+                f.location
+                    .as_deref()
+                    .is_some_and(|l| l.starts_with("dependents, dependent"))
+            })
+            .collect()
+    }
+
     fn plan_findings_for(
         dependents: Vec<PlanDependent>,
         open_questions: Vec<String>,
+    ) -> Vec<Finding> {
+        plan_findings_with(dependents, open_questions, vec![])
+    }
+
+    fn plan_findings_with(
+        dependents: Vec<PlanDependent>,
+        open_questions: Vec<String>,
+        risks: Vec<PlanRisk>,
     ) -> Vec<Finding> {
         use athena_data::records::Role;
         let mut r = reading();
@@ -886,7 +1115,7 @@ mod tests {
             decisions: vec![],
             files: vec![],
             steps: vec![],
-            risks: vec![],
+            risks,
             dependents,
             demonstrations: vec![Demonstration {
                 criterion: 1,
@@ -973,6 +1202,123 @@ mod tests {
             dependents_findings_for(vec![complete_dependent()]).len()
         );
         assert!(dependents_findings_for(vec![complete_dependent()]).is_empty());
+    }
+
+    #[test]
+    fn a_risk_that_defers_to_the_producer_is_a_major_finding_naming_it() {
+        // The first pair is job 20261025-055626-er96's own risk and mitigation.
+        for (risk, mitigation) in [
+            (
+                "Existing go tests would call real gh",
+                "producer to check existing go tests",
+            ),
+            ("Callers may break", "the producer should check the callers"),
+            (
+                "Readers",
+                "the producer will verify other crates that read it",
+            ),
+            ("Tests", "producer should also search the tests"),
+            ("Moved file", "producer to look for include_str! readers"),
+            ("Callers", "producer checks existing callers"),
+            ("Readers", "producer's to verify the readers"),
+            (
+                "Warnings",
+                "left to the producer: which tests assert no warning",
+            ),
+            // The deferral is in the risk text; the mitigation states a settled answer.
+            (
+                "Producer to check existing callers of the moved file",
+                "lifecycle.rs:2627 asserts no warning",
+            ),
+        ] {
+            let found = risk_findings_for(vec![(risk, mitigation)]);
+            assert_eq!(found.len(), 1, "{risk} / {mitigation}: {found:?}");
+            assert_eq!(found[0].severity, Severity::Major);
+            assert_eq!(found[0].source, FindingSource::Athena);
+            assert_eq!(found[0].location.as_deref(), Some("risks"));
+            assert!(found[0].summary.contains(risk), "{found:?}");
+            assert!(
+                found[0]
+                    .summary
+                    .contains("defers its impact to the producer"),
+                "{found:?}"
+            );
+        }
+        // Each deferring risk gets its own finding, numbered from 1.
+        let two = risk_findings_for(vec![
+            ("Fine", "lifecycle.rs:2627 asserts no warning"),
+            ("Tests", "producer to check existing tests"),
+        ]);
+        assert_eq!(two.len(), 1, "{two:?}");
+        assert!(two[0].summary.contains("Risk 2"), "{two:?}");
+    }
+
+    #[test]
+    fn a_dependent_that_defers_to_the_producer_is_a_major_finding_naming_it() {
+        for entry in [
+            dependent(
+                "the output",
+                "status.rs",
+                Some("a test"),
+                Some("producer to check for include_str! readers"),
+            ),
+            dependent(
+                "the output",
+                "status.rs",
+                Some("producer to check existing tests"),
+                None,
+            ),
+        ] {
+            let found = dependent_findings_for(entry.clone());
+            assert_eq!(found.len(), 1, "{entry:?}: {found:?}");
+            assert_eq!(found[0].severity, Severity::Major);
+            assert_eq!(found[0].source, FindingSource::Athena);
+            assert_eq!(
+                found[0].location.as_deref(),
+                Some("dependents, dependent 1")
+            );
+            assert!(found[0].summary.contains("the output"), "{found:?}");
+            assert!(
+                found[0]
+                    .summary
+                    .contains("defers its impact to the producer"),
+                "{found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settled_risk_and_an_empty_risks_list_add_no_finding() {
+        for mitigation in [
+            "lifecycle.rs:2627 asserts no warning; GhEarly skips quietly",
+            "The producer runs cargo test -p athena-core --lib admission after the edit",
+            "the producer should check that cargo fmt --check passes",
+            "the producer will verify with cargo test -p athena-cli --test budgets",
+            "the producer must read the computed figure from the budgets test failure message",
+            "the producer must confirm cargo fmt --check passes",
+            "the producer should verify the existing tests pass",
+            "updating the budget line is left to the producer",
+        ] {
+            let found = risk_findings_for(vec![("A risk", mitigation)]);
+            assert!(found.is_empty(), "{mitigation}: {found:?}");
+        }
+        // An empty list adds no finding at all: the whole result is the dependents shape result.
+        assert!(risk_findings_for(vec![]).is_empty());
+        assert!(plan_findings_with(vec![complete_dependent()], vec![], vec![]).is_empty());
+    }
+
+    #[test]
+    fn a_dependent_that_states_a_found_answer_adds_no_finding() {
+        let entry = dependent(
+            "the moved file",
+            "status.rs",
+            None,
+            Some(
+                "status.rs:410 reads display.rs via include_str!; test status_reads_display updated in step 4",
+            ),
+        );
+        let found = dependent_findings_for(entry);
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]

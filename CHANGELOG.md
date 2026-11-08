@@ -9,6 +9,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Plan admission refuses a plan that leaves caller and test impact to the producer. Root cause: planning was
+  not required to settle which existing callers and tests run a changed path, and a risk or a dependent could
+  say "producer to check", so plans passed the gate with that impact open (job 20261025-055626-er96: the risk
+  "Existing go tests would call real gh" was left to the producer, and the lifecycle tests that assert no
+  warning were missed). `plan_findings` now calls two rules after the open-questions rule: `risks_findings`
+  gives a major finding at location `risks` for each risk whose text or mitigation defers the search for
+  callers, readers or tests to the producer, and `dependents_deferral_findings` does the same at
+  `dependents, dependent N` for a dependent's test or reason, so a deferral cannot move there. The plan goes
+  back to the planner without a critic call. A mitigation that states a found answer with file and line, a
+  procedural one such as "the producer should check that cargo fmt passes", and an empty risks list pass.
+  Limit: the rule refuses written deferrals only. An omission with nothing written (job 20261026-193430-avnq:
+  a move broke an `include_str!` read of `display.rs` that no one searched for) is covered only by the new
+  line in the planner brief, which is prose. The rule refuses more plans: expected 5% of newly refused plans
+  (an estimate, not a measurement); the higher refusal rate is intended, because those plans cost critic
+  rounds on impact the planner can find by searching. Follow-up: the `OPEN_QUESTION_RULE` doc in
+  `crates/athena-context/src/briefs.rs` still says the caller listing is prose only.
 - The reader and producer briefs require every acceptance criterion to be checkable from the snapshot, the diff
   or the commands the verifier runs, never from the producer's report or change description. Section 5 of
   `docs/design/structure-pass.md` now puts its proofs in the snapshot or in commands the verifier reruns.
