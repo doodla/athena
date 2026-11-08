@@ -440,6 +440,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `crates/athena-data/src/records.rs` is split into submodules under `records/` (`core`, `introspection`,
+  `work`, `throughput`, `plan`) to bring it under the code-health size limits. Every item is moved unchanged
+  and re-exported, so all `athena_data::records::*` paths, serde formats and schemas are the same.
 - An open earlier throughput design request no longer stops the throughput review. The review runs, asks the
   model, records the proposal, and notes the open request in the record and in `THROUGHPUT.md`; four of seven runs
   on 4 to 6 Nov did nothing for this reason. A proposal recorded without a design request has `request_job` unset.
