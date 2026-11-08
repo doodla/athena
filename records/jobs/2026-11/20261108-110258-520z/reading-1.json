@@ -1,0 +1,169 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261108-110258-520z",
+  "n": 1,
+  "at": "2026-11-08T11:57:44.375115565Z",
+  "invocation_seq": 4,
+  "base_commit": "bf59d34b5aef6c19f7ba333abb65cb9543c66f98",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Refuse plans that leave caller and test impact to the producer",
+  "summary": "Root cause: plan admission (`plan_findings` in admission.rs) checks open questions but not risks, so a plan can pass with a risk whose mitigation is \"producer to check\" and no list of existing callers/tests that run the changed path (seen in jobs 20261025-055626-er96 and 20261026-193430-avnq). Fix at that gate and in the planner brief: a risk that defers to the producer is a major finding, and the planner must list the callers and tests of each changed path in `dependents`.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The rule and tests are Rust in athena-core."
+    },
+    {
+      "id": "tested",
+      "how": "A failing-without test plus refusal corpus cases; fmt, clippy and test must pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced in plan_findings, not left as prose only."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fixed at plan admission and the planner brief where the cause originates, covering both jobs' failures."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run plan_findings on a deferring plan and check the finding."
+    },
+    {
+      "id": "small",
+      "how": "One rule, one brief line, tests and a changelog entry."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is that plans deferring impact are refused before the critic, checked by the test."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comment names the cause for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the planner and the plan gate, so the planning rounds stop ending 'plan still needed revising' because caller and test impact was left for the producer; the user and verifier judge by the new refusal and its test.",
+    "Code survey: read crates/athena-core/src/admission.rs (plan_findings, open_questions_findings, dependents_findings, dependents_unnamed; entry point plan_findings, called from crates/athena-core/src/run/planning.rs), crates/athena-data/src/records/plan.rs (PlanRisk has risk and mitigation strings; JobPlan.risks), crates/athena-core/tests/refusal_corpus.rs (open_question_cases and plan_findings tests) and crates/athena-context/prompts/planner.md. No record or data file is added, so check_record_file, AnyRecord and the round-trip test are unaffected. The property is measured directly by calling plan_findings on a JobPlan whose risk mitigation defers to the producer.",
+    "Cause as it originates: open_questions_findings already forces open questions to be User:/Host: only, but a risk's mitigation is unchecked, and its doc comment says the caller listing 'stays prose in the planner brief'. Job 20261025-055626-er96 failed in plan round 3 for exactly this (risk 'Existing go tests would call real gh' left to the producer; CLI lifecycle tests asserting no 'warning' were missed). Job 20261026-193430-avnq failed because a move broke athena-core's include_str! read of display.rs, which no one searched for.",
+    "Previous result, job 20261025-055626-er96: its work (early push in gh.rs, run.rs, land.rs, pr.rs, test_support.rs) was never produced (planning stopped, no candidate). Its findings do not apply to this change; they are the evidence for the cause. The early-push feature itself is dropped here and stays a separate job.",
+    "Previous result, job 20261026-193430-avnq: its candidate (display.rs split into display/status_view.rs, CHANGELOG entry) was rejected because status.rs's include_str! test read display.rs. That split is dropped here: display.rs and status_view.rs are not touched. Its CHANGELOG entry is not kept; this job adds its own entry.",
+    "The new rule: a risk whose mitigation (or risk text) defers to the producer, with phrases such as 'producer to check', 'producer should check', 'producer will check', 'producer to verify', 'left to the producer', is a major finding at location 'risks' naming it, sent back to the planner without a critic call. A mitigation that states a found answer with file and line passes.",
+    "The planner brief gains one short line (planner has 175 tokens of headroom; stay within it): for every production path the plan changes, search the tests and other crates for callers, include_str!/fs reads of moved files, and output assertions, list them in dependents, and never defer them to the producer. No other prompt file changes.",
+    "Refusal rule: expected 5% of newly refused plans. The higher refusal rate is intended, because those plans spent critic rounds on impact the planner could find by searching."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-core/src/admission.rs has a risks rule called from plan_findings (next to open_questions_findings) whose doc comment names the root cause: planning was not required to settle caller and test impact and let risks defer it to the producer; the rule is a major finding at location 'risks'.",
+      "kind": "content"
+    },
+    {
+      "text": "A unit test in crates/athena-core/src/admission.rs builds a JobPlan with a risk whose mitigation is 'producer to check existing go tests' and asserts plan_findings returns a major Athena finding at 'risks' naming it; the same test fails on the base commit and passes with the change. Run: cargo test -p athena-core --lib admission.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The test also shows a risk whose mitigation states a settled answer with file and line (for example 'lifecycle.rs:2627 asserts no warning; GhEarly skips quietly') and an empty risks list add no finding, so the rule is not blanket. Run: cargo test -p athena-core --lib admission.",
+      "kind": "behavior"
+    },
+    {
+      "text": "crates/athena-core/tests/refusal_corpus.rs maps each input form of the new rule (each deferring phrase, the settled answer, mixed case, deferral in the risk text rather than the mitigation) to a case with its expected outcome, and passes. Run: cargo test -p athena-core --test refusal_corpus.",
+      "kind": "behavior"
+    },
+    {
+      "text": "crates/athena-context/prompts/planner.md requires the planner to list, for each changed production path, the existing callers and tests that run it (including include_str!/fs reads of moved files and output assertions) in dependents and never leave them to the producer; Grep shows the line.",
+      "kind": "content"
+    },
+    {
+      "text": "The change expects 5% of newly refused plans; the higher refusal rate is intended because those plans cost critic rounds on impact the planner can find by searching.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry naming the root cause and the new risks rule, and the display.rs/status_view.rs split of job 20261026-193430-avnq is not present in the diff.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --workspace --all-targets and cargo test --workspace all pass, including the prompt token budget tests for the planner set.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-context/prompts/planner.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "The early-push-to-PR-branch feature of job 20261025-055626-er96 (gh.rs, run.rs, land.rs, pr.rs, test_support.rs); changing ci.yml or the xtask fingerprint; merging the PR before verification passes; changing how land merges or waits for checks",
+    "The display.rs split of job 20261026-193430-avnq: crates/athena-cli/src/display.rs and crates/athena-cli/src/display/status_view.rs are not changed or created; behavior or output format changes; splitting other files or raising limits; refactoring the status function; fixing status.rs's include_str! test",
+    "Changing the critic prompt, the reader prompt, athena.toml or defaults.toml",
+    "A mechanical repository-wide search for callers (the search stays the planner's; Athena checks only that risks do not defer it)"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.4,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1900.0,
+        "p90": 4300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.673773987206823,
+      "p_user_intervenes": 0.07475915221579961,
+      "cost_usd": {
+        "p10": 0.5670511049740374,
+        "p50": 1.4261069000000002,
+        "p90": 4.7081840178519005
+      },
+      "wall_time_s": {
+        "p10": 570.503783696053,
+        "p50": 2095.7441542093593,
+        "p90": 4308.859520508788
+      }
+    }
+  },
+  "departures": "Hard job touching plan admission and refusal corpus, slightly lowering verification odds and raising cost versus the reference.",
+  "hard_reason": "It adds a rule to plan admission that can refuse a plan before the critic sees it, and changes the planner brief in the run pipeline.",
+  "producer_effort": "high"
+}
