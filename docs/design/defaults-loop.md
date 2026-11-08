@@ -162,6 +162,38 @@ may rename or merge classes at review. The registry is a record store, not a fil
 repository. Choosing `prevention_kind` among its five values is also a `choice` question for Jev; writing the
 prose is not.
 
+**Merging classes (built, except where marked design).** Records are append-only, so a merge is a new
+`athena.failure-class/1` record with status `merged`, naming the retired class (`merged_from`) and the class it
+now counts as (`merged_into`). The retired class's own file is not touched. A merge record is not a class: it has
+its own id, copies the retired class's name, and its `proposed_by` is the retired class's value, kept only so the
+record has the shape of every other class record; no introspection proposed the merge. Records of status
+`proposed` parse as before. Every reader folds the merge records into a map from each retired id to its target
+(`ClassMerges`, in `athena-data`) and resolves ids in memory: the registry shown to the model and Jev lists live
+classes only; earlier cases in a merged class are cases of the target, so the model may cite them; recurrence
+keys, the recurring-class list in the producer brief, the recurrence evidence label, default proposals and the
+labeled set (labels and Jev's stored answers) count a merged class as its target. A chain of merges ends at the
+last target; a cycle ends after at most one step per merge; if two merge records retire one class, the earlier
+wins. `Athena::merge_classes(from, into)` writes the record; it refuses a class merged into itself, an unknown
+id, a merge record, and a class that is already retired.
+
+**Duplicates are stopped at creation.** The two places that create a class, the introspection step (the model
+answers `new`) and `athena review --new-class`, share one rule, `introspect::class_named`: a new class whose name
+equals the name of an existing class after normalising (lower case, letters and digits, words joined by one space)
+is that class. The introspection step records the existing class id on the new introspection and adds no class
+record; the review command refuses and names the class to use. A class that was merged into another stands for its
+target; a name with no words matches nothing. `athena review --class` also refuses a merge record's id and a
+retired class's id. The rule is enforced in code, not in the prompt.
+
+**Limits.** Creation-time reuse catches only names that are equal after normalising. A model that words one cause
+differently each time still makes a new class, and that duplicate needs a merge record. The change does not
+rewrite or merge the existing classes (158 at the time of writing, counted by the user from the records branch,
+not measured here): their records stand as written, and nothing runs a merge over them. Design, not built: a
+user command that writes a merge record (today `merge_classes` is called from code); a backtest over the records
+branch that counts how many existing classes share a normalised name, and how many differently worded duplicates
+remain; merging the existing classes, with a rule for which class survives; clustering classes with a model or
+Jev (the open question in §13 stays open). Two introspections running at once both read the registry before
+either commits and can both create the same new class; that rare duplicate is left for a merge record.
+
 ### 3.5 Retries start from the record
 
 When the user asks for a retry of a failed or rejected job, the new reading is seeded with the
@@ -750,7 +782,8 @@ with a person-visible review.
 - What the gateway's confidence measures, and whether a fallback answer is labelled (§6).
 - How a rejection is recorded when it is not a proposal or a rejected outcome (a plan): a new record kind, not
   designed here. A rejected outcome is already recorded (`OutcomeState::Rejected`, §3.1).
-- Whether the class registry should be merged by Jev pairwise questions; not decided.
+- Whether the class registry should be merged by Jev pairwise questions; not decided. (A merge by record and
+  the reuse of an equal-named class at creation are built, §3.4.)
 - The class vocabulary is closed in decision-sets §2 to the values `defaults.toml` uses; a registry that code can
   check exactly remains open, as the item above says.
 - The correction to `docs/decisions.md` D90 ("Alternatives ... section 9" should read §11 of this document) is made

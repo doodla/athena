@@ -15,13 +15,14 @@
 
 use crate::Athena;
 use crate::commits::{NewFile, message};
+use crate::introspect::class_named;
 use crate::labeled::newest_labels;
 use crate::store::Records;
 use anyhow::{Result, bail};
 use athena_data::RecordId;
 use athena_data::records::{
-    AnyRecord, ClassLabel, ClassStatus, FailureClass, IntrospectionJev, IntrospectionRecord,
-    Labeler,
+    AnyRecord, ClassLabel, ClassMerges, ClassStatus, FailureClass, IntrospectionJev,
+    IntrospectionRecord, Labeler,
 };
 use serde::Serialize;
 
@@ -255,26 +256,31 @@ impl Athena {
         let head = self.head()?;
         let records = Records::load(&self.git, &head)?;
         let introspection = find(&records, reference)?;
+        let merges = ClassMerges::of(&records.classes);
         let mut new_class = None;
         let class = match verdict {
             Verdict::Right => match &introspection.failure_class {
-                Some(class) => class.clone(),
+                Some(class) => merges.resolve(class),
                 None => bail!(
                     "introspection {} records no class, so --right has nothing to confirm; use --class <class-id> or --new-class <name> --description \"...\"",
                     introspection.id
                 ),
             },
-            Verdict::Class(id) => {
-                if !records.classes.iter().any(|c| &c.id == id) {
-                    bail!("no class {id} in the registry; use --new-class to add one");
+            Verdict::Class(id) => match records.classes.iter().find(|c| &c.id == id) {
+                None => bail!("no class {id} in the registry; use --new-class to add one"),
+                Some(c) if c.is_merge() => {
+                    bail!("{id} is a merge record, not a class; use --class with a live class id")
                 }
-                id.clone()
-            }
+                Some(_) if merges.is_retired(id) => {
+                    let target = merges.resolve(id);
+                    bail!("class {id} was merged into {target}; use --class {target}")
+                }
+                Some(_) => id.clone(),
+            },
             Verdict::NewClass { name, description } => {
-                if let Some(same) = records
-                    .classes
-                    .iter()
-                    .find(|c| c.name.to_lowercase() == name.to_lowercase())
+                // The same rule the introspection step uses: names equal after normalising are one class.
+                if let Some(same) = class_named(&records.classes, &merges, name)
+                    .and_then(|id| records.classes.iter().find(|c| c.id == id))
                 {
                     bail!(
                         "the registry already has a class named {:?} ({}); use --class {}",

@@ -38,7 +38,7 @@ use crate::store::{JobRecords, JobState, Records};
 use anyhow::Result;
 use athena_data::RecordId;
 use athena_data::records::{
-    AnyRecord, ClassLabel, EvidenceKind, Finding, FindingSource, IntrospectionRecord,
+    AnyRecord, ClassLabel, ClassMerges, EvidenceKind, Finding, FindingSource, IntrospectionRecord,
     IntrospectionStatus, IntrospectionTrigger, LabelBasis, Labeler, OutcomeState, ProposalStatus,
     Severity,
 };
@@ -244,9 +244,12 @@ fn landed_at(job: &JobRecords) -> Option<Timestamp> {
 /// Evidence 2: the first accepted proposal for the class that landed after the introspection, and whether the
 /// class then stopped or kept recurring.
 fn recurrence_vote(records: &Records, i: &IntrospectionRecord, class: &RecordId) -> Option<Vote> {
+    // A class that was merged into another is the other: compare the classes after resolving each.
+    let merges = ClassMerges::of(&records.classes);
+    let same_class = |id: &RecordId| merges.resolve(id) == merges.resolve(class);
     let (proposal, applied, landed) = proposals::current(&records.proposals)
         .into_iter()
-        .filter(|p| &p.failure_class == class)
+        .filter(|p| same_class(&p.failure_class))
         .filter_map(|p| match &p.status {
             ProposalStatus::Accepted { job } => {
                 let at = landed_at(records.jobs.get(job.as_str())?)?;
@@ -263,7 +266,7 @@ fn recurrence_vote(records: &Records, i: &IntrospectionRecord, class: &RecordId)
             r.id != i.id
                 && r.at > landed
                 && r.status == IntrospectionStatus::Recorded
-                && r.failure_class.as_ref() == Some(class)
+                && r.failure_class.as_ref().is_some_and(same_class)
         })
         .collect();
     let mut cited = vec![
@@ -764,6 +767,55 @@ mod tests {
         // The recurrence itself came after the landing, so no prevention follows it: unlabeled.
         assert!(label_of(&d, 2, 40).is_none());
         assert_eq!(d.summary.by_kind["recurrence-after-prevention"], 2);
+    }
+
+    #[test]
+    fn a_recurrence_in_a_merged_class_counts_as_a_recurrence_of_its_target() {
+        use athena_data::records::{ClassStatus, FailureClass};
+        let class = |id: &str, name: &str| FailureClass {
+            id: RecordId::parse(id).unwrap(),
+            at: ts(0),
+            name: name.into(),
+            description: "d".into(),
+            status: ClassStatus::Proposed,
+            proposed_by: rid(0, 1),
+        };
+        let (target, retired) = (class(C, "Target"), class(D, "Retired"));
+        let mut records = Records::default();
+        // The case at minute 1 is in D, the prevention that landed at minute 21 was proposed for C, and the
+        // recurrence at minute 40 is in C.
+        records
+            .introspections
+            .push(intro(1, 1, "j001", IntrospectionTrigger::Intervention, D));
+        records
+            .introspections
+            .push(intro(2, 40, "j009", IntrospectionTrigger::Intervention, C));
+        add_job(
+            &mut records,
+            "jp01",
+            "Apply the default.",
+            19,
+            Some(OutcomeState::Landed),
+        );
+        records.proposals.push(proposal(C, "jp01"));
+        records.classes = vec![target.clone(), retired.clone()];
+        let apart = derive(&records, ts(100));
+        assert!(
+            label_of(&apart, 1, 1).is_none(),
+            "two classes: the prevention for C says nothing about D"
+        );
+
+        records
+            .classes
+            .push(retired.merged_into_class(&target, rid(5, 9), ts(5)));
+        let merged = derive(&records, ts(100));
+        let label = label_of(&merged, 1, 1).expect("D is C after the merge");
+        assert_eq!(
+            basis_kinds(label),
+            [EvidenceKind::RecurrenceAfterPrevention]
+        );
+        assert!(label.basis[0].detail.contains("recurred in 1 later"));
+        assert!(label.basis[0].records.contains(&rid(40, 2).to_string()));
     }
 
     #[test]

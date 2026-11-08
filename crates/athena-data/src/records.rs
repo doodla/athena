@@ -1189,9 +1189,7 @@ impl AnyRecord {
             }
             AnyRecord::DefaultExpectations(e) => e.validate().map_err(invalid)?,
             AnyRecord::Introspection(i) => i.validate().map_err(invalid)?,
-            AnyRecord::FailureClass(c) if c.name.trim().is_empty() => {
-                return Err(invalid("a failure class has a name".into()));
-            }
+            AnyRecord::FailureClass(c) => c.validate().map_err(invalid)?,
             AnyRecord::ClassLabel(l) => l.validate().map_err(invalid)?,
             AnyRecord::Role(r) => r.validate().map_err(invalid)?,
             AnyRecord::WorkItem(w) => w.validate().map_err(invalid)?,
@@ -3640,5 +3638,135 @@ mod tests {
         assert_eq!(job.allowed_paths, None);
         assert_eq!(checked, record);
         assert!(!checked.to_json().contains("allowed_paths"));
+    }
+
+    fn registry_class(id: &str, name: &str) -> FailureClass {
+        FailureClass {
+            id: RecordId::parse(id).unwrap(),
+            at: ts(),
+            name: name.into(),
+            description: "d".into(),
+            status: ClassStatus::Proposed,
+            proposed_by: RecordId::parse("20261014-100000-aaaa").unwrap(),
+        }
+    }
+
+    fn merge_record(from: &FailureClass, into: &FailureClass, id: &str, at: &str) -> FailureClass {
+        from.merged_into_class(into, RecordId::parse(id).unwrap(), at.parse().unwrap())
+    }
+
+    #[test]
+    fn a_merged_failure_class_has_a_path_a_schema_and_round_trips() {
+        let a = registry_class("20261014-090000-aaaa", "stale cache");
+        let b = registry_class("20261014-090100-bbbb", "cache is stale");
+        let merged = merge_record(&b, &a, "20261014-120000-cccc", "2026-10-14T12:00:00Z");
+        assert!(merged.is_merge());
+        assert_eq!(merged.merge_target(), Some(&a.id));
+        let record = AnyRecord::FailureClass(merged);
+        assert_eq!(
+            record.canonical_path(),
+            "records/failure-classes/2026-10/20261014-120000-cccc.json"
+        );
+        let text = record.to_json();
+        assert!(
+            text.contains("\"merged\"") && text.contains("merged_into"),
+            "{text}"
+        );
+        assert!(text.contains("athena.failure-class/1"));
+        assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), record);
+        let checked = check_record_file(&record.canonical_path(), text.as_bytes())
+            .unwrap()
+            .expect("a record");
+        assert_eq!(checked, record);
+    }
+
+    #[test]
+    fn an_old_proposed_failure_class_still_parses() {
+        let class = registry_class("20261014-090000-aaaa", "stale cache");
+        let record = AnyRecord::FailureClass(class.clone());
+        let text = record.to_json();
+        assert!(text.contains("\"status\": \"proposed\""), "{text}");
+        let checked = check_record_file(&record.canonical_path(), text.as_bytes())
+            .unwrap()
+            .expect("a record");
+        assert_eq!(checked, record);
+        assert!(!class.is_merge());
+        assert_eq!(class.merge_target(), None);
+    }
+
+    #[test]
+    fn merged_failure_class_validation() {
+        let a = registry_class("20261014-090000-aaaa", "stale cache");
+        let b = registry_class("20261014-090100-bbbb", "cache is stale");
+        let mut itself = merge_record(&b, &a, "20261014-120000-cccc", "2026-10-14T12:00:00Z");
+        itself.status = ClassStatus::Merged {
+            merged_into: b.id.clone(),
+            merged_from: b.id.clone(),
+        };
+        let mut unnamed = merge_record(&b, &a, "20261014-120000-cccc", "2026-10-14T12:00:00Z");
+        unnamed.name = " ".into();
+        let mut own_id = merge_record(&b, &a, "20261014-120000-cccc", "2026-10-14T12:00:00Z");
+        own_id.id = b.id.clone();
+        for bad in [itself, unnamed, own_id] {
+            let record = AnyRecord::FailureClass(bad);
+            assert!(
+                matches!(
+                    check_record_file(&record.canonical_path(), record.to_json().as_bytes()),
+                    Err(RecordError::Invalid { .. })
+                ),
+                "{record:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn class_merges_resolve_chains_stop_at_cycles_and_take_the_earliest_merge() {
+        let a = registry_class("20261014-090000-aaaa", "a");
+        let b = registry_class("20261014-090100-bbbb", "b");
+        let c = registry_class("20261014-090200-cccc", "c");
+        // No merge record: nothing retired, every id resolves to itself.
+        let none = ClassMerges::of(&[a.clone(), b.clone()]);
+        assert_eq!(none.resolve(&b.id), b.id);
+        assert!(!none.is_retired(&b.id));
+        // A chain b -> c -> a.
+        let bc = merge_record(&b, &c, "20261014-120000-1111", "2026-10-14T12:00:00Z");
+        let ca = merge_record(&c, &a, "20261014-120100-2222", "2026-10-14T12:01:00Z");
+        let all = vec![a.clone(), b.clone(), c.clone(), bc.clone(), ca.clone()];
+        let chain = ClassMerges::of(&all);
+        assert_eq!(chain.resolve(&b.id), a.id);
+        assert_eq!(chain.resolve(&c.id), a.id);
+        assert_eq!(chain.resolve(&a.id), a.id);
+        assert!(chain.is_retired(&b.id) && chain.is_retired(&c.id) && !chain.is_retired(&a.id));
+        assert_eq!(chain.live_target(&all, &b.id), Some(a.id.clone()));
+        assert_eq!(
+            chain.live_target(&all, &merged_id(&bc)),
+            None,
+            "a merge record is not a class"
+        );
+        let live: Vec<_> = chain
+            .live_classes(&all)
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        assert_eq!(live, vec![a.id.clone()]);
+        // Two merges of the same class: the earliest wins.
+        let late = merge_record(&b, &a, "20261014-130000-4444", "2026-10-14T13:00:00Z");
+        let twice = ClassMerges::of(&[a.clone(), b.clone(), c.clone(), late, bc]);
+        assert_eq!(twice.resolve(&b.id), c.id, "the earlier merge counts");
+    }
+
+    fn merged_id(record: &FailureClass) -> RecordId {
+        record.id.clone()
+    }
+
+    #[test]
+    fn a_merge_cycle_resolves_to_a_class_in_the_cycle() {
+        let a = registry_class("20261014-090000-aaaa", "a");
+        let b = registry_class("20261014-090100-bbbb", "b");
+        let ab = merge_record(&a, &b, "20261014-120000-1111", "2026-10-14T12:00:00Z");
+        let ba = merge_record(&b, &a, "20261014-120100-2222", "2026-10-14T12:01:00Z");
+        let cyclic = ClassMerges::of(&[a.clone(), b.clone(), ab, ba]);
+        let end = cyclic.resolve(&a.id);
+        assert!(end == a.id || end == b.id);
     }
 }

@@ -8,9 +8,9 @@
 use athena_data::DefaultsModel;
 use athena_data::JobId;
 use athena_data::records::{
-    CriterionKind, DeliverableAction, Demonstration, DependentKind, FailureClass, Finding,
-    FindingSource, Forecast, IntrospectionRecord, IntrospectionStatus, JobPlan, PinnedRepo,
-    PreventionKind, Reading, Severity,
+    ClassMerges, CriterionKind, DeliverableAction, Demonstration, DependentKind, FailureClass,
+    Finding, FindingSource, Forecast, IntrospectionRecord, IntrospectionStatus, JobPlan,
+    PinnedRepo, PreventionKind, Reading, Severity,
 };
 use std::fmt::Write;
 
@@ -347,19 +347,23 @@ pub struct ClassSummary {
 
 /// Summarises every registry class that has a recorded case, from the introspections and the registry. An
 /// introspection that proposes relaxing or removing a gate is not a case: it is a challenge to a check, for
-/// the review Hestia queues, and the producer is not shown it.
+/// the review Hestia queues, and the producer is not shown it. A merge record is not a class, and a class that
+/// was merged into another is counted under the other.
 pub fn class_summaries(
     introspections: &[IntrospectionRecord],
     classes: &[FailureClass],
 ) -> Vec<ClassSummary> {
-    classes
-        .iter()
+    let merges = ClassMerges::of(classes);
+    merges
+        .live_classes(classes)
+        .into_iter()
         .filter_map(|class| {
             let cases: Vec<&IntrospectionRecord> = introspections
                 .iter()
                 .filter(|i| {
                     i.status == IntrospectionStatus::Recorded
-                        && i.failure_class.as_ref() == Some(&class.id)
+                        && i.failure_class.as_ref().map(|c| merges.resolve(c)).as_ref()
+                            == Some(&class.id)
                         && !i.prevention_kind.is_some_and(PreventionKind::loosens)
                 })
                 .collect();
@@ -3112,6 +3116,68 @@ mod tests {
                 prevention: Some("newest check".into()),
             }],
             "relax and remove are not cases, and a class with only those has no summary"
+        );
+    }
+
+    #[test]
+    fn class_summaries_count_a_merged_class_under_its_target_and_skip_the_merge_record() {
+        let registry = |n: u32, name: &str| FailureClass {
+            id: RecordId::parse(&format!("20261001-000000-c{n:03}")).unwrap(),
+            at: "2026-10-01T00:00:00Z".parse().unwrap(),
+            name: name.into(),
+            description: "A description.".into(),
+            status: ClassStatus::Proposed,
+            proposed_by: RecordId::parse("20261001-000000-0001").unwrap(),
+        };
+        let (target, retired) = (registry(1, "Target"), registry(2, "Retired"));
+        let case = |class: &FailureClass, n: u32| IntrospectionRecord {
+            id: RecordId::parse(&format!("20261002-00{n:02}00-0001")).unwrap(),
+            at: format!("2026-10-02T00:{n:02}:00Z").parse().unwrap(),
+            trigger: IntrospectionTrigger::Rejection,
+            job: Some(JobId::parse(&format!("20261002-00{n:02}00-aaa{n}")).unwrap()),
+            intervention: None,
+            class_of_work: "code".into(),
+            category: "rejected".into(),
+            what_happened: Some("It happened.".into()),
+            failure_class: Some(class.id.clone()),
+            new_class: false,
+            earlier_cases: vec![],
+            decisions_matched: vec![],
+            cause: Some("A cause.".into()),
+            prevention_kind: Some(PreventionKind::CodeCheck),
+            prevention: Some(format!("check {n}")),
+            proposed_request: Some("Do it.".into()),
+            evidence: None,
+            status: IntrospectionStatus::Recorded,
+            failure: None,
+            flags: vec![],
+            dropped_ids: vec![],
+            planning_stopped: false,
+            from_jev: false,
+            jev: None,
+        };
+        let cases = vec![case(&target, 1), case(&retired, 2), case(&retired, 3)];
+        let merge = retired.merged_into_class(
+            &target,
+            RecordId::parse("20261020-000000-0abc").unwrap(),
+            "2026-10-20T00:00:00Z".parse().unwrap(),
+        );
+        let separate = class_summaries(&cases, &[target.clone(), retired.clone()]);
+        assert_eq!(
+            separate.len(),
+            2,
+            "before the merge the classes stand apart"
+        );
+        let merged = class_summaries(&cases, &[target, retired, merge]);
+        assert_eq!(
+            merged,
+            vec![ClassSummary {
+                title: "Target".into(),
+                cases: 3,
+                jobs: 3,
+                prevention: Some("check 3".into()),
+            }],
+            "one summary: the merge record is no class and the retired class counts under its target"
         );
     }
 
