@@ -1,0 +1,413 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-082810-q9j5",
+  "round": 3,
+  "at": "2026-11-08T17:22:27.907255839Z",
+  "invocation_seq": 8,
+  "approach": "Count the rejected, failed or timed-out jobs in one retry lineage (a chain of \"try again on <job>\" requests) from the job records. The count is built on `job_history` and `retries_by_job` in `crates/athena-core/src/reading/retry.rs`, with a named constant `LINEAGE_ATTEMPT_LIMIT = 3`. A new `lineage_stop` returns None when the job is in no lineage or has fewer than 3 failed attempts. Otherwise it returns the failed job ids, the findings and unmet criteria seen in at least two attempts, and a `NarrowerAction`: Queued(existing marker request), Queue(text of a new narrower request) or Refused(reason). The narrower request is defined mechanically, not as a renamed retry. Its title is `Re-scope or split <root>: <first repeated item>`. Its acceptance bullets are only the repeated unmet criteria and one bullet per repeated blocker/major finding, capped strictly below the root's own bullet count when the root has more than one. Leftover repeated items go in the body under \"Left for a later request\". Its files are the files named in the repeated findings' locations, kept to the root's files when they overlap, then the root's files, then the fallback `StewardRequest::from_change` already uses. A request that is itself a narrower request (its title starts `Re-scope or split `) never gets another: `lineage_stop` returns Refused, the drain still stops, and the operator decides. The drain asks through two new `Steps` methods with defaults, so no existing implementor changes. It asks at two places in `Drain::attempts`: (1) the loop top, before `run_job`, for a non-landing attempt (stops a queued retry item whose chain already holds 3 failures, and a 4th attempt after any failure); (2) right after `failures += 1`, before the `failures >= ATTEMPTS` return (a lineage that reaches 3 on the item's own last in-run attempt would otherwise end `Failed` with nothing recorded). A hand `athena retry` stays unlimited. A new `lineage-limit` default is added to `defaults.toml`. The reader token budget (1997 of 2000) has no room, so `buy-first` is split at its real `; ` break (59 bytes saved, estimate by count) and the new entry's first sentence and id are worded and measured so the computed reader size stays exactly 1997. `docs/system-facts.md` and `docs/design/context-engineer.md` are then not touched, and they are not deliverables. Tests use `max_jobs` of at least 2 so the job cap cannot be the thing that stops the 4th attempt, and each stop point is shown by removing it.",
+  "decisions": [
+    {
+      "choice": "Ask `Steps::lineage_stop` at two points in `Drain::attempts` (drain.rs:1855-1957) through one helper `Drain::lineage_end(item, job) -> Option<ItemEnd>`. Point 1: in the `if passed.is_none()` block after the `paused_reason` check (1875-1877) and before `run_job` (1887), with `last_job`. Point 2: right after `failures += 1` (1941), only when `passed.is_none()` and `paused_reason(item)` is None, before the `failures >= ATTEMPTS` block (1942). The helper calls `lineage_stop`, then `queue_narrower` (skipped for Refused), writes one `drain      <item> stopped: ...` UI line plus a `note_once`, and returns `ItemEnd::LineageStopped(reason)`; `finish` passes the item over with the reason.",
+      "reason": "Point 1 covers a queued retry item whose chain is already at 3 and any retry after a failure. Point 2 covers the lineage that becomes 3 on the item's last in-run attempt: there `failures` becomes 2 and the function returns `Failed` (1951-1954) at once, so point 1 never sees it and no narrower request would be queued. Point 1 alone would not do it, and point 2 alone misses a queued item already at 3 before its first read. The pause keeps priority, so the scope guard's own stop is unchanged. A landing retry of a passed job (`passed.is_some()`) is not a new attempt and is not checked.",
+      "rejected": [
+        {
+          "option": "Check only at the loop top",
+          "why": "Misses the lineage that reaches 3 on the item's second in-run attempt: it returns `ItemEnd::Failed` first with no narrower request."
+        },
+        {
+          "option": "Refuse inside `Athena::retry`/`go` in athena-core",
+          "why": "It would also block the operator's own `athena retry`, the manual override, and the drain would see an error rather than a stop it can answer with a narrower request."
+        },
+        {
+          "option": "Raise the scope guard's T1 (flag at attempt 3, scope_guard.rs) to a pause",
+          "why": "A pause queues no narrower request and records no repeated findings, and T1 counts per line, not per retry chain. The `thrash-stop` text is out of scope."
+        },
+        {
+          "option": "Reuse the drain's `failures` counter or raise `ATTEMPTS`",
+          "why": "`failures` is per item per run; a lineage spans runs and hand retries. The two-attempt per-item rule is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "`lineage_attempts(records, job)` in retry.rs calls `job_history` once and derives the forward map with a private `retries_in(records, &history)` that `retries_by_job` is changed to call (same result). It returns empty at once when the given job has no `retry_of` and no entry in the forward map. Otherwise it walks forward to the newest standing retry, then back along `retry_of`, with a seen-set and `MAX_RETRY_DEPTH` each way, and keeps jobs whose `records.jobs[id].state()` is Closed(Rejected | Failed | TimedOut), oldest first. `pub const LINEAGE_ATTEMPT_LIMIT: usize = 3`.",
+      "reason": "Reuses the one place the \"try again on\" form is read (`retried_job`, retry.rs:201). One history pass per call and no further work for a job in no lineage. Counts hand and drain retries alike. `retries_by_job` already skips unrun retries (dropped, declined, abandoned, stale, closed). `job_history` maps Stale to Failed (retry.rs:222), so the state is read from the record to keep stale out. TimedOut counts because `athena retry` and `RunStep::Failed.retry` treat it like rejected or failed.",
+      "rejected": [
+        {
+          "option": "Walk back only with `earlier_jobs`",
+          "why": "Does not use the helpers the brief names and misses a hand retry of the job the drain holds."
+        },
+        {
+          "option": "A `[retry] max_attempts` key in athena.toml",
+          "why": "athena.toml is a governance file not listed as a deliverable. The default's text names the constant."
+        },
+        {
+          "option": "Call `retries_by_job` and `job_history` separately per walk",
+          "why": "Each resolves every request job's text; one history pass per call is enough."
+        }
+      ]
+    },
+    {
+      "choice": "The replacement is an ordinary request built by `StewardRequest::new` and queued with `Athena::queue` (channel `cli`). Narrowing rule, mechanical. Title: `Re-scope or split <root id>: <first repeated item, one line, at most 80 characters>`. Body: starts `Lineage <root id>: failed attempts <ids>.`, then the repeated findings (one line each, length-capped), and, under `Left for a later request:`, any repeated items that did not fit the acceptance. Acceptance: one bullet per repeated unmet criterion (`Meet: <criterion>`) and per repeated blocker/major finding (`Resolve: <summary>`), at most max(1, root bullets - 1) of them when the root has more than one bullet; never the root's full list. A finding repeats when the same summary+location (or the same unmet criterion text) is in at least 2 failed attempts; a failed attempt with no verification contributes its closing reason line. If nothing repeats, the last attempt's blocking findings are used and the body says none repeated. Files: (1) paths from the repeated findings' `location` (trailing `:line[:col]` stripped, `looks_like_path`), restricted to the root's `request_text_touches` when that overlap is non-empty; (2) else the root's touches; (3) else `records/`, the fallback `StewardRequest::from_change` already uses (steward.rs:624-630). `lineage_stop` finds an existing request job whose text contains `Lineage <root id>:` and returns Queued(it), so later passes queue nothing. Second generation: if the lineage root's own request starts with `Re-scope or split `, the action is Refused and nothing is queued.",
+      "reason": "`StewardRequest::new` checks the text against the parse `athena plan` uses (steward.rs:532-592), so the planning pass never refuses it for missing acceptance, and it demands at least one bullet and one path (560-567), which the three-step files fallback guarantees. The narrowing is checkable: acceptance differs from the root's text and is no larger than its bullet count, strictly smaller when the root has several. The second-generation stop closes the loop that a fresh lineage at zero would otherwise open: a narrower request that itself fails 3 times is passed over for the operator and not re-narrowed forever. `queue` redacts and commits a Request record on the already-drained `cli` channel. No new record type, so `check_record_file` and `AnyRecord` are untouched.",
+      "rejected": [
+        {
+          "option": "Title only differs from the root; acceptance and files copied from the root",
+          "why": "That launders the cap: the same scope gets a fresh allowance."
+        },
+        {
+          "option": "A new record type for the stop",
+          "why": "Touches the record schema and gate for no gain; the request text carries the findings."
+        },
+        {
+          "option": "Queue on the `steward` channel through `RequestQueue`/`decide`",
+          "why": "Needs a ProposedChange, role and work item, and gets guaranteed-turn treatment in the plan."
+        },
+        {
+          "option": "Close or drop the queued \"try again\" item that tripped the limit",
+          "why": "No drain path closes a queued request; it is passed over each run with the reason and the operator may drop it. Not in scope."
+        }
+      ]
+    },
+    {
+      "choice": "A manual `athena retry` / `athena go` stays unlimited; one test in tests/retry.rs shows a 4th hand retry still runs.",
+      "reason": "The request is that Athena stops its own retrying; the operator keeps an override, and criterion 6 needs existing retry behavior unchanged.",
+      "rejected": [
+        {
+          "option": "Refuse a fourth `athena retry`",
+          "why": "Changes a user command beyond the request."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the reader set at its recorded size (1997 of 2000) with no edit to docs/system-facts.md or docs/design/context-engineer.md. Add `lineage-limit` with a short first sentence (for example `Retries stop after 3 failed attempts.`, 37 characters, line about 59 bytes) and split ONLY `buy-first` at its `; ` break into `Adopt good, maintained tools and crates before building. Build only for needs they don't meet, and record the call.` (59 bytes less in the reader line, counted from the text). The producer runs `cargo test -p athena-cli --test budgets` and, if the computed reader size is not 1997, rewords the new first sentence or id from natural variants (for example `A retry lineage stops after 3 failures.`, id `retry-limit`) until it is. `lazy-requests` is not split.",
+      "reason": "The facts-file test compares the line exactly, and neither facts file is a listed deliverable. The size is ceil(bytes/3), so a window of three bytes covers the choice, and wording of one short sentence is free. `buy-first` is the only entry whose split loses nothing the reader judges on (its second half is about how to build, and the producer and verifier still see the whole statement through `DefaultsModel::get`). `lazy-requests` is left whole because its second half, recovering hidden requirements, is the reader's own task. Searched the repository: `Adopt good` and `build only for needs` appear only in defaults.toml, BRIEF.md and docs; no test pins the rendered line. The pinned first sentences (`behavior-evidence`, `root-cause`, `outcome-check`, `no-empty-success`, `thrash-stop`) are untouched. The change description and CHANGELOG say the reader now sees a shorter first sentence for `buy-first`.",
+      "rejected": [
+        {
+          "option": "Update the `budget reader` line in docs/system-facts.md and the prose row in docs/design/context-engineer.md",
+          "why": "Neither file is a listed deliverable; Athena flagged both as widening the scope. Kept only as a fallback that needs the user's approval (see open questions)."
+        },
+        {
+          "option": "Split `lazy-requests` as well",
+          "why": "The reader would keep only `Requests are short.` and lose the clause about its own task; a single split of `buy-first` is enough by count."
+        },
+        {
+          "option": "Raise the reader budget",
+          "why": "The facts file says update the line, never the budget."
+        },
+        {
+          "option": "Add no default",
+          "why": "The brief requires one with its own id and source."
+        }
+      ]
+    },
+    {
+      "choice": "Add no parser form or refusal rule; `retry_reference` is reused unchanged and `crates/athena-core/tests/refusal_corpus.rs` is not extended.",
+      "reason": "The change is a stop on a count, not a new way to read or refuse request text. The marker `Lineage <root id>:` and the title prefix `Re-scope or split ` are matched as substrings of text Athena built itself, not parsed from operator input. An operator who types a request starting `Re-scope or split ` only gets the second-generation stop (no further narrower request queued), which is harmless.",
+      "rejected": [
+        {
+          "option": "Add refusal-corpus cases",
+          "why": "Nothing in that corpus matches the new rule."
+        }
+      ]
+    },
+    {
+      "choice": "Drain tests use `Limits { budget_usd: 100.0, target_rating: 5, max_jobs }` with `max_jobs` of at least 2 in the in-item and second-attempt tests, and assert on the lineage records, the marker count and the passed-over line, not on the job total. Each test's discriminator is derived from the code: without point 1 the drain runs `try again on <q>` (run_job starts it because started 1 < 2); without point 2 the second-attempt case ends `ItemEnd::Failed` (drain.rs:1951-1954) with no marker request and the display says `failed twice`.",
+      "reason": "With `max_jobs: 1` the job cap (drain.rs:1544-1546) would stop the 4th attempt and the test would pass without the lineage rule (critic finding 3). The plan is rebuilt before each wave (drain.rs:3022-3025), so the narrower request may be worked in a later wave of the same run; the assertions are chosen so that does not matter.",
+      "rejected": [
+        {
+          "option": "`max_jobs: 1` for the in-item test",
+          "why": "The cap, not the lineage rule, would end the item; only a passed-over line would differ."
+        },
+        {
+          "option": "`work_everything()` (max_jobs 10) with job-total assertions",
+          "why": "The narrower request is then worked and fails twice, blurring the totals."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "defaults.toml",
+      "action": "modify",
+      "purpose": "Add `[[default]] id = \"lineage-limit\"` (applies_to [\"*\"], source naming records/interventions/2026-10/20261026-180231-tf2p.json): at 3 rejected or failed attempts in one retry lineage Athena stops retrying, records the repeated findings and queues one narrower re-scope or split request; enforced by mechanism in the drain; a hand `athena retry` is not limited. Split `buy-first` at its `; ` break. Governance file, allowed because the reading lists it.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/retry.rs",
+      "action": "modify",
+      "purpose": "Add `LINEAGE_ATTEMPT_LIMIT`, the private `retries_in` that `retries_by_job` calls, `lineage_attempts`, `LineageStop`, `NarrowerAction`, `lineage_stop` (repeated-finding selection, mechanical narrowing, file fallbacks, marker lookup, second-generation refusal).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Unit tests in `mod tests` for lineage counting, early return, cycle, repeated findings, narrowing, the no-files case, the marker lookup and the second-generation refusal. The `pub use retry::*` already exports the new items.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "`Steps::lineage_stop` and `Steps::queue_narrower` (defaults), `RealSteps` impls, `ItemEnd::LineageStopped`, `Drain::lineage_end`, the two call sites in `Drain::attempts`, a `finish` arm, and the module-doc bullet.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "The default test, the in-item and queued-retry no-4th-attempt tests, the narrower-request, second-attempt and idempotence tests, and an all-met-plus-major verdict helper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "purpose": "Add `a_hand_retry_past_three_failed_attempts_is_still_allowed`; existing tests unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased/Added entry: the limit, both stop points, the narrower request and its narrowing, root cause, tests, default id, readings re-read once after the defaults edit, shorter reader sentence for `buy-first`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "purpose": "Add a row for the lineage limit to the section 10 failure table, with a sentence on the narrower request, the second-generation rule and the manual override.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read retry.rs around `retried_job` (201), `job_history` (210), `retries_by_job` (246), `finding_text` (446) and `retry_findings` (476); the `mod tests` helpers in reading.rs (`records_with`, `outcome`, `finding`, `two_majors_and_a_minor`); `StewardRequest::new` (steward.rs:532-592); and `Drain::attempts` (drain.rs:1855-1957) before writing code.",
+    "In retry.rs add `pub const LINEAGE_ATTEMPT_LIMIT: usize = 3;`. Add private `retries_in(records, &history)` holding the body of `retries_by_job`, and make `retries_by_job` call it with `job_history(records)`. Add `pub fn lineage_attempts(records, job) -> Vec<JobId>`: one `job_history` pass; empty when the job has no `retry_of` and no forward entry; walk forward to the newest standing retry, then back along `retry_of`, with a seen-set and `MAX_RETRY_DEPTH` bounds; keep jobs whose record state is Closed(Rejected | Failed | TimedOut), oldest first. Add `pub enum NarrowerAction { Queued(JobId), Queue(String), Refused(String) }`, `pub struct LineageStop { root, attempts, repeated: Vec<String>, action }` and `pub fn lineage_stop(records, job) -> Option<LineageStop>` (Some only when `attempts.len() >= LINEAGE_ATTEMPT_LIMIT`). Build the request per decision 3: repeated items from each failed attempt's final verification (unmet criteria by criterion text; blocker/major findings by summary+location via `finding_blocks`), or the closing reason line when there is no verification; flatten each to one line and cap its length; build with `StewardRequest::new(None, title, body, acceptance, files)` using the acceptance cap and the three-step files fallback. `Queued` when a request job's text contains `Lineage <root>:`; `Refused` when the root request starts `Re-scope or split ` or the build errors.",
+    "In reading.rs `mod tests` add the lineage unit tests of demonstration 2 and the repeated-finding, narrowing, no-files, marker and second-generation tests of demonstration 4(d).",
+    "In drain.rs add to `Steps`: `fn lineage_stop(&self, _job: &str) -> Option<athena_core::reading::LineageStop> { None }` and `fn queue_narrower(&self, _stop: &athena_core::reading::LineageStop) -> Result<String, String>` (default Err), each with a doc comment on the default.",
+    "Implement both for `RealSteps`: `lineage_stop` loads `self.records()` (None if it cannot load, as `paused`/`flagged` do) and calls `athena_core::reading::lineage_stop`; `queue_narrower` returns the id for Queued, calls `self.athena.queue(...)` for Queue (errors mapped to strings), and returns Err(reason) for Refused.",
+    "Add `ItemEnd::LineageStopped(String)` and `Drain::lineage_end(&self, item, job) -> Option<ItemEnd>`: ask `lineage_stop`; on Some call `queue_narrower` (an error or Refused becomes a note), write one `drain      <item> stopped: ...` UI line and a `note_once`; the reason names the attempts, the narrower request id (or why none) and that the operator may drop the item. Call it in `Drain::attempts` (1) inside `if passed.is_none()` after the `paused_reason` check and before `run_job`, with `last_job`; (2) right after `failures += 1`, when `passed.is_none()` and `paused_reason(item)` is None, before the `failures >= ATTEMPTS` block. Add the arm to `finish` (`pass_over(&item.job, &reason)`) and fix any other exhaustive match the compiler reports.",
+    "Update the `Retry` bullet of the drain.rs module doc (~line 201) or add a bullet: limit of 3, no 4th attempt, one narrower request and how it is narrowed, both stop points, the marker and idempotence, the second-generation rule, the manual-retry override.",
+    "Edit defaults.toml: add `lineage-limit` after `thrash-stop` with a short first sentence (for example `Retries stop after 3 failed attempts.`), then the rest of the statement (a retry lineage that reaches 3 rejected or failed attempts gets no 4th attempt; Athena records the findings that repeated and queues one narrower re-scope or split request; enforced by mechanism in `Drain::attempts`; a hand `athena retry` is not limited). Source: `records/interventions/2026-10/20261026-180231-tf2p.json: the operator stopped and split by hand lineages that ran 3 to 5 rejected attempts`. Split `buy-first` into `...before building. Build only for needs they don't meet, and record the call.`. Run `cargo test -p athena-cli --test budgets`; it must pass with docs/system-facts.md unchanged. If the computed reader size differs from 1997, reword the new first sentence or id (natural variants only) and re-run until it matches. Do not edit docs/system-facts.md or the budget; if no natural wording matches, stop and report.",
+    "Add the CHANGELOG.md entry at the top of `## [Unreleased]` / `### Added` and the async-drain.md section 10 row with one sentence below the table.",
+    "In tests/drain.rs add the all-met-plus-major verdict helper beside `rejecting_verdict`, a small hand-run helper (`go` until Finished, assert Rejected) and Limits with `max_jobs` of at least 2 where the plan says so. Add: the default test (demonstration 1); `a_lineage_with_three_rejected_attempts_gets_no_fourth_attempt`; `a_queued_retry_of_a_lineage_with_three_failures_is_not_read_or_run` (with two drains and the one-marker, q-still-Queued assertions); `the_lineage_stop_queues_one_narrower_request_that_carries_the_repeated_findings` (narrowing assertions and the direct `lineage_stop`/`queue_narrower` unchanged-head check); and `a_lineage_that_reaches_three_failures_on_the_items_second_attempt_queues_the_narrower_request`.",
+    "In tests/retry.rs add `a_hand_retry_past_three_failed_attempts_is_still_allowed`, using `reject_then_ask_again`/`run_retry` for the first two attempts, a third by `athena.retry`, and a fourth `athena.retry` that returns Ok and runs to a finished job. Use the all-met-plus-major verdict so the scope guard does not pause the line.",
+    "Confirm the new tests fail without each point, then restore both: disable point 1 and see the in-item and queued-retry tests fail; disable point 2 and see the second-attempt test fail; remove the marker lookup and see the idempotence assertions fail. Do not leave any of that state in the working tree.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; confirm `git diff --stat` shows eight paths, none under records/, and no governance file other than defaults.toml."
+  ],
+  "risks": [
+    {
+      "risk": "The new default plus the `buy-first` split may not land the reader at exactly 1997, so `system_facts_budgets_match_computed` fails and the facts file would need an edit.",
+      "mitigation": "The window is three bytes (ceil(bytes/3)), and the new first sentence and id have several natural wordings; step 8 measures with the budgets test and rewords until it matches. If none does, the producer stops and reports instead of editing docs/system-facts.md (open question)."
+    },
+    {
+      "risk": "The rejecting verdict (fail, all criteria met, one major finding) might not close the job as rejected, or the scope guard might pause the line, so the drain stops for the wrong reason.",
+      "mitigation": "`judge` gives final_verdict Fail on a Fail verdict or any blocker/major finding (verify.rs:649-672). The tests assert j1, j2 and q are each `Closed(Rejected)` and `steps.paused` is empty before they assert the lineage stop. If the guard still pauses, vary the unmet criterion per attempt while keeping the same major finding so it repeats."
+    },
+    {
+      "risk": "The narrower request may be worked in a later wave of the same run (the plan is rebuilt before each wave, drain.rs:3022-3025) and add jobs that look like extra attempts.",
+      "mitigation": "Tests assert on `lineage_attempts`, the marker count, the absence of a job `try again on <q>` and the passed-over line, never on the job total. A narrower request starts its own lineage at zero, so it can fail twice without tripping the limit."
+    },
+    {
+      "risk": "The planning pass reads the queued retry item before the attempt, so a Reader invocation appears in the queued-retry test even when the gate works.",
+      "mitigation": "That test asserts q's state (still Queued), no job `try again on <q>` and the passed-over line, not the Reader count."
+    },
+    {
+      "risk": "A queued \"try again\" item that hits the limit stays queued and is passed over on every run.",
+      "mitigation": "`lineage_stop` finds the existing marker request, so nothing new is queued, and the pass-over line names the narrower request and says the operator may drop the item. The drain module doc says so; the two-drain test covers it."
+    },
+    {
+      "risk": "The narrower request could still be as large as its root when the root has one bullet, or a narrower request could itself fail 3 times and be re-narrowed forever.",
+      "mitigation": "Acceptance is only the repeated items, capped strictly below the root's bullet count when it has several, with the rest listed as left for a later request. A request whose root is a `Re-scope or split ` request gets Refused (no further request, the drain still stops); a unit test covers it."
+    },
+    {
+      "risk": "The last files fallback (`records/`, the precedent in `StewardRequest::from_change`) is weak for a code request.",
+      "mitigation": "It is reached only when neither the repeated findings' locations nor the root request name a path. It keeps the request buildable so a replacement is always queued, and a unit test covers the case."
+    },
+    {
+      "risk": "Finding text may hold a boundary word or secret.",
+      "mitigation": "`StewardRequest::new` rewords boundary words and `Athena::queue` redacts. If queuing still errors, the drain stops the lineage anyway, dispatches no 4th attempt and notes the error."
+    },
+    {
+      "risk": "A lineage longer than `MAX_RETRY_DEPTH` (16) or with a cycle.",
+      "mitigation": "Both walks use a seen-set and the same depth bound as `earlier_jobs`. A unit test covers a cyclic request. Past 16 hops the count is still at least 3, so the stop holds."
+    },
+    {
+      "risk": "The reader's view of `buy-first` is shorter.",
+      "mitigation": "Only its first sentence is shown to the reader; the producer and verifier briefs still carry the whole statement. The CHANGELOG and change description say so."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`Steps` trait gains `lineage_stop` and `queue_narrower` (both with defaults)",
+      "dependent": "crates/athena-cli/src/drain.rs `Steps` implementors: RealSteps; unit-test stubs `Stub`, `Capped`, `Housekeeping`, `World`, `Lane`; crates/athena-cli/tests/drain.rs `Stub`, `Unaccepted`, `Replay`, `WithRealCheck`, `Shared`, `Rebasing`",
+      "kind": "code",
+      "test": "cargo test --locked: every existing drain test compiles unchanged; the defaults (None, Err) mean no stub sees a stop. Only `RealSteps` overrides them; the wrappers `WithRealCheck` and `Replay` use the defaults, so their tests behave as before.",
+      "reason": null
+    },
+    {
+      "name": "New `ItemEnd::LineageStopped(String)` variant",
+      "dependent": "crates/athena-cli/src/drain.rs `Drain::finish` (match on `ItemEnd`, ~2576-2639) and every other match on `ItemEnd`",
+      "kind": "code",
+      "test": "cargo clippy --all-targets --locked -- -D warnings (and the build) fail on a missed arm; the criterion 3 tests check the passed-over line.",
+      "reason": null
+    },
+    {
+      "name": "`Drain::attempts` asks for a lineage stop at the loop top and after each failure",
+      "dependent": "crates/athena-cli/src/drain.rs `Drain::work` and its callers (`run_serial`, `run_parallel`, `drain`, `drain_concurrent`) that reach `Drain::attempts`",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain: the existing flag/pause tests run through stubs or a lineage of 2 and are unchanged; the new tests cover both points.",
+      "reason": null
+    },
+    {
+      "name": "Scope-guard thrash signals and the `thrash-stop` default",
+      "dependent": "crates/athena-core/src/scope_guard.rs T1 (flag at the 3rd attempt) and T4 (pause at 2 rejections of one criterion); `Drain::paused_reason` / `flagged_reason` (drain.rs ~1960-1975); defaults.toml `thrash-stop`",
+      "kind": "rule",
+      "test": null,
+      "reason": "Unchanged. A paused line still returns `ItemEnd::Paused` first at the loop top, and point 2 runs only when `paused_reason` is None. A flagged line with fewer than 3 failed attempts in its chain is unaffected (existing tests with a lineage of 2). The criterion 3 test asserts `steps.paused` is empty. The `thrash-stop` text is not edited."
+    },
+    {
+      "name": "`retries_by_job` now calls a private `retries_in(records, &history)`",
+      "dependent": "athena_core callers of `retries_by_job`, `job_history`, `retried_job`: status.rs, run/mod.rs, plan.rs, steward.rs, evidence_labels.rs, scope_guard.rs, gate_counts.rs, status/planning.rs, status/throughput.rs, crates/athena-context/src/briefs.rs, and `Athena::retry`",
+      "kind": "code",
+      "test": "cargo test -p athena-core lineage asserts `retries_by_job` returns the same map as before for the same records; `cargo test --locked` runs every existing caller's tests. Public signatures and results are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "The narrower request is a new queued request on channel `cli`",
+      "dependent": "crates/athena-core/src/steward.rs `queued_work` / `DRAINED_CHANNELS`; the drain's per-wave plan (`Drain::prepare`, `athena_core::plan`)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain the_lineage_stop_queues_one_narrower_request_that_carries_the_repeated_findings (built with `StewardRequest::new`, so `request_text_acceptance` and `request_text_touches` accept it).",
+      "reason": null
+    },
+    {
+      "name": "Queuing the narrower request",
+      "dependent": "crates/athena-core/src/reading.rs `Athena::queue` (banned-word refusal, redactor)",
+      "kind": "code",
+      "test": null,
+      "reason": "`queue` is called unchanged. If it errors, `RealSteps::queue_narrower` returns Err; the drain still stops the lineage, dispatches no 4th attempt and records the error as a note. The next run tries again because no marker request exists."
+    },
+    {
+      "name": "defaults.toml content changes the reader's rendered set",
+      "dependent": "crates/athena-cli/tests/budgets.rs (`DefaultsModel::parse(include_str!(\"../../../defaults.toml\"))`, reader budget 2000, `check_system_facts` exact match with docs/system-facts.md `budget reader: 1997 of 2000`)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets system_facts_budgets_match_computed passes with docs/system-facts.md unchanged, because the new line is offset by the `buy-first` split to the same computed size. The producer verifies by running it.",
+      "reason": null
+    },
+    {
+      "name": "Docs and briefs that quote the reader size",
+      "dependent": "docs/system-facts.md (read through `athena_context::briefs::SYSTEM_FACTS`), docs/design/context-engineer.md row `Reader prompt | 1997 of 2000`, xtask `BUILD_INPUT_GLOBS`",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not edited: the reader size stays 1997, so the quoted line and row remain true. The xtask glob names paths, not content."
+    },
+    {
+      "name": "A defaults.toml edit changes `defaults_sha256`, so every accepted reading not yet run is read again at its next run",
+      "dependent": "crates/athena-core/src/run/mod.rs:1018-1022 (compares `reading.defaults_sha256` with the current `jc.defaults_sha256` and re-reads), crates/athena-core/src/steward.rs:363, crates/athena-gate/src/jobs.rs:419 (checks the hash against defaults.toml at the reading's base commit)",
+      "kind": "code",
+      "test": null,
+      "reason": "An expected, designed cost of any defaults edit: each such reading pays one re-read once this lands. The gate check compares each reading with the defaults.toml at its own base commit, so existing records stay valid. The CHANGELOG entry and the change description say so."
+    },
+    {
+      "name": "Rendered first sentences of existing defaults and the parse of the repository's defaults.toml",
+      "dependent": "crates/athena-data/src/defaults.rs tests, crates/athena-context/src/briefs.rs defaults tests, crates/athena-data/tests/repo_config.rs",
+      "kind": "code",
+      "test": "cargo test -p athena-data; cargo test -p athena-context",
+      "reason": "The pinned first sentences are untouched. Only `buy-first` gets a sentence break; a search of the repository found no test that pins its text. The new entry has a unique id, a non-empty statement and a source, so `DefaultsModel::parse` accepts it."
+    },
+    {
+      "name": "Prose lists of defaults",
+      "dependent": "docs/design/athena-v0.md defaults table (~line 1552) and docs/design/defaults-loop.md",
+      "kind": "rule",
+      "test": null,
+      "reason": "Descriptive tables read by no code or test; the new default's entry and source are in defaults.toml. They are not edited."
+    },
+    {
+      "name": "Manual retry of a long lineage",
+      "dependent": "crates/athena-cli/tests/retry.rs, `Athena::retry` (reading.rs:1123), `earlier_attempt`",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test retry (existing `a_rejected_job_can_be_retried_twice` plus the new `a_hand_retry_past_three_failed_attempts_is_still_allowed`).",
+      "reason": null
+    },
+    {
+      "name": "Landing, history-check and attribution rules",
+      "dependent": "`athena land` and the landing rules",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not touched. The plan adds no landing, history-check or attribution classification; the new checks run only when `passed.is_none()` and before any read or run, so no commit shape on the branch changes and no commit-shape table is needed."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A test in crates/athena-cli/tests/drain.rs parses the repository's defaults.toml with `DefaultsModel::parse(include_str!(\"../../../defaults.toml\"))` and asserts that `get(\"lineage-limit\")` exists, its source contains `records/interventions/2026-10/20261026-180231-tf2p.json`, its statement contains `3 rejected or failed attempts`, `findings`, `narrower` and `enforced by mechanism`, and `render()` holds a line starting `- lineage-limit [*]: `. A second command shows the reader set still equals the recorded line.",
+      "command": "cargo test -p athena-cli --test drain the_lineage_limit_default_names_its_source_and_states_it_is_enforced_by_mechanism",
+      "observes": "The default parses with the new id, source and statement. Then `cargo test -p athena-cli --test budgets` passes with docs/system-facts.md unchanged: the computed reader size is still 1997 of 2000.",
+      "fails_without": "Without the entry, `get(\"lineage-limit\")` is None and the test fails. If the reader size drifted from 1997, `system_facts_budgets_match_computed` fails with the computed value in its message.",
+      "seam": "`athena_data::DefaultsModel::parse` over the real defaults.toml (exists; the same include path budgets.rs line 13 uses). The entry is added by plan step 8 and the test by step 10."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in crates/athena-core/src/reading.rs `mod tests` (helpers `records_with`, `outcome`, `finding`, `two_majors_and_a_minor`) build in-memory `Records` with a chain j1 <- j2 <- j3 of \"try again on\" requests. They assert: `LINEAGE_ATTEMPT_LIMIT == 3`; `lineage_attempts` returns the failed ids oldest first from any job of the chain and from an unrun queued item that retries j3; a landed job, a dropped or stale retry and a job in another lineage are not counted; rejected, failed and timed-out each count; a job in no lineage returns empty; a cyclic request does not loop; `retries_by_job` returns the same map as before for the same records.",
+      "command": "cargo test -p athena-core lineage",
+      "observes": "The constant is 3, and the count over the `job_history`/`retries_in` chain matches the records for each shape. The constant and helper are visible in the diff of retry.rs.",
+      "fails_without": "Without the helper the test module does not compile. With a counting bug (stale counted, forward walk missing, queued item not walking back) one shape assertion fails.",
+      "seam": "`athena_core::reading::lineage_attempts` and `retries_by_job` over in-memory `Records` built by the existing `records_with` helper (exists); the functions are added by plan step 2 and the tests by step 3."
+    },
+    {
+      "criterion": 3,
+      "method": "Two tests in crates/athena-cli/tests/drain.rs, over `drain::drain(&real_steps(&athena, &lander), limits, &Lines)` with a `Scenario` whose verdict is `fail` with every criterion met and one major finding `the description lists no callers` (a Fail verdict or blocking finding gives final_verdict Fail, verify.rs:649-672; no unmet criterion, so the scope guard's T4 does not pause). In-item path `a_lineage_with_three_rejected_attempts_gets_no_fourth_attempt`: run j1 by hand to Rejected; `athena.retry(j1)` and run it to Rejected j2; `athena.queue(\"try again on <j2>\")` = q. Drain with `max_jobs: 3`. The drain reads and runs q (3rd failure). Assert: j1, j2 and q are `JobState::Closed(OutcomeState::Rejected)`; `lineage_attempts(&records, q)` is exactly [j1, j2, q]; no request job has text `try again on <q>`; `steps.paused(&[q])` is empty; the lander landed nothing for q; the `plan       <q> passed over:` line (or the item's `drain      <q> stopped:` line) names the lineage stop; and no output line says `over the job limit` for q. Loop-top path `a_queued_retry_of_a_lineage_with_three_failures_is_not_read_or_run`: hand-reject j1, j2 (`athena.retry`) and j3 (`athena.retry(j2)`), then `athena.queue(\"try again on <j3>\")` = q; drain with `max_jobs: 3`. Assert q is still `JobState::Queued` (never read or run), no job of q's own exists, no job has text `try again on <q>`, and the passed-over line names the lineage. Planning may read q, so the Reader count is not asserted.",
+      "command": "cargo test -p athena-cli --test drain a_lineage_with_three_rejected_attempts_gets_no_fourth_attempt",
+      "observes": "Exactly three rejected jobs in the lineage and none a retry of the third, with `max_jobs` 3 so the cap could not have stopped it; the output says the lineage was stopped. The sibling command `cargo test -p athena-cli --test drain a_queued_retry_of_a_lineage_with_three_failures_is_not_read_or_run` shows a queued 4th is not dispatched either.",
+      "fails_without": "Without point 1 (loop top), after q fails the loop calls `run_job(ReadOf::Retry(q))`; started is 1 < 3, so it makes and runs a job `try again on <q>`: the no-retry-of-q assertion and the lineage-equals-3 assertion fail. Without point 1 in the queued-retry test, q is read and run and closes, so the Queued assertion fails. Step 12 removes each point in turn to confirm.",
+      "seam": "Production entry `drain::drain` over `RealSteps` (exists; `real_steps`, `work_everything` for the Limits shape, `Lines` and `RecordingLander` exist in tests/drain.rs). The fake agent from `Fixture::athena(Scenario.script())` (tests/common/mod.rs, exists) plays only the rejecting verifier and holds no limit logic. Hand attempts go through `Athena::go` and `Athena::retry` (exist). The all-met-plus-major verdict helper is added by plan step 10; the `Steps` methods, `ItemEnd::LineageStopped` and both checks by steps 4 to 6."
+    },
+    {
+      "criterion": 4,
+      "method": "Three tests. (a) `the_lineage_stop_queues_one_narrower_request_that_carries_the_repeated_findings` on the in-item fixture of criterion 3: load `Records`; select requests whose text contains `Lineage <j1>:`. Assert exactly one, on channel `cli`, text not starting `try again on`, starting its title `Re-scope or split `, containing `the description lists no callers` and the three failed job ids, `request_text_acceptance` non-empty, its bullet count no larger than the root request's (strictly smaller when the root has several) and none equal to a root bullet, and its `Files:` inside the root's touches. Then call `steps.lineage_stop(q)` and `steps.queue_narrower(&stop)` on the same `RealSteps` and assert the returned id is the queued one and `fx.head()` is unchanged. (b) `a_lineage_that_reaches_three_failures_on_the_items_second_attempt_queues_the_narrower_request`: hand-reject j1, queue `try again on <j1>` = q, drain with `max_jobs: 2`. q runs (2nd failure), its retry r runs (3rd); point 2 stops before the `failures >= ATTEMPTS` return. Assert: exactly one marker request; the output does not contain `failed twice`; no job retries r; the passed-over line names the lineage. (c) `a_queued_retry_of_a_lineage_with_three_failures_is_not_read_or_run` (criterion 3 fixture) drains twice and asserts one marker request after both and q still Queued. (d) core unit tests in reading.rs: a finding in 2 of 3 attempts is listed, one in 1 is not, the `none repeated` wording, a root with no files and no located findings still builds a request (files `records/`), the request is accepted by `request_text_acceptance`/`request_text_touches`, the marker lookup returns Queued, and a lineage whose root request is itself a `Re-scope or split ` request gives Refused and queues nothing.",
+      "command": "cargo test -p athena-cli --test drain the_lineage_stop_queues_one_narrower_request_that_carries_the_repeated_findings",
+      "observes": "One narrower, differently-worded request carries the repeated finding; a direct second queue call adds none; a second full drain adds none (case c, where the stopped item is still queued so the stop is re-checked). Sibling commands: `cargo test -p athena-cli --test drain a_lineage_that_reaches_three_failures_on_the_items_second_attempt_queues_the_narrower_request` and `cargo test -p athena-core lineage_stop`.",
+      "fails_without": "Without queuing, the marker count of 1 fails. Without the marker lookup, the second `queue_narrower` call writes a second request and the unchanged-head assertion fails, and the second drain in (c) writes a second one. If findings were not carried or acceptance were copied from the root, the text and bullet assertions fail. Without point 2, (b) ends `ItemEnd::Failed` (drain.rs:1951-1954) with no marker request and the output says `failed twice`. Without the second-generation rule, the unit test queues a request.",
+      "seam": "`RealSteps::lineage_stop` and `RealSteps::queue_narrower` (added by plan steps 4 and 5) over a real `Athena` and fixture repository (exist); the stop and the request text come from `athena_core::reading::lineage_stop` (step 2) computed from the fixture's own records. The fake agent only plays the rejecting verifier. Nothing under test sits in a double."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff of the documentation files. CHANGELOG.md has an Unreleased/Added entry naming the 3-attempt limit, the root cause, both stop points, the narrower request and how it is narrowed, the second-generation rule, the hand-retry override, the tests, the default id, that every reading made before the defaults edit is read again at its next run, and that the reader now sees a shorter first sentence for `buy-first`. The drain.rs module doc has a bullet on the lineage limit, the narrower request, idempotence, the second-generation rule and the hand-retry override. async-drain.md section 10's failure table has a row for it with a sentence below.",
+      "command": "git diff -- CHANGELOG.md docs/design/async-drain.md crates/athena-cli/src/drain.rs",
+      "observes": "The three files hold the described entries, each stating the limit of 3, the narrower request and that a hand `athena retry` is not limited.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the whole suite. It includes the unchanged tests in crates/athena-cli/tests/retry.rs and drain.rs: every existing drain test with fewer than 3 failed attempts in a lineage (the default `Stub` returns `lineage_stop` None; the real-steps flag/pause tests have a lineage of 2, so neither check fires), plus the new tests/retry.rs test `a_hand_retry_past_three_failed_attempts_is_still_allowed`. That test builds three rejected attempts with `reject_then_ask_again`/`run_retry` and the all-met-plus-major verdict (no T4 pause), then calls `athena.retry` on the third and runs the proposal to a finished job. `cargo test -p athena-core --test refusal_corpus` is run as a regression of the shared retry reading; no result is claimed here.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass; the diff of test files shows only added tests.",
+      "fails_without": "If the gate fired below 3 failures, `a_rejected_job_can_be_retried_twice` (tests/retry.rs) and the one-retry drain tests would fail. If a hand retry were limited, the new retry.rs test fails.",
+      "seam": "Existing tests with their existing fakes through `Athena::retry`, `Athena::go` and `drain::drain` (exist). The new retry.rs test is added in plan step 11."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three checks Athena runs, each as its own whole command, in this order: fmt, clippy, test.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "Each exits 0: formatting clean, no clippy warning (no missed `ItemEnd::LineageStopped` arm, no unused item), and every test passes, including the new lineage tests, `system_facts_budgets_match_computed` against the unchanged facts line, and the defaults tests.",
+      "fails_without": "Unformatted code fails fmt; a missed `ItemEnd` arm or unused item fails clippy; a missing gate or marker check, or a reader size off 1997, fails `cargo test --locked`.",
+      "seam": "Cargo over the whole workspace (exists). No fake or fixture."
+    },
+    {
+      "criterion": 8,
+      "method": "List the changed files. No path under records/ appears, and the only governance file changed is defaults.toml. The eight paths are the eight listed deliverables; docs/system-facts.md, docs/design/context-engineer.md, athena.toml, workflows and tool or lint configuration are not touched.",
+      "command": "git diff --stat",
+      "observes": "Eight paths, none under records/; defaults.toml is the only governance file.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: should a hand-run `athena retry` also stop at 3 failed attempts? The plan limits only the drain and keeps the manual command as the operator's override, because the request says Athena should stop retrying.",
+    "User: is counting a timed-out job as a failed attempt acceptable? The request says \"rejected or failed\"; the plan also counts timed-out, since `athena retry` and the drain treat the three alike.",
+    "User: if no natural wording of the new default keeps the reader set at exactly 1997 of 2000, may the producer instead update the `budget reader` line in docs/system-facts.md (and the matching row in docs/design/context-engineer.md)? Neither file is a listed deliverable, so the plan does not touch them without your approval."
+  ],
+  "producer_section_sha256": "68f0f588dc57ed2e233c1706603c911b61b7caa3834f4f6e3ac2803185b04dbe"
+}

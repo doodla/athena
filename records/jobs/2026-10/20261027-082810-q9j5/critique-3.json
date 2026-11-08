@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-082810-q9j5",
+  "round": 3,
+  "at": "2026-11-08T17:24:48.225698641Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Repeated findings are matched by exact string equality, so real lineages will rarely show any repeat; the existing normaliser goes unused.",
+      "evidence": "Each attempt is judged by a fresh verifier run, so summaries are free text and locations carry line numbers (`finding_text`, retry.rs:446-459). Exact equality will rarely match across real attempts. The plan then falls back to the last attempt's findings with the body saying none repeated, so the requested \"records the findings that repeated\" mostly will not happen. The codebase already compares text across rejections: `scope_guard::normalise_criterion` and `compare_criteria` (scope_guard.rs:189-218, used by T4) normalise case, digits and whitespace and match by containment or overlap. Demonstration 4(a) passes only because the fake verifier emits the identical summary `the description lists no callers` every time, so it cannot show the matching works on realistic input. Fix: Match unmet criteria with `scope_guard::compare_criteria` (count a `Yes` as a repeat). Match blocker and major findings on the location path with `:line[:col]` stripped, plus `compare_criteria` (or `introspect::normalise`) on the summary. Add a unit test in reading.rs `mod tests` where two attempts report the same finding with different line numbers and slightly different wording, and assert it is listed as repeated; add a contrasting pair that must not match.",
+      "location": "Decision 3 (\"A finding repeats when the same summary+location (or the same unmet criterion text) is in at least 2 failed attempts\"); plan step 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The step-12 claim is wrong: disabling only point 1 does not make the in-item test fail, because point 2 stops that item first.",
+      "evidence": "Point 2 runs right after every `failures += 1` (decision 1, step 6), not only on the last in-run attempt. In the in-item test, q is the third failure in the lineage, so point 2 stops the item at failures == 1, before control returns to the loop top. Disabling only point 1 therefore leaves that test passing, which contradicts the plan's claim that it calls `run_job(ReadOf::Retry(q))`. The queued-retry test does exercise point 1; the in-item test exercises point 2. Fix: Correct the discriminators. The in-item test and the second-attempt test fail without point 2; the queued-retry test fails without point 1. Rewrite step 12 to match, so the producer does not read a correct result as a failed check.",
+      "location": "Criterion 3 demonstration \"Fails without the behavior\"; plan step 12",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Splitting `buy-first` changes the reader prompt only to avoid updating the budget line in the facts file, and the new wording is tuned to hit exactly 1997.",
+      "evidence": "`DefaultsModel::render` shows the reader only each statement's first sentence (defaults.rs:58-83; reader_system_prompt, reading.rs:232). Splitting `buy-first` at its `; ` removes \"build only for needs they don't meet, and record the call\" from the reader prompt. That is a change unrelated to the request, made only so a system-facts line need not be edited. Rewording the new sentence until ceil(bytes/3) lands exactly on 1997 also tunes content to a test rather than to the reader. Fix: Keep the user question already in the open questions, but ask it before editing. The straightforward fix is to update the `budget reader` line, which the facts file itself says to do. Use the `buy-first` split only if the user declines, and state it as a behavior change in the description.",
+      "location": "Decision 5 / plan step 8 (splitting `buy-first` to hold the reader size at 1997)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A narrower request worked in the same drain may need more fake-agent responses than the test script holds.",
+      "evidence": "With `max_jobs` of 3, the queued narrower request can be read and run (and retried) in the same drain. The fake agent from `Fixture::athena(Scenario.script())` (tests/common/mod.rs:417) then needs reader, producer and verifier responses for those extra jobs. The plan asserts nothing depends on them, but it does not check that the script holds enough responses or that running out ends the job cleanly rather than panicking. Fix: Size `max_jobs` to the lineage jobs alone where possible (2 in the queued-retry test leaves room only for one extra job). Otherwise make sure the Scenario script can serve the extra jobs and say how an exhausted script behaves.",
+      "location": "Risks (\"The narrower request may be worked in a later wave of the same run\"); criterion 3/4 drain tests",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the request and the accepted reading. The code it names exists and matches what I read: `Drain::attempts` (drain.rs:1855-1957) with `failures += 1` at 1941 and the `Failed` return at 1951-1954, the job limit at 1544, `job_history`/`retries_by_job` (retry.rs:210/246), `StewardRequest::new` (steward.rs:532), `Athena::queue` (reading.rs:895), `RealSteps::records` (drain.rs:4055), and the 12 `Steps` implementors listed in the dependents. Placing the stop in the drain, with default trait methods and a new `ItemEnd` arm, is sound and starts where the fault is. The demonstrations run the real `drain::drain` over `RealSteps`; the fake agent only plays the rejecting verifier. Using `max_jobs` of at least 2 rules out the job limit as the thing that stops the 4th attempt. One major soundness problem remains. A finding counts as \"repeated\" only when its summary and location are exactly equal in two attempts. Two independent verifier runs rarely produce the same wording or the same line numbers, so in real lineages the narrower request will mostly fall back to \"none repeated\". The test passes only because the fake verifier emits identical text. scope_guard.rs already has a normaliser and comparison (`normalise_criterion`, `compare_criteria`) that should be reused. Minor points: the step-12 claim about which test fails without which stop point is wrong; the `buy-first` split is an unrelated change to the reader prompt, made to avoid updating a facts line; and a narrower request worked in the same run may need more fake-agent responses than the script holds."
+}
