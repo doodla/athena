@@ -128,19 +128,25 @@ fn put(root: &Path, relative: &str, bytes: &[u8]) -> Result<()> {
 ///
 /// Write bits come off every file and directory, which stops every user but root. Where the process may set
 /// it (root, on a file system that supports it) the immutable attribute goes on too, which stops root. The lock
-/// is then probed: a file is created and an existing one opened for writing. If either works the snapshot is
-/// unlocked again and the call fails, so a lock that does not hold is never taken for one that does.
+/// is then probed by `athena_git::snapshot::writable_paths`, the routine the verifier snapshot's lock uses: a
+/// write is attempted at every directory and file. If any attempt works, or a path cannot be tried, the
+/// snapshot is unlocked again and the call fails naming the paths, so a lock that does not hold is never taken
+/// for one that does.
 pub fn lock(dir: &Path) -> Result<()> {
+    lock_with(dir, |_| {})
+}
+
+/// [`lock`] with a hook between applying the lock and probing it, so a test can reopen one path with the real
+/// unlock and see the real probe find it.
+fn lock_with(dir: &Path, after_apply: impl FnOnce(&Path)) -> Result<()> {
     set_write_bits(dir, false)?;
     // Best effort: without the privilege or file system support the probe below decides.
     let _ = set_immutable(dir, true);
-    if let Some(how) = probe_write(dir) {
+    after_apply(dir);
+    let findings = athena_git::snapshot::writable_paths(dir);
+    if !findings.is_clean() {
         let _ = unlock(dir);
-        bail!(
-            "the evidence snapshot lock does not hold: {how} succeeded in {}; run as a user the permission \
-             bits bind, or on a file system that supports the immutable attribute",
-            dir.display()
-        );
+        bail!("{}", findings.refusal("the evidence snapshot", dir));
     }
     Ok(())
 }
@@ -149,23 +155,6 @@ pub fn lock(dir: &Path) -> Result<()> {
 pub fn unlock(dir: &Path) -> Result<()> {
     athena_git::snapshot::unlock_dir(dir)?;
     Ok(())
-}
-
-/// The first write that works on a locked snapshot, if any (what it did is undone).
-fn probe_write(dir: &Path) -> Option<&'static str> {
-    let fresh = dir.join(".athena-lock-probe");
-    if std::fs::write(&fresh, b"x").is_ok() {
-        let _ = std::fs::remove_file(&fresh);
-        return Some("creating a file");
-    }
-    if std::fs::OpenOptions::new()
-        .append(true)
-        .open(dir.join(HISTORY_FILE))
-        .is_ok()
-    {
-        return Some("opening a snapshot file for writing");
-    }
-    None
 }
 
 /// Clears every write bit under `dir` (the files first, so a directory is still reachable while it is
@@ -354,6 +343,36 @@ mod tests {
             "one"
         );
         assert!(!dest.join("src").exists(), "only evidence is copied");
+    }
+
+    #[test]
+    fn an_evidence_lock_with_one_nested_path_left_writable_is_refused_naming_it() {
+        // The snapshot is locked for real; one empty nested directory is then reopened with the real unlock,
+        // so it takes a file even from root. The old probe tried only the root and history.json.
+        let (_repo, git) = repo(&[("records/a/one.md", "one")]);
+        let out = tempfile::tempdir().unwrap();
+        let dest = out.path().join("evidence");
+        let _guard = Unlock(dest.clone());
+        write(&git, "HEAD", &dest).unwrap();
+        unlock(&dest).unwrap();
+        std::fs::create_dir(dest.join("records/a/leaf")).unwrap();
+        let err = lock_with(&dest, |dir| {
+            athena_git::snapshot::unlock_dir(&dir.join("records/a/leaf")).unwrap();
+        })
+        .expect_err("a partly locked snapshot must be refused");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("evidence snapshot lock does not hold"),
+            "{message}"
+        );
+        assert!(message.contains("`records/a/leaf`"), "{message}");
+        assert_eq!(
+            message.matches('`').count(),
+            2,
+            "exactly one path is named: {message}"
+        );
+        // A failed lock leaves the snapshot unlocked, so it can be replaced.
+        std::fs::write(dest.join("new.txt"), "x").expect("the failed lock was undone");
     }
 
     #[test]
