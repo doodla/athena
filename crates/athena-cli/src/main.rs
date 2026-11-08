@@ -460,6 +460,11 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
     /// checkpoint is written and the reason is printed. It writes nothing when CI is set in the environment,
     /// with `--no-checkpoint`, or off the main branch.
     /// It prints the seconds taken and the commits and records judged.
+    ///
+    /// With `--host-rules`, the read-only check of the host rules: it reads the rulesets view of the GitHub
+    /// origin (GET requests only) and reports, for `athena/records`, whether force pushes and deletion are
+    /// forbidden and, for `main`, whether branches must be up to date before merging. Exit 2 when a required
+    /// rule is not in force or cannot be read.
     Check {
         #[arg(long)]
         history: bool,
@@ -467,6 +472,9 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         pr_head: Option<Vec<String>>,
         #[arg(long, conflicts_with_all = ["history", "pr_head"])]
         attribution: bool,
+        /// Read-only check that the host rules on `athena/records` and `main` are in force.
+        #[arg(long, conflicts_with_all = ["history", "pr_head", "attribution"])]
+        host_rules: bool,
         /// With `--attribution`: ignore checkpoints, judge everything from the start, and fail if the newest
         /// checkpoint names a commit the replay fails.
         #[arg(long, requires = "attribution")]
@@ -612,6 +620,31 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// `athena check --host-rules`: reads the rulesets view of the repository `origin_url` names through `runner`
+/// (GET only) and returns the text to print and the exit code (0 when every required rule is in force, else 2).
+fn host_rules_command(
+    runner: &dyn athena_core::gh::Runner,
+    origin_url: &str,
+    json: bool,
+) -> Result<(String, u8)> {
+    let results = athena_core::host_rules::check_origin(runner, origin_url)?;
+    let missing = athena_core::host_rules::missing_required(&results);
+    let code = if missing.is_empty() { 0 } else { 2 };
+    let text = if json {
+        let branches: Vec<_> = results
+            .iter()
+            .map(|r| serde_json::json!({ "branch": r.branch, "states": format!("{:?}", r.states) }))
+            .collect();
+        format!(
+            "{}\n",
+            serde_json::json!({ "branches": branches, "passed": missing.is_empty(), "missing": missing })
+        )
+    } else {
+        display::host_rules_report(&results)
+    };
+    Ok((text, code))
 }
 
 /// `athena check-reading`: applies this build's reading rules (`athena_core::reading::check_reading_text`) to a
@@ -1521,11 +1554,18 @@ fn run(cli: Cli) -> Result<u8> {
             history,
             pr_head,
             attribution,
+            host_rules,
             full_replay,
             no_checkpoint,
             json,
         } => {
             let athena = open(false)?;
+            if host_rules {
+                let url = athena.git.run(["remote", "get-url", "origin"])?;
+                let (text, code) = host_rules_command(&athena_core::gh::GhCli, &url, json)?;
+                print!("{text}");
+                return Ok(code);
+            }
             if attribution {
                 use athena_gate::attribution::{Mode, Options, run_check};
                 let tip = athena
@@ -1801,6 +1841,84 @@ mod tests {
         let not_reading = dir.path().join("notes.json");
         std::fs::write(&not_reading, "{ \"schema\": \"nope\" }").unwrap();
         assert!(check_reading_command(&request, &not_reading).is_err());
+    }
+
+    struct FixtureRunner {
+        replies: std::cell::RefCell<std::collections::VecDeque<&'static str>>,
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+
+    impl FixtureRunner {
+        fn new(replies: &[&'static str]) -> Self {
+            FixtureRunner {
+                replies: std::cell::RefCell::new(replies.iter().copied().collect()),
+                calls: Default::default(),
+            }
+        }
+    }
+
+    impl athena_core::gh::Runner for FixtureRunner {
+        fn gh(&self, args: &[String]) -> Result<String> {
+            self.calls.borrow_mut().push(args.to_vec());
+            Ok(self.replies.borrow_mut().pop_front().unwrap().to_string())
+        }
+    }
+
+    const HOST_RULES_RECORDS: &str = r#"[{"type":"non_fast_forward"},{"type":"deletion"}]"#;
+    const HOST_RULES_MAIN: &str = r#"[{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true}}]"#;
+    const HOST_RULES_URL: &str = "https://github.com/o/r.git";
+
+    #[test]
+    fn host_rules_in_force_exits_0_with_the_report() {
+        let runner = FixtureRunner::new(&[HOST_RULES_RECORDS, HOST_RULES_MAIN]);
+        let (text, code) = host_rules_command(&runner, HOST_RULES_URL, false).unwrap();
+        assert_eq!(code, 0);
+        let expected = "\
+athena/records: force-push forbidden: in force
+athena/records: deletion forbidden: in force
+athena/records: up-to-date required: not in force
+main: force-push forbidden: not in force
+main: deletion forbidden: not in force
+main: up-to-date required: in force
+Only rulesets are seen; classic branch protection is not visible to this check, so set these rules as rulesets.
+host rules: all required rules are in force
+";
+        assert_eq!(text, expected);
+        for call in runner.calls.borrow().iter() {
+            assert_eq!(call.len(), 2, "GET only, no flags: {call:?}");
+            assert_eq!(call[0], "api");
+        }
+    }
+
+    #[test]
+    fn host_rules_not_in_force_exits_2_naming_branch_and_rule() {
+        let runner = FixtureRunner::new(&[r#"[{"type":"non_fast_forward"}]"#, "[]"]);
+        let (text, code) = host_rules_command(&runner, HOST_RULES_URL, false).unwrap();
+        assert_eq!(code, 2);
+        assert!(text.contains(
+            "  - required rule not in force: athena/records: deletion forbidden: not in force\n"
+        ));
+        assert!(
+            text.contains(
+                "  - required rule not in force: main: up-to-date required: not in force\n"
+            )
+        );
+        assert!(text.ends_with("host rules FAIL: 2 required rule(s) not in force\n"));
+        // A non-GitHub origin is an error, not a pass.
+        assert!(host_rules_command(&runner, "/srv/repo", false).is_err());
+    }
+
+    #[test]
+    fn host_rules_is_a_check_flag_that_excludes_the_other_modes() {
+        let parsed = Cli::try_parse_from(["athena", "check", "--host-rules"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Check {
+                host_rules: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["athena", "check", "--host-rules", "--history"]).is_err());
     }
 
     #[test]

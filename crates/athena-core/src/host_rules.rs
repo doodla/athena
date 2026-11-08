@@ -67,6 +67,39 @@ pub fn check(runner: &dyn Runner, owner: &str, repo: &str) -> Vec<BranchRules> {
         .collect()
 }
 
+/// Reads both branches of the GitHub repository that `origin_url` names. Fails when the URL is not an https
+/// URL on github.com. Every call is a GET.
+pub fn check_origin(runner: &dyn Runner, origin_url: &str) -> anyhow::Result<Vec<BranchRules>> {
+    let slug = crate::gh::GhClient::origin_repository(origin_url)
+        .ok_or_else(|| anyhow::anyhow!("origin is not an https URL on github.com"))?;
+    let (owner, repo) = slug
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("origin does not name an owner and a repository"))?;
+    Ok(check(runner, owner, repo))
+}
+
+/// Whether a rule must be in force: force-push and deletion on `athena/records`, up-to-date on `main`.
+fn required(branch: &str, rule_index: usize) -> bool {
+    match branch {
+        "athena/records" => rule_index < 2,
+        "main" => rule_index == 2,
+        _ => false,
+    }
+}
+
+/// The required rules that are not in force (not in force or unknown), one `branch: rule: state` line each.
+pub fn missing_required(results: &[BranchRules]) -> Vec<String> {
+    let mut missing = Vec::new();
+    for result in results {
+        for (i, (rule, state)) in RULES.iter().zip(result.states).enumerate() {
+            if required(&result.branch, i) && state != RuleState::InForce {
+                missing.push(format!("{}: {}: {}", result.branch, rule, state.text()));
+            }
+        }
+    }
+    missing
+}
+
 /// The rule states in one reply of the rulesets view. Anything but a JSON list gives unknown for all three.
 pub fn evaluate(reply: &str) -> [RuleState; 3] {
     let Ok(Value::Array(rules)) = serde_json::from_str::<Value>(reply) else {
@@ -207,6 +240,35 @@ mod tests {
             assert!(!["--method", "-X", "-f", "-F", "--input"].contains(&arg.as_str()));
             assert!(!arg.contains("protection"));
         }
+    }
+
+    #[test]
+    fn host_rules_origin_path_makes_only_get_reads() {
+        let runner = Recording::new(vec![ok(RECORDS), ok(MAIN)]);
+        let got = check_origin(&runner, "https://github.com/o/r.git").unwrap();
+        assert!(missing_required(&got).is_empty());
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        for call in calls.iter() {
+            assert_eq!(call[0], "api");
+            assert_eq!(call.len(), 2, "no flags: {call:?}");
+            assert!(call[1].starts_with("repos/o/r/rules/branches/"));
+        }
+        assert!(check_origin(&runner, "/srv/local/repo").is_err());
+    }
+
+    #[test]
+    fn host_rules_missing_required_names_branch_and_rule() {
+        let runner = Recording::new(vec![ok("[]"), failure(403)]);
+        let got = check(&runner, "o", "r");
+        assert_eq!(
+            missing_required(&got),
+            vec![
+                "athena/records: force-push forbidden: not in force",
+                "athena/records: deletion forbidden: not in force",
+                "main: up-to-date required: unknown",
+            ]
+        );
     }
 
     #[test]
