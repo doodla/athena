@@ -2544,6 +2544,25 @@ mod tests {
     }
 
     #[test]
+    fn the_plan_entry_title_skips_a_leading_priority_line() {
+        for (text, title) in [
+            ("Priority: urgent\n\nFix the widget", "Fix the widget"),
+            ("  priority: high\nFix the widget", "Fix the widget"),
+            ("Fix the widget\nmore", "Fix the widget"),
+            ("Priority: high\nPriority: low", "Priority: high"),
+        ] {
+            let mut job = job_with_checks(vec![]);
+            job.request.as_mut().unwrap().text = text.into();
+            job.readings.clear();
+            assert_eq!(
+                plan_entry(&job, None, &nothing_known()).title,
+                title,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_word_like_fix_or_bug_alone_is_no_rung() {
         let brief = real_brief();
         assert_eq!(rung_with_brief("fix a bug", &brief), None);
