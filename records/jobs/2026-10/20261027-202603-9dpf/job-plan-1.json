@@ -1,0 +1,250 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-202603-9dpf",
+  "round": 1,
+  "at": "2026-11-08T20:18:52.984115236Z",
+  "invocation_seq": 3,
+  "approach": "Add a pure check `staleness(records, item) -> Option<String>` to crates/athena-core/src/work_decisions.rs and call it in `Athena::approve_work` right after `find_open` (line 329) and before `approve_request` (330) and `self.ask` (331). A proposal is stale when (a) a job cited in its source or evidence has a closing outcome (`later_outcome` else `outcome`, as `JobRecords::state` does) whose reason, after stripping `closed: `, starts with `Done`, recorded after the item's `at`; or (b) its source or evidence is an `audience-ratings` record path whose rating has a newer rating (later `(at, id)`) of the same target. When stale, `approve_work` returns an error that says the proposal is stale, names every closing job id and the newest newer rating id, says nothing was queued, and asks for a fresh approval. Nothing is written, so no job and no decision record exist and the proposal stays open. `approve_in_limit` (line 358-370) and the drain's `approve` both reach `approve_work`, so they are covered. drain.rs gets a doc comment only. Two in-crate tests drive `approve_work` on a seeded repo, one drives `approve_in_limit`, and a unit test covers the pure function. CHANGELOG.md and roles-and-ladder.md record the rule. Criterion 5 is shown by running the three Athena checks, with the demonstration now stating its seam and what fails without the behavior.",
+  "decisions": [
+    {
+      "choice": "Put the check in `approve_work` after `find_open`, before `approve_request` and `self.ask`.",
+      "reason": "`approve_in_limit` (work_decisions.rs:358-370), the drain's `approve` (drain.rs:4283) and `athena approve-work` (main.rs:1046) all go through `approve_work`, so one check covers every path. It runs before building the request or asking the reader. This is the root-cause place.",
+      "rejected": [
+        {
+          "option": "Check in `approve_in_limit` or in the drain only",
+          "why": "`athena approve-work` by hand would still queue a stale proposal."
+        },
+        {
+          "option": "Check inside `approve_request`",
+          "why": "`approve_request` is a text builder used by tests in refusal_corpus.rs (line 810, with `Records::default()`); mixing a refusal into it would change those callers."
+        }
+      ]
+    },
+    {
+      "choice": "Mark stale by refusing with an error. The proposal stays open; no new record or state is written.",
+      "reason": "The brief puts a new work-decision schema or stale state out of scope. The drain already keeps an erroring proposal open and prints the error (drain.rs:2059-2066), so the user sees the ids. reject-work or a re-raised proposal are the existing ways forward.",
+      "rejected": [
+        {
+          "option": "Append a work-decision record with a Stale state",
+          "why": "Out of scope; needs a new schema and AnyRecord handling."
+        }
+      ]
+    },
+    {
+      "choice": "A cited job counts as closed as done when its latest outcome reason, after stripping `closed: `, starts with `Done`, and the outcome's `at` is later than the work item's `at`.",
+      "reason": "Matches the reading's definition (`close` writes `closed: {why}`, manage.rs:163; `closed_by_person` strips the same prefix, hestia.rs:352). The later-than-item time keeps a proposal that cites an old finished job only as evidence from being refused for good.",
+      "rejected": [
+        {
+          "option": "Treat any cited closed or landed job as stale",
+          "why": "Many proposals cite landed or closed jobs as evidence of a past failure; valid proposals would be refused."
+        },
+        {
+          "option": "Ignore the time and refuse any cited Done job",
+          "why": "A re-raised proposal would cite the same job and be refused forever."
+        }
+      ]
+    },
+    {
+      "choice": "A rating is cited when the source or an evidence path starts with `records/audience-ratings/`; its id is the file stem. Newer means another rating with the same target and a greater `(at, id)`.",
+      "reason": "`audience::work_item` (audience.rs:98-115) sets source and evidence to the rating's canonical path. `Records.audience_ratings` is sorted by `(at, id)` (store.rs:465-467). The request says 'same target', so audience name is not compared.",
+      "rejected": [
+        {
+          "option": "Compare with `audience::latest` (the last rating of any target)",
+          "why": "A rating of a different page would wrongly make a proposal stale."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal_corpus case is added; `cargo test -p athena-core --test refusal_corpus` is run as a regression.",
+      "reason": "The inputs are records (references, outcomes, ratings), not request text; `approve_request` is unchanged. Cases calling it (refusal_corpus.rs:810, `approve_request_has_the_generators_shapes` at :842) are unaffected.",
+      "rejected": [
+        {
+          "option": "Add corpus cases for the staleness inputs",
+          "why": "The corpus replays reading checks over request text; staleness inputs never reach it."
+        }
+      ]
+    },
+    {
+      "choice": "Criterion 5 is demonstrated by the full check commands plus the named tests that fail if the check is missing or too broad, not by a bare 'passes' claim.",
+      "reason": "A pass of fmt, clippy and test shows the behavior only through the tests it runs: the new refusal tests fail without the check, and the existing approve_work callers fail if the check over-refuses.",
+      "rejected": [
+        {
+          "option": "Treat criterion 5 as a pure build gate with no seam",
+          "why": "The reviewer requires a seam and a failure condition for every behavior criterion."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/work_decisions.rs",
+      "action": "modify",
+      "purpose": "Add `staleness`, call it in `approve_work` before `approve_request`/`ask`, update the module doc, and add tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Comment-only: the doc comment on `approve_all` says a proposal refused as stale stays open and its reason is in the note. No behavior change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under Unreleased > Added: root cause (an approved proposal was queued after its items landed or its rating was superseded), the rule, the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/roles-and-ladder.md",
+      "action": "modify",
+      "purpose": "Add to the 'Deciding a proposal' bullet that approval refuses a proposal whose cited job was closed done, or whose cited rating has a newer one of the same target.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read work_decisions.rs tests and `test_support::make_athena` for the fixture shape; check `RecordId`/`JobId` ordering and `Outcome` fields (athena-data records.rs).",
+    "In work_decisions.rs add `pub fn staleness(records: &Records, item: &WorkItem) -> Option<String>`. For each reference in source plus evidence: a `RefKind::Job` whose `records.jobs` entry has `later_outcome.as_ref().or(outcome.as_ref())` with reason (after `strip_prefix(\"closed: \")`) starting `Done` and `at > item.at` is a closing job. A `RefKind::Path` starting with `records/audience-ratings/` gives an id (file stem); find the rating in `records.audience_ratings`; collect ratings with the same target and greater `(at, id)`, keep the newest. Return None when neither is found. Otherwise return a message that says: work item {id} is stale, lists 'job {J} was closed as done: {reason}' and 'rating {R2} of {target} is newer than the cited rating {R1}', then says it was not queued and a fresh approval is needed (reject it with `athena reject-work {id} --why ...` and approve a proposal raised from the current records).",
+    "In `approve_work`, right after `let item = find_open(&known, id)?.clone();` (line 329), add `if let Some(why) = staleness(&known, &item) { bail!(\"{why}\"); }` so it runs before `approve_request` and `self.ask`. Update the module doc comment. Do not touch `approve_request`, `approve_in_limit` or `find_open`.",
+    "Add a test helper that commits records into the `repo_with` repo (write `NewFile::record(&record)` bytes, `git add -A`, commit, as the existing test does near lines 542-551). Add tests: `approve_work_refuses_a_proposal_whose_cited_job_was_closed_as_done` (with a control close reason that is approved), `approve_work_refuses_a_proposal_whose_source_rating_has_a_newer_one` (with a fresh and an other-target case that are approved), `approve_in_limit_refuses_a_stale_proposal` (steward role via `athena_data::roles::steward(at())`), and the pure `staleness_names_the_closing_job_and_the_newer_rating`. Assert on no new job in `Records::load(...).jobs`, empty `work_decisions`, unchanged head, and the message text (job id, rating id, 'stale', 'fresh approval').",
+    "In drain.rs update only the doc comment on `approve_all` (around line 2026); confirm no code line changed.",
+    "Add the CHANGELOG.md entry under Unreleased > Added (format of existing entries: root cause, jobs 20261027-074457-bx8e and 20261018-000747-w4v7 as the cause, the rule, tests, 'this check refuses more approvals'). Add the sentence to roles-and-ladder.md.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, and `cargo test -p athena-core --test refusal_corpus`. Run `git diff --stat` to confirm no change to model.json, claims.json or site.rs."
+  ],
+  "risks": [
+    {
+      "risk": "The check refuses a valid proposal (a false positive); the only ways forward are reject-work or a re-raised proposal.",
+      "mitigation": "Limit rule (a) to outcomes whose reason starts with `Done` after stripping `closed: ` and whose `at` is later than the item's `at`; rule (b) to audience-ratings paths of the same target. Tests cover the negative cases."
+    },
+    {
+      "risk": "A refused proposal looks stuck to the user.",
+      "mitigation": "The error names the ids and says how to proceed (reject-work, then a fresh proposal from current records). The proposal stays open and the drain prints the reason."
+    },
+    {
+      "risk": "The test fixture is invalid, so the refusal passes for another reason.",
+      "mitigation": "Test records are built through the real record types and `canonical_path()`, with outcome totals `Some(...)` as validation requires (records.rs:1215), and a control case approves a non-Done close."
+    },
+    {
+      "risk": "The cited rating path form drifts from what the parser expects.",
+      "mitigation": "The rating test builds the item with `audience::work_item` so the cited path is the production form. A path that does not parse as a known rating is ignored (not stale), never an error."
+    },
+    {
+      "risk": "A job blocked and then closed Done later is missed if only `outcome` is read.",
+      "mitigation": "Read the job through `later_outcome` first then `outcome`, as `JobRecords::state` does (store.rs:116-126)."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`Athena::approve_work` now returns an error for a stale proposal",
+      "dependent": "crates/athena-cli/src/main.rs:1046 (`Command::ApproveWork` -> `approve_work`)",
+      "kind": "code",
+      "test": "New work_decisions.rs tests; existing `approving_queues_a_job_whose_request_carries_the_cited_content` (crates/athena-cli/tests/work_decisions.rs:96) and siblings at lines 135-167 stay green: the cited job has only a Request, no outcome, and no rating is cited. Run cargo test -p athena-cli --test work_decisions.",
+      "reason": null
+    },
+    {
+      "name": "Approval path used by the drain",
+      "dependent": "crates/athena-core/src/work_decisions.rs:358 `approve_in_limit`, called by crates/athena-cli/src/drain.rs:4283 `approve`",
+      "kind": "code",
+      "test": "New `approve_in_limit_refuses_a_stale_proposal`; `approve_all` (drain.rs:2046-2066) already leaves an erroring proposal open with a note; cargo test -p athena-cli --test drain.",
+      "reason": null
+    },
+    {
+      "name": "Existing callers of `approve_work` in drain tests",
+      "dependent": "crates/athena-cli/tests/drain.rs:5328, 6210, 6276 (call `approve_work` on item LOW, fixture at drain.rs:5440-5454)",
+      "kind": "code",
+      "test": "The LOW item cites `src/lib.rs` and `README.md` paths only, no job and no rating, so `staleness` returns None; cargo test -p athena-cli --test drain runs them unchanged.",
+      "reason": null
+    },
+    {
+      "name": "Work items that cite jobs and the records `approve_work` reads",
+      "dependent": "crates/athena-core/src/steward.rs:484 `approved_work`, :703 and :831 (raise work items that cite jobs)",
+      "kind": "code",
+      "test": null,
+      "reason": "They only read decisions and items. The new check reads `Records.jobs`, `Records.audience_ratings` and work items and writes nothing; no record or schema changes, so no AnyRecord or check_record_file change is needed."
+    },
+    {
+      "name": "The rating citation form the check parses",
+      "dependent": "crates/athena-core/src/audience.rs:98 `work_item` (source and evidence are the rating's canonical path) and :83 `latest`",
+      "kind": "code",
+      "test": "The rating test builds the item with `audience::work_item` so the path form is the production one; `audience::latest` is not changed.",
+      "reason": null
+    },
+    {
+      "name": "`approve_request` and the reading refusal corpus",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (calls `approve_request` at line 810 with `Records::default()`; case `approve_request_has_the_generators_shapes` at :842)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus (regression run; I read the case ids, did not run them).",
+      "reason": "`approve_request` is not changed and the check sits in `approve_work`. The inputs are records, not request text, so no corpus case maps to them. Input forms handled: job reference closed Done (plain, with `closed: ` prefix, Done only later in the text, closed before the item), audience-rating path (older with newer same target, newest, different target, a path that is not an audience-ratings record); path and commit references are ignored."
+    },
+    {
+      "name": "Documented approval behavior",
+      "dependent": "docs/design/roles-and-ladder.md lines 28-44 (Deciding a proposal; What athena drain decides) and CHANGELOG.md",
+      "kind": "rule",
+      "test": null,
+      "reason": "The doc is updated to say approval refuses a stale proposal; the new changelog entry follows the existing format (root cause, jobs, tests) so the changelog-naming tests (`*_doc_and_changelog_name_the_cause`) are met."
+    },
+    {
+      "name": "Prompt-set budgets",
+      "dependent": "docs/system-facts.md budget lines (`system_facts_budgets_match_computed`, crates/athena-cli/tests/budgets.rs)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No file in an always-loaded prompt set is edited (work_decisions.rs, drain.rs, CHANGELOG.md and roles-and-ladder.md are not role prompt files)."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test `approve_work_refuses_a_proposal_whose_cited_job_was_closed_as_done` in work_decisions.rs. It builds a repo with `repo_with`, commits a work item (kind proposal, role steward, `at` 2026-10-15) whose evidence is `Reference::job(J)`, plus J's Request and an Outcome (reason `closed: Done: the items landed in 9884df5`, `at` 2026-10-16, totals `Some(crate::scoring::totals(&[], None))`). It calls `athena.approve_work(id, &Quiet)`, asserts Err, reloads `Records` and asserts no new job, empty `work_decisions`, and unchanged git head. A control in the same test uses a second repo whose J is closed `closed: dropped as a duplicate` and asserts `approve_work` succeeds.",
+      "command": "cargo test -p athena-core work_decisions",
+      "observes": "The Done-closed case returns an error with no new job and no decision record; the control case is approved, so the refusal comes from the check and not from the fixture.",
+      "fails_without": "Without the check, `approve_work` reads the request, asks the reader and commits an approval, so the Err assertion, the no-new-job assertion and the no-decision assertion all fail.",
+      "seam": "Production entry point: `Athena::approve_work` (work_decisions.rs:326), guarded by `find_open`. Fixture: `repo_with` (exists, work_decisions.rs:480) with the scripted fake reader from `test_support::make_athena` (exists), records committed as the existing test near line 534 does. A small helper that commits the extra records is added in step 4. The refusal logic is not in any double."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test `approve_work_refuses_a_proposal_whose_source_rating_has_a_newer_one` in work_decisions.rs. It commits two `AudienceRating` records for the same target (older R1 at 2026-10-10, newer R2 at 2026-10-12) and a proposal built with `audience::work_item` citing R1's canonical path; `approve_work` returns Err with no job and no decision. A second proposal citing R2 (nothing newer) and a third citing a rating of another target are still approved and a decision record names each. `approve_in_limit_refuses_a_stale_proposal` records the steward role (`athena_data::roles::steward`) and asserts `approve_in_limit` refuses a stale item.",
+      "command": "cargo test -p athena-core work_decisions",
+      "observes": "The stale-rating proposal is refused and queues nothing; proposals citing the newest rating of their target, or a rating of another target, are approved with a job and a decision.",
+      "fails_without": "Without the rating check, the stale proposal is approved and the Err and no-decision assertions fail; a check comparing across targets would fail the unrelated-proposal-approved assertion.",
+      "seam": "Production entry points: `Athena::approve_work` and `Athena::approve_in_limit` (work_decisions.rs:358, guard `in_limit`). Same `repo_with` fixture and scripted fake reader (exist). Ratings are real `AudienceRating` records committed to the temporary git repo and loaded by `Records::load`; the helper added in step 4 commits them."
+    },
+    {
+      "criterion": 3,
+      "method": "The two tests above assert on `error.to_string()`: it contains the closing job id, the newer rating id, `stale` and `fresh approval`. A pure test `staleness_names_the_closing_job_and_the_newer_rating` calls `staleness()` on in-memory `Records` and checks the same text, including two Done jobs, and the non-stale cases: closed before the item, reason with 'Done' only later in the text, other-target rating.",
+      "command": "cargo test -p athena-core work_decisions",
+      "observes": "The message holds the job id, the newer rating id, the word stale and the request for a fresh approval; the edge cases return None.",
+      "fails_without": "A message without the ids, or a check that matches 'Done' anywhere in the reason, fails these assertions.",
+      "seam": "Production entry point: `work_decisions::staleness` (pub, added in step 2), called with in-memory `Records` built from `Records::default()` and `Outcome` values; added by step 2, tests by step 4. Nothing is faked."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff to see the `staleness` call in `approve_work` before `self.ask`. `approve_in_limit_refuses_a_stale_proposal` shows the shared path. The drain's `approve` returns the error in `Approval.error`, and `approve_all` (drain.rs:2059-2066) keeps the proposal open with a note. Run the cli suites that call the shared path.",
+      "command": "cargo test -p athena-cli --test work_decisions && cargo test -p athena-cli --test drain && git diff -- crates/athena-core/src/work_decisions.rs crates/athena-cli/src/drain.rs",
+      "observes": "The only code change is the `staleness` call in `approve_work` plus the new function and tests; drain.rs shows a comment change only. The cli suites pass.",
+      "fails_without": "If the check were in one caller only, `approve_in_limit_refuses_a_stale_proposal` or the direct `approve_work` test in criterion 1 would still queue; if it sat after `self.ask`, the no-new-job assertion would fail.",
+      "seam": "Entry points `approve_work` and `approve_in_limit` (exist). The cli drain tests use their fake `Steps` (exists); `approving_queues_a_job_whose_request_carries_the_cited_content` (crates/athena-cli/tests/work_decisions.rs:96) uses a cited job with no outcome, so it stays green. No new seam."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks on the final tree. The workspace test run executes the new tests (criteria 1-3), every existing caller of `approve_work` (crates/athena-cli/tests/drain.rs:5328, 6210, 6276 with item LOW; crates/athena-cli/tests/work_decisions.rs:96-167) and the refusal corpus; also run the corpus alone as a regression for the unchanged `approve_request`.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked && cargo test -p athena-core --test refusal_corpus",
+      "observes": "All commands exit 0. In the test run, the new refusal tests pass and the existing approve-work tests still approve their non-stale proposals (they cite only paths, or a job with no outcome, and no rating), which shows the check refuses only stale proposals. I read the corpus case `approve_request_has_the_generators_shapes` (refusal_corpus.rs:842) but did not run it.",
+      "fails_without": "Without the check, the new tests `approve_work_refuses_a_proposal_whose_cited_job_was_closed_as_done` and `approve_work_refuses_a_proposal_whose_source_rating_has_a_newer_one` fail, so `cargo test --locked` fails. If the check over-refuses (for example refuses any cited job), the existing approve_work tests in crates/athena-cli/tests/drain.rs and work_decisions.rs and the control and unrelated-proposal cases fail. Unformatted code or a clippy warning in the new function fails the first two commands.",
+      "seam": "Entry points are the cargo commands over the whole workspace; the behavior is reached through `Athena::approve_work` from the existing tests (fixtures `repo_with` and the cli drain `Steps` fakes, both exist) and the new tests from step 4. No double holds the staleness logic."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the diff for the dropped job's files.",
+      "command": "git diff --stat",
+      "observes": "Changed files are exactly work_decisions.rs, drain.rs (comment), CHANGELOG.md (one new entry under Unreleased > Added) and docs/design/roles-and-ladder.md (one added sentence in the 'Deciding a proposal' bullet). No change to studies/firstmate-work-handling/model.json, claims.json or xtask/src/site.rs.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: Should a cited job count as closed as done only when it was closed after the proposal was raised? The plan says yes, so a proposal that merely cites an old finished job is not refused; say if any cited Done job should refuse regardless of time."
+  ],
+  "producer_section_sha256": "e48dad9fc1005b338e89857eedad30de7e9b51289246d26c0dc60c949500315d"
+}

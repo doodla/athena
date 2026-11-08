@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-202603-9dpf",
+  "round": 1,
+  "at": "2026-11-08T20:20:22.1950488Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Rule (a) cannot fire for audience proposals: it checks only jobs cited by reference, and audience proposals cite only the rating path. The request's 'earlier job from the same source' is not implemented.",
+      "evidence": "audience::work_item sets `source: record.clone(), evidence: vec![record]`, where record is the AudienceRating canonical path. No RefKind::Job ever appears. The request's condition is 'an earlier job from the same source was closed as done'. The records already link a job to its source: WorkDecision { work_item, decision: Approved { job } } (work.rs:146-163) points to a WorkItem whose `source` can be compared with the item being approved. As planned, an audience proposal from a rating whose earlier approved job was closed Done is approved unless a newer rating happens to exist. Fix: Extend `staleness` with a same-source rule. For each WorkDecision Approved{job} whose work item differs from this item and has an equal `source` (or the same key), treat that job as a closing job if its outcome is closed Done. Name it in the message the same way. Keep the cited-job rule too. Add a test: an audience proposal built with `audience::work_item`, plus an earlier work item with the same source, approved to job J, with J closed `closed: Done: ...`. Assert approve_work refuses it and queues nothing. Add a control where J was closed with a non-Done reason. Consider whether the item.at time filter applies to this rule; an earlier same-source job is earlier by definition.",
+      "location": "Plan Decision 3 / Step 2 (rule a); crates/athena-core/src/audience.rs:98-116",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Closing a blocked job writes the reason 'closed while blocked: {why}', so reading later_outcome first, as the plan does, still never matches 'Done' for that job. The stated mitigation does not work.",
+      "evidence": "manage.rs:123 has `reason: format!(\"closed while blocked: {why}\")` with `after_blocked: true`, which store.rs:183 loads into later_outcome. Step 2 strips only `closed: `, so 'closed while blocked: Done: ...' does not start with 'Done'. Fix: Strip both prefixes ('closed while blocked: ' and 'closed: '), or share one helper with hestia::closed_by_person. Add a pure-test case for a blocked job later closed with 'Done: ...'.",
+      "location": "Plan Risks (last bullet) and Step 2 (strip_prefix(\"closed: \")); crates/athena-core/src/manage.rs:121-127",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The Done rule matches on reason text only and ignores OutcomeState. A landed or failed job whose reason happened to begin with 'Done' would count as closed as done.",
+      "evidence": "hestia.rs:346-355 checks the state first (Dropped | Declined | Abandoned) and only then the reason prefix. The plan's rule reads only the reason. Fix: Also require the job's state() to be Closed(Dropped | Declined | Abandoned), as closed_by_person does, before testing the 'Done' prefix.",
+      "location": "Plan Step 2 (closing-job rule)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A refused stale proposal stays open, so every drain run notes it again until a person rejects it.",
+      "evidence": "approve_all pushes an erroring proposal to `left` with a note each run; nothing records that it was found stale. Fix: Say in the drain.rs doc comment and in roles-and-ladder.md that the note repeats until reject-work is run. That is enough without a new state.",
+      "location": "Plan Decision 2; crates/athena-cli/src/drain.rs:2059-2066",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The request says \"an earlier job from the same source was closed as done\". The reading, and this plan, narrowed that to \"a job cited in the proposal's source or evidence\". Audience proposals (audience.rs:98-116) cite only the rating path, so this narrowing leaves rule (a) dead for the incident class the acceptance names (\"an approved audience proposal from an old rating\"). The request's own test wording (\"a proposal whose cited job was closed as done\") is still met. The fix is to add a same-source rule, not to drop the cited-job rule.",
+  "summary": "I read work_decisions.rs (approve_work at 326-354, approve_in_limit at 358-370, repo_with and the existing approve test), drain.rs approve_all (2029-2070) and the call at 4283, audience.rs work_item (98-116), the Outcome and WorkDecision types, JobRecords::state, and manage.rs close. The plan's placement is right. The check goes into approve_work after find_open and before approve_request and self.ask, which every caller passes through: main.rs:1046, approve_in_limit and drain.rs:4283. The demonstrations drive real entry points on a seeded git repo, and the dependents list matches the callers I found by grep. Two problems remain. The main one is soundness: rule (a) only looks at job references inside the proposal. audience::work_item sets both source and evidence to the rating path and never cites a job. So for an audience proposal, which is the kind in the incident, the \"earlier job from the same source was closed as done\" condition can never fire. Records already link jobs to sources (WorkDecision Approved{job} → work_item → source), so the plan can implement the request's wording without guessing. The smaller problem: the plan says a blocked-then-closed job is covered by reading later_outcome first, but manage.rs:123 writes that reason as \"closed while blocked: {why}\". Stripping only \"closed: \" misses it."
+}
