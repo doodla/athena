@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The second firstmate study, milestone M2 (long-running sessions), in
+  `studies/firstmate-long-running-sessions/`, at the same pinned commit as the work-handling study. It models
+  session start, lock refusal, a truncated digest, reconciliation after a restart, watcher continuity, away mode,
+  secondmate relaunch, self-update and startup-memory growth as states, transitions, guards and counters, with
+  47 claims that cite lines and quotes of the pinned tree, 8 rationale cards and a newcomer introduction. Where
+  the source says nothing (crash cut-offs, context rot, scheduled updates, deadlines in away mode) the study
+  records a finding. `crates/athena-cap-study/src/rules.rs` gains tests that check this study against the
+  pinned tree with every rule, check that its recorded validation matches, and check that every claim id the
+  introduction names exists. The work-handling study is unchanged.
 - Per-gate counters, the `relax` and `remove` prevention kinds, and Hestia's review of a gate
   (`crates/athena-core/src/gate_counts.rs`, `docs/design/defaults-loop.md` section 3.8). A gate is a failed check
   of a rejected job, the verifier when no check failed, or an admission rule that ended a rejected or failed job.
