@@ -13,6 +13,10 @@ both start a chain: "jobs <a> and <b> both start a chain, so they do not form on
 verification verified other content than its candidate holds: "<dir>/verification.json verified <fp>, not the
 content <dir>/candidate.json holds"). The text below is the original proposal and is otherwise unchanged.
 
+**See also:** `per-job-landing-branches.md` (proposed) cuts each job's commit from current main so that a pull
+request holds one job. The chain rule below stays for adopters who squash a pull request with several jobs; that
+design does not use it.
+
 Claims are marked **(read)** when taken from the code or docs named beside them, and **(inferred)** when they
 follow from reading but were not run. No command was run to reproduce any failure.
 
