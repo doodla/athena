@@ -243,6 +243,49 @@ impl Athena {
         config: &athena_data::Config,
     ) -> Result<(Vec<NewFile>, Vec<Invocation>)> {
         let id = job.id();
+        let (mut files, mut invocations) = self.recover_traces(job, config)?;
+        // A job that died while planning has planner or critic invocations and no producer yet: the producer
+        // never started, so there is nothing to bound and no missing producer to record.
+        let planned = invocations
+            .iter()
+            .any(|i| matches!(i.role, Role::Planner | Role::Critic));
+        if !planned && !invocations.iter().any(|i| i.role == Role::Producer) {
+            let seq = invocations.iter().map(|i| i.seq).max().unwrap_or(0) + 1;
+            let model = job
+                .latest_reading()
+                .map(|r| r.producer_model.clone())
+                .unwrap_or_default();
+            let partial = PartialUsage {
+                seq,
+                role: "producer".into(),
+                model,
+                cap_usd: config.budget.producer_usd,
+                timeout_s: config.budget.producer_timeout_s,
+                started_at: job.job.as_ref().and_then(|j| j.dispatched_at),
+                ..PartialUsage::default()
+            };
+            let mut record = interrupted_record(self, id, &partial, config);
+            record.outcome = athena_data::records::InvocationOutcome::Missing;
+            record.detail = Some("recorded by `athena close`: no trace of the producer survived; its cost is bounded by its cap".into());
+            files.push(NewFile::record(&AnyRecord::Invocation(Box::new(
+                record.clone(),
+            ))));
+            invocations.push(record);
+        }
+        invocations.sort_by_key(|i| i.seq);
+        Ok((files, invocations))
+    }
+
+    /// Collects the invocations that left a trace in the state directory and are not committed yet:
+    /// completed live records, and lower-bound records for invocations whose process died (their usage
+    /// files). The second value starts from the job's committed invocations. Nothing is synthesized: a
+    /// producer that left no trace is not booked here (`recover_interrupted` does that for `athena close`).
+    pub(crate) fn recover_traces(
+        &self,
+        job: &JobRecords,
+        config: &athena_data::Config,
+    ) -> Result<(Vec<NewFile>, Vec<Invocation>)> {
+        let id = job.id();
         let committed: BTreeSet<u32> = job.invocations.iter().map(|i| i.seq).collect();
         let mut invocations = job.invocations.clone();
         let mut files = Vec::new();
@@ -276,34 +319,6 @@ impl Athena {
                 ))));
                 invocations.push(record);
             }
-        }
-        // A job that died while planning has planner or critic invocations and no producer yet: the producer
-        // never started, so there is nothing to bound and no missing producer to record.
-        let planned = invocations
-            .iter()
-            .any(|i| matches!(i.role, Role::Planner | Role::Critic));
-        if !planned && !invocations.iter().any(|i| i.role == Role::Producer) {
-            let seq = invocations.iter().map(|i| i.seq).max().unwrap_or(0) + 1;
-            let model = job
-                .latest_reading()
-                .map(|r| r.producer_model.clone())
-                .unwrap_or_default();
-            let partial = PartialUsage {
-                seq,
-                role: "producer".into(),
-                model,
-                cap_usd: config.budget.producer_usd,
-                timeout_s: config.budget.producer_timeout_s,
-                started_at: job.job.as_ref().and_then(|j| j.dispatched_at),
-                ..PartialUsage::default()
-            };
-            let mut record = interrupted_record(self, id, &partial, config);
-            record.outcome = athena_data::records::InvocationOutcome::Missing;
-            record.detail = Some("recorded by `athena close`: no trace of the producer survived; its cost is bounded by its cap".into());
-            files.push(NewFile::record(&AnyRecord::Invocation(Box::new(
-                record.clone(),
-            ))));
-            invocations.push(record);
         }
         invocations.sort_by_key(|i| i.seq);
         Ok((files, invocations))

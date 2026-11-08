@@ -660,6 +660,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A dispatched job with no outcome is no longer skipped by the drain, and `athena status` shows one that has no
+  process however it came to be. Cause: a dispatched job with no outcome was skipped by drain and not shown by
+  status as work to resume. Two origins, both in code. (1) A run that returned an error after the Dispatch commit
+  (`Athena::dispatch` commits the job record and producer brief first) left the job dispatched with no closing
+  record, and the drain read the run as one with no outcome. (2) `steward::interrupted_work` listed a dispatched job
+  only for the drained channels and hid every job that any later request named as a retry, even a retry that was
+  dropped, so a job on another channel or one whose retry was dropped was never retried or closed; nothing closed an
+  original once its retry had ended; and `athena status` called a job that another process runs "interrupted".
+  Failure class: a dispatched job that ends with no outcome record. Jobs 20261026-232359-msh3,
+  20261026-232423-hvyb, 20261027-054148-g63s, 20261027-123701-77zh, 20261027-054206-w1y3 and 20261027-054209-z7sj
+  were found in this state: 20261027-054148-g63s, 20261027-123701-77zh, 20261027-054206-w1y3 and
+  20261027-054209-z7sj were each retried by a later request (20261028-174834-xncn, 20261028-213554-pnjn,
+  20261028-185350-qjzx and 20261028-201400-ykmf), every retry landed, and the original stayed dispatched with no
+  outcome because nothing closed it (origin 2); 20261026-232359-msh3 and 20261026-232423-hvyb were closed by hand
+  later, citing their re-ask and retry. Fix: (a) a run that errors after dispatch closes the job `failed` with an
+  `environment: stopped by an error after dispatch, before the job closed: <error>` reason (`close_after_error`),
+  which the scope guard does not count and `athena retry` may resume; a low-disk or slot hold, the kill switch, a
+  resume mark and a job already closed at `HEAD` are left as they were; only invocations that left a trace are booked
+  (`Athena::recover_traces`, split out of `recover_interrupted`, which `athena close` still uses). (b)
+  `interrupted_work` lists every dispatched job with no process on any channel, except a job a standing retry
+  covers; liveness is `Athena::has_process` (registry entry or held job lock). `queued_work` still leaves queued
+  requests of other channels alone. (c) A new settle step (`steward::settle_interrupted`, `Steps::settle_interrupted`)
+  closes an original whose retry has ended with "re-queued as <retry>, which ended <state>" and a job with no request
+  record, before the queue is read and after it was worked; after the queue was worked it also writes a `held <job>:
+  <reason>` note for every dispatched job still without an outcome that the run has not already named. (d) An
+  interrupted item's incomplete plan entry is not used, since its retry reads the request again. `athena status` only
+  gained the lock-aware running test: it already listed every dispatched job with no process, on every channel, with
+  an `athena retry` next step; `reading/retry.rs` is unchanged. The new text replaces the older entry that said the
+  drain retries interrupted jobs "on a drained channel only". Recorded in D167. Order for the live records: close or
+  re-queue the six jobs above (`athena close <job> --why "..."`, citing the commit that carried the work where it
+  landed through another job, or `athena retry <job>`) and any other stale dispatched job before the first drain on
+  this build, since that drain now lists every channel. Tests: `drain_resumes_an_interrupted_job_on_any_channel`,
+  `a_run_that_errors_after_dispatch_ends_with_an_outcome_in_the_same_drain`,
+  `a_drain_with_a_job_limit_names_the_interrupted_job_it_did_not_reach`,
+  `an_interrupted_job_whose_retry_is_open_on_another_channel_is_named_as_held`,
+  `an_interrupted_job_whose_retry_was_dropped_is_listed_and_resumed_again`,
+  `a_dispatched_job_whose_lock_another_process_holds_is_left_alone`,
+  `status_lists_every_dispatched_job_with_no_outcome_whatever_its_channel`, the `settle_*` tests in `steward.rs` and
+  `an_error_after_dispatch_*` in `run/tests.rs`.
 - Attribution checkpoints are now pushed to the remote `athena/records` branch. `athena check --attribution` on
   main and `athena land` wrote the checkpoint commit to the local records branch only, and the next write to
   the records branch (a landing, which first resets the local branch to the remote tip) dropped it, so CI never
