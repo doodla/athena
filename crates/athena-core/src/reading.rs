@@ -588,6 +588,7 @@ impl Athena {
                 .collect(),
             headroom: reader_headroom(self, jc),
             refusal: refusal.map(str::to_string),
+            enabled_roles: jc.config.enabled_roles(),
         });
         let capability_ids: Vec<String> = self
             .capabilities
@@ -1412,6 +1413,20 @@ mod tests {
 
     fn shipped_config() -> athena_data::Config {
         athena_data::Config::parse(include_str!("../../../athena.toml")).unwrap()
+    }
+
+    #[test]
+    fn the_reader_input_roles_come_from_the_config_job_plan_enabled_value() {
+        let mut config = shipped_config();
+        config.job_plan.as_mut().unwrap().enabled = true;
+        assert!(config.enabled_roles().contains(&"planner".to_string()));
+        assert!(config.enabled_roles().contains(&"critic".to_string()));
+        config.job_plan.as_mut().unwrap().enabled = false;
+        assert_eq!(config.enabled_roles(), ["reader", "producer", "verifier"]);
+        config.job_plan = None;
+        assert_eq!(config.enabled_roles(), ["reader", "producer", "verifier"]);
+        // read_once passes the config's roles, not a fixed list.
+        assert!(reading_source().contains("enabled_roles: jc.config.enabled_roles(),"));
     }
 
     fn close(a: f64, b: f64) -> bool {

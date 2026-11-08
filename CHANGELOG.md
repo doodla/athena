@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The reader's brief lists the pipeline roles enabled in the effective config under "Enabled roles", and
+  `READING_RULES` gains a tenth, prose-only line: brief content targets only enabled roles. Root cause:
+  readings put new content into planner and critic briefs although `[job_plan]` was off, because the reader was
+  never told which roles run. `Config::enabled_roles` (reader, producer and verifier always; planner and critic
+  when `[job_plan] enabled` is true) feeds the new `ReaderInputs::enabled_roles` in `read_once`. Tests:
+  `the_reader_brief_lists_only_reader_producer_and_verifier_when_job_planning_is_off`,
+  `the_reader_brief_lists_planner_and_critic_when_job_planning_is_on`,
+  `the_reader_input_roles_come_from_the_config_job_plan_enabled_value`.
 - A check that a verifier prompt does not contradict the verdict rules. Root cause: `judge` in
   `crates/athena-core/src/verify.rs` refuses a behavior criterion that cites no command or one the core did not
   see run (D43, D63, D115), but nothing compared the verifier prompts with those rules, so an edit such as

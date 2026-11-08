@@ -828,6 +828,19 @@ impl Config {
             .map_or(0.0, |p| f64::from(rounds) * (p.planner_usd + p.critic_usd))
     }
 
+    /// The pipeline roles that run for a job under this config: the reader, producer and verifier always, and
+    /// the planner and critic only when `[job_plan]` is present and `enabled` is true (any mode).
+    pub fn enabled_roles(&self) -> Vec<String> {
+        let mut roles = vec!["reader".to_string()];
+        if self.job_plan.is_some_and(|p| p.enabled) {
+            roles.push("planner".into());
+            roles.push("critic".into());
+        }
+        roles.push("producer".into());
+        roles.push("verifier".into());
+        roles
+    }
+
     /// The cap on one critic call, zero when `[job_plan]` is absent.
     pub fn critic_usd(&self) -> f64 {
         self.job_plan.map_or(0.0, |p| p.critic_usd)
@@ -1091,6 +1104,21 @@ pub(crate) mod tests {
 
     fn digest(config: &Config) -> String {
         crate::sha256_hex(config.reading_inputs().as_bytes())
+    }
+
+    #[test]
+    fn enabled_roles_follow_the_job_plan_enabled_value() {
+        let unplanned_text = unplanned(REPO_CONFIG);
+        let absent = Config::parse(&unplanned_text).unwrap();
+        assert_eq!(absent.enabled_roles(), ["reader", "producer", "verifier"]);
+        let off =
+            Config::parse(&format!("{unplanned_text}\n[job_plan]\nenabled = false\n")).unwrap();
+        assert_eq!(off.enabled_roles(), ["reader", "producer", "verifier"]);
+        let on = Config::parse(&format!("{unplanned_text}\n[job_plan]\nenabled = true\n")).unwrap();
+        assert_eq!(
+            on.enabled_roles(),
+            ["reader", "planner", "critic", "producer", "verifier"]
+        );
     }
 
     #[test]
