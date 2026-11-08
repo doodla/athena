@@ -1,0 +1,31 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261108-224502-c0z6",
+  "at": "2026-11-08T22:45:02.065002703Z",
+  "trigger": "failure",
+  "job": "20261027-054321-rxa7",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "failed",
+  "what_happened": "Job 20261027-054321-rxa7 (\"Verify the whole verifier-snapshot lock holds before the verifier runs\", code) failed in planning, before any code was written. After round 1 of 5 the critic found the reading misread the request, and the plan still needed revising at the last round. The reading said all snapshot locking goes through `Snapshot::lock` in athena-git. A second copy of the same two-place-probe lock sits in crates/athena-core/src/snapshot.rs, for the evidence snapshot the verifier reads. The plan named it but left it to the user, though the request asks to fix the whole class across crates/. Major finding 1: the new tests build the partial lock from write bits only, and root ignores write bits. The real component runs as root, so the tests also pass against the old probe and prove nothing about the fix. Major finding 2: the athena-core lock is left unfixed. Minor findings: the CHANGELOG blames two earlier jobs without evidence the lock existed then. The no-probe-left-behind test runs only on an unlocked tree. One nit: the lock error cannot tell a path that accepted a write from a path that could not be checked. No acceptance criteria were reported unmet and no checks failed. Nothing was delivered.",
+  "failure_class": "20261108-224515-nx55",
+  "new_class": true,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "Planning checks that named functions exist, but nothing makes the reading search the whole scope the request names for every copy of the mechanism. It also does not make the plan run its failing-before test as the user the real component runs as. The reading took the first lock it found as the only one, though the request said \"the whole class\" across crates/. The plan's tests relied on file mode bits, which root bypasses, so they could not fail on the old code. Planning has fixed rounds, keeps no partial plan and has no repair step, so two major findings left at the last round lose all planning spend. A mechanical grep for duplicate implementations and a run of the demonstration under the real uid would both have found the gaps in round 1.",
+  "prevention_kind": "design-change",
+  "prevention": "Add two planning-stage checks. (1) When a request says to fix a whole class within a path, the reading must list every implementation of the mechanism found by searching that whole path (here both `lock` and `probe_write` copies), and the plan must fix all of them or name why one is out of scope. A reading that defers one to the user is refused. (2) Each \"fails without the change\" demonstration must be run, or reasoned, under the real component's uid (root). Tests that rely on permission bits root ignores are refused and must use an attempted write, a fake filesystem or an injected failure.",
+  "proposed_request": "Make the verifier-snapshot lock check every path, in both copies. The lock in crates/athena-git/src/snapshot.rs (Snapshot::lock) and the evidence-snapshot lock in crates/athena-core/src/snapshot.rs must each attempt a write at every path of the tree. Preferably they should share one routine. If any path accepts a write, the lock fails with an error naming that path. Verification must still turn a lock error into Incomplete before the verifier is invoked, as verification.rs does now. Acceptance: (1) both locks fail when any nested path stays writable, and the error names the path; (2) the tests detect this when run as root. Do not rely on mode bits. Use an attempted write or an injected writable path, and show each test fails against the old two-place probe; (3) the check leaves no probe file behind, including on the real locked-tree path that the later tree comparison sees; (4) the error distinguishes a path that accepted a write from a path that could not be checked; (5) CHANGELOG.md has an entry that states only what the diff does and does not blame earlier jobs. Allowed files: the two snapshot.rs files, their tests, and CHANGELOG.md.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.1260142,
+    "input_tokens": 2,
+    "output_tokens": 1602
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "planning_stopped": true,
+  "from_jev": false
+}
