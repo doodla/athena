@@ -1,0 +1,359 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261108-110258-520z",
+  "round": 3,
+  "at": "2026-11-08T12:05:54.342197388Z",
+  "invocation_seq": 9,
+  "approach": "Add a gate rule next to the open-questions rule in `plan_findings` that refuses a plan whose risks, or whose dependents' tests and reasons, hand caller and test discovery to the producer. One helper, `defers_to_producer(text)`, normalizes the text into words (lowercase, markup removed, `producer's` read as `producer`). It matches only a discovery deferral: the word `producer`, zero or more auxiliaries, an inflected discovery verb, and an impact word (callers, readers, tests, existing, crates, include_str, and so on) within eight words after the verb, with no procedural marker (cargo, pass, fmt, clippy) in that window. It also matches `left/leave (it) to the producer` when the same text names an impact word. So 'producer to check existing go tests' is refused, while 'the producer should check that cargo fmt passes' and 'the producer will verify with cargo test -p athena-cli --test budgets' are accepted. `risks_findings` emits one Major Athena finding per offending risk at location `risks`; `dependents_deferral_findings` emits one at `dependents, dependent N`. Both are called from `plan_findings` after `open_questions_findings`, and a Major finding returns the plan to the planner with no critic call. The doc comment names the root cause and says plainly what the rule cannot see: an omission with no written deferral (job 20261026-193430-avnq's unlisted include_str! reader) is covered only by the new planner.md line, which is prose. The `open_questions_findings` doc comment is corrected to match. One line goes into planner.md, the `budget planner` line in docs/system-facts.md is recomputed, and CHANGELOG.md gets an entry. Tests are unit tests in admission.rs and a case table in refusal_corpus.rs.",
+  "decisions": [
+    {
+      "choice": "Fix at `plan_findings` with a risks rule and a dependents-deferral rule that share one helper `defers_to_producer`, and add one planner.md line.",
+      "reason": "`open_questions_findings` (admission.rs:331) never reads risks, and its doc (admission.rs:325-326) says the caller listing 'stays prose'. Job 20261025-055626-er96 passed the gate with a risk deferring to the producer. The planner brief points callers to `dependents`, and `dependents_findings` (admission.rs:383) accepts any non-blank test or reason, so a risks-only rule would push the deferral into dependents. Scanning both places closes the written-deferral half of the class. The other half, an omission with no written deferral (job 20261026-193430-avnq), cannot be seen by a text rule; only the planner.md line addresses it, and that line is prose only. The doc comment and CHANGELOG say so.",
+      "rejected": [
+        {
+          "option": "Change only the planner prompt",
+          "why": "Prose alone is what failed twice; the user default 'mechanism' wants enforcement in code."
+        },
+        {
+          "option": "Scan risks only",
+          "why": "The deferral would move into a dependent's reason."
+        },
+        {
+          "option": "Search the repository mechanically for callers and compare with `dependents`",
+          "why": "Out of scope: plan_findings has no repository access, and the request keeps the search with the planner."
+        },
+        {
+          "option": "Refuse any risk that mentions the producer, or any non-empty risks list",
+          "why": "Too blunt; 'the producer runs cargo test' is a legitimate mitigation and the rule must not be blanket."
+        }
+      ]
+    },
+    {
+      "choice": "Answer critic finding 2: the matcher requires an impact word within eight words after the discovery verb and no procedural marker in that window. Procedural markers are cargo, pass, passes, passing, green, fmt, clippy, succeed, succeeds. Verbs are check, verify, search, find, grep, determine, their -s forms, and look(s) for. Zero or more auxiliaries (to, should, will, must, needs, has, also, then, can, may) may sit between `producer` and the verb.",
+      "reason": "`check` and `verify` are used procedurally as often as `confirm`. Requiring an impact object (the option-two fix) refuses 'producer to check existing go tests' and 'producer should verify the callers' but not 'the producer should check that cargo fmt --check passes' (no impact word, and cargo/passes are markers) or 'the producer will verify with cargo test -p athena-cli --test budgets' (cargo marker; `test` singular is not an impact word). The marker rule also accepts 'the producer should verify the existing tests pass', a procedural sentence that contains an impact word. Over-refusal is costly because MAX_MECHANICAL_PASSES is 2 (planning.rs:437) and the job stops after that. The corpus pins both directions.",
+      "rejected": [
+        {
+          "option": "Match the verb list without an impact object",
+          "why": "Refuses ordinary procedural mitigations, as the critic showed."
+        },
+        {
+          "option": "Do not match when check/verify is followed by `that`",
+          "why": "'check that no other crate reads display.rs' is a real deferral."
+        },
+        {
+          "option": "Include the singular `test` as an impact word",
+          "why": "It appears in `cargo test` and 'test output'; a miss costs a critic round, a false refusal costs a mechanical pass. Listed as a known miss."
+        },
+        {
+          "option": "Regex or NLP matching",
+          "why": "A transparent word list, like `says_code_answers` (admission.rs:366), is simple and the corpus pins it."
+        }
+      ]
+    },
+    {
+      "choice": "Answer critic nit 5: normalize `producer's` and `producer’s` to `producer`, accept the inflected verbs (checks, verifies, searches, finds, greps, determines, looks for), and allow zero auxiliaries. Known misses go in the doc comment: the passive ('callers to be checked by the producer'), an adverb between auxiliary and verb ('producer to carefully check'), and the singular `test` as the only impact word.",
+      "reason": "The inflected and possessive forms cost a few lines. The impact-object requirement keeps zero-auxiliary matches from refusing 'the producer finds the figure in the failure message'. The passive and adverb forms need grammar parsing; the critic still reviews what passes.",
+      "rejected": [
+        {
+          "option": "Match the passive",
+          "why": "Needs a parse; the rule is a declaration check, not proof."
+        }
+      ]
+    },
+    {
+      "choice": "Findings: one per offending risk at location exactly `risks`, summary 'Risk N defers its impact to the producer: <risk text>', checking both the risk text and the mitigation. One per offending dependent at `dependents, dependent N`, summary 'Dependent N (<name>) defers its impact to the producer: <text>', checking both the test and the reason. All are Major and from Athena. The detail says to search the tests and other crates, state the answer with file and line, and list the callers and tests in `dependents`.",
+      "reason": "The criterion names location 'risks'. The dependents location reuses the existing `dependents, dependent N` form (admission.rs:397), which the corpus already accepts by prefix 'dependents'. Scanning the risk text covers the deferral-in-the-risk-text input form. The detail applies because the finding fires only on a discovery deferral.",
+      "rejected": [
+        {
+          "option": "Location `risks, risk N`",
+          "why": "The criterion says location 'risks'."
+        },
+        {
+          "option": "Put dependent findings at `risks`",
+          "why": "The planner needs the pointer to the field to fix."
+        }
+      ]
+    },
+    {
+      "choice": "Answer critic finding 4: relabel the corpus case for a reader of display.rs left to the producer as 'synthetic: written for this corpus' (not a paraphrase of job 20261026-193430-avnq). Say in the `risks_findings` doc and the CHANGELOG that the mechanism refuses written deferrals (job 20261025-055626-er96), and that job 20261026-193430-avnq's unlisted include_str! reader, with no deferral written, is covered only by the planner.md line, which is prose only.",
+      "reason": "That job wrote no 'producer to check'; its record is not in the snapshot, so the case cannot cite it. The honest description keeps the change description from overclaiming.",
+      "rejected": [
+        {
+          "option": "Keep the case as a paraphrase of that job",
+          "why": "It misstates what that job's plan said."
+        }
+      ]
+    },
+    {
+      "choice": "Answer critic finding 3: change the last sentence of the `open_questions_findings` doc comment (admission.rs:324-326) to say completeness of the caller search stays prose, but a deferral of it to the producer is refused by `risks_findings` and `dependents_deferral_findings`. Do not edit briefs.rs (`OPEN_QUESTION_RULE` doc, briefs.rs:1839-1840); the CHANGELOG entry names it as a follow-up.",
+      "reason": "admission.rs is a deliverable; briefs.rs is not and is out of scope.",
+      "rejected": [
+        {
+          "option": "Edit briefs.rs too",
+          "why": "Not a listed deliverable."
+        }
+      ]
+    },
+    {
+      "choice": "Answer athena minor finding 1: keep the `docs/system-facts.md` edit, one number on the `budget planner` line. It is not a listed deliverable.",
+      "reason": "`system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs:125) fails when the line differs from the computed size, and acceptance 8 needs the workspace test to pass. The file says to update the line, never the budget. The planner.md line is required by acceptance 5, so the budget line cannot be left alone.",
+      "rejected": [
+        {
+          "option": "Leave the facts line alone",
+          "why": "The budget test fails."
+        },
+        {
+          "option": "Skip the planner.md line",
+          "why": "Acceptance 5 requires it."
+        }
+      ]
+    },
+    {
+      "choice": "Make the corpus case shape hold a list of risks and a dependent's test and reason: `ImpactCase { id, source, risks: Vec<(&str,&str)>, dependent_test: Option<&str>, dependent_reason: Option<&str>, location, expected }`.",
+      "reason": "A list represents the empty-risks case directly and one table covers risks and dependents.",
+      "rejected": [
+        {
+          "option": "Keep the empty list only in the unit test",
+          "why": "The reading wants every input form mapped to a corpus case."
+        }
+      ]
+    },
+    {
+      "choice": "Leave OPEN_QUESTION_RULE in briefs.rs, the critic and reader prompts, athena.toml and defaults.toml unchanged.",
+      "reason": "Out of scope; the new rule enforces the existing brief sentence that the planner lists every caller.",
+      "rejected": [
+        {
+          "option": "Tighten briefs.rs wording",
+          "why": "Not a deliverable; duplicate instructions cost tokens."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Add `defers_to_producer`, `risks_findings` and `dependents_deferral_findings`, with root-cause doc comments (5% estimate, known misses, the omission limit). Call both from `plan_findings` after `open_questions_findings`, add a bullet to the `plan_findings` doc list, and correct the last sentence of the `open_questions_findings` doc. Add the test helpers and unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add the impact table (`ImpactCase`, `impact_cases`, `impact_findings`, `impact_cases_get_the_expected_outcome` and a wrong-outcome check) inside `mod plan_side`, mapping each input form to a case id.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/planner.md",
+      "action": "modify",
+      "purpose": "Add one line requiring callers, include_str!/fs readers of moved files and output assertions to be searched for and listed in dependents, never deferred to the producer.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Update the `budget planner` line to the computed value (not a listed deliverable; `system_facts_budgets_match_computed` fails otherwise).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Comment only: extend the comment above the `plan_findings` call (lines 212-215) to say the checks also refuse a risk or dependent that defers caller and test impact to the producer.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under [Unreleased] naming the root cause, the two rules, their limit, the planner.md line, the 5% estimate and the briefs.rs follow-up.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-core/src/admission.rs add `fn defers_to_producer(text: &str) -> bool`. Normalize: lowercase, remove `*` and backticks, split on whitespace, trim non-alphanumeric characters from each word's edges, and strip a trailing `'s` or `’s` (so `producer's` becomes `producer`). Form A: for each word equal to `producer`, skip zero or more auxiliaries (to, should, will, must, needs, has, also, then, can, may). If the next word is check, checks, verify, verifies, search, searches, find, finds, grep, greps, determine or determines, or is look/looks followed by `for`, take the next eight words as the window. The text defers when the window holds an impact word and no procedural marker. Impact words: caller, callers, reader, readers, tests, existing, crates, impact, dependent, dependents, usage, usages, references, or a word containing `include_str`. Procedural markers: cargo, pass, passes, passing, green, fmt, clippy, succeed, succeeds. Form B: the text holds the contiguous phrase 'left to the producer', 'leave to the producer' or 'leave it to the producer' and any word of the text is an impact word. Do not match read, confirm, review or inspect.",
+    "Add `fn risks_findings(risks: &[PlanRisk]) -> Vec<Finding>`: for each risk (numbered from 1), when `defers_to_producer` is true for its `risk` or its `mitigation`, push one `athena_finding(Severity::Major, \"risks\".into(), format!(\"Risk {n} defers its impact to the producer: {risk}\"), detail)`. The detail says to search the tests and other crates, state the answer with file and line, and list the callers and tests in `dependents`. Add `fn dependents_deferral_findings(dependents: &[PlanDependent])`: for each dependent, when its present non-blank `test` or `reason` defers, push one Major finding at `dependents, dependent N` with summary 'Dependent N (<name>) defers its impact to the producer: <text>'. Put the root-cause doc comment on `risks_findings`: planning was not required to settle caller and test impact, and risks and dependents could say 'producer to check', so plans passed with impact open (job 20261025-055626-er96). State plainly that the rule refuses written deferrals only; an omission with no deferral (job 20261026-193430-avnq's unlisted include_str! reader of display.rs) is covered only by the planner.md line, which is prose. List the known misses (passive, adverb before the verb, singular `test` only). Include 'expected 5% of newly refused plans (the reading's estimate, not a measurement)' and that the higher refusal rate is intended because those plans cost critic rounds on impact the planner can find by searching. Import `PlanRisk` if it is not in scope (athena_data::records, admission.rs:24-27).",
+    "In `plan_findings` (admission.rs:311) add `findings.extend(risks_findings(&plan.risks));` and `findings.extend(dependents_deferral_findings(&plan.dependents));` after the open-questions call, and add a bullet to the doc list above it. Edit the last sentence of the `open_questions_findings` doc (admission.rs:324-326): completeness of the caller search stays prose, but a deferral of it to the producer is refused by `risks_findings` and `dependents_deferral_findings`. In the tests module make `plan_findings_for` (admission.rs:870) delegate to a new `plan_findings_with(dependents, open_questions, risks)` that holds its body, so existing tests are unchanged. Add `risk_findings_for(Vec<(&str,&str)>)` (a complete dependent, filtered to location 'risks') and `dependent_findings_for(PlanDependent)` (filtered to locations starting 'dependents, dependent'). Add the tests `a_risk_that_defers_to_the_producer_is_a_major_finding_naming_it`, `a_dependent_that_defers_to_the_producer_is_a_major_finding_naming_it` and `a_settled_risk_and_an_empty_risks_list_add_no_finding` with the inputs in demonstrations 2 and 3.",
+    "In crates/athena-core/tests/refusal_corpus.rs `mod plan_side`, after `open_question_cases` (line 2606), add `ImpactCase { id, source, risks: Vec<(&'static str, &'static str)>, dependent_test: Option<&'static str>, dependent_reason: Option<&'static str>, location: &'static str, expected: PlanExpected }` and `impact_cases()` with the case ids in demonstration 4. Add an `impact_findings(&ImpactCase)` helper that builds `plan_for(...)` with the dependent's test (default 'cargo test -p athena-core verify') and reason, sets `plan.risks`, and calls `plan_findings` as `question_findings` does. Add `impact_cases_get_the_expected_outcome` and a wrong-outcome check. Sources: the first case cites job 20261025-055626-er96; every other case says 'synthetic: written for this corpus'. Update the module-level comment.",
+    "Add one line to crates/athena-context/prompts/planner.md after the dependents bullet (line 11): for every production path the plan changes, search the tests and other crates for its callers, for `include_str!` or fs reads of any file it moves, and for output assertions; list them in dependents; never write 'producer to check' in a risk or a dependent (Athena refuses it). Keep it near 300 bytes.",
+    "Run `cargo test -p athena-cli --test budgets`. If `system_facts_budgets_match_computed` fails on the planner figure, copy the computed value from the failure message into the `budget planner` line of docs/system-facts.md and rerun until it passes. Do not touch the budget (1300).",
+    "Edit the comment above the `plan_findings` call in crates/athena-core/src/run/planning.rs (lines 212-215) to say the checks also refuse a risk or dependent that defers caller and test impact to the producer. No code change.",
+    "Add the CHANGELOG.md entry under [Unreleased] / Added: the root cause (planning was not required to settle caller and test impact, and risks and dependents could say 'producer to check', job 20261025-055626-er96); the two rules (Major at 'risks' and at 'dependents, dependent N', sent back without a critic call); the limit (job 20261026-193430-avnq's unlisted include_str! reader, with no deferral written, is covered only by the planner.md line, which is prose); the planner.md line; the expected 5% of newly refused plans; and a follow-up to update the briefs.rs `OPEN_QUESTION_RULE` doc (briefs.rs:1839-1840). Do not mention or include the display.rs split.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test -p athena-core --lib admission`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-context` and `cargo test --workspace`. Confirm with `git status` that display.rs and display/status_view.rs are untouched."
+  ],
+  "risks": [
+    {
+      "risk": "The matcher misses a differently worded deferral, such as the passive 'callers to be checked by the producer', or an omission like job 20261026-193430-avnq's.",
+      "mitigation": "The matcher covers producer + auxiliaries + discovery verb (including inflected forms and the possessive) with an impact word, and the fixed 'left/leave to the producer' phrases with an impact word. The doc comment lists the known misses: the passive, an adverb before the verb, the singular `test` as the only impact word, and an omission with no written deferral. The critic still reviews what passes."
+    },
+    {
+      "risk": "Over-refusal spends one of MAX_MECHANICAL_PASSES = 2 (planning.rs:437) and the job stops after the second.",
+      "mitigation": "The impact-object and procedural-marker conditions keep 'should check that cargo fmt passes', 'will verify with cargo test ... budgets' and 'verify the existing tests pass' accepted; each is a corpus Accept case. Singular `test` is excluded as an impact word. The expected rate is 5% of newly refused plans (the reading's estimate, not a measurement), and the higher rate is intended."
+    },
+    {
+      "risk": "The new planner.md line pushes the planner set over its budget, or the facts line drifts.",
+      "mitigation": "The line is about 300 bytes, about 100 tokens (an estimate), against 175 tokens of headroom (1125 of 1300 at docs/system-facts.md:25). Step 6 runs the budgets test and copies the computed figure into the facts line. The budget 1300 is not touched."
+    },
+    {
+      "risk": "The docs/system-facts.md edit goes beyond the listed deliverables (a minor finding).",
+      "mitigation": "The edit is one number, required by `system_facts_budgets_match_computed`, and is named in files with that reason."
+    },
+    {
+      "risk": "Scope creep into the early-push feature or the display.rs split.",
+      "mitigation": "Neither is touched. Criterion 7 is checked with `git status` and `git diff`."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "plan_findings result (new Major findings at 'risks' and 'dependents, dependent N')",
+      "dependent": "crates/athena-core/src/run/planning.rs:216 (plan round: a Blocker or Major finding returns RoundEnd::Mechanical, up to MAX_MECHANICAL_PASSES = 2 at planning.rs:437, then the job stops)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --lib admission and cargo test -p athena-core --test refusal_corpus. The new findings have the shape of the open-question findings the loop already handles. Fake planners in run/tests.rs:1146 send `risks: []`.",
+      "reason": null
+    },
+    {
+      "name": "plan_findings signature and callers",
+      "dependent": "crates/athena-core/src/run/mod.rs:3 (import), crates/athena-core/src/run/planning.rs:216, admission.rs tests, refusal_corpus.rs",
+      "kind": "code",
+      "test": null,
+      "reason": "A Grep for `plan_findings` in crates found only those users. The signature does not change, so no caller changes."
+    },
+    {
+      "name": "dependents_findings shape check (empty section, blank name, neither test nor reason)",
+      "dependent": "crates/athena-core/src/admission.rs:383 and corpus cases dependents-missing, dependents-blank-name, dependents-no-test-or-reason, dependents-whitespace-only-test-and-reason, dependents-test-only, dependents-reason-only, dependents-complete-ci-reuse (refusal_corpus.rs:2423-2484)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus (plan_cases_get_the_expected_outcome)",
+      "reason": null
+    },
+    {
+      "name": "One-finding expectations for a dependent with no test or reason",
+      "dependent": "New dependents-deferral rule in admission.rs, combined with `dependents_findings`",
+      "kind": "rule",
+      "test": null,
+      "reason": "The deferral rule scans only a present, non-blank test or reason, so 'neither a test nor a reason' cases still give exactly one finding. Existing dependents texts in the corpus hold no producer-deferral phrase (Grep over crates)."
+    },
+    {
+      "name": "JobPlan.risks and PlanRisk (risk, mitigation)",
+      "dependent": "crates/athena-data/src/records/plan.rs:41, crates/athena-data/src/records.rs:2914 (round-trip test), crates/athena-context/src/briefs.rs:1645-1653 (renders risks)",
+      "kind": "code",
+      "test": null,
+      "reason": "The rule reads the strings and changes no record, schema or field. `check_record_file`, `AnyRecord` and the round-trip test are unaffected, and the plan render in briefs.rs is unchanged."
+    },
+    {
+      "name": "Planner output in fake planner JSON",
+      "dependent": "crates/athena-core/src/run/tests.rs:1146, crates/athena-cli/tests/lifecycle.rs:3125, crates/athena-cli/tests/job_plan.rs:430, crates/athena-cli/tests/introspection.rs:737, crates/athena-agent/src/fake.rs:378",
+      "kind": "code",
+      "test": "cargo test --workspace (criterion 8)",
+      "reason": "Each fake output has `\"risks\": []` (Grep for `\"risks\"` in crates), which the rule accepts, and their dependents text holds no deferral phrase."
+    },
+    {
+      "name": "Planner frame text (planner.md) and its budget set",
+      "dependent": "crates/athena-context/src/lib.rs:56 (PLANNER_FRAME), crates/athena-cli/tests/budgets.rs:62-66 and :125 (system_facts_budgets_match_computed), crates/athena-core/src/run/planning.rs:136 (composes the planner brief)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test budgets. The size is ceil(bytes/3); the producer copies the computed value from the failure message into the facts line.",
+      "reason": null
+    },
+    {
+      "name": "Planner wording assertions",
+      "dependent": "crates/athena-context/src/lib.rs:472, 503, 513 and crates/athena-context/src/briefs.rs:2671-2703 (assert that PLANNER_FRAME contains given phrases)",
+      "kind": "rule",
+      "test": "cargo test -p athena-context (no asserted phrase is removed; the line is added)",
+      "reason": null
+    },
+    {
+      "name": "`budget planner` line in docs/system-facts.md",
+      "dependent": "docs/system-facts.md:25, included by crates/athena-context/src/briefs.rs:1764 as SYSTEM_FACTS in the planner and critic briefs",
+      "kind": "host_setting",
+      "test": "cargo test -p athena-cli --test budgets (system_facts_budgets_match_computed; system_facts_drift_is_rejected)",
+      "reason": null
+    },
+    {
+      "name": "Producer-set prompt budget (1300), which the planner is measured against",
+      "dependent": "BudgetSet::Producer in crates/athena-context/src/lib.rs; every_role_set_is_within_its_budget in crates/athena-cli/tests/budgets.rs",
+      "kind": "host_setting",
+      "test": "cargo test -p athena-cli --test budgets",
+      "reason": "The planner is at 1125 of 1300 (docs/system-facts.md:25); a line of about 300 bytes is about 100 tokens (an estimate) and fits in the 175-token headroom."
+    },
+    {
+      "name": "`open_questions_findings` doc comment and OPEN_QUESTION_RULE doc in briefs.rs",
+      "dependent": "crates/athena-core/src/admission.rs:324-326; crates/athena-context/src/briefs.rs:1839-1840",
+      "kind": "rule",
+      "test": null,
+      "reason": "The admission.rs sentence is corrected in this change (comment only). The briefs.rs doc says the caller listing is prose only; it stays untouched because it is not a deliverable and is named as a follow-up in the CHANGELOG. Neither is behavior."
+    },
+    {
+      "name": "Critic and reader prompts, athena.toml, defaults.toml",
+      "dependent": "crates/athena-context/prompts/critic.md, reader.md, athena.toml, defaults.toml",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Out of scope and not edited. The critic still reviews what passes the gate."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check by Grep and Read, then run the admission tests. Grep admission.rs for `fn risks_findings`, `fn dependents_deferral_findings` and `fn defers_to_producer`. Read the `findings.extend(risks_findings(&plan.risks))` call after `open_questions_findings` in `plan_findings`, and read the doc comment.",
+      "command": "cargo test -p athena-core --lib admission",
+      "observes": "The `risks_findings` doc comment names the root cause: planning was not required to settle caller and test impact and let risks and dependents defer it to the producer. It says the finding is Major at location 'risks', and lists what the rule cannot see (omission, passive, adverb, singular `test`). The call sits in `plan_findings` beside the open-questions call. The admission unit tests compile against it and pass.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests `a_risk_that_defers_to_the_producer_is_a_major_finding_naming_it` and `a_dependent_that_defers_to_the_producer_is_a_major_finding_naming_it` in admission.rs. Each builds a plan whose only variable part is the risks or the dependent, calls `plan_findings`, and filters to location 'risks' (or a location starting 'dependents, dependent'). Risk inputs: ('Existing go tests would call real gh', 'producer to check existing go tests'); 'the producer should check the callers', 'will verify other crates that read it', 'producer should also search the tests', 'producer to look for include_str! readers', 'producer checks existing callers', \"producer's to verify the readers\", 'left to the producer: which tests assert no warning'; a deferral in the risk text with a settled mitigation; two risks where only the second defers (numbering). Dependent inputs: reason 'producer to check for include_str! readers' and test 'producer to check existing tests'.",
+      "command": "cargo test -p athena-core --lib admission",
+      "observes": "One finding per deferring risk or dependent: severity Major, source Athena, location Some('risks') or 'dependents, dependent N', summary containing the offending text and 'defers its impact to the producer'. The second of two risks is named 'Risk 2'.",
+      "fails_without": "On the base commit `plan_findings` has no risks or dependents-deferral rule, so the findings at 'risks' are empty and the `len() == 1` assertion fails for every deferring input.",
+      "seam": "Entry point: `plan_findings(&JobPlan, &Reading, &Policy, &dyn Fn(&str)->bool)` in admission.rs, the function called from run/planning.rs:216. Fixture: the module's existing `plan_findings_for` (admission.rs:870), which builds a JobPlan with a content criterion and an empty verifier Policy. Step 3 makes it delegate to a new `plan_findings_with(dependents, open_questions, risks)` and adds the wrappers `risk_findings_for` and `dependent_findings_for`. Nothing is doubled; the tests supply data only. `plan_findings` and `plan_findings_for` exist today; the wrappers are added by step 3."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests `a_settled_risk_and_an_empty_risks_list_add_no_finding` and a dependents counterpart in admission.rs, using the same helpers. Inputs that add no finding at 'risks' or 'dependents, dependent N': mitigation 'lifecycle.rs:2627 asserts no warning; GhEarly skips quietly'; 'The producer runs cargo test -p athena-core --lib admission after the edit'; 'the producer should check that cargo fmt --check passes'; 'the producer will verify with cargo test -p athena-cli --test budgets'; 'the producer must read the computed figure from the budgets test failure message'; 'the producer must confirm cargo fmt --check passes'; 'the producer should verify the existing tests pass'; 'updating the budget line is left to the producer'; an empty risks list; a dependent whose reason states a found answer ('status.rs:410 reads display.rs via include_str!; test status_reads_display updated in step 4').",
+      "command": "cargo test -p athena-core --lib admission",
+      "observes": "For each input the findings at the checked locations are empty. For the empty risks list the whole `plan_findings` result is empty, as before the rule.",
+      "fails_without": "A blanket implementation (any risk that mentions the producer, any non-empty list, or discovery verbs without the impact-object and procedural-marker conditions) produces a finding and fails these emptiness assertions. Refusing deferrals at all is criterion 2's failing-on-base direction.",
+      "seam": "Same as criterion 2: production `plan_findings` through `risk_findings_for` and `dependent_findings_for`, added by step 3. Nothing is doubled."
+    },
+    {
+      "criterion": 4,
+      "method": "Add an impact table inside `mod plan_side` of crates/athena-core/tests/refusal_corpus.rs, after `open_question_cases` (line 2606), with the test `impact_cases_get_the_expected_outcome` and a wrong-expectation check like `a_plan_case_that_expects_the_wrong_outcome_is_reported` (line 2575). Map of input forms to case ids (I read the existing tables; I have not run the new cases). Refuse at 'risks': risk-producer-to-check (source: job 20261025-055626-er96, 'Existing go tests would call real gh'), risk-producer-should-check, risk-producer-will-check, risk-producer-to-verify, risk-producer-should-also-check, risk-producer-to-look-for, risk-producer-checks-callers (inflected), risk-possessive-producers-to-verify, risk-left-to-the-producer, risk-mixed-case-deferral ('PRODUCER To Check'), risk-bold-and-backtick-markup-deferral, risk-deferral-across-a-line-break, risk-deferral-in-the-risk-text (synthetic: written for this corpus, an include_str! reader of a moved file left to the producer, settled mitigation). Refuse at 'dependents, dependent 1': dependent-reason-defers, dependent-test-defers. Accept: risk-settled-answer-with-file-and-line, risk-producer-runs-a-command, risk-producer-should-check-that-fmt-passes, risk-producer-will-verify-with-cargo-test-budgets, risk-producer-must-read-the-figure, risk-producer-must-confirm-fmt, risk-producer-verifies-existing-tests-pass, risk-left-to-the-producer-without-impact, risk-empty-list, dependent-reason-states-found-answer.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "Every impact case gets its expected outcome: each Refuse case gives exactly one Major Athena finding at its location whose summary contains the stated text; each Accept case gives no finding. Ids are unique and the table holds both outcomes.",
+      "fails_without": "Without the rule every Refuse case gets zero findings and the table test fails. Without the impact-object and procedural-marker conditions the Accept cases 'should check that fmt passes' and 'will verify with cargo test ... budgets' fail. Without the narrowed verb list the 'must read' and 'must confirm' cases fail.",
+      "seam": "Entry point: `athena_core::admission::plan_findings`. Fixture: the corpus's existing `plan_side::plan_for(dependents)` plus `super::base_reading(\"\")` with a content criterion, as `question_findings` does (refusal_corpus.rs:2668). The new `impact_findings(&ImpactCase)` helper sets `plan.risks` and the dependent's test and reason before the call. The harness shape exists; the table, case struct and helper are added by step 4. The matching logic stays in production code."
+    },
+    {
+      "criterion": 5,
+      "method": "Content check: Grep planner.md for 'include_str!' and read the new line. Then run the budget tests.",
+      "command": "cargo test -p athena-cli --test budgets",
+      "observes": "One line tells the planner to search the tests and other crates for the callers of every changed production path, for include_str! or fs reads of moved files and for output assertions, to list them in dependents, and never to leave them to the producer (Athena refuses a written deferral). The planner set stays within 1300 and docs/system-facts.md carries the recomputed `budget planner` figure.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Content check: Grep for '5% of newly refused plans' in admission.rs and CHANGELOG.md.",
+      "command": "cargo test -p athena-core --lib admission",
+      "observes": "The `risks_findings` doc comment and the CHANGELOG entry each say the rule refuses more plans, expected 5% of newly refused plans (the reading's estimate, not a measurement), and that the higher refusal rate is intended because those plans cost critic rounds on impact the planner can find by searching. The admission tests compile and pass with the comment in place.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the new CHANGELOG.md entry under [Unreleased], then check the changed paths with git status and git diff.",
+      "command": "git status",
+      "observes": "The entry names the root cause (planning was not required to settle caller and test impact, and risks and dependents could say 'producer to check', as in job 20261025-055626-er96), the two rules, and the limit: job 20261026-193430-avnq's unlisted reader is covered only by the planner.md prose line. It names briefs.rs `OPEN_QUESTION_RULE` as a follow-up. Changed paths are only admission.rs, refusal_corpus.rs, planner.md, planning.rs, CHANGELOG.md and docs/system-facts.md. display.rs is unchanged and display/status_view.rs does not exist.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run the whole gate: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, then `cargo test --workspace`, which includes budgets.rs, the refusal corpus and the athena-context wording tests.",
+      "command": "cargo test --workspace",
+      "observes": "All pass. Fake planner outputs in run/tests.rs, lifecycle.rs, job_plan.rs and introspection.rs carry `\"risks\": []` and no deferral text, so none is refused.",
+      "fails_without": "Without the system-facts update, `system_facts_budgets_match_computed` fails. Without the rule none of the new tests pass.",
+      "seam": "Whole-workspace run, no double. Existing tests that reach `plan_findings` indirectly with empty risks are the regression check."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "18499cb54e181d5b8cdb60a6c6bc2b4a72df35ade622ec4875b7dc82ca35dc35"
+}

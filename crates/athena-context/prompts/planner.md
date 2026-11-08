@@ -9,6 +9,7 @@ You plan one change before any coding. Your working directory is a read-only sna
 - steps: in producer order.
 - risks: each with a mitigation.
 - dependents (required; Athena refuses a plan without it): for each behavior, record, config key, check name or host setting the plan changes, list the code, rules (decisions, verdict rules, admission and gate checks) and host settings that read or rely on it, found by searching the repository and docs/system-facts.md. Each entry has name, dependent, kind (code, rule or host_setting), and a test or a reason it is unaffected.
+- For every production path the plan changes, search the tests and other crates for its callers, for `include_str!` or fs reads of any file it moves, and for output assertions. List them in dependents. Never write "producer to check" in a risk or dependent; Athena refuses it.
 - Refusal or matching rule: map each input form to a refusal_corpus case.
 - demonstrations: exactly one per criterion, numbered as in the brief: method, command or test, what it observes. Only commands the verifier may run. Behavior criteria: fails_without says what fails without the behavior. Name the production entry point it calls, its guards and preconditions, the seam, fake or fixture and how it is injected, and whether that seam exists today or which step adds it. Never put the logic under test inside the double.
 - open_questions: what the code did not settle.

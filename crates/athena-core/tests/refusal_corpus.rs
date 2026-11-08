@@ -2374,7 +2374,9 @@ fn no_check_bypasses_refusing_check() {
 // `refusing_check`. The rule refuses more plans than before (every plan without dependents); the higher
 // refusal rate is intended, and expected 15% of newly refused readings is the share the change declares.
 // Sources are the four earlier breakages, where a change left a reader of the changed behavior unexamined,
-// and job 20261102-063419-0beg, the retry of which added the section.
+// and job 20261102-063419-0beg, the retry of which added the section. The same module also drives the
+// open-questions rule and the impact rule (a risk or dependent that defers caller and test impact to the
+// producer).
 
 mod plan_side {
     use athena_agent::policy::Policy;
@@ -2382,7 +2384,7 @@ mod plan_side {
     use athena_data::JobId;
     use athena_data::records::{
         Criterion, CriterionKind, Demonstration, DependentKind, Finding, FindingSource, JobPlan,
-        PlanDependent, Role, Severity,
+        PlanDependent, PlanRisk, Role, Severity,
     };
 
     /// What `plan_findings` must do with a plan case.
@@ -2721,6 +2723,310 @@ mod plan_side {
                     .any(|c| matches!(c.expected, PlanExpected::Refuse(_))),
             "the table holds accepted and refused questions"
         );
+    }
+
+    // The impact rule: a risk, or a dependent's test or reason, that defers the search for existing callers and
+    // tests to the producer is refused at `risks` or `dependents, dependent N`, and a risk that states a found
+    // answer, names a command the producer runs, or an empty list is accepted. It refuses more plans; expected
+    // 5% of newly refused plans (the reading's estimate, not a measurement); the higher refusal rate is
+    // intended, because those plans cost critic rounds on impact the planner can find by searching. Only the
+    // first case is a real job's wording (job 20261025-055626-er96); the others are synthetic.
+
+    struct ImpactCase {
+        id: &'static str,
+        source: &'static str,
+        /// `(risk, mitigation)` pairs.
+        risks: Vec<(&'static str, &'static str)>,
+        dependent_test: Option<&'static str>,
+        dependent_reason: Option<&'static str>,
+        /// The location of the one expected finding, when the case is refused.
+        location: &'static str,
+        expected: PlanExpected,
+    }
+
+    fn risk_case(
+        id: &'static str,
+        risk: &'static str,
+        mitigation: &'static str,
+        expected: PlanExpected,
+    ) -> ImpactCase {
+        ImpactCase {
+            id,
+            source: "synthetic: written for this corpus",
+            risks: vec![(risk, mitigation)],
+            dependent_test: Some("cargo test -p athena-core verify"),
+            dependent_reason: None,
+            location: "risks",
+            expected,
+        }
+    }
+
+    fn impact_cases() -> Vec<ImpactCase> {
+        use PlanExpected::{Accept, Refuse};
+        let defers = "defers its impact to the producer";
+        let cases = vec![
+            ImpactCase {
+                id: "risk-producer-to-check",
+                source: "job 20261025-055626-er96: the risk and mitigation its plan passed the gate with",
+                risks: vec![(
+                    "Existing go tests would call real gh",
+                    "producer to check existing go tests",
+                )],
+                dependent_test: Some("cargo test -p athena-core verify"),
+                dependent_reason: None,
+                location: "risks",
+                expected: Refuse(defers),
+            },
+            risk_case(
+                "risk-producer-should-check",
+                "Callers may break",
+                "The producer should check the callers",
+                Refuse(defers),
+            ),
+            risk_case(
+                "risk-producer-will-check",
+                "Readers of the file",
+                "Producer will check other crates for readers",
+                Refuse(defers),
+            ),
+            risk_case(
+                "risk-producer-to-verify",
+                "Output assertions",
+                "producer to verify the existing tests",
+                Refuse(defers),
+            ),
+            risk_case(
+                "risk-producer-should-also-check",
+                "Tests",
+                "producer should also search the tests",
+                Refuse(defers),
+            ),
+            risk_case(
+                "risk-producer-to-look-for",
+                "A moved file",
+                "producer to look for include_str! readers",
+                Refuse(defers),
+            ),
+            risk_case(
+                "risk-producer-checks-callers",
+                "Callers",
+                "producer checks existing callers",
+                Refuse(defers),
+            ),
+            risk_case(
+                "risk-possessive-producers-to-verify",
+                "Readers",
+                "producer's to verify the readers",
+                Refuse(defers),
+            ),
+            risk_case(
+                "risk-left-to-the-producer",
+                "Warnings",
+                "which tests assert no warning is left to the producer",
+                Refuse(defers),
+            ),
+            risk_case(
+                "risk-mixed-case-deferral",
+                "Existing tests",
+                "PRODUCER To Check Existing Tests",
+                Refuse(defers),
+            ),
+            risk_case(
+                "risk-bold-and-backtick-markup-deferral",
+                "Readers",
+                "**Producer** to `check` the readers",
+                Refuse(defers),
+            ),
+            risk_case(
+                "risk-deferral-across-a-line-break",
+                "Callers",
+                "producer to\ncheck existing callers",
+                Refuse(defers),
+            ),
+            risk_case(
+                "risk-deferral-in-the-risk-text",
+                "A move may break an include_str! reader of display.rs; producer to check existing readers",
+                "lifecycle.rs:2627 asserts no warning",
+                Refuse(defers),
+            ),
+            risk_case(
+                "risk-settled-answer-with-file-and-line",
+                "Existing go tests would call real gh",
+                "lifecycle.rs:2627 asserts no warning; GhEarly skips quietly",
+                Accept,
+            ),
+            risk_case(
+                "risk-producer-runs-a-command",
+                "The budget line drifts",
+                "The producer runs cargo test -p athena-cli --test budgets after the edit",
+                Accept,
+            ),
+            risk_case(
+                "risk-producer-should-check-that-fmt-passes",
+                "Formatting",
+                "the producer should check that cargo fmt --check passes",
+                Accept,
+            ),
+            risk_case(
+                "risk-producer-will-verify-with-cargo-test-budgets",
+                "Budget",
+                "the producer will verify with cargo test -p athena-cli --test budgets",
+                Accept,
+            ),
+            risk_case(
+                "risk-producer-must-read-the-figure",
+                "Budget",
+                "the producer must read the computed figure from the failure message",
+                Accept,
+            ),
+            risk_case(
+                "risk-producer-must-confirm-fmt",
+                "Formatting",
+                "the producer must confirm cargo fmt --check passes",
+                Accept,
+            ),
+            risk_case(
+                "risk-producer-verifies-existing-tests-pass",
+                "Regression",
+                "the producer should verify the existing tests pass",
+                Accept,
+            ),
+            risk_case(
+                "risk-left-to-the-producer-without-impact",
+                "Budget",
+                "updating the budget line is left to the producer",
+                Accept,
+            ),
+            ImpactCase {
+                id: "risk-empty-list",
+                source: "synthetic: written for this corpus",
+                risks: vec![],
+                dependent_test: Some("cargo test -p athena-core verify"),
+                dependent_reason: None,
+                location: "risks",
+                expected: Accept,
+            },
+            ImpactCase {
+                id: "dependent-reason-defers",
+                source: "synthetic: written for this corpus",
+                risks: vec![],
+                dependent_test: None,
+                dependent_reason: Some("producer to check for include_str! readers"),
+                location: "dependents, dependent 1",
+                expected: Refuse(defers),
+            },
+            ImpactCase {
+                id: "dependent-test-defers",
+                source: "synthetic: written for this corpus",
+                risks: vec![],
+                dependent_test: Some("producer to check existing tests"),
+                dependent_reason: None,
+                location: "dependents, dependent 1",
+                expected: Refuse(defers),
+            },
+            ImpactCase {
+                id: "dependent-reason-states-found-answer",
+                source: "synthetic: written for this corpus",
+                risks: vec![],
+                dependent_test: None,
+                dependent_reason: Some(
+                    "status.rs:410 reads display.rs via include_str!; test status_reads_display updated in step 4",
+                ),
+                location: "dependents, dependent 1",
+                expected: Accept,
+            },
+        ];
+        cases
+    }
+
+    fn impact_findings(c: &ImpactCase) -> Vec<Finding> {
+        let mut plan = plan_for(vec![entry(
+            "recorded exit code",
+            "verify.rs judge: the seen-commands filter counts a reused passing check",
+            c.dependent_test,
+            c.dependent_reason,
+        )]);
+        plan.risks = c
+            .risks
+            .iter()
+            .map(|(risk, mitigation)| PlanRisk {
+                risk: (*risk).into(),
+                mitigation: (*mitigation).into(),
+            })
+            .collect();
+        let mut reading = super::base_reading("");
+        reading.acceptance_criteria = vec![Criterion {
+            text: "The plan lists its dependents".into(),
+            kind: CriterionKind::Content,
+        }];
+        let verifier = Policy {
+            role: Role::Verifier,
+            root: std::path::PathBuf::from("."),
+            commands: Default::default(),
+            writes: false,
+            evidence: None,
+        };
+        plan_findings(&plan, &reading, &verifier, &|_| false)
+    }
+
+    /// The impact cases that fail their expectation, each as a line naming the case and its source.
+    fn impact_mismatches(cases: &[ImpactCase]) -> Vec<String> {
+        let mut found = Vec::new();
+        for c in cases {
+            let got = impact_findings(c);
+            let ok = match c.expected {
+                PlanExpected::Accept => got.is_empty(),
+                PlanExpected::Refuse(text) => {
+                    got.len() == 1
+                        && got[0].severity == Severity::Major
+                        && got[0].source == FindingSource::Athena
+                        && got[0].location.as_deref() == Some(c.location)
+                        && got[0].summary.contains(text)
+                }
+            };
+            if !ok {
+                found.push(format!(
+                    "{} ({}): expected {:?}, got {got:?}",
+                    c.id, c.source, c.expected
+                ));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn impact_cases_get_the_expected_outcome() {
+        let cases = impact_cases();
+        let ids: std::collections::BTreeSet<&str> = cases.iter().map(|c| c.id).collect();
+        assert_eq!(ids.len(), cases.len(), "impact case ids are unique");
+        assert!(
+            cases.iter().any(|c| c.expected == PlanExpected::Accept)
+                && cases
+                    .iter()
+                    .any(|c| matches!(c.expected, PlanExpected::Refuse(_))),
+            "the table holds accepted and refused plans"
+        );
+        let mismatches = impact_mismatches(&cases);
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    #[test]
+    fn an_impact_case_that_expects_the_wrong_outcome_is_reported() {
+        let wrong = vec![
+            risk_case(
+                "deferral-but-expected-accepted",
+                "Tests",
+                "producer to check existing tests",
+                PlanExpected::Accept,
+            ),
+            risk_case(
+                "settled-but-expected-refused",
+                "Tests",
+                "lifecycle.rs:2627 asserts no warning",
+                PlanExpected::Refuse("defers its impact to the producer"),
+            ),
+        ];
+        assert_eq!(impact_mismatches(&wrong).len(), 2);
     }
 
     #[test]

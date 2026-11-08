@@ -22,7 +22,7 @@ whole. Each fact names its source. Where the source is a request and not code, t
   - budget reader: 1997 of 2000
   - budget producer: 1257 of 1300
   - budget verifier: 1298 of 1300
-  - budget planner: 1125 of 1300
+  - budget planner: 1217 of 1300
   - budget critic: 974 of 1300
 - **Banned words.** The boundary scan fails any tracked file naming who runs Athena or the machine it runs
   on. The list is not repeated here, so this file passes the scan. Source: `boundary_words()` in
