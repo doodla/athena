@@ -9,6 +9,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A cache-scope rule in `check_environment_reach` (in `reading`). Root cause: the reading stage had no step asking, for
+  each CI cache or stored artifact, which ref saves it, which runs restore it, and which runs may write shared
+  entries (jobs 20261025-034731-2am0 and 20261025-055626-er96; introspections 20261025-050603-wrv7 and
+  20261025-065849-n99a), so two plans designed a fingerprint-keyed result cache and an early push whose CI run is
+  reused at landing without asking. The check now also fires on a behavior criterion that ties a CI place to a
+  cache or artifact word (or names `actions/cache`), on a CI run or result reused across refs, and on a
+  created or modified `.github/workflows/` deliverable with a cache or artifact word. The reading then needs one
+  `Environment:` assumption that names the cache, artifact or result and states its save scope, restore scope and
+  write rights, for example "saved by the main branch push run, restored by pull request runs of the same branch
+  and by main, written only by main"; the error names the part that is missing. A CI result matched by commit
+  SHA is not a trigger. Tests: `environment_reach_cache_refuses_a_workflow_with_a_cache_without_scope`,
+  `environment_reach_cache_refuses_a_behavior_cache_criterion_without_scope`,
+  `environment_reach_cache_scope_covers_the_class`, `environment_reach_cache_scope_doc_and_changelog_name_the_cause`
+  and the corpus test `environment_cache_scope_refusal_is_declared_intended`. This check refuses more readings;
+  the higher refusal rate is intended, expected 3% of newly refused readings (an estimate, not measured).
+  Follow-up, not done here: add the cache clause to the reader rule line in `crates/athena-context/src/briefs.rs`
+  within its 220-byte limit.
 - The reader's brief lists the pipeline roles enabled in the effective config under "Enabled roles", and
   `READING_RULES` gains a tenth, prose-only line: brief content targets only enabled roles. Root cause:
   readings put new content into planner and critic briefs although `[job_plan]` was off, because the reader was
