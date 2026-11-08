@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Spec requirements OLY-A-55 to OLY-A-60 in `docs/spec.toml` for the BRIEF.md addenda of 2026-11-04 to
+  2026-11-08. Without them the six coverage tests in `xtask/tests/spec.rs` failed with "no requirement for", so
+  `cargo test` was red. The firstmate long-running-sessions (M2) study is not part of this entry: its sources
+  were not available in this job.
 - Per-gate counters, the `relax` and `remove` prevention kinds, and Hestia's review of a gate
   (`crates/athena-core/src/gate_counts.rs`, `docs/design/defaults-loop.md` section 3.8). A gate is a failed check
   of a rejected job, the verifier when no check failed, or an admission rule that ended a rejected or failed job.
