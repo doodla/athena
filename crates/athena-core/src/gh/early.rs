@@ -319,6 +319,7 @@ pub fn open_early_pr(early: &EarlyPr) -> Result<()> {
             job: early.job.as_str().to_string(),
             state: LinkState::Open,
             merged_commit: None,
+            base_jobs: Vec::new(),
         },
     )
 }

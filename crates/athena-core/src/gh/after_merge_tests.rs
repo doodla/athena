@@ -36,6 +36,7 @@ fn report(state: LinkState, merged: Option<&str>) -> PrReport {
             job: "j1".into(),
             state,
             merged_commit: merged.map(str::to_string),
+            base_jobs: Vec::new(),
         },
         checks: None,
         merge_requested: true,

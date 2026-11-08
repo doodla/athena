@@ -124,6 +124,7 @@ fn link() -> PrLink {
         job: "j".into(),
         state: LinkState::Open,
         merged_commit: None,
+        base_jobs: Vec::new(),
     }
 }
 

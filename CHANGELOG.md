@@ -9,6 +9,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Earlier pull requests are closed when a later job's pull request lands their commits. Root cause: a job built
+  on an earlier unmerged job's branch had no recorded dependency, and nothing reconciled the earlier pull
+  requests after the later one merged, so they stayed open although `main` carried their commits. Failure class
+  stacked-job-content-lands-via-later-pr; jobs 20261010-154004-60r4 and 20261010-154007-jbt9 (introspections
+  20261017-125701-mkgp and 20261017-141752-2ffq). `PrLink` (`crates/athena-core/src/pr.rs`) gains `base_jobs`,
+  found at landing, not when the job is cut: `land_pr` records the other jobs whose open link head is an ancestor
+  of the landing commit (`record_bases`). Old links load with it empty, and an empty list is not written. After
+  `land_pr` sees its own pull request merged (also on a later call, which retries a failed close),
+  `close_carried_prs` in `crates/athena-core/src/gh/landing.rs` walks `base_jobs` and each earlier link's own
+  `base_jobs`, so a chain A, B on A, C on B closes both A and B. An earlier pull request is closed, with a comment
+  naming the merging pull request and the merged commit, only when the host reports it open and its head, as the
+  host reports it now, is an ancestor of the merged commit or of the head the host was asked to merge. The second
+  test is for squash merges (the only method this repository uses), whose commit never has the earlier head as an
+  ancestor. A pull request that is merged or closed, or has a commit the merge does not carry, is not touched. A
+  failure is a `PrReport.warnings` line; the merge and the landing record stand. `PrHost` gains `pr_status` and
+  `close_pr` (default bodies are errors); `GhClient` reads `pulls/N`, patches it closed and posts the comment,
+  under the existing read-pr host operation. Left open on purpose: a pull request whose head is still its job's
+  early candidate, which is on no branch (the job was landed locally but `athena land --pr` never ran for it), and
+  a stack that `plan_rebase` replayed under new hashes. Neither is reachable from the merge, and closing them needs
+  another rule. Tests: the `stacked` module in `crates/athena-core/src/gh/tests.rs` and the link tests in
+  `pr.rs`.
 - A reading check for scope limits, `reading::check_scope_limit`, run as a `step!` in `refusing_check` right after
   `check_defined_terms`. Root cause: a scope limit written from the named files without listing default-written
   files and config consumers. The reader wrote "only these files may change" from the files the request named, and

@@ -1,0 +1,97 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-054318-cgxc",
+  "round": 1,
+  "at": "2026-11-08T21:12:41.141941062Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "docs/design/native-pr-landing.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/design/native-pr-landing.md",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/early.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/early.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/after_merge_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/after_merge_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/display.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/display.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/external_calls.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/external_calls.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The ancestry rule misses the most common shape: an earlier PR whose head is still the early-pushed candidate commit, which is not on any branch.",
+      "evidence": "run/mod.rs:741-746 builds the candidate with `commit_tree(&tree, &[&p], \"Candidate for job {id}\\n\\nNot on any branch; landing builds its own commit.\")`. Its only parent is the job's base. open_early_pr pushes that commit and stores it as link.head (early.rs:291, 318). land.rs:210-211 says the landing commit replaces the candidate only when `gh::land_pr` runs for that job (landing.rs:206-209). A later job is cut on the local branch, which holds the earlier job's landing commit, not its candidate. So for an earlier job that was verified but never run through `athena land` (exactly the 'left open' case), the PR head is a sibling of the stack. `is_ancestor(head, job.commit)` in record_bases is false, and so are both arms of the carried test. The risk list names only rebase replay and cleaned links, not this. The tests miss it: criteria 3, 4 and 6 use the Edges fake and criterion 5 uses a straight-line chain with PR heads on the line. Fix: Model the real shape first. Base the dependency on the earlier job's landing commit (found from the job's records or landed_commit_for on the local branch), not on its PR head. Then decide the close rule for a PR whose host head is the earlier job's own recorded early candidate (pr-early.json / early link) while its landing commit is carried. Because the brief says 'all commits reachable' and puts other rules out of scope, put this to the user as an open question, and state in the plan and CHANGELOG which shapes are closed and which are left open. Add a real-git test in which the earlier PR's head is an off-branch candidate.",
+      "location": "Decisions 1-2 (record_bases and the carried test); crates/athena-core/src/run/mod.rs:741-746; crates/athena-core/src/gh/early.rs:291,318",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "This is a landing plan that sorts commits by ancestry, but it has no commit-shape table and no realistic-branch fixture.",
+      "evidence": "The plan changes land_pr and adds a rule that decides from commit ancestry whether an earlier PR's commits landed. It meets a range of shapes: early candidate head vs landing-commit head, a head with a commit pushed since, merge-commit vs squash vs rebase-merge, a stack replayed by plan_rebase (landing.rs:545-630, which copies earlier commits under new hashes), and records-only commits. Decision 8 opts out, and the only real-git fixture is a straight-line A→B→C where each PR head sits on the line and the merged commit is the fake string 'merged1'. Fix: Add a table with one row per shape: earlier head kind, how C was merged, whether main moved or the stack was replayed, and the expected result (closed, left open, or warned). Back it with a Git::isolated fixture shaped like real Athena branches: base, A's candidate made with commit_tree off-branch, A's landing commit with records on the branch, C cut on it, C's candidate and landing commit, and a squash commit on main. Assert the table's outcome for each row.",
+      "location": "Decision 8 ('No ... commit-shape table'); Demonstration for criterion 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The base is found by scanning at land time, just before the reconciliation uses it, rather than recorded when the job is cut.",
+      "evidence": "record_bases runs inside land_pr and scans every open link with is_ancestor(head, job.commit). In practice the field caches the 'scan all open links after a merge' design that the plan itself rejects. The link is created earlier, in open_early_pr (early.rs:311-323), when the job's base commit (candidate parent `p`) is already known. Fix: Record base_jobs where the link is created (open_early_pr, from the job's base commit and the landing commits under it), or say plainly in the change description that it is found at landing. Either way, test that it is recorded at that point.",
+      "location": "Decision 1; reading 'recorded base (the earlier job's id, from the branch the job is cut on)'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After its PR is closed, the earlier job stays verified-but-unlanded with an Open link, and drain will keep trying to land it.",
+      "evidence": "PrLander::land (drain.rs:3255-3263) calls athena.land_pr for each job, and landing_from_report (drain.rs:3271-3290) turns any error into NotLanded. A closed PR fails the merge (or the early head replacement) on every drain pass. The dependents entry says only that exit codes follow link.state. Fix: Name the drain behaviour in Dependents and add a test for it, or have land_pr report a host-closed PR clearly (for example as a warning that names the PR that carried it) instead of trying to merge it.",
+      "location": "Risks ('earlier job's PR is closed while its stored link still says Open'); Dependents 'PrReport.warnings'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The real-git chain test cannot use a real merged commit, so it exercises only the second arm and may pick up stray ancestry warnings.",
+      "evidence": "In FakeHost, `merge_makes: &'static str` is fixed to \"merged1\", and FakeContent is a BTreeMap<&'static str, &'static str> indexed with `self.0[commit]`. With `&Git` as the ancestry, is_ancestor(sha, \"merged1\") errors, and under Decision 2 an errored arm can produce a warning. Fix: Make merge_makes and the FakeContent keys owned Strings so the merged commit can be a real squash commit. Otherwise, state that the test covers only the second arm and assert the warning list exactly.",
+      "location": "Demonstration for criterion 5; crates/athena-core/src/gh/tests.rs:1257,1321,1428-1433",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Wrong path given for test_support.rs.",
+      "evidence": "FakeHost and EarlyFake are in crates/athena-core/src/test_support.rs:188-418, not in gh/test_support.rs. Fix: Correct the path.",
+      "location": "Dependents 'PrHost trait'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan names the root cause and puts the fix where the reading asks, in PrLink and land_pr. Its seams exist: Rig::run_with, FakeHost, store_link and Git::isolated. It accounts for every PrLink literal (grep of `PrLink {` matches its list), and its failure handling only adds warnings. But it judges 'carried' by ancestry of each earlier PR's head, and the plan never models the head Athena actually leaves on an earlier PR. At verification start, `go` pushes the candidate commit and opens the PR on it (run/mod.rs:741-746; early.rs:291,318). That commit is 'Not on any branch'; the stacked branch carries the earlier job's separate landing commit. Unless `athena land` already ran once on the earlier job, its PR head is never an ancestor of the later job's commit, its head or the merged commit. So record_bases records nothing and nothing is closed. The tests would still pass, because they use a fake ancestry (Edges) and a straight-line real-git chain. The plan also opts out of the commit-shape table and the realistic-branch fixture, although it is a landing plan that sorts commits by ancestry. Smaller points: the base is recorded at land time rather than when the job is cut; after its PR is closed, the earlier job stays verified-but-unlanded for drain to retry; and the real-git chain test cannot use a real merged commit. Revise."
+}

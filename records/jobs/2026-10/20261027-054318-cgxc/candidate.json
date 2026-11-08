@@ -1,0 +1,205 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261027-054318-cgxc",
+  "base_commit": "fb366fdd7178f12bceb267b9e9b44eb37aad93f8",
+  "base_fingerprint": "sha256:48634a64e2c769718f722e8258b6d00e30cfbc01f9f5e075e8e19d7c0c38032a",
+  "previous_job": "20261108-185513-gc6d",
+  "candidate_commit": "cb12eb14a8feb9f9cc54639fa3f27539aa855c9c",
+  "candidate_tree": "ef6e128f0c90c1aabe473e997ca62e89c6488076",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 391961
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 92365
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 304851
+    },
+    {
+      "path": "crates/athena-cli/tests/external_calls.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 17501
+    },
+    {
+      "path": "crates/athena-core/src/gh/after_merge_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 3852
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 49572
+    },
+    {
+      "path": "crates/athena-core/src/gh/early.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 19011
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 59012
+    },
+    {
+      "path": "crates/athena-core/src/gh/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 3932
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 186084
+    },
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 35309
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 45737
+    },
+    {
+      "path": "docs/records.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31165
+    }
+  ],
+  "fingerprint": "sha256:eaa8ec5562e99c2311e4e33b781c010e0d4b7c38e7ac76f0b05d3d77a9ee6228",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: a job built on an earlier unmerged job's branch had no recorded dependency, and nothing looked at the earlier pull requests once the later one merged. Their commits reached main but the PRs stayed open. Fixed in the link and in land_pr, not for one job.\n\n(1) `PrLink` (pr.rs) gains `base_jobs: Vec<String>` with `#[serde(default, skip_serializing_if = \"Vec::is_empty\")]`. Old links load with it empty. Unstacked links write the same bytes as before. The base is found at landing, not when the job is cut: `record_bases` and a read-only `all_links` take the other jobs whose open link head is an ancestor of the landing commit. `land_pr` runs this and stores the result.\n\n(2) After `land_pr` sees its own PR Landed (also on a later call, which retries a failed close), the new `close_carried_prs` (landing.rs) walks `base_jobs` and each earlier link's own `base_jobs`. For each earlier PR it asks the host for state and current head. It closes the PR, with a comment naming the merging PR and the merged commit, only if the PR is open and its head is an ancestor of the merged commit or of the head the host was asked to merge. The second test is what makes squash merges work: a squash commit has main as its only parent, so the first test alone would never fire. Merged or closed PRs are untouched. Every problem or close is a `PrReport.warnings` line, and the merge, landing record and stored link are never undone.\n\n`PrHost` gains `pr_status` and `close_pr` (default bodies are errors, so other fakes compile unchanged). `GhClient` does GET pulls/N, PATCH state=closed, then POST issues/N/comments, all under the existing ReadPr host operation.\n\nLeft open on purpose, and recorded in the CHANGELOG: a PR whose head is still its job's off-branch early candidate (the job was landed locally but `athena land --pr` never ran), and a stack that plan_rebase replayed under new hashes. Neither is reachable from the merge, so neither rule fires, and a real-git test pins both.\n\nVerified: `cargo test --locked` exit 0 and clippy clean. With the close call disabled, 9 of the 14 new `stacked` tests fail; the call is restored.",
+    "files": [
+      "crates/athena-core/src/pr.rs",
+      "crates/athena-core/src/gh/landing.rs",
+      "crates/athena-core/src/gh/client.rs",
+      "crates/athena-core/src/gh/mod.rs",
+      "crates/athena-core/src/gh/tests.rs",
+      "crates/athena-core/src/gh/early.rs",
+      "crates/athena-core/src/gh/after_merge_tests.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/external_calls.rs",
+      "CHANGELOG.md",
+      "docs/records.md",
+      "docs/design/native-pr-landing.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core stacked",
+        "result": "pass",
+        "note": "14 new tests pass."
+      },
+      {
+        "command": "cargo test -p athena-core stacked (close_carried_prs call temporarily disabled)",
+        "result": "fail",
+        "note": "9 of 14 failed as intended, so the tests show the behavior; the call was then restored."
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "whole workspace, exit 0"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed; boundary-word scan clean"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "The change description names the root cause: a job built on an unmerged job's branch has no recorded dependency and no post-merge reconciliation of the earlier PRs it carries. The fix is in crates/athena-core/src/pr.rs (the link) and crates/athena-core/src/gh/landing.rs (land_pr), not in one job's data. Check with git diff.",
+        "status": "met",
+        "evidence": "The doc comments on PrLink::base_jobs (pr.rs) and close_carried_prs (landing.rs), and the CHANGELOG entry, state the root cause and say the base is found at landing. The code is in pr.rs (base_jobs, all_links, record_bases) and landing.rs (land_pr, close_carried_prs). No job id literal appears outside tests. Read in the diff."
+      },
+      {
+        "criterion": "PrLink gains a defaulted field recording the base job (or earlier PR). A test in pr.rs shows an old pr-link.json without the field still loads (git diff shows the test).",
+        "status": "met",
+        "evidence": "`base_jobs` has serde(default, skip_serializing_if empty). `an_old_link_file_without_base_jobs_still_loads` in pr.rs writes an old-format file, loads it with empty base_jobs, shows the key is not written back, and round-trips a non-empty list. Ran `cargo test -p athena-core` (full workspace test also exit 0)."
+      },
+      {
+        "criterion": "A new unit test of the reconciliation (run cargo test -p athena-core) shows an open earlier PR whose head is reachable from the merged commit is closed with a comment naming the merging PR. It fails on the pre-change code, which has no such step.",
+        "status": "met",
+        "evidence": "`landing_a_stacked_job_closes_the_earlier_pull_request` (merge-commit and squash variants) and the real-git `a_chain_of_stacked_jobs_closes_every_earlier_pull_request` assert the host's closed list and that the comment contains #42 and the merged commit. With the close_carried_prs call disabled, `cargo test -p athena-core stacked` failed 9 of 14 tests, including these. I then restored the call and the tests pass."
+      },
+      {
+        "criterion": "A new unit test shows an earlier open PR with a commit not reachable from the merged commit is left open, and an already merged or closed PR is not touched. This guards against closing live work.",
+        "status": "met",
+        "evidence": "`an_earlier_pull_request_with_a_commit_the_merge_does_not_carry_stays_open` (host head e2 not carried: closed list empty). `a_merged_or_closed_earlier_pull_request_is_not_touched` (Merged and Closed statuses: only the open one is closed). `a_head_git_cannot_place_leaves_the_pull_request_open_and_names_it`, plus the real-git `shapes_the_rule_leaves_open_are_left_open` (early candidate, replayed head and unknown head left open). All pass."
+      },
+      {
+        "criterion": "A test is generic over the cause: two different earlier jobs stacked in a chain (A, then B on A, then C on B) are both closed when C lands, with no job id hard-coded. Run cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "`a_chain_of_stacked_jobs_closes_every_earlier_pull_request` builds a real git stack of three jobs with records-only and intervention commits between them. Ids come from a generator `id(n)` and assertions use the vector. It runs for squash and merge-commit merges, closes both earlier PRs, and leaves a sibling job with an off-branch candidate head untouched. `the_walk_follows_the_earlier_links_own_bases` shows the walk through C->[B], B->[A]. Both pass."
+      },
+      {
+        "criterion": "A failure to close an earlier PR is reported as a warning in PrReport.warnings and does not undo or fail the merge or the landing record. Check with a unit test using a failing fake host (cargo test -p athena-core).",
+        "status": "met",
+        "evidence": "`a_failure_to_close_is_a_warning_and_the_landing_stands` covers a failing status read, a failing close, and a close whose comment fails. In each case land_pr returns Ok, the link is Landed with merged_commit set, the stored link equals the report link, the host merged once, and a warning names #101 with the host error text. `a_close_that_failed_is_tried_again_by_the_next_landing_call` shows the retry. Both pass."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for the change, and docs describing the PR link or landing (docs/ file that mentions pr-link) are updated if they list the link's fields. Check with git diff and grep.",
+        "status": "met",
+        "evidence": "CHANGELOG.md has a new Unreleased/Added entry naming the root cause, the failure class, both jobs, the fix, the squash rule and the shapes left open. docs/design/native-pr-landing.md, the only doc mentioning pr-link (step 3, line 153), now lists base_jobs and the post-merge close. docs/records.md has a short section saying the link is state, not a record. Read in the diff. Ran `cargo test -p xtask --test policy` (17 passed) and the full suite, which includes the ontology and budget tests."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. For information I ran `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` (clean) and `cargo test --locked` (exit 0)."
+      }
+    ],
+    "open_issues": [
+      "User decision: the second ancestry test (earlier head reachable from the head the host was asked to merge) goes beyond 'reachable from the merged commit'. It is needed for squash merges, which this repository uses. If not wanted, delete the second is_ancestor arm in close_carried_prs; the tests that use the merge-commit variant stay valid.",
+      "User decision: an earlier PR whose host head is still its job's off-branch early candidate (the job was landed locally but `athena land --pr` never ran) stays open, as does a stack replayed by plan_rebase. Closing the first needs another rule, for example 'the job's landing commit is carried', which the brief puts out of scope. The recorded base_jobs and close step are where it would plug in.",
+      "Host question: whether the repository's token may PATCH a PR's state and POST an issue comment is not known from the code, which only shows it can merge. If not, every close becomes a warning and nothing else changes.",
+      "The earlier job's stored link still says Open after its PR is closed, so a later `athena land` or drain pass on it fails to land, as it does today with the stale open PR. No new LinkState was added, to avoid touching every match on LinkState. A drain change is out of scope.",
+      "Departures from the plan: edits outside the listed deliverables were compile-forced (`base_jobs: Vec::new()` in early.rs, after_merge_tests.rs, display.rs, drain.rs, external_calls.rs) plus docs/design/native-pr-landing.md as the doc that lists the link's fields. The plan's single `shapes_left_open` and 'realistic branch' fixtures were folded into `a_chain_of_stacked_jobs_closes_every_earlier_pull_request` and `shapes_the_rule_leaves_open_are_left_open`, which build real git history with records-only and intervention commits, off-branch candidates and real squash and merge commits."
+    ],
+    "mistakes": [
+      "The first test compile failed because the new `stacked` module did not import `store_link`; I fixed it.",
+      "I first used `_dir` as a struct field name in the test Repo; I renamed it to `dir` since the field is used."
+    ],
+    "learnings": [
+      "PrLink is a state-directory file, not a record. The seven struct literals across three crates all needed `base_jobs: Vec::new()`; the full workspace test compiles them all.",
+      "FakeContent maps `&'static str` to a fingerprint and indexes it with `[]`, so a real-git test must leak the merged commit sha (Box::leak, as the cutover tests do) and set host.merge_makes and the content map to it.",
+      "Git::is_ancestor returns Err (not false) for a commit git does not have, so an ancestry error and a plain 'not carried' are distinguishable.",
+      "This repository merges by squash, so a squash commit has main as its only parent. A rule that only checks reachability from the merged commit would never fire in production, which is why the second test (the head the host was asked to merge) is needed.",
+      "The build slot is limited. A foreground cargo call while a background cargo test runs fails with 'no build slot free' until it ends."
+    ],
+    "desires": [
+      "A way to see the output of a background test run while waiting. Reading the task output file is outside the working directory, and a second cargo call can only be told 'no build slot free'.",
+      "A read-only view of a live GitHub token's permissions, to answer the open host question."
+    ]
+  }
+}

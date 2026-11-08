@@ -294,6 +294,14 @@ Records are never edited, so an error in one is corrected here, not in the file.
   overwrote each other. Checks recorded from the fix round after acceptance verification 1 on share one open
   file.
 
+## The pull request link is state, not a record
+
+The link between a job and its pull request (`pr-link.json` in the state directory) is not a record and is not
+on the records branch. Besides the pull request number, host, repository, pushed head, job and merge outcome,
+it holds `base_jobs`: the earlier jobs whose unmerged pull requests the job was built on, found when the job
+lands. After the job's pull request merges, Athena closes each of those earlier pull requests whose commits the
+merge carries. A link written before `base_jobs` existed has none and still loads.
+
 ## What is never recorded
 
 No transcripts. Claude Code runs with `--no-session-persistence`, and the driver keeps only usage figures,

@@ -153,7 +153,14 @@ directory is stealth.
    modes**, in a link file under the job's directory (`pr-link.json`). It is not a record: the repository's
    records schema does not change. Reason (review 3 N2): the number and the pushed head exist only after the
    push, so they cannot be in the closing records the pull request itself carries, and a later record would
-   need its own path through the gate (M4, M5). Step 5 looks the merge up by the stored number.
+   need its own path through the gate (M4, M5). Step 5 looks the merge up by the stored number. The link also
+   holds `base_jobs`: the earlier jobs whose still-open pull requests this job was built on, found at landing as
+   the other open links whose head is an ancestor of the job's landing commit (a link written before the field
+   existed has none). After the job's pull request merges, each recorded earlier pull request that the host still
+   reports open is closed with a comment naming the merging pull request, but only when its head is reachable
+   from the merged commit or from the head the host was asked to merge (the second test covers a squash merge).
+   The walk follows each earlier link's own `base_jobs`. A failure to close is a warning and never undoes the
+   merge.
 4. **Wait.** Athena reads the pull request's check status through the client. It does not merge on its own
    authority: the merge is the user's, or the host's auto-merge setting the user chose.
 5. **Merge observed.** Athena asks the host for the pull request by its stored number and reads the merged
