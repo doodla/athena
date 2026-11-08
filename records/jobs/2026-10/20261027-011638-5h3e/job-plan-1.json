@@ -1,0 +1,236 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-011638-5h3e",
+  "round": 1,
+  "at": "2026-11-08T10:41:50.161670031Z",
+  "invocation_seq": 4,
+  "approach": "Add one shared constant CHECKABLE_CRITERIA_RULE in briefs.rs. Render it in the reader brief as its own `# Checkable criteria` section (after the code survey guide, before `# What the verifier can run`), so the existing rule lines, counts and the 2600-byte rules-section test are untouched. Render it in the producer brief as a new `## Make your evidence checkable` section (new fn checkable_evidence_section, called just before criteria_check_section) that adds: put proof in a file or test in the snapshot. Add two tests that render the briefs and assert on their text. Rewrite the report-held evidence rules in structure-pass.md section 5 (item 5 Caller check, item 3's report-listed lines, the two R5-R8 bullets, the 5.2 sentence) so the evidence is a committed file or test. Add one CHANGELOG line. No refusal logic, prompt file or governance file changes.",
+  "decisions": [
+    {
+      "choice": "New standalone section in the reader brief rather than a ninth entry in READING_RULES",
+      "reason": "READING_RULES is [&str; 8] with a test asserting len 8, one line per rule naming a check, lines <=220 bytes, and the section <2600 bytes (briefs.rs ~4476-4521). The rule has no new check (check_criteria_evidence stays unchanged), so it does not belong in a list where every line names a check.",
+      "rejected": [
+        {
+          "option": "Add a ninth READING_RULES line",
+          "why": "Breaks the len==8 assertion and the 'each rule names a check' test; would require editing existing tests."
+        },
+        {
+          "option": "Append the sentence to the 'What the verifier can run' paragraph",
+          "why": "That section prints only when verifier_can_run is non-empty and its text is covered by an existing test; the rule should always show. It would also change existing wording."
+        }
+      ]
+    },
+    {
+      "choice": "One shared private const used by both briefs; the producer section adds the 'file or test in the snapshot' instruction",
+      "reason": "The two briefs cannot drift and a test can assert the same phrase in both.",
+      "rejected": [
+        {
+          "option": "Edit prompts/reader.md and the producer prompt",
+          "why": "Headroom is 3 tokens (reader) and budgets are fixed; prompt files are out of scope."
+        },
+        {
+          "option": "Edit VERIFIER_VISIBILITY",
+          "why": "Existing wording must stay unchanged apart from the added rule; a separate section is a pure addition."
+        }
+      ]
+    },
+    {
+      "choice": "No new refusal check",
+      "reason": "The request is a stated rule with a test; check_criteria_evidence already refuses criteria citing the report. No refusal-corpus change, no refusal-rate change.",
+      "rejected": [
+        {
+          "option": "Extend check_criteria_evidence to refuse 'change description' wording",
+          "why": "Out of scope; would change refusal rate and need replay and corpus work."
+        }
+      ]
+    },
+    {
+      "choice": "In structure-pass.md section 5, rewrite item 5 and every other report-only evidence line (item 3, the two R5-R8 bullets, the 5.2 sentence) to a committed file or test",
+      "reason": "Criterion 3 requires no section-5 requirement whose evidence lives only in a report. The G1-G8 and R1-R9 rows and numbering stay.",
+      "rejected": [
+        {
+          "option": "Change only item 5",
+          "why": "Leaves other report-only requirements, failing the Grep `report` check."
+        }
+      ]
+    },
+    {
+      "choice": "Demonstrate the file-scope criterion (6) with `git diff --stat` and `git status` run in the producer's snapshot repository, naming the exact allowed paths",
+      "reason": "These are in the verifier's allowed command list and show directly whether any file beyond the three was touched.",
+      "rejected": [
+        {
+          "option": "Rely on cargo test to show no unrelated changes",
+          "why": "Tests do not detect an extra edited file such as a prompt or checks.rs."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add CHECKABLE_CRITERIA_RULE, the reader `# Checkable criteria` section, the producer `## Make your evidence checkable` section (fn checkable_evidence_section), and two tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/structure-pass.md",
+      "action": "modify",
+      "purpose": "Section 5: item 5 (Caller check), item 3's report-listed lines, the two R5-R8 bullets and the 5.2 'report shows both runs' sentence put their evidence in a committed file or test in the snapshot.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One line under [Unreleased] ### Added naming the rule in the reader and producer briefs and the structure-pass section 5 change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read briefs.rs around reader_brief (~2256-2440), producer_brief_with_evidence (~626-693) and the test helpers (`reader_inputs`, `reading()`, `defaults()`) to copy their form.",
+    "In briefs.rs add `const CHECKABLE_CRITERIA_RULE: &str` near VERIFIER_VISIBILITY (~1060): 'Every acceptance criterion must be checkable from the snapshot, the diff or the commands the verifier runs, never from the producer's report or change description, which the verifier does not see.' Plain text, no banned words.",
+    "In reader_brief, after `writeln!(out, \"\\n{CODE_SURVEY_GUIDE}\\n\")` and before the verifier_can_run block, add `# Checkable criteria` with the rule and 'Write each criterion so the check names a file, a diff line or a command from the list below.' Do not touch existing lines.",
+    "Add fn `checkable_evidence_section() -> String` with heading `## Make your evidence checkable`, the rule, and: 'Where a criterion needs proof that is not in the diff (a count, a list of callers, a before/after run), put it in the snapshot as a file or test you commit, so the verifier can read or run it; text only in your report or change description is not seen.' Call it in producer_brief_with_evidence just before `criteria_check_section(...)`, with a `writeln!` like unchanged_files_section.",
+    "Add test `the_reader_brief_requires_criteria_checkable_from_the_snapshot` (literal phrases `# Checkable criteria`, `checkable from the snapshot, the diff or the commands the verifier runs`, `producer's report or change description`; assert the section comes before `# What the verifier can run`).",
+    "Add test `producer_brief_requires_checkable_evidence_in_the_snapshot` building ProducerInputs as in `producer_briefs_say_what_the_verifier_can_see`; assert the heading, the same rule phrase, `a file or test you commit`, that the heading index is less than that of `## criteria_check: copy the line`, and that the LEFT_TO_ATHENA text still appears.",
+    "In structure-pass.md section 5 rewrite item 5: the Grep for each moved name's old path, with file counts before and after, is committed in the job as a file or test in the snapshot (for example a `caller_check` test or a note under `docs/`), counts equal, and the fake-host test named in that file; likewise change item 3's 'listed in the job's report', the two R5-R8 bullets (early-return pairs and crossed locals go in a committed file) and the 5.2 'job's report shows both runs' to a test. Add a one-sentence opening note that no item may rest on the report or change description. Leave G/R rows alone.",
+    "Add one line under `### Added` of [Unreleased] in CHANGELOG.md.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`; run `git diff --stat` and `git status` to confirm only the three files changed and none under crates/athena-context/prompts."
+  ],
+  "risks": [
+    {
+      "risk": "The rules-section length test (<2600 bytes) or the rule count test breaks if the rule lands in the rules section.",
+      "mitigation": "Put the reader section under its own `# ` heading so the `split(\"\\n# \")` slicing in existing tests excludes it; run cargo test -p athena-context."
+    },
+    {
+      "risk": "A producer-brief test that compares exact full text or section order fails.",
+      "mitigation": "Keep the producer section to about three sentences; assert section presence and phrases only; run the full cargo test --locked."
+    },
+    {
+      "risk": "The doc edit drifts into the moves (out of scope).",
+      "mitigation": "Rewrite only the evidence sentences of items 3 and 5, the two R5-R8 bullets and the 5.2 sentence; keep G1-G8, R1-R9 and numbering; check the diff shows no change outside section 5."
+    },
+    {
+      "risk": "New text trips the boundary-word scan.",
+      "mitigation": "Avoid the words the scan lists and write no email-like text; the policy test runs in cargo test."
+    },
+    {
+      "risk": "The producer reads the new section as forbidding the report's criteria_check evidence.",
+      "mitigation": "Keep the rule text plain and say evidence is a file or test in the snapshot, which fits the existing 'what you read or ran' entries."
+    },
+    {
+      "risk": "The producer edits a file beyond the three (for example a prompt file) to make room.",
+      "mitigation": "Criterion 6's `git diff --stat` demonstration and step 9 catch it; the plan places all text in Rust-built briefs."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "reader brief rules section (READING_RULES)",
+      "dependent": "crates/athena-context/src/briefs.rs test `the_reader_brief_names_each_reading_rule_in_one_short_line` (~4476)",
+      "kind": "code",
+      "test": "the_reader_brief_names_each_reading_rule_in_one_short_line: READING_RULES is unchanged and the new section has its own `# ` heading, so the split at `\\n# ` leaves the rules section (len 8, <2600 bytes) as before; run by cargo test -p athena-context",
+      "reason": null
+    },
+    {
+      "name": "reader brief 'What the verifier can run' section",
+      "dependent": "crates/athena-context/src/briefs.rs test `the_reader_brief_says_the_verifier_never_sees_the_producers_report` (~4588)",
+      "kind": "code",
+      "test": "That test splits after `# What the verifier can run`; the new section is placed before it, so the text it reads is unchanged and the test still passes.",
+      "reason": null
+    },
+    {
+      "name": "producer brief sections (VERIFIER_VISIBILITY, criteria_check_section, LEFT_TO_ATHENA)",
+      "dependent": "crates/athena-context/src/briefs.rs tests `producer_briefs_say_what_the_verifier_can_see` and `producer_brief_tells_how_to_leave_a_criterion_to_athenas_checks` (~2614, ~2710)",
+      "kind": "code",
+      "test": null,
+      "reason": "The new section is added between existing sections; none is edited and those tests assert contains() on their own text."
+    },
+    {
+      "name": "rendered brief text",
+      "dependent": "Callers of producer_brief / producer_brief_with_evidence / reader_brief in crates/athena-core and crates/athena-cli (found by searching crates/ for the names)",
+      "kind": "code",
+      "test": null,
+      "reason": "They pass the string to the model; none parse the new text. Fake readers/producers find sections by constants such as REFUSAL_HEADING, which are unchanged. Workspace `cargo test --locked` covers them."
+    },
+    {
+      "name": "criteria-evidence refusal rule",
+      "dependent": "crates/athena-core/src/reading/checks.rs `check_criteria_evidence` and crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not changed; no refusal or matching rule is added or altered, so no corpus case is needed and the refusal rate is unchanged."
+    },
+    {
+      "name": "prompt-set token budgets",
+      "dependent": "docs/system-facts.md budgets and crates/athena-cli/tests/budgets.rs (`system_facts_budgets_match_computed`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Briefs sit outside the prompt sets and no prompt file changes, so the computed sizes and budget lines are unchanged."
+    },
+    {
+      "name": "structure-pass.md section 5 wording",
+      "dependent": "docs/decisions.md entry linking structure-pass.md and code comments citing structure-pass §3.3",
+      "kind": "rule",
+      "test": null,
+      "reason": "They cite the doc or section 3.3, not section 5's wording; section numbers and the G/R move numbers do not change."
+    },
+    {
+      "name": "new text in tracked files",
+      "dependent": "xtask/tests/policy.rs boundary-word scan and the athena.toml personal_data allow-list",
+      "kind": "rule",
+      "test": null,
+      "reason": "New text avoids the banned words and email-like text; the scan runs in cargo test --locked."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test that renders the reader brief and checks its text",
+      "command": "cargo test -p athena-context the_reader_brief_requires_criteria_checkable_from_the_snapshot",
+      "observes": "The rendered reader brief contains a `# Checkable criteria` section with the literal phrases `checkable from the snapshot, the diff or the commands the verifier runs` and `producer's report or change description`, placed before `# What the verifier can run`. The existing reader-brief tests also pass (run `cargo test -p athena-context`).",
+      "fails_without": "Without the section the `# Checkable criteria` split/contains assertion fails; the assertions use literal phrases written in the test, not the constant, so deleting the text fails the test.",
+      "seam": "Calls `reader_brief(&reader_inputs(&reading()))` (production entry point reader_brief, briefs.rs ~2256; test helpers reader_inputs/reading exist, ~4455). No fake or double. Step 5 adds the test."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test that renders the producer brief for an accepted reading",
+      "command": "cargo test -p athena-context producer_brief_requires_checkable_evidence_in_the_snapshot",
+      "observes": "The producer brief contains the `## Make your evidence checkable` section, the same rule phrase as the reader brief, the sentence telling the producer to make evidence `a file or test you commit` in the snapshot, the section sits before `## criteria_check: copy the line`, and the LEFT_TO_ATHENA text is still present.",
+      "fails_without": "Without the new section the contains assertions on the heading, the rule phrase and the file-or-test sentence fail.",
+      "seam": "Calls `producer_brief(&ProducerInputs{..})` (production entry point, briefs.rs ~626/~2710) built as in the existing test `producer_briefs_say_what_the_verifier_can_see`, with `AcceptedReading::new(&reading(), &defaults(), |_| false)`. The fixtures exist; no double. Step 6 adds the test."
+    },
+    {
+      "criterion": 3,
+      "method": "Grep the doc",
+      "command": "Grep pattern `Caller check` and pattern `report` in docs/design/structure-pass.md",
+      "observes": "Item 5 says the old-path Grep counts (before and after) are put in a committed file or test in the snapshot; every `report` hit in section 5 is removed or states the evidence is a file or test; none asks for report-only proof.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Inspect the diff",
+      "command": "git diff",
+      "observes": "In briefs.rs only added lines (the const, the reader section, the producer section and fn, two tests); VERIFIER_VISIBILITY, criteria_check_section, LEFT_TO_ATHENA, READING_RULES and the 'What the verifier can run' text show no removed lines; no path under crates/athena-context/prompts appears.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three checks from the repository root",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All exit 0, including `system_facts_budgets_match_computed` and the reader-rules tests; `git diff` shows no added #[allow].",
+      "fails_without": "If the rule were put in the rules section, the len==8 / <2600-byte rules test would fail here; if prompt files changed, the budget test would fail; formatting or lint errors in the new code fail fmt or clippy.",
+      "seam": "Existing workspace test suite and the cargo fmt/clippy commands; entry point is cargo itself on the whole workspace, no fixture or double. Seam exists; no step adds one."
+    },
+    {
+      "criterion": 6,
+      "method": "List changed paths in the producer's snapshot repository and compare them with the three allowed files",
+      "command": "git diff --stat",
+      "observes": "The stat lists only crates/athena-context/src/briefs.rs, docs/design/structure-pass.md and (optionally) CHANGELOG.md; `git status` shows no untracked or other modified file, and no path under crates/athena-context/prompts or crates/athena-core/src/reading/checks.rs.",
+      "fails_without": "If the producer also edited a prompt file, checks.rs, athena.toml or any other file (an unrelated behavior change), `git diff --stat` would list that path and the criterion would fail; with only the briefs.rs addition, the stat still shows the three files.",
+      "seam": "Production entry point is `git diff --stat` / `git status` run in the producer's own one-commit snapshot repository (per the Producer snapshot fact, briefs.rs working-directory text), compared with the base commit; the producer's edits are the input, no fake or double. The seam exists today (git is in the verifier's allowed commands); no plan step adds one. Step 9 runs it."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "43690b3d004d323b3453df3ff4a3cdcc852bf54667afa09d7580c0ea52ab2f7b"
+}
