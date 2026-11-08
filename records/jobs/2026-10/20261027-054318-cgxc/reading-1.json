@@ -1,0 +1,184 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-054318-cgxc",
+  "n": 1,
+  "at": "2026-11-08T21:04:12.596761629Z",
+  "invocation_seq": 1,
+  "base_commit": "68d27739cbe1c277bf51fc74aed8a852b5032642",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Close stacked earlier PRs when a later PR lands their commits",
+  "summary": "Root cause: a job can be cut on an earlier unmerged job's branch, but the pull request link (`PrLink` in crates/athena-core/src/pr.rs) records no base job or earlier PR, and nothing runs after a merge to reconcile open PRs whose commits main now carries. The fix records the base job on the link and, after a merge, closes each recorded earlier open PR whose head is reachable from the merged commit, with a comment naming the PR that carried it. This follows up jobs 20261010-154004-60r4 and 20261010-154007-jbt9, whose commits landed this way.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The change is Rust only."
+    },
+    {
+      "id": "tested",
+      "how": "New unit tests, with clippy and fmt clean."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fixes the missing dependency record and the missing post-merge reconciliation, not one job."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that fail without the change."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that no stale open PR remains after a later PR lands its commits."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the PR link and landing code."
+    },
+    {
+      "id": "verified",
+      "how": "An independent verifier runs cargo fmt, clippy and test."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and the changelog written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/pr.rs (PrLink holds pr_number, host, repository, head, job, state, merged_commit; no base job; Host trait has only merged_commit; observe_merge/check_merged/apply_outcome record the merge outcome) and crates/athena-core/src/gh/landing.rs (land_pr publishes, observes the merge, merges over REST, then writes the landing record and cutover; it never looks at other jobs' links). Entry point is land_pr, run after publish and merge confirmation. The property is measured directly by unit tests with fake Host and Ancestry implementations, as the existing pr.rs tests do.",
+    "Existing code: crates/athena-core/src/pr.rs (PrLink, store_link, load_link, Host, Ancestry, observe_merge) and crates/athena-core/src/gh/landing.rs (land_pr, confirm_existing_merge) are extended, not replaced. PrLink is a state-directory file (pr-link.json), not a records-branch record, so no AnyRecord or check_record_file change is expected. New PrLink fields use serde default so old links still parse.",
+    "Environment: the host is GitHub through the existing gh client in crates/athena-core/src/gh; closing a pull request and commenting on it are new write calls on the same token that already merges. The tests use fakes and need no network. Data reached: the job state directory's pr-link.json files and the remote's main history.",
+    "Reading of the cause: the originating gap is that a stacked job's dependency is never recorded, not that one job's PR was left open. The class fix is a recorded base (the earlier job's id, from the branch the job is cut on) plus a post-merge reconciliation. The reconciliation closes an earlier PR only when it is still open and every commit of its head is reachable from the merged commit. Otherwise it leaves the PR alone.",
+    "Both referenced jobs are already landed with passing verification. Their own findings are not reopened and do not apply here: for 20261010-154004-60r4 the display.rs, lifecycle-reason and deliverable-list findings; for 20261010-154007-jbt9 the weak manage.rs subject test. Their landed code is kept, and none of their files are deliverables.",
+    "Audience: Athena maintainers who stack jobs and review the PR list. The outcome they check is that no stale open PR remains after the later one merges."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description names the root cause: a job built on an unmerged job's branch has no recorded dependency and no post-merge reconciliation of the earlier PRs it carries. The fix is in crates/athena-core/src/pr.rs (the link) and crates/athena-core/src/gh/landing.rs (land_pr), not in one job's data. Check with git diff.",
+      "kind": "content"
+    },
+    {
+      "text": "PrLink gains a defaulted field recording the base job (or earlier PR). A test in pr.rs shows an old pr-link.json without the field still loads (git diff shows the test).",
+      "kind": "content"
+    },
+    {
+      "text": "A new unit test of the reconciliation (run cargo test -p athena-core) shows an open earlier PR whose head is reachable from the merged commit is closed with a comment naming the merging PR. It fails on the pre-change code, which has no such step.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new unit test shows an earlier open PR with a commit not reachable from the merged commit is left open, and an already merged or closed PR is not touched. This guards against closing live work.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test is generic over the cause: two different earlier jobs stacked in a chain (A, then B on A, then C on B) are both closed when C lands, with no job id hard-coded. Run cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A failure to close an earlier PR is reported as a warning in PrReport.warnings and does not undo or fail the merge or the landing record. Check with a unit test using a failing fake host (cargo test -p athena-core).",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the change, and docs describing the PR link or landing (docs/ file that mentions pr-link) are updated if they list the link's fields. Check with git diff and grep.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/pr.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/gh/mod.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Automatically detecting the base job from git history for jobs already landed",
+    "Changing how the stacked branch is cut or how rebases work (rebase_job_branch, plan_rebase)",
+    "Closing PRs by any rule other than all commits reachable from the merged commit",
+    "Fixing the earlier jobs' own minor findings (display.rs provisional cost display, lifecycle test reason, manage.rs subject test input)",
+    "Files changed by jobs 20261010-154004-60r4 and 20261010-154007-jbt9: claude.rs, scoring.rs, records.rs, athena-score lib.rs, lifecycle.rs, manage.rs, reading.rs, store.rs, athena-core lib.rs. Their landed work is kept unchanged.",
+    "Governance files: athena.toml, defaults.toml and workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6792452830188679,
+      "p_user_intervenes": 0.07334593572778828,
+      "cost_usd": {
+        "p10": 0.5670511049740374,
+        "p50": 1.4678668,
+        "p90": 4.824292359718401
+      },
+      "wall_time_s": {
+        "p10": 569.6055806988737,
+        "p50": 2108.1592929438516,
+        "p90": 4314.865233263222
+      }
+    }
+  },
+  "departures": "Higher cost and time than the reference: the change touches the landing flow, adds a host write call and needs a fake-host test across pr.rs and gh/. Lower pass odds because the exact file list is inferred.",
+  "hard_reason": "It changes landing: the post-merge step in land_pr that closes pull requests and the link records it depends on, where a mistake could close a PR that still carries unmerged work.",
+  "producer_effort": "high"
+}
