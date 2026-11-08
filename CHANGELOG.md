@@ -469,6 +469,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `crates/athena-cli/src/display.rs` is split to get under the file-size limit. The status-rendering group
+  (`status`, `snapshot_status` and their section helpers) moved unchanged to `display/status_view.rs` and is
+  re-exported, so callers are unchanged. The athena-core test that checks each status label is printed now
+  also reads the new file.
 - `crates/athena-core/src/status.rs` is split into modules and `Athena::status` is shortened. The throughput,
   waste and check-duration code moved to `status/throughput.rs`, and the planning cost, keep rule, later-harm
   and producer-settings code to `status/planning.rs`; both are re-exported, so every `crate::status::` path
