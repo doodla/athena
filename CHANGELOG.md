@@ -469,6 +469,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `run` in `crates/athena-cli/src/main.rs` (549 lines, over the 200-line function limit) is now a thin
+  dispatcher. The body of each subcommand moved into its own function in the new `crates/athena-cli/src/commands.rs`.
+  Output, exit codes and the clap definitions are unchanged.
 - `crates/athena-core/src/reading.rs` is split into submodules under `reading/` (`retry`, `topics`, `checks`,
   `outcome`, `terms`, `surveys`, `replay`) to bring it under the code-health size limits. Every item is moved
   unchanged, apart from visibility and the shared imports, and is re-exported, so paths under
