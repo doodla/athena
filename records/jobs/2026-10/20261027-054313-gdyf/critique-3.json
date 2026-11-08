@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-054313-gdyf",
+  "round": 3,
+  "at": "2026-11-08T19:37:11.073539577Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/steward.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/steward.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan omits the job that applies a defaults proposal. In production this is the main source of readings with a config deliverable and a scope limit.",
+      "evidence": "`accept_request` builds the request \"Deliverable: defaults.toml (modify). Make one change to it and touch no other file.\", and proposals.rs:642 feeds it to `self.ask(..)`, so it goes through `build_reading` and `check_reading_acceptance`. A reader that mirrors this request writes a criterion such as 'No other file is changed'. `limits_changed_files` matches that criterion, so under Decision 3 the config half fires even though the CHANGELOG half exempts the bare form, and the reading is refused without a `Consumers:` line. The Dependents entry for config deliverables covers only cli tests with athena.toml ('A grep of crates/ for limit phrases found none'). It does not mention defaults.toml, `accept_request`, or how this flow interacts with the one refuse-and-re-read in `build_reading`. A proposal-apply job could fail reading twice and stall. These readings will also be a large part of the replay share. Fix: Add proposals.rs `accept_request` and the `ask` path at :642 to Dependents. Add a unit test or corpus case with this exact shape: the request text from `accept_request`, a defaults.toml modify deliverable, and the criterion 'No other file is changed'. Show it is refused with no Consumers line and accepted with 'Consumers: ... unchanged'. Make sure the new READING_RULES line tells the reader what to write in this case. If the planner decides that bare limits on proposal-apply jobs should not need a Consumers line, say so and record why in D166.",
+      "location": "Dependents; crates/athena-core/src/proposals.rs:440-450 and :642",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The CHANGELOG half relies on loose word lists that will produce false refusals and false accepts.",
+      "evidence": "The negation list contains 'keep', 'kept', 'stay', 'stays', 'remain' and 'remains'. These words often appear with a positive sense near a file name, for example 'Only src/a.rs and CHANGELOG.md may change, keeping one entry'. The 3-word window would refuse such a valid limit. The exemption fires when the text 'contains deliverable', so 'Only the deliverable src/a.rs may change' passes although it leaves out CHANGELOG.md. 'than', 'apart' and 'aside' are common words in the exception list. Fix: Use the structure `limits_changed_files` already parses. Look for CHANGELOG.md inside the allowed-list span, which is the words between 'only' or 'outside' and the change word, and treat it as permitted there. Drop the free negation window, or keep it only for 'not', 'never', 'unchanged' and 'untouched'. Exempt only the phrase 'the deliverables' (plural, with the article), not any occurrence of 'deliverable'. Pin both behaviors with corpus cases.",
+      "location": "Decision 1 (negation words and 'deliverable' exemption)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 2's 'the same reading with CHANGELOG.md listed is accepted' is shown in a changed sense, so a literal verifier may mark it unmet.",
+      "evidence": "The plan reads 'CHANGELOG.md listed' as CHANGELOG.md named in the limit text, not as a deliverable. It argues correctly that the deliverable alone would never trigger the check, because `ensure_changelog` runs at reading.rs:859 before the gate. But the accepted criterion text says 'listed', and the plan's own test asserts that the deliverable-only reading is refused. Fix: Keep the design. Add one sentence to the change description and D166 that maps criterion 2's 'listed' to 'named in the limit', with the reading.rs:859 evidence, so the verifier can match the evidence to the criterion without the open question being answered first.",
+      "location": "Demonstration of criterion 2; Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two files edited outside the reading's deliverables (Athena's findings 1-2, weighed rather than repeated).",
+      "evidence": "The new rule refuses the `LIMIT` constant (run/tests.rs:3213, 'No file outside README.md changed'), so editing it is forced. The steward test is needed to show the effect on `queued_work`. Both files are under the request's `Files: crates/` scope, and both are raised for the user. Fix: No design change. Keep both edits minimal, and put the reason for each in the change description.",
+      "location": "Files: crates/athena-core/src/run/tests.rs, crates/athena-core/src/steward.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's code anchors by reading the snapshot, and they hold. `limits_changed_files`, `allowed_paths` and `limiting_criterion` are in briefs.rs (lines 103-146). `CHANGELOG_PATH` and `ensure_changelog` are at reading.rs:293-297, and `build_reading` calls `ensure_changelog` at line 859, before the gate at line 680. The `step!` list in `refusing_check` is at checks.rs:529-542. `LIMIT` is at run/tests.rs:3213. `queued_work` is at steward.rs:402-425 and checks stored readings through `check_reading_text`. The loop replay that reports the refusal share back to the producer is in run/mod.rs:2251. The design fixes the class at the reading gate, and the round 3 refinements are reasoned well: one matcher shared with verification, criteria only, and every named consumer must be a deliverable. The departures from criteria 2 and 3 are raised openly as User questions. One major gap remains. The dependents list leaves out the production path that most often pairs a config deliverable with a limit: the job that applies a defaults proposal (`accept_request`, proposals.rs:442, called through `ask` at proposals.rs:642). Its request names defaults.toml and says \"touch no other file\", so the config half will now refuse those readings unless the reader writes a `Consumers:` line, and no test shows that path still works. Two smaller soundness points: the negation and exception word lists are crude, and the 'deliverable' substring exemption is too loose. Athena's two scope findings, on run/tests.rs and steward.rs, are weighed: the plan forces the first edit and needs the second for its demonstration, and it raises both for the user. I agree they are minor."
+}

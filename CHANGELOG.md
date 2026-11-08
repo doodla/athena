@@ -9,6 +9,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A reading check for scope limits, `reading::check_scope_limit`, run as a `step!` in `refusing_check` right after
+  `check_defined_terms`. Root cause: a scope limit written from the named files without listing default-written
+  files and config consumers. The reader wrote "only these files may change" from the files the request named, and
+  nothing at the reading gate compared the limit with the files Athena always writes (`CHANGELOG.md`) or with the
+  tests and tools that load a changed config, so the job passed the gate and failed at verification. Failure
+  class scope-criterion-too-narrow-misses-dependent-tests; jobs 20261018-045437-7z81 (the tests that load the real
+  `athena.toml` were not allowed to change) and 20261023-052543-9bw7 (the limit left out `CHANGELOG.md`). The
+  check refuses a limit that names its allowed files without `CHANGELOG.md` or "the deliverables", and a reading
+  with an `athena.toml` or `defaults.toml` deliverable and a limit that has no `Consumers:` assumption naming
+  deliverable paths, or saying none found or unchanged; the error names the file, why, and the repair. One matcher
+  reads the limit: `change_limit` in `crates/athena-context/src/briefs.rs`, which `limits_changed_files` now
+  wraps, so the gate reads a sentence as verification does. Only criteria are read, as in verification. The
+  accepted reading asked for CHANGELOG.md to be listed as a deliverable; `ensure_changelog` lists it before the
+  gate in production, so that would never refuse, and the check asks for it to be named in the limit instead.
+  A defaults-proposal job lists `defaults.toml`, so its reader now writes `Consumers: none found` (or a real
+  list) once. A proposed job whose stored reading has such a limit and omits these will leave the drain queue
+  until it is read again, because the queue re-checks the stored reading. The scope tests in
+  `crates/athena-core/src/run/tests.rs` pass a limit through the real gate, so their `LIMIT` constant now names
+  CHANGELOG.md. The reader rule line is a new `READING_RULES` entry; the reader prompt is unchanged. The check
+  does not search the repo: it forces the question and checks that each named consumer is a deliverable.
+  Tests: `scope_limit_changelog`, `scope_limit_config_consumers`, `scope_limit_proposal_apply_shape`,
+  `scope_limit_unaffected_readings`, `scope_limit_doc_and_changelog_name_the_cause`,
+  `change_limit_reports_the_allowed_words` and the `scope-limit-*` cases of the refusal corpus. This check
+  refuses more readings; the higher refusal rate is intended, expected 3% of newly refused readings (an
+  estimate, not measured here; the replay at verification measures it). Recorded in D166.
 - A cache-scope rule in `check_environment_reach` (in `reading`). Root cause: the reading stage had no step asking, for
   each CI cache or stored artifact, which ref saves it, which runs restore it, and which runs may write shared
   entries (jobs 20261025-034731-2am0 and 20261025-055626-er96; introspections 20261025-050603-wrv7 and

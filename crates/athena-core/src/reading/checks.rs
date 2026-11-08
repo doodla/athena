@@ -1,6 +1,7 @@
 //! Reference, boundary, acceptance and governance checks on a reading.
 
 use super::*;
+use athena_context::briefs::change_limit;
 
 /// Refuses a reading for a retried or follow-up job that leaves out the previous result or the change
 /// scope. `priors` are the retried job and the jobs the request says it follows up (see
@@ -479,7 +480,9 @@ pub fn check_reading_references(
 /// ([`check_governance_coverage`]), then the observable state a delivery request needs
 /// ([`check_outcome_state`]), then the place, permissions and data reach of each action or source the reading
 /// assigns ([`check_environment_reach`]), then the structural terms the request uses and the reading leaves
-/// undefined ([`check_defined_terms`]), then the deliverable paths and `content` criteria against the boundary
+/// undefined ([`check_defined_terms`]), then the files a criterion that limits which files may change leaves
+/// out, those Athena always writes and the readers of a changed config ([`check_scope_limit`]), then the
+/// deliverable paths and `content` criteria against the boundary
 /// words and the deliverables against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
 /// there is no repository to compare with), then the repo paths its text relies on against the same files
 /// ([`check_reading_references`]). It applies to a first attempt as well as a retry. It runs
@@ -538,6 +541,7 @@ pub fn refusing_check(
     step!(check_outcome_state(reading, request));
     step!(check_environment_reach(reading));
     step!(check_defined_terms(reading, request));
+    step!(check_scope_limit(reading));
     step!(check_boundary_and_repo_files(reading, repo_files));
     step!(check_reading_references(reading, repo_files));
     None
@@ -561,6 +565,16 @@ pub(super) const GOVERNANCE_BY_DELIVERABLE: [(&str, &str, &str); 1] = [(
     "athena.toml",
     "a new or changed configuration section must be set in athena.toml, or its schema test fails",
 )];
+
+/// Files Athena writes in every change reading whatever the request says, and why. A criterion that limits
+/// which files may change must let the job write each of them.
+pub(super) const DEFAULT_WRITTEN_FILES: [(&str, &str); 1] = [(
+    CHANGELOG_PATH,
+    "Athena always adds it to a change reading, and the job must record itself there",
+)];
+
+/// Configuration files that many tests and tools read, so changing one can break a file the request never named.
+pub(super) const CONFIG_FILES: [&str; 2] = ["athena.toml", "defaults.toml"];
 
 /// Whether the reading covers the governance `path` (a directory when it ends in `/`): it lists a governance
 /// deliverable there and names it in a criterion, or it names the path in `out_of_scope`.
@@ -654,4 +668,166 @@ pub fn check_governance_coverage(reading: &Reading, request: &str) -> Result<()>
          and named, and only after the producer has finished",
         paths.join("; ")
     )
+}
+
+/// Refuses a change reading whose criterion limits which files may change but leaves out a file the job
+/// must change anyway: one Athena always writes, or one that reads a changed config.
+///
+/// Root cause this check removes: a scope limit written from the named files without listing default-written
+/// files and config consumers. The reader wrote "only these files may change" from the files the request
+/// named, and nothing at the reading gate compared that limit with the files Athena always writes
+/// (`CHANGELOG.md`, see [`DEFAULT_WRITTEN_FILES`]) or with the tests and tools that load a changed config
+/// (`athena.toml`, `defaults.toml`). Verification builds its allowed list from the same limit
+/// (`AcceptedReading::allowed_paths`), so the job failed there, after the producer had finished. Failure
+/// class scope-criterion-too-narrow-misses-dependent-tests; jobs 20261018-045437-7z81 (the tests that
+/// load the real `athena.toml` were not allowed to change) and 20261023-052543-9bw7 (the limit left out
+/// `CHANGELOG.md`).
+///
+/// The limit is read by `change_limit` in athena-context, the matcher that enforcement uses, and only the
+/// first limiting criterion counts, as in enforcement. It refuses when:
+/// - the limit names its allowed files (not "no other file is changed") and those words neither include
+///   `CHANGELOG.md` nor say `the deliverables`. A `CHANGELOG.md` deliverable alone does not repair the text,
+///   because `ensure_changelog` adds it before the gate in production; or
+/// - a deliverable is `athena.toml` or `defaults.toml` (limit named or bare) and no `Consumers:` assumption
+///   answers who loads it. The line must name only deliverable paths (a config file itself is ignored) and
+///   either name at least one or say "none found", "unchanged" or "no change". A consumer path that is not a
+///   deliverable is refused whatever else the line says, because with a limit the deliverable list is the
+///   allowed list.
+///
+/// The error names each missing file, why, and the repair. Only criteria are read, as in enforcement, and the
+/// repo is not searched: the check forces the question and checks that every named consumer is a deliverable,
+/// but it cannot tell that `Consumers: none found` followed a search. Known misses: a bare form that really
+/// forbids `CHANGELOG.md`, a negation inside the allowed words, and a second limiting criterion.
+///
+/// This check refuses more readings; the higher refusal rate is intended: a scope limit that omits files
+/// Athena always writes fails verification. The share is expected 3% of newly refused readings, an estimate
+/// and not a measurement; the replay of accepted readings measures it.
+pub fn check_scope_limit(reading: &Reading) -> Result<()> {
+    if reading.capability.as_deref() != Some("change") || reading.question.is_some() {
+        return Ok(());
+    }
+    let Some(limit) = reading
+        .acceptance_criteria
+        .iter()
+        .find_map(|c| change_limit(&c.text))
+    else {
+        return Ok(());
+    };
+    let mut missing: Vec<String> = Vec::new();
+    let names_deliverables = limit
+        .allowed
+        .windows(2)
+        .any(|pair| pair[0] == "the" && pair[1] == "deliverables");
+    if !limit.bare && !names_deliverables {
+        for (file, why) in DEFAULT_WRITTEN_FILES {
+            if !limit.allowed.iter().any(|w| *w == file.to_lowercase()) {
+                missing.push(format!(
+                    "{file} ({why}) is not in the files the limiting criterion allows; add {file} to its \
+                     list, or write \"the deliverables\" there"
+                ));
+            }
+        }
+    }
+    let deliverables: Vec<String> = reading
+        .deliverables
+        .iter()
+        .map(|d| normalized_path(&d.path))
+        .collect();
+    let configs: Vec<&str> = CONFIG_FILES
+        .into_iter()
+        .filter(|c| deliverables.iter().any(|d| d == c))
+        .collect();
+    if !configs.is_empty() {
+        let lines: Vec<&str> = reading
+            .assumptions
+            .iter()
+            .map(|a| a.trim())
+            .filter(|a| a.to_lowercase().starts_with("consumers:"))
+            .collect();
+        match lines.iter().find_map(|l| consumers_problem(l, &deliverables)) {
+            Some(problem) => missing.push(format!(
+                "{} is a deliverable and a criterion limits which files may change, so the files that load it \
+                 must be allowed to change with it, but {problem}",
+                configs.join(" and ")
+            )),
+            None if lines.is_empty() => missing.push(format!(
+                "{} is a deliverable and a criterion limits which files may change, so the tests and tools \
+                 that load it must be allowed to change with it, but the reading has no `Consumers:` assumption",
+                configs.join(" and ")
+            )),
+            None => {}
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the reading was refused because a criterion that limits which files may change leaves out files the \
+         job must change: {}; with a limit the deliverable list is the allowed list, and verification fails a \
+         diff outside it, after the producer has finished. Repair: for a config, write an assumption \
+         `Consumers: <files that load it, each also a deliverable>`, or `Consumers: none found`, or \
+         `Consumers: ... unchanged`; leave off a consumer that needs no change",
+        missing.join("; ")
+    )
+}
+
+/// A path without surrounding blanks and a leading `./`.
+fn normalized_path(path: &str) -> String {
+    let path = path.trim();
+    path.strip_prefix("./").unwrap_or(path).to_string()
+}
+
+/// Why a `Consumers:` line does not answer who loads the changed config, or `None` when it does: every
+/// path-like word on it (other than a config file itself) is one of `deliverables` or under a deliverable
+/// that ends in `/`, and the line names at least one such path or says "none found", "unchanged" or
+/// "no change".
+fn consumers_problem(line: &str, deliverables: &[String]) -> Option<String> {
+    let mut named: Vec<String> = Vec::new();
+    let mut outside: Vec<String> = Vec::new();
+    for word in line
+        .get("consumers:".len()..)
+        .unwrap_or("")
+        .split_whitespace()
+    {
+        let word = word.trim_start_matches(|c: char| "([{'\"`".contains(c));
+        let word = word.strip_prefix("./").unwrap_or(word);
+        let word = word.trim_end_matches(|c: char| ".,;:)]}'\"`".contains(c));
+        if !is_path_like(word) || CONFIG_FILES.contains(&word) {
+            continue;
+        }
+        let covered = deliverables
+            .iter()
+            .any(|d| d == word || (d.ends_with('/') && word.starts_with(d.as_str())));
+        let list = if covered { &mut named } else { &mut outside };
+        if !list.iter().any(|w| w == word) {
+            list.push(word.to_string());
+        }
+    }
+    if !outside.is_empty() {
+        return Some(format!(
+            "the `Consumers:` line names {} that {} not a deliverable; list each as a deliverable, or leave it \
+             off the line if it needs no change",
+            outside.join(", "),
+            if outside.len() == 1 { "is" } else { "are" }
+        ));
+    }
+    let lower = line.to_lowercase();
+    let says_none = ["none found", "unchanged", "no change"]
+        .iter()
+        .any(|phrase| lower.contains(phrase));
+    (named.is_empty() && !says_none).then(|| {
+        "the `Consumers:` line names no deliverable path and does not say \"none found\", \"unchanged\" or \
+         \"no change\""
+            .to_string()
+    })
+}
+
+/// Whether a word of a `Consumers:` line looks like a file path: it has a `/` (but is not "and/or") or ends
+/// with a file extension of the repo's files.
+fn is_path_like(word: &str) -> bool {
+    word != "and/or"
+        && (word.contains('/')
+            || [".rs", ".toml", ".md", ".json", ".yml", ".yaml"]
+                .iter()
+                .any(|ext| word.ends_with(ext)))
 }
