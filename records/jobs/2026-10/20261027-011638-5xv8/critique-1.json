@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-011638-5xv8",
+  "round": 1,
+  "at": "2026-11-08T13:04:29.435817191Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan leaves dev-dependencies out of the crate lines for a reason that is a guess. The manifests show the claim is wrong, and dev-dependencies are exactly what decides where a test can go.",
+      "evidence": "I grepped `^athena-` in every crates/*/Cargo.toml and read xtask/Cargo.toml. Only five crates have workspace-internal dev-dependencies, with 8 entries in total: core (testkit), agent (testkit), git (testkit), cli (context, testkit; its core entry only adds the test-support feature), and xtask (context, testkit). That is about 70 bytes, not double the lines. Integration tests and unit tests reach a crate's [dev-dependencies], so a test's reach is decided by them. Example: budgets.rs is an integration test in athena-cli, and it imports athena_context only through `[dev-dependencies] athena-context` (athena-cli/Cargo.toml line 30). The planned line `crate cli: lib+bin; deps agent cap-change cap-study core data gate git` would suggest that a cli test cannot reach context, which is false. Fix: Add an optional field to the crate line form, for example `; dev <names>`, filled only for crates that have workspace-internal [dev-dependencies]. Compute it in `crate_rows()` from `[dev-dependencies]` the same way `deps` is computed, and add a doctored-dev case to `system_facts_crate_drift_is_rejected`. Keep the prose short so the file stays under 5,000 bytes. My own estimate: the 12 lines are about 500 bytes, plus about 70 for dev. Measure the file after editing. If it really cannot fit, say so with the measured byte count, not an assumed one.",
+      "location": "Plan Decision 2 (\"Dev-dependencies change often and would not fit\", \"Roughly doubles the lines\")",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The text 'unit tests inside xtask/src/main.rs' is incomplete. xtask has unit-test modules in four other source files.",
+      "evidence": "`#[cfg(test)]` appears in xtask/src/main.rs:855, shard.rs:341, decisions.rs:419, site.rs:667 and walltime.rs:301. Fix: In the fact, the rule and the marker, write 'unit tests in `xtask/src/` (main.rs or its modules)'. This still meets criterion 1, which names main.rs, and it is accurate.",
+      "location": "Plan step 2, step 4 (rule text), step 5 (marker)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The READING_RULES doc comment will become false once a prose-only line is added.",
+      "evidence": "The doc comment reads: 'Each rule a reading must pass, one short line each, with the check that enforces it. A reading that breaks one is refused and read again once.' The new line has no check and causes no refusal. Fix: In step 4, update the doc comment to say that a line ending '(prose only)' has no check and causes no refusal.",
+      "location": "crates/athena-context/src/briefs.rs:2244-2245",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The `deps` field states the current dependencies, not which crates may depend on which.",
+      "evidence": "The request asks 'which may depend on which'. The lines list only existing [dependencies]. Nothing says that a crate cannot add a dependency on a crate above it (Cargo refuses a cycle), for example data on core. Fix: Add one short sentence: a crate may depend only on crates that do not depend on it, directly or through others (Cargo refuses cycles). So a test needing two crates goes in the crate that already reaches both, or in athena-cli.",
+      "location": "Plan Decision 2 / step 2 prose",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The size cap on the 'Reading rules' section is left conditional, and its slack is not measured.",
+      "evidence": "briefs.rs:4567 asserts `section.len() < 2600`. The section is the 8 rule lines plus CODE_SURVEY_GUIDE (lines 2263-2270), and my estimate puts it close to the cap. Fix: Have the producer print the measured section length before and after the change, and quote both numbers in the changelog or comment if the cap moves.",
+      "location": "Plan Decision 4 / step 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code and manifests the plan relies on, and its main claims hold. The files and functions it names exist: READING_RULES is `[&str; 8]` at briefs.rs:2246, the length assertion is at 4546, the section cap at 4567, and the facts test with `facts.len() >= 11` and `< 5_000` at 3768-3806. `check_system_facts` filters on the `- budget ` prefix, so it ignores the new `- crate ` lines. athena-cli already has `toml` in [dependencies], so its integration tests can parse manifests. Only athena-cli declares `[[bin]]`, xtask has no lib.rs, and the plan's normal-dependency table matches every manifest. The new drift check, `check_crate_facts` driven by `crate_rows()` over the real Cargo.toml files, is a real seam with no double. Its positive and negative tests would fail without the behavior and cover the doctored, missing and unknown-crate cases. The dependents list matches what I found by grepping READING_RULES and system-facts.md. Leaving reading.rs unchanged and leaving out the records merge are both justified. One major soundness problem remains: dev-dependencies are dropped from the crate lines because they supposedly 'change often' and 'double the lines'. The manifests show only 8 workspace-internal dev-dependency entries across 5 crates, and dev-dependencies are exactly what decides which crate a test can reach (budgets.rs reaches athena_context only through one). Without them the facts misstate test reach for cli and xtask. The minor findings: the xtask text names only main.rs although xtask has test modules in four other files, the READING_RULES doc comment becomes false with a prose-only line, and the 'may depend on which' direction is not stated as a rule. Verdict: revise."
+}
