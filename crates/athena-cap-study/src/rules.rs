@@ -1431,12 +1431,24 @@ pub(crate) mod tests {
         }
     }
 
+    const SESSIONS_STUDY: &str = "firstmate-long-running-sessions";
+
     fn study_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../studies/firstmate-work-handling")
+        study_dir_of("firstmate-work-handling")
+    }
+
+    fn study_dir_of(id: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../studies")
+            .join(id)
     }
 
     fn load<T: DeserializeOwned>(name: &str) -> T {
-        let text = std::fs::read_to_string(study_dir().join(name)).expect("a study file");
+        load_from(&study_dir(), name)
+    }
+
+    fn load_from<T: DeserializeOwned>(dir: &Path, name: &str) -> T {
+        let text = std::fs::read_to_string(dir.join(name)).expect("a study file");
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}"))
     }
 
@@ -1461,12 +1473,16 @@ pub(crate) mod tests {
 
     impl Loaded {
         fn read() -> Loaded {
+            Loaded::read_from(&study_dir())
+        }
+
+        fn read_from(dir: &Path) -> Loaded {
             Loaded {
-                pin: load("pin.json"),
-                claims: load("claims.json"),
-                rationales: load("rationales.json"),
-                model: load("model.json"),
-                findings: load("findings.json"),
+                pin: load_from(dir, "pin.json"),
+                claims: load_from(dir, "claims.json"),
+                rationales: load_from(dir, "rationales.json"),
+                model: load_from(dir, "model.json"),
+                findings: load_from(dir, "findings.json"),
             }
         }
 
@@ -1605,6 +1621,98 @@ pub(crate) mod tests {
                 claim.id
             );
         }
+    }
+
+    #[test]
+    fn the_long_running_sessions_study_passes_every_rule_against_the_pinned_tree() {
+        let dir = study_dir_of(SESSIONS_STUDY);
+        let study = Loaded::read_from(&dir);
+        assert_eq!(study.pin.sha, STUDY_SHA);
+        let Some(tree) = mounted_tree() else {
+            eprintln!("pinned-source/ is absent; the study is not checked against a tree here");
+            return;
+        };
+        let computed = study.validate(&tree);
+        assert!(
+            computed.passed(),
+            "{:?}",
+            computed
+                .results
+                .iter()
+                .filter(|r| !r.pass)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(computed.results.len(), RULES.len());
+        // The recorded validation is what the rules answer now, and lists every rule of the first study.
+        let recorded: Validation = load_from(&dir, "validation.json");
+        assert_eq!(recorded, computed);
+        let first: Validation = load("validation.json");
+        let ids = |v: &Validation| v.results.iter().map(|r| r.rule.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&recorded), ids(&first));
+        // Every claim and card source is a file source with a quote.
+        let sources: Vec<&Source> = study
+            .claims
+            .iter()
+            .flat_map(|c| &c.sources)
+            .chain(study.rationales.iter().flat_map(|r| &r.sources))
+            .collect();
+        assert!(sources.len() > 40);
+        assert!(sources.iter().all(|s| s.kind == SourceKind::File));
+        assert!(
+            sources
+                .iter()
+                .all(|s| s.quote.as_deref().is_some_and(|q| !q.trim().is_empty()))
+        );
+        for claim in &study.claims {
+            assert!(
+                claim.text.starts_with("[mechanism] ") || claim.text.starts_with("[prose-only] "),
+                "{}: enforcement is not tagged",
+                claim.id
+            );
+        }
+        for source in sources {
+            assert_eq!(source.sha.as_deref(), Some(STUDY_SHA));
+        }
+        // Every claim id that the introduction names is a claim of the study.
+        let intro: serde_json::Value = load_from(&dir, "intro.json");
+        let known: BTreeSet<&str> = study.claims.iter().map(|c| c.id.as_str()).collect();
+        let mut named = 0;
+        let mut stack = vec![&intro];
+        while let Some(v) = stack.pop() {
+            match v {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        if key == "claims" {
+                            for id in child.as_array().expect("a claim list") {
+                                named += 1;
+                                let id = id.as_str().expect("a claim id");
+                                assert!(known.contains(id), "intro.json names unknown claim {id}");
+                            }
+                        } else {
+                            stack.push(child);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => stack.extend(items),
+                _ => {}
+            }
+        }
+        assert!(named > 100);
+    }
+
+    #[test]
+    fn a_changed_quote_fails_the_long_running_sessions_study() {
+        let Some(tree) = mounted_tree() else {
+            return;
+        };
+        let study = Loaded::read_from(&study_dir_of(SESSIONS_STUDY));
+        assert!(study.violations(&tree, "quote-mismatch").is_empty());
+        let mut other_quote = study.clone();
+        other_quote.claims[0].sources[0].quote = Some("text that is not in the file".into());
+        assert_eq!(other_quote.violations(&tree, "quote-mismatch"), ["c1"]);
+        let mut other_lines = study;
+        other_lines.claims[0].sources[0].end_line = Some(999_999);
+        assert_eq!(other_lines.violations(&tree, "bad-citation"), ["c1"]);
     }
 
     #[test]

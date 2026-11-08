@@ -1,0 +1,116 @@
+{
+  "about": {
+    "athena": "Athena is an open-source system, written in Rust, that turns a short request into a change to a code repository. It shows how it read the request, has one AI model do the work and a different one check it, and records what each step cost. It is for people who want to give a lazy, one- or two-line request and get back a commit they can trace to the request, the models, the cost and the verdict. It solves the problem of AI edits that arrive unreviewed and unaccountable.",
+    "study": "A study is Athena's written reading of another software project, taken at one fixed commit so that it describes exactly one version. This second study of firstmate covers how it keeps running for a long time: starting a session, recovering after a restart or crash, working while the captain is away, updating itself, and what the source says about drift and about a session's memory wearing out. Every statement traces to a claim, and every claim to lines in the project's own files."
+  },
+  "what_is": {"text": "Firstmate is a tool that keeps a backlog of programming tasks and hands each one to a separate AI coding tool, called a worker; this study asks how the deciding AI that supervises them, called the agent, stays useful over days instead of one sitting.", "claims": ["c1", "c2", "c16"]},
+  "what": [
+    {"text": "Firstmate does not trust the agent's memory. After a restart it rebuilds its picture from durable records and from the workers that are actually running, and the authors say a restart must be a non-event.", "claims": ["c1", "c2", "c3"]},
+    {"text": "Each session begins by running one script, the session-start script, that takes a lock for the home, reads the records, and prints one digest the agent reads once and trusts.", "claims": ["c6", "c7", "c25"]},
+    {"text": "While the session runs, a watcher checks on the workers. The watcher is deliberately one-shot, so a component above it starts the next one instead of relying on the agent to remember.", "claims": ["c16", "c17", "c19"]},
+    {"text": "When the captain leaves, an away mode records the captain's words verbatim and holds decisions for the captain's return. Being away never widens what firstmate may do.", "claims": ["c32", "c33", "c34", "c35"]},
+    {"text": "Firstmate updates itself only when the captain asks, by fast-forwarding the running copy and every secondmate home, and then restarts the live secondmates so that they pick up the new instructions.", "claims": ["c42", "c43", "c44"]}
+  ],
+  "limits": [
+    {"text": "A session that cannot take the lock stays read-only and changes nothing. The cited text names no way out except a later session start.", "claims": ["c10", "c11"]},
+    {"text": "The session-start digest has a runtime bound of 120 seconds by default. If it stops early, a banner names the stage that did not finish and tells the agent to rerun it; the cited text states no limit on reruns.", "claims": ["c12", "c13", "c14"]},
+    {"text": "An automatic secondmate relaunch is bounded: 3 attempts per mate in 3600 seconds, after which it is parked and escalated once. Recovery of an ordinary worker after a restart has no stated bound in the cited text.", "claims": ["c4", "c39", "c41"]},
+    {"text": "Re-arming the watcher after a failed close is retried at most 5 times by default on the Pi and OpenCode adapters, and then the original wake is delivered with a typed failure.", "claims": ["c17", "c18"]},
+    {"text": "The study found no measure of how a long session degrades. Compaction is recorded as losing the digest, and two harness surfaces have no channel to restore it; the study records this as a gap, not as a mechanism.", "claims": ["c27", "c28"]},
+    {"text": "Away mode sets no deadline after which a held captain decision is made without the captain. On platforms other than macOS no alert channel is built in, so a stalled injection leaves only a durable marker unless a command is configured.", "claims": ["c35", "c36"]},
+    {"text": "The cited text names no scheduled update and no check that a running agent's loaded instructions still match the files on disk. A home skipped by the update stays on old files until a later pass reports it.", "claims": ["c42", "c45", "c46"]}
+  ],
+  "walkthrough": [
+    {"text": "A harness opens a session and runs the session-start script, or the agent runs it after a nudge.", "claims": ["c6"]},
+    {"text": "The script takes the per-home lock first. Only a session that holds the lock runs the sweeps that change state.", "claims": ["c7", "c8", "c10"]},
+    {"text": "If the lock cannot be taken, the session is read-only. If the digest stops early, the agent reruns the script.", "claims": ["c11", "c13", "c14"]},
+    {"text": "With the lock held, the agent reconciles this home's recorded workers with the digest before it takes new work, recovering any worker whose endpoint died.", "claims": ["c2", "c3", "c4"]},
+    {"text": "The agent then supervises. A watcher cycle ends with one reason, and a component above it re-arms the next, with a durable queue and a turn-end guard behind it.", "claims": ["c16", "c19", "c20", "c21"]},
+    {"text": "If the captain goes away, the away record holds decisions for the return; the captain's first unmarked message archives it.", "claims": ["c32", "c33"]},
+    {"text": "If the captain asks for an update, the update script fast-forwards each home, skips any home that is dirty or diverged, and restarts the live secondmates.", "claims": ["c42", "c43", "c44", "c45"]}
+  ],
+  "start_terms": [
+    {"term": "captain", "text": "The person who directs firstmate. Away mode records the captain's words and holds decisions for the captain's return.", "claims": ["c32", "c33", "c35"]},
+    {"term": "home", "text": "A firstmate home is the place that holds a backlog, its state and its session lock. A secondmate has a home of its own.", "claims": ["c5", "c8"]},
+    {"term": "session lock", "text": "A file that records which harness process owns the session of a home. A dead owner makes it stale, and the next session reclaims it.", "claims": ["c8", "c9"]},
+    {"term": "digest", "text": "The single ordered report that the session-start script prints. The agent reads it once and trusts it.", "claims": ["c7", "c25"]},
+    {"term": "watcher", "text": "The one-shot process that checks on workers; one actionable reason closes one cycle.", "claims": ["c16"]},
+    {"term": "compaction", "text": "A harness shortening a long conversation. A compacted session has lost the digest it needs.", "claims": ["c27", "c28"]}
+  ],
+  "rationale_titles": [
+    {"id": "ra1", "title": "The lock is taken before any step that changes state"},
+    {"id": "ra2", "title": "No network call on the blocking path of session start"},
+    {"id": "ra3", "title": "Re-arming lives above the one-shot watcher"},
+    {"id": "ra4", "title": "Relaunch a secondmate only when it is proven dead or missing"},
+    {"id": "ra5", "title": "Automatic relaunch is capped at 3 per hour"},
+    {"id": "ra6", "title": "Restart live secondmates after every successful update"},
+    {"id": "ra7", "title": "Deliver the digest again after compaction"},
+    {"id": "ra8", "title": "Away words are recorded verbatim and never parsed"}
+  ],
+  "leadins": {
+    "terms": {"text": "These words appear in the sentences that follow. Each is defined here, and again in the Glossary at the end of the page.", "claims": ["c8", "c16", "c27"]},
+    "states": {"text": "A state is a stage a home's session can be in. The list shows nine, from Closed, where no session is live, to Supervising, where the agent works with a watcher armed, and Read-only, where a refused lock leaves the session unable to change anything. Read-only is tagged as an end because the cited text names no exit from it other than a later session start. Read each line as the state's name, its kind, and the claims that support it.", "claims": ["c1", "c6", "c11", "c16"]},
+    "counters": {"text": "A counter is a number that firstmate reads or changes as a session runs. The study found three: relaunch-attempts, which counts a secondmate's automatic relaunches inside a window; watcher-down-generation, which numbers watcher-downtime episodes; and startup-memory-tokens, which estimates the size of the startup memory files against an allowance. No transition changes the third; the model says so in a finding.", "claims": ["c20", "c29", "c39"]},
+    "transitions": {"text": "A transition is one move of a session from one state to another. Each card opens with a one-line summary, then gives the trigger that starts the move and the guard that must hold, and says who decides each: the agent, code, or the captain. A guard of none means the cited text names no condition.", "claims": ["c6", "c7", "c12", "c33"]},
+    "why": {"text": "Each card here is a design choice the study found, with the alternatives the authors named and what the choice costs. Read a card as: what was chosen, what else could have been chosen, and the trade-off that came with the choice.", "claims": ["c7", "c12", "c16", "c38", "c44"]}
+  },
+  "deciders": [
+    {"term": "agent", "text": "Firstmate's own deciding AI, never a worker. It decides, for example, when it has finished reconciling and when to rerun a truncated start.", "claims": ["c2", "c6", "c14"]},
+    {"term": "code", "text": "The firstmate scripts. They apply a rule themselves, for example the session lock check, the digest's runtime bound and the relaunch cap.", "claims": ["c10", "c12", "c39"]},
+    {"term": "captain", "text": "The person who decides when to go away, when to return and when to update.", "claims": ["c33", "c42"]}
+  ],
+  "summaries": [
+    {"id": "t1", "text": "A session opens and the session-start script runs, by the harness or by the agent after a nudge.", "claims": ["c6"]},
+    {"id": "t2", "text": "The digest finishes inside its bound with the lock verified, and the agent begins reconciling.", "claims": ["c7", "c8", "c10", "c12"]},
+    {"id": "t3", "text": "The lock cannot be acquired and verified, so the session stays read-only and changes nothing.", "claims": ["c9", "c10", "c11"]},
+    {"id": "t4", "text": "The digest stops on its runtime bound or dies, and a banner names the unfinished stage. No limit on how often this repeats was found.", "claims": ["c12", "c13", "c14"]},
+    {"id": "t5", "text": "The agent reruns the session-start script after the banner.", "claims": ["c14"]},
+    {"id": "t6", "text": "The agent has reconciled the recorded workers with the digest and begins supervising.", "claims": ["c2", "c3", "c5", "c25", "c26"]},
+    {"id": "t7", "text": "A recorded worker is found dead after a restart and is recovered with its worktree and unlanded work kept. No bound on this recovery was found.", "claims": ["c3", "c4", "c5"]},
+    {"id": "t8", "text": "A watcher cycle ends with no live successor, so a downtime episode is published and the re-arm is retried up to 5 times with exponential delay.", "claims": ["c16", "c17", "c18", "c19", "c20", "c22"]},
+    {"id": "t9", "text": "A verified successor starts and the drain acknowledges the episode, so supervision resumes.", "claims": ["c20", "c21"]},
+    {"id": "t10", "text": "The captain goes away or enters quiet mode, and the record is written in the same turn.", "claims": ["c32", "c33"]},
+    {"id": "t11", "text": "The captain's first unmarked message archives the away record and supervision returns to the attended posture.", "claims": ["c33"]},
+    {"id": "t12", "text": "The captain asks for an update.", "claims": ["c42"]},
+    {"id": "t13", "text": "The update script finishes: homes fast-forward only, skipped homes get no action, and live secondmates that can prove a restart are restarted.", "claims": ["c43", "c44", "c45", "c46"]},
+    {"id": "t14", "text": "The watcher finds a secondmate dead or missing and relaunches it, up to 3 times in 3600 seconds.", "claims": ["c38", "c39", "c40", "c41"]},
+    {"id": "t15", "text": "The attempts of one mate reach the bound, so automatic relaunch is parked and escalated once.", "claims": ["c39", "c41"]},
+    {"id": "t16", "text": "A later live probe finds the parked mate alive, clears the marker and restores the full attempt budget.", "claims": ["c39"]},
+    {"id": "t17", "text": "The daily growth check reports that the startup memory is over its allowance or has grown past a threshold, once per distinct finding.", "claims": ["c29", "c30", "c31"]},
+    {"id": "t18", "text": "The harness process that owns the session ends, by exit or crash, and the lock goes stale for the next session to reclaim.", "claims": ["c1", "c8", "c9"]}
+  ],
+  "glossary": [
+    {"term": "code", "definition": "The firstmate scripts, as opposed to the agent. They enforce a rule and refuse when it is not met.", "claims": ["c10", "c12", "c39"]},
+    {"term": "agent", "definition": "Firstmate's own deciding AI, never a worker.", "claims": ["c2", "c6"]},
+    {"term": "closed", "definition": "The state of a home with no live session. Durable records remain.", "claims": ["c1", "c6"]},
+    {"term": "starting", "definition": "The state while the session-start script runs under its runtime bound.", "claims": ["c7", "c12"]},
+    {"term": "truncated", "definition": "The state after the digest stopped early. A banner tells the agent to rerun.", "claims": ["c13", "c14"]},
+    {"term": "read-only", "definition": "The state of a session whose lock was refused. It reports the diagnostic and changes nothing.", "claims": ["c10", "c11"]},
+    {"term": "reconciling", "definition": "The state in which the agent rebuilds its picture from durable records before new work.", "claims": ["c2", "c3", "c4"]},
+    {"term": "supervising", "definition": "The state in which the agent works with a watcher armed.", "claims": ["c16", "c19"]},
+    {"term": "watcher-down", "definition": "The state after a watcher cycle ended without a live successor, until an episode is acknowledged.", "claims": ["c20", "c21"]},
+    {"term": "away", "definition": "The state in which an away record exists and decisions are held for the captain's return.", "claims": ["c32", "c33", "c35"]},
+    {"term": "updating", "definition": "The state while the update script runs over the homes.", "claims": ["c42", "c43"]},
+    {"term": "relaunch-attempts", "definition": "The counter of a mate's automatic relaunches inside the window; at 3 the watcher parks relaunch.", "claims": ["c39"]},
+    {"term": "watcher-down-generation", "definition": "The counter that numbers watcher-downtime episodes; an acknowledgement retires an episode only by its generation.", "claims": ["c20", "c21"]},
+    {"term": "startup-memory-tokens", "definition": "The estimated size of the startup memory files, compared with an allowance of 7500 by default.", "claims": ["c29"]},
+    {"term": "session lock", "definition": "A file recording which harness process owns a home's session.", "claims": ["c8", "c9"]},
+    {"term": "digest", "definition": "The ordered report printed once at session start.", "claims": ["c7", "c25"]},
+    {"term": "wake", "definition": "An event that tells the agent something needs attention. A status line is a wake event, not current state.", "claims": ["c26"]},
+    {"term": "watcher", "definition": "The one-shot process that checks on workers.", "claims": ["c16"]},
+    {"term": "compaction", "definition": "A harness shortening a conversation; the session-start digest is delivered again where a channel exists.", "claims": ["c27", "c28"]},
+    {"term": "secondmate", "definition": "A persistent firstmate home of its own. It reconciles its own work after a restart and then idles.", "claims": ["c5", "c38"]},
+    {"term": "away mode", "definition": "A posture recorded in a file, in which decisions are held for the captain's return.", "claims": ["c32", "c33", "c35"]},
+    {"term": "self-update", "definition": "The captain-triggered, fast-forward-only update of the running home and every secondmate home.", "claims": ["c42", "c43"]},
+    {"term": "drift", "definition": "A home or a running agent no longer matching the shared instructions. The update records a diverged home and skips it; the study found no scheduled check for a running agent.", "claims": ["c44", "c45", "c46", "c47"]},
+    {"term": "context rot", "definition": "The loss of a session's useful memory over time. The study found only the compaction case and a startup-memory allowance, and records the rest as a gap.", "claims": ["c27", "c28", "c29"]},
+    {"term": "state", "about": "page", "definition": "A stage a home's session can be in. The states are listed first."},
+    {"term": "transition", "about": "page", "definition": "A move from one state to another, shown as a card with its trigger and guard."},
+    {"term": "trigger", "about": "page", "definition": "What starts a transition, and whether the agent, code or the captain decides that it has happened."},
+    {"term": "guard", "about": "page", "definition": "The condition that must hold for a transition to go ahead, and who checks it."},
+    {"term": "counter", "about": "page", "definition": "A number that some transitions change and others read, listed under Counters."},
+    {"term": "claim", "about": "page", "definition": "One sentence about firstmate, with its sources. Each claim has an id such as c1."},
+    {"term": "pin", "about": "page", "definition": "The single firstmate commit the study read. Nothing here describes any other version."},
+    {"term": "mark", "about": "page", "definition": "The label on a claim that says how the study came to it."}
+  ]
+}

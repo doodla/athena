@@ -1,0 +1,197 @@
+{
+  "schema": "study.model/1",
+  "study_id": "firstmate-long-running-sessions",
+  "states": [
+    {"id": "closed", "kind": "initial", "claims": ["c1", "c6"]},
+    {"id": "starting", "kind": "active", "claims": ["c6", "c7", "c12"]},
+    {"id": "truncated", "kind": "waiting", "claims": ["c13", "c14"]},
+    {"id": "read-only", "kind": "terminal-failure", "claims": ["c10", "c11"]},
+    {"id": "reconciling", "kind": "active", "claims": ["c2", "c3", "c4", "c25"]},
+    {"id": "supervising", "kind": "active", "claims": ["c16", "c19", "c32"]},
+    {"id": "watcher-down", "kind": "waiting", "claims": ["c20", "c21", "c22"]},
+    {"id": "away", "kind": "active", "claims": ["c32", "c33", "c34"]},
+    {"id": "updating", "kind": "active", "claims": ["c42", "c43", "c44"]}
+  ],
+  "counters": [
+    {"id": "relaunch-attempts", "start": 0, "changed_by": ["t14", "t16"], "claims": ["c39", "c40"]},
+    {"id": "watcher-down-generation", "start": 0, "changed_by": ["t8", "t9"], "claims": ["c20", "c21"]},
+    {"id": "startup-memory-tokens", "start": 0, "changed_by": [], "claims": ["c29", "c30"]}
+  ],
+  "transitions": [
+    {
+      "id": "t1", "from": "closed", "to": "starting",
+      "trigger": "a harness opens a session and runs the session-start script, or the agent runs it after a nudge", "trigger_evaluated_by": "agent",
+      "guard": "none", "guard_evaluated_by": "agent",
+      "guard_counters": [], "actor": "agent", "failure": null, "retry": null,
+      "claims": ["c6"]
+    },
+    {
+      "id": "t2", "from": "starting", "to": "reconciling",
+      "trigger": "the digest finishes every stage inside its runtime bound", "trigger_evaluated_by": "code",
+      "guard": "the per-home session lock is acquired and verified", "guard_evaluated_by": "code",
+      "guard_counters": [], "actor": "process", "failure": null, "retry": null,
+      "claims": ["c7", "c8", "c10", "c12"]
+    },
+    {
+      "id": "t3", "from": "starting", "to": "read-only",
+      "trigger": "the lock script cannot acquire and verify the session lock", "trigger_evaluated_by": "code",
+      "guard": "the recorded owner is another live harness, or the state directory cannot be written", "guard_evaluated_by": "code",
+      "guard_counters": [], "actor": "process", "failure": "session lock refused (exit 1); the session reports the diagnostic and makes no fleet change",
+      "retry": null,
+      "claims": ["c9", "c10", "c11"]
+    },
+    {
+      "id": "t4", "from": "starting", "to": "truncated",
+      "trigger": "the digest child stops on its runtime bound or dies", "trigger_evaluated_by": "code",
+      "guard": "the child exits nonzero", "guard_evaluated_by": "code",
+      "guard_counters": [], "actor": "process", "failure": "digest truncated: the banner names the stage that did not finish and the sections never emitted (exit 124 for the runtime bound, another status for a death)",
+      "retry": {
+        "bound": null, "bound_absent_claims": ["c14"], "backoff": null,
+        "changes": ["the agent may raise FM_SESSION_START_TIMEOUT before the rerun"],
+        "claims": ["c13", "c14"]
+      },
+      "claims": ["c12", "c13", "c14"]
+    },
+    {
+      "id": "t5", "from": "truncated", "to": "starting",
+      "trigger": "the agent reruns the session-start script after the banner", "trigger_evaluated_by": "agent",
+      "guard": "none", "guard_evaluated_by": "agent",
+      "guard_counters": [], "actor": "agent", "failure": null, "retry": null,
+      "claims": ["c14"]
+    },
+    {
+      "id": "t6", "from": "reconciling", "to": "supervising",
+      "trigger": "the agent has reconciled this home's recorded direct reports with the digest", "trigger_evaluated_by": "agent",
+      "guard": "none", "guard_evaluated_by": "agent",
+      "guard_counters": [], "actor": "agent", "failure": null, "retry": null,
+      "claims": ["c2", "c3", "c5", "c25", "c26"]
+    },
+    {
+      "id": "t7", "from": "reconciling", "to": "reconciling",
+      "trigger": "the agent finds a recorded direct report whose endpoint is dead or whose metadata has no window", "trigger_evaluated_by": "agent",
+      "guard": "the report is recorded in this home; its worktree and unlanded work are preserved", "guard_evaluated_by": "agent",
+      "guard_counters": [], "actor": "agent", "failure": "ordinary direct report dead after a restart; recovered through the stuck-crewmate-recovery skill",
+      "retry": {
+        "bound": null, "bound_absent_claims": ["c4"], "backoff": null,
+        "changes": ["the report's endpoint is replaced", "the recorded worktree and unlanded work are kept"],
+        "claims": ["c4"]
+      },
+      "claims": ["c3", "c4", "c5"]
+    },
+    {
+      "id": "t8", "from": "supervising", "to": "watcher-down",
+      "trigger": "a watcher close or a durable queue append publishes the downtime marker", "trigger_evaluated_by": "code",
+      "guard": "no live watcher with a fresh beacon inside the 300-second grace", "guard_evaluated_by": "code",
+      "guard_counters": [], "actor": "process", "failure": "watcher cycle ended without a live successor",
+      "retry": {
+        "bound": 5, "bound_absent_claims": [], "backoff": "exponential, 250 ms base, capped at 4000 ms (Pi and OpenCode adapters)",
+        "changes": ["a fresh arm attempt starts after the delay", "the downtime marker keeps its generation until it is acknowledged"],
+        "claims": ["c17", "c18", "c20"]
+      },
+      "claims": ["c16", "c17", "c18", "c19", "c20", "c22"]
+    },
+    {
+      "id": "t9", "from": "watcher-down", "to": "supervising",
+      "trigger": "a re-arm owner starts a verified successor watcher and the drain acknowledges the episode", "trigger_evaluated_by": "code",
+      "guard": "the acknowledgement names the current recovery generation and no queue rows remain", "guard_evaluated_by": "code",
+      "guard_counters": ["watcher-down-generation"], "actor": "process", "failure": null, "retry": null,
+      "claims": ["c20", "c21"]
+    },
+    {
+      "id": "t10", "from": "supervising", "to": "away",
+      "trigger": "the captain enters away or quiet mode, and the script writes the posture record in the same turn", "trigger_evaluated_by": "person",
+      "guard": "none", "guard_evaluated_by": "agent",
+      "guard_counters": [], "actor": "person", "failure": null, "retry": null,
+      "claims": ["c32", "c33"]
+    },
+    {
+      "id": "t11", "from": "away", "to": "supervising",
+      "trigger": "the captain's first unmarked message archives the away record", "trigger_evaluated_by": "person",
+      "guard": "an away record exists and the message is not marked", "guard_evaluated_by": "code",
+      "guard_counters": [], "actor": "person", "failure": null, "retry": null,
+      "claims": ["c33"]
+    },
+    {
+      "id": "t12", "from": "supervising", "to": "updating",
+      "trigger": "the captain invokes the update command or asks to update firstmate", "trigger_evaluated_by": "person",
+      "guard": "none", "guard_evaluated_by": "agent",
+      "guard_counters": [], "actor": "person", "failure": null, "retry": null,
+      "claims": ["c42"]
+    },
+    {
+      "id": "t13", "from": "updating", "to": "supervising",
+      "trigger": "the update script finishes its pass over the running home and every registered secondmate home", "trigger_evaluated_by": "code",
+      "guard": "fast-forward only, never force, merge commit or stash; a skipped home gets no action; a live mate whose runtime can prove a restart is restarted whether or not its files changed", "guard_evaluated_by": "code",
+      "guard_counters": [], "actor": "process", "failure": null, "retry": null,
+      "claims": ["c43", "c44", "c45", "c46"]
+    },
+    {
+      "id": "t14", "from": "supervising", "to": "supervising",
+      "trigger": "the watcher probe finds a registered secondmate's endpoint dead or missing", "trigger_evaluated_by": "code",
+      "guard": "relaunch attempts inside the 3600-second window are below 3, and the endpoint is proven dead or missing", "guard_evaluated_by": "code",
+      "guard_counters": ["relaunch-attempts"], "actor": "process", "failure": "secondmate endpoint dead or missing; relaunched through the guarded spawn path with one check wake",
+      "retry": {
+        "bound": 3, "bound_absent_claims": [], "backoff": null,
+        "changes": ["a replacement agent starts in the recorded endpoint", "an attempt line is appended to the per-mate ledger"],
+        "claims": ["c38", "c39", "c40"]
+      },
+      "claims": ["c38", "c39", "c40", "c41"]
+    },
+    {
+      "id": "t15", "from": "supervising", "to": "supervising",
+      "trigger": "the relaunch attempts of one mate inside the window reach the bound", "trigger_evaluated_by": "code",
+      "guard": "attempts inside the 3600-second window are at or above 3", "guard_evaluated_by": "code",
+      "guard_counters": ["relaunch-attempts"], "actor": "process", "failure": null, "retry": null,
+      "claims": ["c39", "c41"]
+    },
+    {
+      "id": "t16", "from": "supervising", "to": "supervising",
+      "trigger": "a later live probe finds the parked mate alive", "trigger_evaluated_by": "code",
+      "guard": "the park marker for that mate exists", "guard_evaluated_by": "code",
+      "guard_counters": ["relaunch-attempts"], "actor": "process", "failure": null, "retry": null,
+      "claims": ["c39"]
+    },
+    {
+      "id": "t17", "from": "supervising", "to": "supervising",
+      "trigger": "the armed daily growth check finds the startup memory over its allowance or a file grown past its threshold", "trigger_evaluated_by": "code",
+      "guard": "the finding differs from the one last reported; the check evaluates at most once per day", "guard_evaluated_by": "code",
+      "guard_counters": ["startup-memory-tokens"], "actor": "clock", "failure": null, "retry": null,
+      "claims": ["c29", "c30", "c31"]
+    },
+    {
+      "id": "t18", "from": "supervising", "to": "closed",
+      "trigger": "the harness process that owns the session ends, by exit or by a crash", "trigger_evaluated_by": "code",
+      "guard": "none", "guard_evaluated_by": "agent",
+      "guard_counters": [], "actor": "process", "failure": null, "retry": null,
+      "claims": ["c1", "c8", "c9"]
+    }
+  ],
+  "unhandled": {
+    "failures": [
+      {"name": "a lock-refused session has no documented exit except a later session start; the cited text gives no bound on how long it stays read-only", "claims": ["c11"]},
+      {"name": "a harness with no compaction channel (Codex's interactive UI, a Cursor primary) loses the digest on compaction and nothing re-emits it", "claims": ["c28"]},
+      {"name": "a home skipped by the update stays on old bytes until a later update or bootstrap pass surfaces its durable divergence record", "claims": ["c45", "c46"]},
+      {"name": "no source states a time limit on how long a home may stay without a live session after a crash", "claims": ["c1", "c9"]}
+    ],
+    "claims": ["c11", "c28", "c45", "c46"]
+  },
+  "concurrency": {
+    "shared_resources": ["the per-home session lock", "the watcher singleton and its beacon", "the durable wake queue", "a secondmate's endpoint and relaunch ledger"],
+    "serialized_by": ["one session lock per home, owned by one harness pid", "per-task and per-home relaunch locks"],
+    "limit": 1,
+    "on_conflict": "session lock refused: the session is read-only and reports the diagnostic; a relaunch lock held by another supervisor: the caller skips and lets that episode finish",
+    "claims": ["c7", "c8", "c10", "c11", "c40"]
+  },
+  "touchpoints": [
+    {
+      "id": "h1", "at": "away",
+      "no_answer": "none found: away mode holds captain decisions for the captain's return, and the cited text sets no deadline after which firstmate decides alone; destructive, irreversible and security-sensitive actions are never pre-authorizable",
+      "claims": ["c33", "c34", "c35"]
+    },
+    {
+      "id": "h2", "at": "updating",
+      "no_answer": "none found: an update starts only when the captain invokes it or asks; the cited text names no timer or default that starts one",
+      "claims": ["c42"]
+    }
+  ]
+}
