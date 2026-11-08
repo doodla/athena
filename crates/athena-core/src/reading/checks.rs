@@ -482,7 +482,8 @@ pub fn check_reading_references(
 /// undefined ([`check_defined_terms`]), then the deliverable paths and `content` criteria against the boundary
 /// words and the deliverables against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
 /// there is no repository to compare with), then the repo paths its text relies on against the same files
-/// ([`check_reading_references`]). It applies to a first attempt as well as a retry. It runs
+/// ([`check_reading_references`]), then the method a subjective-quality outcome in the request is judged by
+/// ([`check_subjective_method`]). It applies to a first attempt as well as a retry. It runs
 /// [`refusing_check`] and drops the name of the check that refused.
 pub fn check_reading_acceptance(
     reading: &Reading,
@@ -540,6 +541,7 @@ pub fn refusing_check(
     step!(check_defined_terms(reading, request));
     step!(check_boundary_and_repo_files(reading, repo_files));
     step!(check_reading_references(reading, repo_files));
+    step!(check_subjective_method(reading, request));
     None
 }
 

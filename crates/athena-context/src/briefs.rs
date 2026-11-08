@@ -2244,7 +2244,7 @@ pub const READING_RULES_HEADING: &str = "# Reading rules";
 /// Each rule a reading must pass, one short line each. A line gives the check that enforces it; a reading
 /// that breaks a checked rule is refused and read again once, with the refusal as a correction. A line
 /// ending `(prose only)` has no check and causes no refusal.
-pub const READING_RULES: [&str; 9] = [
+pub const READING_RULES: [&str; 10] = [
     "Previous result: a retry or follow-up names each earlier job, says how its result is addressed, lists deliverables and out_of_scope, and lists or excludes the files it changed (`check_prior_result_and_scope`).",
     "Criteria evidence: each criterion rests on a command, Grep or file the verifier can check, never the producer's report (`check_criteria_evidence`).",
     "Governance files: list one as a deliverable and name it in a criterion when the request names it or a deliverable implies it, or name it in out_of_scope (`check_governance_coverage`).",
@@ -2252,6 +2252,7 @@ pub const READING_RULES: [&str; 9] = [
     "Design: an `Existing code:` assumption names crates/ or docs/ paths the job does not create; a criterion needs an existing code section that reuses or extends them (`check_design_existing_code`).",
     "Environment: a CI workflow, a push, PR or pull request, or a records-branch or history read needs an `Environment:` assumption: site, read/write permissions, data reached (`check_environment_reach`).",
     "Terms: define each structural term the request uses (ladder, rung, tier, layer) in a `Term ladder: <meaning>` assumption; a quoted or cited mention needs none (`check_defined_terms`).",
+    "Subjective quality: a page or guide that must be clear to a newcomer needs one behavior criterion: independent model reader, persona, 1 to 5 rating, minimum (`check_subjective_method`).",
     "Valid reading: class, capability and producer model from the closed lists; a decline gives a reason; a capability needs a criterion; forecasts are valid (`build_reading`).",
     "Test placement: put each test in a crate that can import the code under test; xtask has no library target, so test it in `xtask/tests/` or unit tests in `xtask/src/` (prose only).",
 ];
@@ -4546,11 +4547,12 @@ mod tests {
             "check_design_existing_code",
             "check_environment_reach",
             "check_defined_terms",
+            "check_subjective_method",
             "build_reading",
         ] {
             assert!(section.contains(check), "no rule for {check}:\n{section}");
         }
-        assert_eq!(READING_RULES.len(), 9);
+        assert_eq!(READING_RULES.len(), 10);
         assert!(
             lines
                 .iter()
@@ -4576,9 +4578,17 @@ mod tests {
                     && l.contains("`check_design_existing_code`")),
             "no rule line names Existing code: and its check:\n{section}"
         );
-        // The section adds little to the brief: nine rule lines and the code survey guide paragraph. The
-        // section was about 2540 bytes with eight rules and measured 2718 with the ninth.
-        assert!(section.len() < 2750, "{} bytes", section.len());
+        assert!(
+            lines.iter().any(
+                |l| l.contains("Subjective quality") && l.contains("`check_subjective_method`")
+            ),
+            "no rule line names subjective quality and its check:\n{section}"
+        );
+        // The section adds little to the brief: ten rule lines and the code survey guide paragraph. The
+        // section was about 2540 bytes with eight rules, measured 2718 with the ninth and about 2906 with
+        // the tenth
+        // (an estimate from the added line's length, 188 bytes).
+        assert!(section.len() < 3000, "{} bytes", section.len());
     }
 
     #[test]

@@ -6869,6 +6869,298 @@ mod tests {
         assert!(body.contains("step!(check_defined_terms(reading, request));"));
     }
 
+    /// A request whose outcome is subjective quality: a page that is clear to a newcomer.
+    const SUBJECTIVE_REQUEST: &str =
+        "Write an explainer page on how firstmate handles work that is clear to a newcomer.";
+
+    /// A behavior criterion that states the whole method: reader, persona, scale and threshold.
+    const SUBJECTIVE_METHOD: &str = "Run `athena audience`: an independent model reader that had no part in \
+         building the page reads it as a newcomer and rates it from 1 to 5; a rating below 4 blocks completion.";
+
+    /// The error of `check_subjective_method` for this reading and request, if it refuses.
+    fn subjective_error(reading: &Reading, request: &str) -> Option<String> {
+        check_subjective_method(reading, request)
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    /// The part names the refusal lists as missing.
+    fn subjective_missing(error: &str) -> String {
+        error
+            .split("missing: ")
+            .nth(1)
+            .and_then(|rest| rest.split("; state the method").next())
+            .unwrap_or_else(|| panic!("no missing list in: {error}"))
+            .to_string()
+    }
+
+    /// A docs reading with the method as a criterion of this kind.
+    fn subjective_reading_with(kind: CriterionKind, text: &str) -> Reading {
+        let mut reading = terms_reading(&[]);
+        reading.acceptance_criteria.push(Criterion {
+            text: text.into(),
+            kind,
+        });
+        reading
+    }
+
+    #[test]
+    fn subjective_method_missing_is_refused_and_named() {
+        let reading = terms_reading(&[]);
+        let error = subjective_error(&reading, SUBJECTIVE_REQUEST).expect("refused");
+        assert!(
+            error.starts_with("the reading was refused because"),
+            "{error}"
+        );
+        for word in [
+            "independent",
+            "persona",
+            "rating",
+            "threshold",
+            "behavior",
+            "before the build",
+        ] {
+            assert!(error.contains(word), "{word}: {error}");
+        }
+        assert!(!error.contains('\n'), "{error}");
+        assert_eq!(
+            subjective_missing(&error),
+            METHOD_PART_NAMES.join("; "),
+            "{error}"
+        );
+        // The gate runs it under the check's own name, and the wrapper gives the same text.
+        assert_eq!(
+            refuser_for(&reading, SUBJECTIVE_REQUEST),
+            Some("check_subjective_method")
+        );
+        let gate = check_reading_acceptance(&reading, SUBJECTIVE_REQUEST, None, &[], None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(gate, error);
+        // A summary that says the same thing, with a request that does not, triggers nothing.
+        let mut summary_only = terms_reading(&[]);
+        summary_only.summary = "A page that is clear to a newcomer.".into();
+        assert_eq!(refuser_for(&summary_only, "Write the page."), None);
+        // Other forms of the outcome: a clarity phrase beside a person, and a self-subjective phrase.
+        for request in [
+            "Write the explainer page so it is clear to a first-time reader.",
+            "Show how clear the explainer page is to a beginner.",
+            "The tutorial must be easy to follow.",
+            "Make the verifier report easy to read.",
+            "Write a guide that is understandable.",
+            "Improve the clarity of the page for the audience.",
+            "Update the docs.\n- The explainer page is easy to understand",
+        ] {
+            assert_eq!(
+                refuser_for(&reading, request),
+                Some("check_subjective_method"),
+                "{request}"
+            );
+        }
+        // A root-cause request is not read in its generated lines, but its own sentence is.
+        let root_cause = |own: &str| {
+            format!(
+                "Priority: normal\n\nFix the root cause of a repeated failure: a page is not clear to a newcomer\n\n\
+                 {ROOT_CAUSE_ANCHOR} Find the cause where it originates and fix it there.{own}\n\n\
+                 Failure class: page not clear to a newcomer\n\
+                 Cause: nothing says how a page is clear to a newcomer\n\
+                 Seen 3 time(s) in 2 jobs. The introspections that record it:\n\
+                 Introspection 20261014-163945-t9c3 (job 20261014-163844-c2kt); prevention it proposed: a reader \
+                 rates the explainer page as a newcomer\n\nAcceptance:\n- fmt, clippy and test pass"
+            )
+        };
+        check_subjective_method(&reading, &root_cause("")).unwrap();
+        let own = root_cause(" The explainer page must be clear to a newcomer.");
+        assert!(subjective_error(&reading, &own).is_some());
+    }
+
+    #[test]
+    fn subjective_method_stated_is_accepted() {
+        let accepted = |text: &str| {
+            let reading = subjective_reading_with(CriterionKind::Behavior, text);
+            check_subjective_method(&reading, SUBJECTIVE_REQUEST)
+                .unwrap_or_else(|e| panic!("{text}: {e}"));
+            check_reading_acceptance(&reading, SUBJECTIVE_REQUEST, None, &[], None)
+                .unwrap_or_else(|e| panic!("{text}: {e}"));
+        };
+        accepted(SUBJECTIVE_METHOD);
+        // The user's own `outcome-check` default, word for word, is a method the gate accepts.
+        let defaults = include_str!("../../../defaults.toml");
+        let sentence = defaults
+            .split("For audience-facing quality")
+            .nth(1)
+            .and_then(|rest| rest.split("blocks completion.").next())
+            .expect("the outcome-check default");
+        accepted(&format!(
+            "Run `athena audience`: For audience-facing quality{sentence}blocks completion."
+        ));
+        for text in [
+            "Run `athena audience`: a separate reviewer that did not build the page reads it as a new user and \
+             gives a score of 4/5 or above",
+            "Run `athena audience`: a fresh model reader, as a newcomer, rates the page out of 5; at least 4 passes.",
+            "Run `athena audience`: an independent judge reads the page as a beginner and rates it 1-5; a rating \
+             of 4 or above passes.",
+            "Run `athena audience`: a model that took no part in the work rates the page as a newcomer on a \
+             five-point scale; the minimum rating is 4.",
+            "Run `athena audience`: an independent reader persona rates the page 1 through 5; no less than 4 \
+             passes.",
+            "Run `athena audience`: a fresh model reader that took no part in the work reads it as a first-time \
+             visitor and rates it 4 of 5 at least; under 4 of 5 blocks completion.",
+        ] {
+            accepted(text);
+        }
+        // A reading that states no subjective outcome is unaffected, as is one with no deliverable, a
+        // question or a decline.
+        let plain = terms_reading(&[]);
+        for request in [
+            "Refactor the page renderer into two functions.",
+            "change the reading rules",
+        ] {
+            check_subjective_method(&plain, request).unwrap();
+        }
+        let mut asking = terms_reading(&[]);
+        asking.question = Some("Which page?".into());
+        check_subjective_method(&asking, SUBJECTIVE_REQUEST).unwrap();
+        let mut none = terms_reading(&[]);
+        none.deliverables.clear();
+        check_subjective_method(&none, SUBJECTIVE_REQUEST).unwrap();
+        let mut declined = terms_reading(&[]);
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        check_subjective_method(&declined, SUBJECTIVE_REQUEST).unwrap();
+    }
+
+    #[test]
+    fn subjective_method_partial_is_refused() {
+        // Each variant drops one part of the method; the refusal names exactly that part.
+        for (dropped, text) in [
+            (
+                0,
+                "Run `athena audience`: the page is read as a newcomer and rated from 1 to 5; a rating below 4 \
+                 blocks completion.",
+            ),
+            (
+                1,
+                "Run `athena audience`: an independent model reader that had no part in building the page rates \
+                 it from 1 to 5; a rating below 4 blocks completion.",
+            ),
+            (
+                2,
+                "Run `athena audience`: an independent model reader that had no part in building the page reads \
+                 it as a newcomer and rates it; a rating below 4 blocks completion.",
+            ),
+            (
+                3,
+                "Run `athena audience`: an independent model reader that had no part in building the page reads \
+                 it as a newcomer and rates it from 1 to 5.",
+            ),
+            (
+                3,
+                "Run `athena audience`: an independent model reader that had no part in building the page reads \
+                 it as a newcomer and rates it from 1 to 5; the threshold is agreed with the owner later on \
+                 today, probably 4.",
+            ),
+        ] {
+            let reading = subjective_reading_with(CriterionKind::Behavior, text);
+            let error = subjective_error(&reading, SUBJECTIVE_REQUEST)
+                .unwrap_or_else(|| panic!("accepted: {text}"));
+            assert_eq!(
+                subjective_missing(&error),
+                METHOD_PART_NAMES[dropped],
+                "{text}"
+            );
+            assert_eq!(
+                refuser_for(&reading, SUBJECTIVE_REQUEST),
+                Some("check_subjective_method")
+            );
+        }
+        // The method in a content criterion only is a file check, not a run: refused with all four named.
+        let content = subjective_reading_with(CriterionKind::Content, SUBJECTIVE_METHOD);
+        let error = subjective_error(&content, SUBJECTIVE_REQUEST).expect("refused");
+        assert_eq!(subjective_missing(&error), METHOD_PART_NAMES.join("; "));
+        // Parts spread over several criteria are not a method: no single criterion tells how to rate.
+        let mut spread = terms_reading(&[]);
+        for text in [
+            "Run `athena audience`: an independent model reader that had no part in building the page reads it \
+             as a newcomer.",
+            "Run `athena audience`: the page is rated from 1 to 5; a rating below 4 blocks completion.",
+        ] {
+            spread.acceptance_criteria.push(Criterion {
+                text: text.into(),
+                kind: CriterionKind::Behavior,
+            });
+        }
+        assert!(subjective_error(&spread, SUBJECTIVE_REQUEST).is_some());
+        // An incidental stray word is not a persona or a threshold.
+        let stray = subjective_reading_with(
+            CriterionKind::Behavior,
+            "Run `athena audience`: an independent model reader that had no part in building the page rates it \
+             from 1 to 5 as a reference check of 1 file",
+        );
+        let error = subjective_error(&stray, SUBJECTIVE_REQUEST).expect("refused");
+        assert_eq!(
+            subjective_missing(&error),
+            [METHOD_PART_NAMES[1], METHOD_PART_NAMES[3]].join("; ")
+        );
+    }
+
+    #[test]
+    fn subjective_method_ignores_other_requests() {
+        let reading = terms_reading(&[]);
+        for request in [
+            "Refactor the page renderer into two functions",
+            "Clear the cache when the page reloads",
+            "Make each call site readable",
+            "Make the page output machine-readable",
+            "Make the JSON output human-readable",
+            "Improve the clarity of the verifier report",
+            "Make the error in the report clear to the maintainer",
+            "Rename the \"newcomer\" page template",
+            "Rename the 'newcomer' page template",
+            "Add a unit test for the newcomer module",
+            "Rename the explainer page file (clear to a newcomer, easy to follow, understandable)",
+            "Fix the page loader in crates/newcomer/clear_to_a_newcomer.rs",
+            "Keep the guide as it is:\n```\nthe page is clear to a newcomer\n```",
+        ] {
+            check_subjective_method(&reading, request).unwrap_or_else(|e| panic!("{request}: {e}"));
+            assert_ne!(
+                refuser_for(&reading, request),
+                Some("check_subjective_method"),
+                "{request}"
+            );
+        }
+        // Word boundaries are those of `has_phrase`: a hyphen is a boundary, a longer word is not a match.
+        assert!(has_phrase("a machine-readable page", "readable"));
+        assert!(!has_phrase("the newcomers page", "newcomer"));
+    }
+
+    #[test]
+    fn subjective_method_has_one_step_line() {
+        let source = reading_source();
+        let body = source
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        let steps: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("step!(check_"))
+            .collect();
+        let line = "step!(check_subjective_method(reading, request));";
+        assert_eq!(steps.iter().filter(|l| **l == line).count(), 1, "{steps:?}");
+        let references = steps
+            .iter()
+            .position(|l| *l == "step!(check_reading_references(reading, repo_files));")
+            .unwrap();
+        assert_eq!(steps[references + 1], line);
+        let acceptance_doc = source
+            .split("pub fn check_reading_acceptance(")
+            .next()
+            .unwrap();
+        assert!(acceptance_doc.contains("[`check_subjective_method`]"));
+    }
+
     /// The text of the `///` block above `pub fn check_defined_terms(`, as one line.
     fn defined_terms_doc() -> String {
         let before = reading_source()

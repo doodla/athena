@@ -9,6 +9,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A reading check for subjective-quality outcomes: `check_subjective_method` in
+  `crates/athena-core/src/reading/surveys.rs`, one step line at the end of `refusing_check`. Root cause: there
+  was no required verification method for subjective quality at the reading gate. A request stated an outcome
+  such as a page that is clear to a newcomer, nothing asked how anyone would check it, so the reading was
+  accepted with criteria that cannot show it and the job ended in a verifier failure or a question to the user.
+  Jobs 20261014-163844-c2kt and 20261015-064153-wekz each failed that way (three introspections, one cause). The
+  check reads the request's plain prose (generated root-cause lines, quoted spans, example lists, paths and
+  fenced code are skipped) and triggers on a line that holds a page, guide, report or similar noun with
+  `newcomer`, `easy to follow`, `easy to understand`, `easy to read` or `understandable`, or with `how clear`,
+  `clear to`, `clear for` or `clarity` beside a person who judges (newcomer, beginner, first-time, reader,
+  visitor, audience). It then needs one behavior criterion that names an independent model reader that had no
+  part in building the work, a persona, a 1 to 5 rating and a pass threshold; the user's `outcome-check` default
+  wording is accepted word for word. The error names the missing parts and says to state the method before the
+  build. Limits: the match is lexical, so other wording is missed, and the rating itself is not computed. The
+  newcomer gate in the pages ship path (job 20261014-163844-c2kt) and the `athena land --pr` and retry-budget
+  findings of job 20261015-064153-wekz are not redone here. The higher refusal rate is intended; expected 5% of
+  newly refused readings, an estimate, not measured. The refusal corpus gains cases from both jobs' shapes and
+  accepted counterparts, and `READING_RULES` gains a tenth line.
 - A check that a verifier prompt does not contradict the verdict rules. Root cause: `judge` in
   `crates/athena-core/src/verify.rs` refuses a behavior criterion that cites no command or one the core did not
   see run (D43, D63, D115), but nothing compared the verifier prompts with those rules, so an edit such as

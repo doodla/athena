@@ -87,7 +87,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 41] = [
+const INPUT_FORMS: [&str; 47] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -129,6 +129,12 @@ const INPUT_FORMS: [&str; 41] = [
     "ambiguous-name-plain-prose",
     "ambiguous-name-defined",
     "ambiguous-name-quoted-or-generated",
+    "subjective-outcome-no-method",
+    "subjective-method-stated",
+    "subjective-word-without-artifact",
+    "subjective-technical-clarity",
+    "subjective-quoted-or-generated",
+    "subjective-method-partial-or-content-only",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -284,6 +290,7 @@ fn cases() -> Vec<Case> {
     out.extend(reading_check_cases());
     out.extend(delivery_cases());
     out.extend(defined_terms_cases());
+    out.extend(subjective_cases());
     out
 }
 
@@ -740,16 +747,32 @@ fn cause_jobs_referenced() -> Vec<EarlierAttempt> {
 /// whose cause, class and prevention text use `ladder`, `layer` and `tier`. `sentence` is added to the
 /// request's own first paragraph.
 fn generated_root_cause_request(sentence: Option<&str>) -> String {
-    let first = introspection(
-        10,
-        'a',
-        "Add a ladder check for every layer; a tier list is wrong.",
-    );
-    let second = introspection(20, 'b', "Name each rung of the ladder in the reading.");
+    root_cause_request_from(
+        "Ladder of tiers (20261027-090500-1abc)",
+        "the ladder has no rung in this layer",
+        [
+            "Add a ladder check for every layer; a tier list is wrong.",
+            "Name each rung of the ladder in the reading.",
+        ],
+        sentence,
+    )
+}
+
+/// A root-cause request built by `hestia::root_cause_request` for a cause recorded by two introspections, with
+/// this failure class, cause text and one prevention text for each introspection. `sentence` is added to the
+/// request's own first paragraph.
+fn root_cause_request_from(
+    class: &str,
+    cause_text: &str,
+    preventions: [&str; 2],
+    sentence: Option<&str>,
+) -> String {
+    let first = introspection(10, 'a', preventions[0]);
+    let second = introspection(20, 'b', preventions[1]);
     let cause = athena_core::hestia::RepeatedCause {
         key: "cause:ladder".into(),
-        class: Some("Ladder of tiers (20261027-090500-1abc)".into()),
-        cause: "the ladder has no rung in this layer".into(),
+        class: Some(class.into()),
+        cause: cause_text.into(),
         introspections: vec![first.id.to_string(), second.id.to_string()],
         jobs: vec![
             cause_job('a').as_str().to_string(),
@@ -770,6 +793,255 @@ fn generated_root_cause_request(sentence: Option<&str>) -> String {
             1,
         ),
     }
+}
+
+/// A behavior criterion that states the whole method for a subjective outcome.
+const SUBJECTIVE_METHOD: &str = "Run `athena audience`: an independent model reader that had no part in building the page reads it \
+     as a newcomer and rates it from 1 to 5; a rating below 4 blocks completion.";
+
+/// Subjective-quality outcomes (`check_subjective_method`): requests that ask for a page, guide or report that
+/// is clear to a newcomer or easy to follow are refused until a behavior criterion states how that is judged.
+/// The shapes come from jobs 20261014-163844-c2kt (an explainer page that must be clear to a newcomer) and
+/// 20261015-064153-wekz (a loop that improves the explainer page); words that only look like the outcome are
+/// accepted.
+fn subjective_cases() -> Vec<Case> {
+    const C2KT: &str = "job 20261014-163844-c2kt (an explainer page clear to a newcomer); rebuilt from the job brief, not a recorded request";
+    const WEKZ: &str = "job 20261015-064153-wekz (a loop that improves the explainer page); rebuilt from the job brief, not a recorded request";
+    const OWN: &str = "this job, 20261027-054239-v4kj; text built by the real generator";
+    const BRIEF: &str =
+        "the request in the brief of job 20261027-054239-v4kj; rebuilt, not a recorded request";
+    let refuse = Expected::Refuse("check_subjective_method");
+    let explainer =
+        "Write an explainer page on how firstmate handles work. It must be clear to a newcomer.";
+    let loop_page = "Keep improving the explainer page, round after round, until a newcomer finds it easy to follow.";
+    let mut out: Vec<Case> = Vec::new();
+
+    // The outcome with no method: the shape both jobs started from.
+    out.push(case(
+        "subjective-explainer-page-no-method",
+        C2KT,
+        &["subjective-outcome-no-method"],
+        explainer,
+        0,
+        refuse.clone(),
+    ));
+    out.push(case(
+        "subjective-loop-page-no-method",
+        WEKZ,
+        &["subjective-outcome-no-method"],
+        loop_page,
+        0,
+        refuse.clone(),
+    ));
+    out.push(case(
+        "subjective-clear-to-first-time-reader-no-method",
+        BRIEF,
+        &["subjective-outcome-no-method"],
+        "Rewrite the guide so it is clear to a first-time reader.",
+        0,
+        refuse.clone(),
+    ));
+    // A root-cause request: its generated lines quote the outcome and are not read, its own sentence is.
+    let own_sentence = root_cause_request_from(
+        "Subjective quality with no stated check",
+        "a page is clear to a newcomer only by luck",
+        [
+            "Rate the explainer page as a newcomer.",
+            "State how the page is checked.",
+        ],
+        Some("The explainer page must be clear to a newcomer."),
+    );
+    let mut c = case(
+        "subjective-root-cause-own-sentence-no-method",
+        OWN,
+        &[
+            "dash-bullet",
+            "cites-job-without-relying",
+            "subjective-outcome-no-method",
+        ],
+        &own_sentence,
+        3,
+        refuse.clone(),
+    );
+    c.referenced = cause_jobs_referenced();
+    out.push(c);
+
+    // The method stated as one behavior criterion: the same requests are accepted.
+    out.push(with_behavior(
+        case(
+            "subjective-explainer-page-method-stated",
+            C2KT,
+            &["subjective-method-stated"],
+            explainer,
+            0,
+            Expected::Accept,
+        ),
+        &[SUBJECTIVE_METHOD],
+    ));
+    out.push(with_behavior(
+        case(
+            "subjective-loop-page-method-stated",
+            WEKZ,
+            &["subjective-method-stated"],
+            loop_page,
+            0,
+            Expected::Accept,
+        ),
+        &[SUBJECTIVE_METHOD],
+    ));
+    // The user's own `outcome-check` default, taken from defaults.toml and not retyped, is a method.
+    let defaults = include_str!("../../../defaults.toml");
+    let sentence = defaults
+        .split("For audience-facing quality")
+        .nth(1)
+        .and_then(|rest| rest.split("blocks completion.").next())
+        .expect("the outcome-check default is in defaults.toml");
+    let from_defaults =
+        format!("Run `athena audience`: For audience-facing quality{sentence}blocks completion.");
+    out.push(with_behavior(
+        case(
+            "subjective-defaults-sentence-method-accepted",
+            "defaults.toml, default outcome-check, word for word",
+            &["subjective-method-stated"],
+            explainer,
+            0,
+            Expected::Accept,
+        ),
+        &[&from_defaults],
+    ));
+    out.push(with_behavior(
+        case(
+            "subjective-new-user-persona-method-stated",
+            BRIEF,
+            &["subjective-method-stated"],
+            explainer,
+            0,
+            Expected::Accept,
+        ),
+        &["Run `athena audience`: a separate reviewer that did not build the page reads it as a new user and \
+           gives a score out of 5; a score of 4 or above passes."],
+    ));
+
+    // Words that look like the outcome and are not.
+    for (id, request) in [
+        (
+            "subjective-clear-the-cache",
+            "Clear the cache when the page reloads.",
+        ),
+        (
+            "subjective-machine-readable-output",
+            "Make the page output machine-readable.",
+        ),
+        (
+            "subjective-call-site-readable",
+            "Make each call site readable.",
+        ),
+        (
+            "subjective-plain-refactor",
+            "Refactor the page renderer into two functions.",
+        ),
+    ] {
+        out.push(case(
+            id,
+            BRIEF,
+            &["subjective-word-without-artifact"],
+            request,
+            0,
+            Expected::Accept,
+        ));
+    }
+    // A technical output judged by a command, with the word clear or clarity and no person who judges it.
+    for (id, request) in [
+        (
+            "subjective-clarity-of-verifier-report",
+            "Improve the clarity of the verifier report.",
+        ),
+        (
+            "subjective-clear-to-maintainer-report",
+            "Make the error in the report clear to the maintainer.",
+        ),
+    ] {
+        out.push(case(
+            id,
+            BRIEF,
+            &["subjective-technical-clarity"],
+            request,
+            0,
+            Expected::Accept,
+        ));
+    }
+    // The words only quoted, or cited by Athena's own generator.
+    out.push(case(
+        "subjective-quoted-newcomer",
+        BRIEF,
+        &["subjective-quoted-or-generated"],
+        "Rename the \"newcomer\" page template.",
+        0,
+        Expected::Accept,
+    ));
+    let cited = root_cause_request_from(
+        "Subjective quality with no stated check",
+        "a page is clear to a newcomer only by luck",
+        [
+            "Rate the explainer page as a newcomer.",
+            "State how the page is checked.",
+        ],
+        None,
+    );
+    let mut c = case(
+        "subjective-cited-in-root-cause-request",
+        OWN,
+        &[
+            "dash-bullet",
+            "cites-job-without-relying",
+            "subjective-quoted-or-generated",
+        ],
+        &cited,
+        3,
+        Expected::Accept,
+    );
+    c.referenced = cause_jobs_referenced();
+    out.push(c);
+
+    // A method with a part missing, or stated only in a content criterion, is refused.
+    out.push(with_behavior(
+        case(
+            "subjective-method-without-threshold",
+            C2KT,
+            &["subjective-method-partial-or-content-only"],
+            explainer,
+            0,
+            refuse.clone(),
+        ),
+        &["Run `athena audience`: an independent model reader that had no part in building the page reads it \
+           as a newcomer and rates it from 1 to 5."],
+    ));
+    out.push(with_behavior(
+        case(
+            "subjective-method-without-independent-reader",
+            WEKZ,
+            &["subjective-method-partial-or-content-only"],
+            loop_page,
+            0,
+            refuse.clone(),
+        ),
+        &["Run `athena audience`: the page is read as a newcomer and rated from 1 to 5; a rating below 4 blocks \
+           completion."],
+    ));
+    let mut c = case(
+        "subjective-method-in-content-criterion-only",
+        C2KT,
+        &["subjective-method-partial-or-content-only"],
+        explainer,
+        0,
+        refuse,
+    );
+    c.reading.acceptance_criteria.push(Criterion {
+        text: SUBJECTIVE_METHOD.into(),
+        kind: CriterionKind::Content,
+    });
+    out.push(c);
+    out
 }
 
 /// An approved-work request built by `work_decisions::approve_request` for a work item titled `title`, whose
@@ -2353,6 +2625,78 @@ fn history_fixture_refusal_is_declared_intended() {
     assert!(changelog.contains("check_history_fixture"));
     assert!(changelog.contains("higher refusal rate is intended"));
     assert!(changelog.contains("expected 4% of newly refused readings"));
+}
+
+#[test]
+fn subjective_method_refusal_is_declared_intended() {
+    // The declared share is read from the criterion text by the replay.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: "The change refuses more readings: expected 5% of newly refused readings".into(),
+            kind: CriterionKind::Behavior,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(5));
+    // The step line is in refusing_check, and the doc comment names the cause, both jobs and the estimate.
+    assert!(
+        acceptance_check_names(reading_source()).contains(&"check_subjective_method".to_string())
+    );
+    let doc = reading_source()
+        .split("pub fn check_subjective_method(")
+        .next()
+        .unwrap()
+        .lines()
+        .rev()
+        .take_while(|l| l.starts_with("///"))
+        .map(|l| l.trim_start_matches('/').trim())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "This check refuses more readings; the higher refusal rate is intended.",
+        "no required verification method for subjective quality",
+        "20261014-163844-c2kt",
+        "20261015-064153-wekz",
+        "estimate",
+    ] {
+        assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+    }
+    // The changelog item that names the check states the cause, both jobs and the declared share. The file
+    // wraps lines, so each item is joined and its white space made single spaces.
+    let changelog = include_str!("../../../CHANGELOG.md");
+    let unreleased = changelog
+        .split("## [Unreleased]")
+        .nth(1)
+        .unwrap()
+        .split("\n## [")
+        .next()
+        .unwrap();
+    let mut items: Vec<String> = Vec::new();
+    for line in unreleased.lines() {
+        if line.starts_with("- ") {
+            items.push(line.to_string());
+        } else if let Some(last) = items.last_mut() {
+            last.push(' ');
+            last.push_str(line);
+        }
+    }
+    let item = items
+        .iter()
+        .map(|i| i.split_whitespace().collect::<Vec<_>>().join(" "))
+        .find(|i| i.contains("check_subjective_method"))
+        .expect("a changelog item names the check");
+    for needle in [
+        "no required verification method for subjective quality",
+        "20261014-163844-c2kt",
+        "20261015-064153-wekz",
+        "higher refusal rate is intended",
+        "expected 5% of newly refused readings",
+    ] {
+        assert!(item.contains(needle), "the changelog item lacks {needle:?}");
+    }
 }
 
 #[test]

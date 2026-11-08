@@ -994,3 +994,275 @@ pub fn check_design_existing_code(reading: &Reading) -> Result<()> {
     }
     Ok(())
 }
+
+/// Phrases that state a subjective-quality outcome by themselves: how a person finds the work, not a fact a
+/// command can print. Matched with [`has_phrase`] on lowercase text, so a hyphen is a word boundary.
+pub(super) const SUBJECTIVE_SELF_PHRASES: [&str; 6] = [
+    "newcomer",
+    "newcomers",
+    "easy to follow",
+    "easy to understand",
+    "easy to read",
+    "understandable",
+];
+
+/// Phrases about clarity. They state a subjective outcome only beside a person who judges it
+/// ([`SUBJECTIVE_PEOPLE`]); "improve the clarity of the verifier report" names a technical output and none.
+pub(super) const SUBJECTIVE_CLARITY_PHRASES: [&str; 4] =
+    ["how clear", "clear to", "clear for", "clarity"];
+
+/// People whose judgement makes a clarity phrase a subjective outcome. To cover another audience, add its word
+/// here.
+pub(super) const SUBJECTIVE_PEOPLE: [&str; 13] = [
+    "newcomer",
+    "newcomers",
+    "beginner",
+    "beginners",
+    "novice",
+    "novices",
+    "first-time",
+    "reader",
+    "readers",
+    "visitor",
+    "visitors",
+    "audience",
+    "outsider",
+];
+
+/// The first line of the request's plain prose ([`plain_request_prose`]) that states a subjective-quality
+/// outcome about something an audience sees: it holds one of the [`VISIBLE_NOUNS`] (`site` right after `call`
+/// is a call site) and either a [`SUBJECTIVE_SELF_PHRASES`] phrase or a [`SUBJECTIVE_CLARITY_PHRASES`] phrase
+/// together with a word of [`SUBJECTIVE_PEOPLE`].
+pub(super) fn subjective_line(request: &str) -> Option<String> {
+    plain_request_prose(request)
+        .lines()
+        .find(|line| {
+            let lower = straight_lowercase(line);
+            let words = plain_words(&lower);
+            let visible = words.iter().enumerate().any(|(i, word)| {
+                VISIBLE_NOUNS.contains(&word.as_str())
+                    && !(word == "site" && i > 0 && words[i - 1] == "call")
+            });
+            visible
+                && (SUBJECTIVE_SELF_PHRASES
+                    .iter()
+                    .any(|p| has_phrase(&lower, p))
+                    || (SUBJECTIVE_CLARITY_PHRASES
+                        .iter()
+                        .any(|p| has_phrase(&lower, p))
+                        && SUBJECTIVE_PEOPLE.iter().any(|p| has_phrase(&lower, p))))
+        })
+        .map(|line| line.trim().to_string())
+}
+
+/// What the four parts of a stated method are called in the refusal, in the order [`method_parts`] gives them.
+pub(super) const METHOD_PART_NAMES: [&str; 4] = [
+    "an independent reader (a fresh model or reviewer that had no part in building the work)",
+    "the persona it reads as (for example a newcomer)",
+    "a rating scale (1 to 5)",
+    "a pass threshold (a minimum rating, such as at least 4)",
+];
+
+/// Words that say the reader took no part in the work.
+pub(super) const INDEPENDENCE_PHRASES: [&str; 8] = [
+    "independent",
+    "independently",
+    "fresh",
+    "separate",
+    "no part in",
+    "took no part",
+    "did not build",
+    "didn't build",
+];
+
+/// Words that name the one who rates.
+pub(super) const RATER_WORDS: [&str; 4] = ["reader", "model", "reviewer", "judge"];
+
+/// Words that name the persona the rater reads as, beyond `new` with a person word and `reads as a`.
+pub(super) const PERSONA_PHRASES: [&str; 8] = [
+    "persona",
+    "newcomer",
+    "newcomers",
+    "novice",
+    "beginner",
+    "first-time",
+    "outsider",
+    "layperson",
+];
+
+/// A number from 1 to 5 as one word: `4`, or `4/5`.
+fn rating_digit(word: &str) -> bool {
+    let number = word.strip_suffix("/5").unwrap_or(word);
+    matches!(number, "1" | "2" | "3" | "4" | "5")
+}
+
+/// The words of `text` for the method parts: lowercase, apostrophes straight, edge punctuation removed.
+fn method_words(text: &str) -> Vec<String> {
+    straight_lowercase(text)
+        .split(' ')
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Whether `words` starts with the phrase `at` words in.
+fn words_start_with(words: &[String], at: usize, phrase: &[&str]) -> bool {
+    words
+        .get(at..at + phrase.len())
+        .is_some_and(|slice| slice.iter().zip(phrase).all(|(w, p)| w == p))
+}
+
+/// Whether a criterion text holds each of the four parts of a method for judging a subjective outcome, in the
+/// order of [`METHOD_PART_NAMES`]: (1) an independent rater: an independence phrase and a rater word; (2) a
+/// persona: a persona word, `new` with a person word (user, reader, visitor, contributor, hire) or `reads as a`;
+/// (3) a 1 to 5 scale: `1 to 5`, `1-5`, `1 through 5`, `out of 5`, `4 of 5`, `4/5` or `5-point`; (4) a pass
+/// threshold: `minimum`, `at least`, `below`, `under`, `threshold` or `no less than` with a number from 1 to 5
+/// within three words after it, or a number from 1 to 5 with `or above`, `or higher`, `or more` or `and above`
+/// within two words after it.
+pub(super) fn method_parts(text: &str) -> [bool; 4] {
+    let lower = straight_lowercase(text);
+    let words = method_words(text);
+    let independent = INDEPENDENCE_PHRASES.iter().any(|p| has_phrase(&lower, p))
+        && RATER_WORDS.iter().any(|p| has_phrase(&lower, p));
+    let persona = PERSONA_PHRASES.iter().any(|p| has_phrase(&lower, p))
+        || [
+            "reads it as a",
+            "reads it as an",
+            "reads as a",
+            "reads as an",
+        ]
+        .iter()
+        .any(|p| has_phrase(&lower, p))
+        || words.windows(2).any(|pair| {
+            pair[0] == "new"
+                && [
+                    "user",
+                    "users",
+                    "reader",
+                    "readers",
+                    "visitor",
+                    "visitors",
+                    "contributor",
+                    "contributors",
+                    "hire",
+                    "hires",
+                ]
+                .contains(&pair[1].as_str())
+        });
+    let scale = (0..words.len()).any(|i| {
+        let word = words[i].as_str();
+        matches!(word, "1-5" | "1\u{2013}5" | "5-point" | "five-point")
+            || (word.len() == 3 && word.ends_with("/5") && rating_digit(word))
+            || (word == "1"
+                && (words_start_with(&words, i + 1, &["to", "5"])
+                    || words_start_with(&words, i + 1, &["through", "5"])))
+            || words_start_with(&words, i, &["out", "of", "5"])
+            || words_start_with(&words, i, &["out", "of", "five"])
+            || (rating_digit(word)
+                && (words_start_with(&words, i + 1, &["of", "5"])
+                    || words_start_with(&words, i + 1, &["of", "five"])))
+    });
+    let threshold = (0..words.len()).any(|i| {
+        let after = [
+            (&["minimum"][..]),
+            &["below"],
+            &["under"],
+            &["threshold"],
+            &["at", "least"],
+            &["no", "less", "than"],
+        ]
+        .iter()
+        .find(|phrase| words_start_with(&words, i, phrase))
+        .map(|phrase| i + phrase.len());
+        let beside = after.is_some_and(|end| {
+            words[end.min(words.len())..words.len().min(end + 3)]
+                .iter()
+                .any(|w| rating_digit(w))
+        });
+        let or_above = rating_digit(&words[i])
+            && (1..=2).any(|k| {
+                words_start_with(&words, i + k, &["or", "above"])
+                    || words_start_with(&words, i + k, &["or", "higher"])
+                    || words_start_with(&words, i + k, &["or", "more"])
+                    || words_start_with(&words, i + k, &["and", "above"])
+            });
+        beside || or_above
+    });
+    [independent, persona, scale, threshold]
+}
+
+/// Refuses a reading whose request states a subjective-quality outcome (a page, guide or report that is clear
+/// to a newcomer, easy to follow, understandable) and which has no behavior criterion that says how that
+/// quality is judged.
+///
+/// Root cause this check removes: there was no required verification method for subjective quality. A request
+/// states the outcome ("the page is clear to a newcomer") and no step at the reading gate asked how anyone
+/// would check it, so a reading was accepted with criteria that cannot show it. The build then ended in a
+/// verifier failure or in a question to the user that the system should have settled, because the system had no
+/// default for how to verify such a quality. Jobs 20261014-163844-c2kt and 20261015-064153-wekz each failed that
+/// way (the same cause three times in two jobs, recorded by introspections 20261014-163945-t9c3,
+/// 20261014-165951-resy and 20261015-064256-fmsv). The fix is not a newcomer gate in the pages ship path or a
+/// change to `athena land`, which are the instances: it sits where readings are accepted, the one seam every
+/// reading passes, so the method is stated before the build starts and the property is enforced by mechanism
+/// and not by prose. The default it enforces is the user's `outcome-check` default: a fresh model reader that
+/// took no part in the work rates the result as a newcomer, and a rating below 4 of 5 blocks completion.
+///
+/// It applies when the reading has a capability, no question and a deliverable. It reads the request only, as
+/// [`plain_request_prose`] gives it, so Athena's generated root-cause lines, quoted spans, example lists, paths
+/// and fenced code never trigger it, while a root-cause request's own sentence does. A line triggers when it
+/// holds one of the [`VISIBLE_NOUNS`] and either a self-subjective phrase ([`SUBJECTIVE_SELF_PHRASES`]: newcomer,
+/// easy to follow, easy to understand, easy to read, understandable) or a clarity phrase
+/// ([`SUBJECTIVE_CLARITY_PHRASES`]: how clear, clear to, clear for, clarity) together with a word naming a
+/// person who judges ([`SUBJECTIVE_PEOPLE`]). The reading is accepted when one criterion of kind behavior (a
+/// content criterion checks a file, not a run) holds all four parts of [`method_parts`]: an independent model
+/// reader, a persona, a 1 to 5 scale and a pass threshold.
+///
+/// Limits: the match is lexical. Other wording ("polished", "intuitive"), a visible noun outside the list and a
+/// person word outside [`SUBJECTIVE_PEOPLE`] are missed; bare `readable` is not a phrase, because
+/// `machine-readable` would match. 'Make the verifier report easy to read' triggers, intended: it states an
+/// audience judgement on a visible output. The extension points are the word lists in this file
+/// ([`SUBJECTIVE_SELF_PHRASES`], [`SUBJECTIVE_CLARITY_PHRASES`], [`SUBJECTIVE_PEOPLE`], [`PERSONA_PHRASES`]).
+/// The threshold may be any number from 1 to 5; the check does not fix the user's 4. Whether the named rater
+/// exists, and the rating itself, are not computed here; the `outcome-check` default stays prose for the rating.
+///
+/// This check refuses more readings; the higher refusal rate is intended. A replay of accepted readings
+/// (`replay`) holds a job that newly refuses more than 10% unless the job's criteria declare a share. Declared
+/// here: expected 5% of newly refused readings. That is an estimate, not measured: the records are not in the
+/// producer's working copy, and the trigger needs both a visible noun and subjective wording on one line, so
+/// ordinary code requests are not expected to match. The replay at verification measures the real share.
+///
+/// The error quotes the line that triggered it, names the parts the closest behavior criterion lacks, and tells
+/// the reader to state the method before the build.
+pub fn check_subjective_method(reading: &Reading, request: &str) -> Result<()> {
+    if reading.capability.is_none() || reading.question.is_some() || reading.deliverables.is_empty()
+    {
+        return Ok(());
+    }
+    let Some(line) = subjective_line(request) else {
+        return Ok(());
+    };
+    let closest = reading
+        .acceptance_criteria
+        .iter()
+        .filter(|c| c.kind == CriterionKind::Behavior)
+        .map(|c| method_parts(&c.text))
+        .max_by_key(|parts| parts.iter().filter(|held| **held).count());
+    if closest.is_some_and(|parts| parts.iter().all(|held| *held)) {
+        return Ok(());
+    }
+    let held = closest.unwrap_or([false; 4]);
+    let missing: Vec<&str> = METHOD_PART_NAMES
+        .iter()
+        .zip(held)
+        .filter(|(_, held)| !held)
+        .map(|(name, _)| *name)
+        .collect();
+    bail!(
+        "the reading was refused because the request states a subjective-quality outcome ({line:?}) and no \
+         criterion of kind behavior says how it is judged; missing: {}; state the method before the build, as \
+         one behavior criterion that names an independent model reader that had no part in building the work, \
+         the persona it reads as, a rating from 1 to 5, and the minimum rating that passes, for example \
+         `athena audience` rates a live page as a newcomer and a rating below 4 of 5 blocks completion",
+        missing.join("; ")
+    )
+}

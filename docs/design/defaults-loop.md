@@ -184,11 +184,12 @@ names are the proposed starting registry; the prevention is what this design say
 | C5. A plan to edit the owner-only `BRIEF.md` | 16zf | plan touches a file the user owns | the plan was not checked against the list of owner-only files | **code check**: refuse a plan that names an owner-only path as a deliverable; I did not check whether a guard exists today |
 | C6. Plans bundling design and build | not named | job bundles design and build (R3) | `small` and `designed` exist **(read)** but a plan is not tested against them | **default** amended (`small`/`designed`) plus a **code check** that a plan lists only one of design or build |
 | C7. Jev's interface assumed instead of checked | this design | external interface assumed | no step requires the interface to be read or probed before it is designed against | **default** ("check an interface you did not write before designing against it") and **review**; here review 1 caught it |
+| C8. A page that must be clear to a newcomer, with no stated way to check it | 20261014-163844-c2kt, 20261015-064153-wekz | acceptance-method-unspecified-needs-user-answer | no step at the reading gate requires a verification method for subjective quality, so the outcome was accepted without a criterion that can show it | **code check**: `check_subjective_method` refuses the reading until one behavior criterion names an independent model reader, a persona, a 1 to 5 rating and a pass threshold; the `outcome-check` default supplies the method **(read)** |
 
-Reading the table: C1, C2, C4, C5 are prevented by code, not defaults; only C6 and C7 point to defaults. That is
+Reading the table: C1, C2, C4, C5, C8 are prevented by code, not defaults; only C6 and C7 point to defaults. That is
 the answer to the question the loop asks, and it is why `prevention_kind` is a field: the defaults loop (§4)
 consumes the `default` ones, and the others are listed to the user as proposed code or design changes (§9). The
-root-cause default covers all seven: a fix at the place the fault arises, not the instance.
+root-cause default covers all eight: a fix at the place the fault arises, not the instance.
 
 ### 3.7 Worked examples for the `behavior-evidence` default
 
