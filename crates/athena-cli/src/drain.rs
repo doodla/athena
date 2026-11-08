@@ -260,6 +260,7 @@
 use athena_core::audience::{LivePage, Page, Target};
 use athena_core::disk::StopCause;
 use athena_core::gh::{Checks, GhCli, PrReport};
+use athena_core::land::Dispatched;
 use athena_core::plan::{JobEnd, Plan, PlanEntry, Refusal, shared_path};
 use athena_core::pr::LinkState;
 use athena_core::state::{Stage, StageSink};
@@ -4056,6 +4057,37 @@ impl<'a> RealSteps<'a> {
         Records::load(&self.athena.git, &self.athena.head()?)
     }
 
+    /// Why the working copy cannot land `job`, or `None` when it is on the branch the job was dispatched
+    /// from. Root cause of a landing that failed as a missing verification: nothing asked, before landing,
+    /// whether the working copy was on the dispatch branch, so a detached HEAD reached the landing step
+    /// and failed there with an unrelated message. A job whose dispatch branch is not recorded is refused
+    /// only on a detached HEAD.
+    fn off_branch(&self, job: &str) -> Option<String> {
+        let check = || -> anyhow::Result<Option<String>> {
+            // A name that is no job id has no records to check; the lander reports it.
+            let Ok(id) = JobId::parse(job) else {
+                return Ok(None);
+            };
+            let expected =
+                athena_core::land::dispatched_from(&self.athena.git, &self.athena.head()?, &id)?;
+            athena_core::land::refuse_detached(&self.athena.git, &expected)?;
+            if let (Dispatched::Branch(name), Some(current)) =
+                (&expected, self.athena.git.current_branch()?)
+                && current != *name
+            {
+                return Ok(Some(format!(
+                    "the working copy is on branch `{current}`; landing needs branch `{name}` (the job's \
+                     dispatch branch) checked out; nothing landed. Check it out, then run again"
+                )));
+            }
+            Ok(None)
+        };
+        match check() {
+            Ok(refusal) => refusal,
+            Err(error) => Some(format!("{error:#}")),
+        }
+    }
+
     fn job_cost(&self, job: &str) -> f64 {
         self.records()
             .ok()
@@ -4424,6 +4456,10 @@ impl Steps for RealSteps<'_> {
                 ui: self.ui,
             }
             .enter(&id, Stage::Landing);
+        }
+        if let Some(why) = self.off_branch(job) {
+            self.table_result(self.table().remove(job));
+            return Landing::NotLanded(why);
         }
         let landing = match self.lander.land(self.athena, job, self.ui) {
             // What the landing changed is what the job's candidate changed; a landing whose candidate cannot be
