@@ -2547,6 +2547,29 @@ mod produce_and_verify_order_tests {
     }
 
     #[test]
+    fn mirrors_the_producer_is_not_asked_to_build_and_the_loop_still_sends_the_drift_back() {
+        let repo = athena_source_repo();
+        let (_, (producer, _), prompts, said) = mirror_job(
+            &repo,
+            vec![edit("crates/demo/tests/b.rs", "// b\n")],
+            Vec::new(),
+        );
+        // The producer's first prompt carries the facts, so the section really reached it ...
+        for text in ["## Files kept by hand", "xtask/shard-timings.txt"] {
+            assert!(prompts[0].contains(text), "omits {text}: {}", prompts[0]);
+        }
+        // ... and asks for no build of the mirrors target: that cold test build was the added producer time.
+        for text in ["--test mirrors", "cargo test -p athena-cli"] {
+            assert!(!prompts[0].contains(text), "asks for {text}");
+        }
+        // No coverage is lost: the loop finds the drift itself and sends it back once.
+        assert_eq!(producer, 2, "{said:#?}");
+        for text in [MIRROR_SENTENCE, "add the line `demo --test b 5.00`"] {
+            assert!(prompts[1].contains(text), "omits {text}: {}", prompts[1]);
+        }
+    }
+
+    #[test]
     fn mirrors_a_producer_that_fixes_the_timings_on_the_send_back_reaches_the_verifier() {
         let repo = athena_source_repo();
         let (done, (producer, verifier), _, said) = mirror_job(

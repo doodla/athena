@@ -851,17 +851,20 @@ finds, then run it again until it passes. It reads only tracked files, so it doe
 reread each new file against the words above.";
 
 /// The producer brief's note on files kept by hand. A helper only: the mechanism is the registry
-/// (`athena_core::mirrors`) that Athena runs on the producer's work before verification and the `athena-cli`
-/// test target `mirrors`. The note lets the producer find a drift in its own loop and spend no send-back on it.
-pub const MIRROR_CHECK_INSTRUCTION: &str = "If `crates/athena-cli/tests/mirrors.rs` exists in your working directory, run \
-`cargo test -p athena-cli --test mirrors` before you finish. A file kept by hand as a mirror of a source (the test \
-timings, the decision log, the CI cache key against the build paths, the ontology) is compared with that source by \
-content, and a failure names the file and the fix. A new test file needs its line in xtask/shard-timings.txt, and \
-docs/decisions.md only gains text after its last line.";
+/// (`athena_core::mirrors`) that Athena runs in-process on the producer's work after every report, and the
+/// `athena-cli` test target `mirrors` that the configured test check runs at verification. The note gives the
+/// producer the two facts that avoid a drift and names no command. It once told every producer to run the
+/// `mirrors` target itself; that compiled most of the workspace in the producer's own cold target directory on
+/// every job, for a drift the loop already finds without a build (docs/design/producer-slowdown.md).
+pub const MIRROR_CHECK_NOTE: &str = "A file kept by hand as a mirror of a source (the test timings, the decision log, \
+the CI cache key against the build paths, the ontology) is compared with that source by content. A new test file \
+needs its line in xtask/shard-timings.txt, and docs/decisions.md only gains text after its last line. Athena \
+compares these files with their sources after each report and sends a drift back, so you need not build anything \
+to find one.";
 
 /// The "Files kept by hand" section of the producer brief, placed after the banned words and before the checks.
 fn mirror_check_section() -> String {
-    format!("## Files kept by hand\n\n{MIRROR_CHECK_INSTRUCTION}\n")
+    format!("## Files kept by hand\n\n{MIRROR_CHECK_NOTE}\n")
 }
 
 /// One boundary hit in a text: the 1-based line and the banned word or fragment found there. The word is
@@ -3240,10 +3243,10 @@ mod tests {
     }
 
     #[test]
-    fn producer_briefs_tell_the_producer_to_run_the_mirror_check() {
+    fn producer_briefs_do_not_tell_the_producer_to_build_for_the_mirror_check() {
         let brief = producer_brief(&ProducerInputs {
             job: "20261010-153012-k7q2".into(),
-            request: "add a test".into(),
+            request: "add a changelog".into(),
             reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
             checks: vec![],
             commands: vec![],
@@ -3252,18 +3255,19 @@ mod tests {
             retry_findings: None,
             failure_classes: Vec::new(),
         });
-        assert!(brief.contains("run `cargo test -p athena-cli --test mirrors` before you finish"));
-        assert!(brief.contains("needs its line in xtask/shard-timings.txt"));
+        let heading = "## Files kept by hand";
+        let start = brief.find(heading).expect("the section is in the brief");
+        let rest = &brief[start + heading.len()..];
+        let section = &rest[..rest.find("\n## ").unwrap_or(rest.len())];
+        // The facts that avoid a drift stay; no command that builds the workspace is asked for.
+        assert!(section.contains("needs its line in xtask/shard-timings.txt"));
+        assert!(section.contains("docs/decisions.md only gains text after its last line"));
+        assert!(!section.contains("cargo"), "{section}");
+        assert!(!section.contains("--test mirrors"), "{section}");
+        assert!(!brief.contains("cargo test -p athena-cli"));
         // After the banned words and before the checks.
-        let at = brief
-            .find("cargo test -p athena-cli --test mirrors")
-            .unwrap();
-        assert!(at > brief.find("## Words you must not write").unwrap());
-        assert!(at < brief.find("## Checks Athena will run").unwrap());
-        // The test target the note names is there.
-        let target =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../athena-cli/tests/mirrors.rs");
-        assert!(target.is_file(), "{}", target.display());
+        assert!(start > brief.find("## Words you must not write").unwrap());
+        assert!(start < brief.find("## Checks Athena will run").unwrap());
     }
 
     #[test]

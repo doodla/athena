@@ -1,0 +1,413 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-224504-k8mh",
+  "round": 3,
+  "at": "2026-11-07T22:59:17.192806464Z",
+  "invocation_seq": 6,
+  "approach": "Add a `bug-evidence` default to defaults.toml. Add `ensure_bug_evidence(reading, request_text)` in reading.rs beside `ensure_changelog`, called from `build_reading` before `validate()`. For a `change` reading it adds one content criterion (data-backed root-cause evidence) and one `bug-evidence` defaults_applied entry, once. Two-tier trigger. Tier 1: the reader listed `bug-evidence` in defaults_applied, unless that entry's `how` says it does not apply. Tier 2, a narrow fallback: a bug word within two words of a fix-intent word, in the request text or the reading title (not the summary). The step's criterion is skipped only when its own lead phrase is already present, so a standing-default criterion such as 'root-cause: the change description names the root cause' never suppresses it. The reader prompt set is 3 tokens under budget, so `BudgetSet::Reader` in crates/athena-context/src/lib.rs must rise. That is a forced deviation, not an athena.toml key. The raise is recorded as a new appended decision D166 that amends D25 without editing it (the log is append-only), and not by amending D25. The reading's athena.toml deliverable stays unchanged.",
+  "decisions": [
+    {
+      "choice": "Add the criterion and defaults entry as a step in `build_reading` next to `ensure_changelog`, not as a refusal in `refusing_check`.",
+      "reason": "Root cause: bug jobs were rejected at the final verdict because no criterion demanded data-backed root-cause evidence. A step guarantees the criterion with no model round trip, refuses nothing (no replay refusal rate, no new `step!` line, no new corpus case), and follows `ensure_changelog` (reading.rs:281-303): idempotent, capability-gated, run before `validate()`.",
+      "rejected": [
+        {
+          "option": "A `check_*` refusal in `refusing_check` for a bug reading that lacks the criterion",
+          "why": "It adds a refusal rule (replay share, a corpus case that must refuse) and sends the reader round again for a sentence Athena can write itself."
+        },
+        {
+          "option": "Rely on the reader prompt and the default alone",
+          "why": "Prose-only; the `mechanism` default asks for enforcement by mechanism."
+        }
+      ]
+    },
+    {
+      "choice": "Two-tier trigger, applied only when `capability == Some(\"change\")`. Tier 1: a defaults_applied entry with id `bug-evidence` whose lowercase `how` contains none of 'not applicable', 'does not apply', \"doesn't apply\", 'n/a', 'not a bug'. Tier 2: `names_bug_work(text)` is true for the request text or for the reading title. `names_bug_work` lowercases, replaces 'wrong output' with 'wrong-output', splits on whitespace and trims non-alphanumeric characters from each token's ends (inner hyphens stay). Bug tokens: bug, bugs, regression, regressions, slowdown, slowdowns, wrong-output. A `regression` token followed by test, tests or testing is skipped. Fix tokens: fix, fixes, fixed, fixing, repair, repairs, repaired, diagnose, investigate. It is true when a bug token and a fix token have at most two tokens between them, in either order. The tokens `bug-fix` and `bugfix` count alone, since they already state fix intent. A compound such as `bug-evidence` or `bug_id` is a different token and matches nothing. A negated tier-1 entry suppresses tier 1 only; tier 2 still decides.",
+      "reason": "Finding 7: a bare fix word anywhere still matched 'Fix the docs for the bug report form' and 'Fix a typo in the regression section'. The two-token window rejects both (four tokens lie between), while 'Fix the regression', 'Fix the long-standing regression in X' and 'Investigate the slowdown' pass. Finding 10: reader.md:17 asks for 'each default below that applies, with how', and `applies_to` is `*`, so a reader may list the default with a 'how' that says it does not apply; the negation list ignores that listing, and a test pins it. Tier 1 otherwise trusts the reader's semantic judgement, which is the only check that sees paraphrases. `class_of_work` is a closed list (athena.toml:128-129) with no bug class. `build_reading` has no request today (reading.rs:685-695), so one `&str` argument is added; its callers are reading.rs:642 and the test helper at reading.rs:5630. On a retry such as this job's request 'try again on 20261105-234147-88tw', the request text carries no bug word, so tier 2 relies on the reader's title alone (finding 8), and tier 1 relies on the reader naming the default. This job's own title has no fix verb, so only tier 1 covers it. The limits go in the doc comment and defaults-loop.md §3.9.",
+      "rejected": [
+        {
+          "option": "Bare `has_phrase` on title, summary and request text",
+          "why": "It treats `-` as a word break, so `bug` matches in `bug-evidence`, and it matches 'regression test' and 'slowdowns' in feature requests."
+        },
+        {
+          "option": "A fix-intent word anywhere in the text",
+          "why": "Finding 7: it fires on 'Fix the docs for the bug report form'."
+        },
+        {
+          "option": "Add a `bug` class to `[classes]` in athena.toml",
+          "why": "A new class is a job of its own, changes governance, and bug work is also code or tests."
+        },
+        {
+          "option": "No fallback, tier 1 only",
+          "why": "A reader that never lists the default would escape the mechanism, which is the failure that left earlier bug jobs without the criterion."
+        },
+        {
+          "option": "Trust every tier-1 listing without a negation check",
+          "why": "Finding 10: a feature reading could list the default as 'not a bug job' and still receive an unmeetable criterion."
+        }
+      ]
+    },
+    {
+      "choice": "Idempotency and duplicates: add the defaults entry only if no entry has id `bug-evidence`. Skip the criterion only if some criterion text already starts with the constant's lead phrase 'before any fix, the change states the root cause' (lowercased compare). Condition (b) of the earlier plan (skip when the reader wrote any root-cause criterion) is dropped.",
+      "reason": "Finding 6: the standing `root-cause` default (defaults.toml:77-78, applies_to `*`) makes readers write a criterion such as 'root-cause: the change description states why...'. It asks for no readable data and does not rule out estimate-labelled guesses, which is the gap that got bug jobs rejected. Suppressing the step's criterion on it would lock the gap in. The cost is one more demonstration for the planner (admission.rs:179-197 needs one per criterion), which is intended: the criterion is meant to be demonstrated. A test pins that a tier-1 reading whose only root-cause criterion is the standing-default form still gains the step's criterion.",
+      "rejected": [
+        {
+          "option": "Skip when the reader's criterion contains 'root cause' plus 'data' or 'estimate'",
+          "why": "A marker word match is as loose as the substring check; a duplicate costs one demonstration, a skipped criterion costs a rejected job."
+        },
+        {
+          "option": "Skip both when the defaults entry exists",
+          "why": "A reader that lists the default but writes no criterion would escape the mechanism."
+        }
+      ]
+    },
+    {
+      "choice": "The criterion is `kind: content` with text: 'Before any fix, the change states the root cause, shows it from data the job can read (records, a code path or a failing case) and shows why the wrong output or metric change follows from it; a guess labelled as an estimate does not meet this.' It contains no path, no 'only ... may change' wording and no producer-report wording.",
+      "reason": "A content criterion is judged from the diff. `producer_evidence_phrase` (reading.rs:4068), `check_boundary_and_repo_files` and `limits_changed_files` do not fire on it, and `check_environment_reach` reads behavior criteria only. A test runs `refusing_check` on the built reading to prove it. A newcomer can tell what evidence is required (outcome-check default).",
+      "rejected": [
+        {
+          "option": "A behavior criterion that names a command",
+          "why": "No single command shows root-cause evidence in general, and a behavior criterion triggers `check_code_survey` and `check_environment_reach`."
+        }
+      ]
+    },
+    {
+      "choice": "Pay for the new reader line by raising `BudgetSet::Reader` (crates/athena-context/src/lib.rs:175, now 2_000) to the smallest multiple of 50 at or above the measured set. Record it as a NEW appended decision (next id after D165, expected D166) that amends D25 and cites the reading's accepted assumption that the reader budget likely needs a raise and the `behavior-evidence` precedent (CHANGELOG.md:3035-3042). Do NOT edit D25's text. Update the `budget reader` line in docs/system-facts.md, replace the literal 'of 2000' at run_pin_tests.rs:1625 with `athena_context::BudgetSet::Reader.budget()`, and update the reader figures in docs/design/context-engineer.md.",
+      "reason": "Findings 1-5: these five files are forced, and each is named in the CHANGELOG entry. (1) `lib.rs` holds the only reader budget (the athena.toml grep shows only `reader_usd`, `reader_timeout_s`, model and effort keys). (2) `system_facts_budgets_match_computed` fails unless the facts line equals the computed size. (3) run_pin_tests.rs:1625 pins 'of 2000'. (4) The decision log needs a decision of its own. (5) context-engineer.md quotes the measured reader figure. The earlier plan's amendment of D25 was wrong: the log is append-only (run/send_back.rs:295 'docs/decisions.md is append-only'; mirrors.rs `Rule::DecisionEntries` judges only what the change adds and requires the next id, a well-formed heading and a Provenance bullet). Finding 9: context-engineer.md:229-230 says raising a budget needs a decision of its own; D166 is that decision. It must name `crates/athena-context/src/lib.rs` so the D156 reconciliation reading is clear, though docs/decision-links.toml `[[governs]]` lists only D08 (line 212), so no link is required.",
+      "rejected": [
+        {
+          "option": "Edit D25's reader clause",
+          "why": "The log is append-only; an edit fails the DecisionEntries rule and the append-only check."
+        },
+        {
+          "option": "Reword `buy-first`, `public` and `verified` to save tokens",
+          "why": "It rewords three governance defaults the reading never listed and loses meaning for the reader."
+        },
+        {
+          "option": "Trim crates/athena-context/prompts/reader.md",
+          "why": "It is a pinned prompt frame (tests at lib.rs:440-449 and briefs.rs:4616-4630 match its wording) and not a deliverable."
+        },
+        {
+          "option": "Edit athena.toml",
+          "why": "No reader token budget is configured there; the edit would be a governance change with no effect."
+        }
+      ]
+    },
+    {
+      "choice": "Keep `version = 1` in defaults.toml and set `applies_to = [\"*\"]` for `bug-evidence`. The first sentence names the work it covers.",
+      "reason": "`root-cause` and `behavior-evidence` were added at version 1; only the proposals path raises the version (proposals.rs:88-96). Bug, wrong-output and regression are not classes in the closed list, and `*` renders shortest, saving reader tokens.",
+      "rejected": [
+        {
+          "option": "Bump to version 2",
+          "why": "It changes the recorded `defaults_version` for no behavioral need."
+        },
+        {
+          "option": "List classes such as code and tests",
+          "why": "It costs more reader bytes and wrongly implies the default is class-bound."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "defaults.toml",
+      "action": "modify",
+      "purpose": "Governance file listed by the reading. Add `[[default]] id = \"bug-evidence\"` after `behavior-evidence`: applies_to [\"*\"], a short first sentence, the statement (root cause, data the job can read, why the symptom follows, before any fix, an estimate-labelled guess does not meet it), and a source citing the four job ids. Keep `version = 1`. No existing default is edited.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add BUG_EVIDENCE_ID, ROOT_CAUSE_EVIDENCE_CRITERION, the token lists, `names_bug_work` and `pub(crate) fn ensure_bug_evidence(reading, request_text)` beside `ensure_changelog`. Add `request_text: &str` to `build_reading`, call the step after `ensure_changelog` and before `validate()`, pass `&request.text` at line 642. Add the `build_for_request` helper and the `bug_evidence_*` tests; update the `build_sized` call.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/defaults.rs",
+      "action": "modify",
+      "purpose": "Add `bug_evidence_default_parses_and_renders_its_first_sentence` and an assertion that `root-cause` is unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Test only: `bug_evidence_statement_reaches_the_producer_brief`, using the existing `reading()`, `defaults()` and `producer_brief` seam.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "purpose": "Forced deviation (finding 1): the reading pointed at athena.toml, but the reader budget is `BudgetSet::Reader` at line 175. Raise it to the smallest multiple of 50 at or above the measured size. Nothing else changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Forced deviation (finding 2): at line 1625 replace the literal 'of 2000' with `athena_context::BudgetSet::Reader.budget()` so the test follows the budget.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Forced deviation (finding 3): update only the `budget reader` line to the measured size and new budget; `system_facts_budgets_match_computed` fails otherwise.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Forced deviation (finding 4): APPEND a new entry after D165 (next id, expected D166) that amends D25's reader budget and records the raise as a decision of its own (context-engineer.md §8). It cites the accepted reading assumption, the behavior-evidence precedent, the four source jobs and the measured size. D25 and every earlier entry stay unedited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/context-engineer.md",
+      "action": "modify",
+      "purpose": "Forced deviation (finding 5): update the reader figures at lines 54, 141, 202, 232 and 336 to the measured size, new budget and percentage, so the doc does not state a figure that is no longer true.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased item. Cause: bug jobs were rejected at the final verdict because no criterion demanded data-backed root-cause evidence. Describe the two-tier step, the negation rule and the fix-word window, the reader budget raise and the appended decision, and name the files outside the reading's list. Say that athena.toml and the four existing defaults are unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/defaults-loop.md",
+      "action": "modify",
+      "purpose": "Add §3.9 'The `bug-evidence` default' after §3.8: the cause, the four source jobs, the evidence required, both tiers and their limits (on a retry tier 2 relies on the title alone; a negated listing is ignored; the fix-word window), why the standing root-cause criterion does not suppress the step's criterion, and how the reader line was paid for (budget raise by decision, not rewording). §8.3 is not edited.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read defaults.toml (entries at lines 9-104) and add the `bug-evidence` entry after `behavior-evidence`: applies_to [\"*\"], a first sentence of about 70 characters ending '. ', then sentences on naming the root cause, showing it from data the job can read (records, a code path, a failing case), showing why the wrong output or metric change follows, before any fix, and that a guess labelled as an estimate does not meet it. Source: the four job ids with 'root-cause claims with no readable data were rejected at the final verdict'. Keep `version = 1`; touch no other entry.",
+    "In crates/athena-data/src/defaults.rs add `bug_evidence_default_parses_and_renders_its_first_sentence` (parse REPO_DEFAULTS; check id, applies_to, phrases, the four job ids, the rendered line, and that `root-cause` is byte-identical to the base). Run `cargo test -p athena-data`.",
+    "Run `cargo test -p athena-cli --test budgets` and read the measured reader size. Set `BudgetSet::Reader` in crates/athena-context/src/lib.rs:175 to the smallest multiple of 50 at or above it. Update the `budget reader` line in docs/system-facts.md. Do not edit reader.md, athena.toml or any existing default.",
+    "In crates/athena-core/src/run_pin_tests.rs:1624-1625 replace the literal 'of 2000' with `athena_context::BudgetSet::Reader.budget()` in the format string. Update the reader figures in docs/design/context-engineer.md at lines 54, 141, 202, 232 and 336 (recompute used/budget as a percentage).",
+    "Grep docs/decisions.md for `^## D` to find the highest id (D165 at line 4697 at planning time), then APPEND the next entry at the end of the file in the D165 shape (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance). It amends D25's reader budget without editing D25, names `crates/athena-context/src/lib.rs`, the measured size and new budget, the accepted reading assumption, the `behavior-evidence` precedent (CHANGELOG.md:3035-3042) and the four source jobs. Edit nothing above it.",
+    "In reading.rs add, directly after `ensure_changelog` (line 303): `BUG_EVIDENCE_ID`, `ROOT_CAUSE_EVIDENCE_CRITERION`, `BUG_TOKENS`, `FIX_TOKENS`, `NEGATIONS`, a private `names_bug_work(text) -> bool` (lowercase; 'wrong output' to 'wrong-output'; split on whitespace; trim non-alphanumeric ends; skip `regression` followed by test/tests/testing; `bug-fix`/`bugfix` count alone; otherwise true when a bug token and a fix token have at most two tokens between them), and `pub(crate) fn ensure_bug_evidence(reading: &mut Reading, request_text: &str)`. Logic: return unless capability is change; `named` = an entry with id bug-evidence whose lowercase `how` has none of the NEGATIONS; `triggered = named || names_bug_work(request_text) || names_bug_work(title)`; return if not triggered; push the criterion unless some criterion's lowercase text starts with the lead phrase; push the defaults entry only if no entry has the id. Doc comment: the root cause (no criterion demanded data-backed root-cause evidence), the gate, both tiers, the negation rule, the retry limit (tier 2 sees the title alone), idempotency, and that it refuses nothing.",
+    "Add `request_text: &str` to `build_reading` (before `redactor`; the function already has `#[allow(clippy::too_many_arguments)]`) and pass `&request.text` at the call in `read` (reading.rs:642-651). Call `ensure_bug_evidence(&mut reading, request_text)` immediately after `ensure_changelog(&mut reading)` (line 842) and before `reading.validate()`. Update the `build_sized` call (line 5630) to pass an empty request. Add the helper `build_for_request(reading_json, request_text, capabilities)` (a copy of `build_sized`) and the tests: `bug_evidence_reading_gains_criterion_and_default`, `bug_evidence_keywords_and_non_bug_readings` (tables from demonstration 3, including the docs, typo, bug-evidence, regression-test and slowdowns cases), `bug_evidence_reader_named_default_guarantees_criterion`, `bug_evidence_standing_root_cause_criterion_does_not_suppress_step`, `bug_evidence_negated_listing_is_ignored`, `bug_evidence_retry_request_uses_title`, `bug_evidence_step_is_idempotent`, `bug_evidence_added_text_trips_no_refusal_check`, `bug_evidence_step_is_called_beside_ensure_changelog`. Run `cargo test -p athena-core`.",
+    "Add `bug_evidence_criterion_and_default_state_the_same_evidence` and `bug_evidence_changelog_and_design_doc_name_the_cause` to reading.rs tests (the second reads CHANGELOG.md, docs/decisions.md and defaults-loop.md). In crates/athena-context/src/briefs.rs add `bug_evidence_statement_reaches_the_producer_brief`. Run `cargo test -p athena-context`.",
+    "Add the CHANGELOG.md Unreleased item (cause; the two-tier step; the budget raise and the appended decision; the files outside the reading's list; athena.toml and the four existing defaults unchanged) and docs/design/defaults-loop.md §3.9 after §3.8 (cause, four source jobs, evidence required, trigger and limits, why a standing root-cause criterion does not suppress the step's criterion, how the reader line was paid for). Both contain the string `bug-evidence`.",
+    "Grep the repository for '1997', '99.85' and 'of 2000' to confirm no reader figure is left stale outside already-stale 1,930 history. Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-cli --test budgets` and `cargo test -p athena-context`. Run `git diff --stat` and confirm no athena.toml, no records/ path, and that docs/decisions.md only gained lines at its end."
+  ],
+  "risks": [
+    {
+      "risk": "The fallback misses a bug request with no listed bug word (for example 'fix the crash') or fires on a feature request with both a bug word and a fix word within two tokens (for example 'Fix the bug report form').",
+      "mitigation": "Tier 1 covers paraphrases because the reader sees the default's first sentence. Tier 2 needs a bug token within two tokens of a fix token, ignores compounds such as bug-evidence, skips 'regression test(s)', and reads only the request and the title. The docs/typo cases are in the negative table; the limits are in the doc comment and §3.9."
+    },
+    {
+      "risk": "A retry request such as 'try again on <id>' has no bug words, so tier 2 misses retries of bug jobs (finding 8; the earlier plan stated this backwards).",
+      "mitigation": "State in the doc comment and §3.9 that on a retry tier 2 relies on the reading title alone and tier 1 on the reader naming the default. A test pins the title-only positive and the neutral-title negative."
+    },
+    {
+      "risk": "A reader lists `bug-evidence` with a 'how' that says it does not apply, or with an unlisted negation wording, and the criterion is added to a feature reading.",
+      "mitigation": "Tier 1 ignores an entry whose `how` contains one of the listed negations, pinned by a test. Any other wording is trusted; that limit is documented in the doc comment and §3.9."
+    },
+    {
+      "risk": "The added criterion text trips an existing reading check and refuses the whole reading.",
+      "mitigation": "The criterion is content kind with no path, no 'only ... may change' phrase and no producer-report wording; `bug_evidence_added_text_trips_no_refusal_check` runs `refusing_check` on the built reading."
+    },
+    {
+      "risk": "The decision-log edit breaks the append-only or entry-structure rules (a D25 edit, a wrong id, a missing Provenance bullet).",
+      "mitigation": "Append only after the last entry, confirm the highest id with Grep `^## D` before choosing the next, use the D165 bullet shape, and leave D25 unedited. The producer runs `cargo test -p athena-core mirrors` and the refusal_corpus test."
+    },
+    {
+      "risk": "A raised budget leaves stale figures in docs that no test reads.",
+      "mitigation": "Step 10 greps for '1997', '99.85' and 'of 2000' in the touched docs and crates and fixes each reader figure; the older 1,930 history stays."
+    },
+    {
+      "risk": "The step guarantees the criterion exists, not that the producer meets it; the final verdict is still the verifier's judgement, and its rejection logic is out of scope.",
+      "mitigation": "The doc comment and §3.9 say so. The default requires readable data and says an estimate-labelled guess does not meet it, which gives the verifier an explicit test."
+    },
+    {
+      "risk": "One more criterion means one more demonstration for the planner on every bug reading, including readings where the reader wrote its own root-cause criterion.",
+      "mitigation": "This is intended (finding 6): a standing-default criterion does not require readable data. It is documented in §3.9."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "build_reading signature (new `request_text` argument)",
+      "dependent": "crates/athena-core/src/reading.rs: the production call in `read` (reading.rs:642-651) and the test helper `build_sized` (reading.rs:5630); a Grep for `.build_reading(` finds only these two",
+      "kind": "code",
+      "test": "cargo test -p athena-core: `a_reading_within_both_timeouts_is_accepted` and the other `build_sized` tests keep passing with an empty request; the new `bug_evidence_*` tests cover the production path.",
+      "reason": null
+    },
+    {
+      "name": "Reading.acceptance_criteria gains a content criterion on bug readings",
+      "dependent": "`refusing_check` steps (reading.rs:3235 onward): check_criteria_evidence, check_boundary_and_repo_files, check_defined_terms, check_governance_coverage, check_environment_reach, limits_changed_files",
+      "kind": "rule",
+      "test": "`bug_evidence_added_text_trips_no_refusal_check` runs `refusing_check` on a built bug reading and expects None. `cargo test -p athena-core --test refusal_corpus` runs unchanged because its readings are hand-built.",
+      "reason": null
+    },
+    {
+      "name": "`bug-evidence` defaults_applied entry and extra criterion",
+      "dependent": "crates/athena-context/src/briefs.rs `AcceptedReading::new`, `reading_sections` and `criteria_check_section`, which render each criterion and each applied default's statement into the producer and verifier briefs",
+      "kind": "code",
+      "test": "`bug_evidence_statement_reaches_the_producer_brief` in briefs.rs builds an AcceptedReading with the entry and asserts `producer_brief` carries the full statement and the criterion text (cargo test -p athena-context).",
+      "reason": null
+    },
+    {
+      "name": "Plan admission: one demonstration per acceptance criterion",
+      "dependent": "crates/athena-core/src/admission.rs:179-197, which counts the planner's demonstrations against the reading's criteria",
+      "kind": "rule",
+      "test": null,
+      "reason": "A bug reading now carries one more criterion, so its planner adds a demonstration for it. This is intended: the criterion is meant to be demonstrated. With condition (b) dropped, a reader-written root-cause criterion also stays, costing one more demonstration, which is accepted."
+    },
+    {
+      "name": "defaults.toml rendered text in the reader prompt set (1997 of 2000 tokens)",
+      "dependent": "reader_system_prompt and reader_headroom (reading.rs:206-245); crates/athena-cli/tests/budgets.rs (computed_rows, check_budget, headroom rows); run_pin_tests.rs:1624-1644",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test budgets and cargo test -p athena-core (run_pin_tests); both read the real defaults.toml.",
+      "reason": null
+    },
+    {
+      "name": "`BudgetSet::Reader` budget value (2,000, raised)",
+      "dependent": "crates/athena-context/src/lib.rs:175 and its callers: `check_budget`, `headroom_rows`, the reader brief row printed by briefs.rs, budgets.rs",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test budgets and cargo test -p athena-context. The headroom row prints `row.budget`, so it follows the new value; only the literal at run_pin_tests.rs:1625 pinned 2000 and is changed. A Grep for 2_000 and 2,000 in crates, xtask, docs/*.toml and the three docs finds no other pin.",
+      "reason": null
+    },
+    {
+      "name": "`budget reader` line in docs/system-facts.md",
+      "dependent": "docs/system-facts.md, carried whole in the planner and critic briefs (briefs.rs SYSTEM_FACTS) and checked by `system_facts_budgets_match_computed` (budgets.rs)",
+      "kind": "rule",
+      "test": "`system_facts_budgets_match_computed` and `system_facts_drift_is_rejected`; the `SYSTEM_FACTS.len() < 5_000` test in briefs.rs still holds because only digits change.",
+      "reason": null
+    },
+    {
+      "name": "Decision log (append-only) and D25's reader clause",
+      "dependent": "docs/decisions.md D25 (lines 608-629) and the decision-log structure rules: run/send_back.rs:295 ('docs/decisions.md is append-only'), mirrors.rs `Rule::DecisionEntries` (next id, heading, Provenance bullet), docs/decision-links.toml `[[governs]]` (only D08, line 212)",
+      "kind": "rule",
+      "test": "The existing decision-entry tests of mirrors.rs and the run checks (cargo test -p athena-core mirrors, cargo test -p athena-core --test refusal_corpus) run on the appended file; the new CHANGELOG/doc test asserts the entry names `bug-evidence`.",
+      "reason": "D25 is not edited. A new entry is appended after the last entry (D165 at line 4697), with the next id, a heading of the form `## D166 · ...`, the Case/Decision/Alternatives/Tradeoff/Reversal cost/Provenance bullets and a `- **Provenance:**` bullet inside its own text. It says it amends D25's reader budget. No `[[governs]]` entry covers lib.rs, so no `[[link]]` is required."
+    },
+    {
+      "name": "Reader budget figures in design docs",
+      "dependent": "docs/design/context-engineer.md lines 54, 141, 202, 232, 336 (quote '1997 of 2000 (99.85%)' and 'reader 99.85%'); docs/design/defaults-loop.md §8.3 (cites 1,930, already stale); docs/design/decision-sets.md:107 and socratic-review.md:219 (cite 1,930, already stale)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No test reads these docs, so they would go stale silently. The producer updates the context-engineer.md figures to the measured size, budget and percentage. The already-stale 1,930 mentions are older history and are left alone. context-engineer.md §8 (lines 229-230) requires a decision of its own for a raise; the appended decision is that entry."
+    },
+    {
+      "name": "always-loaded producer and verifier prompt sets (producer 1257 of 1300, verifier 1298 of 1300)",
+      "dependent": "crates/athena-cli/tests/budgets.rs:42-61 composes only contract, frame and section; docs/system-facts.md budget lines",
+      "kind": "rule",
+      "test": null,
+      "reason": "Defaults are not part of those sets (defaults-loop.md §8.3), and no prompt asset is edited, so they do not grow."
+    },
+    {
+      "name": "existing defaults statements `root-cause`, `buy-first`, `public`, `verified`",
+      "dependent": "defaults.rs `behavior_evidence_default_leads_with_the_core_rule`, `root_cause_default_leads_with_the_core_rule`, `an_explainer_page_request_gets_the_three_standing_defaults`; briefs.rs:4603-4631",
+      "kind": "code",
+      "test": "cargo test -p athena-data and cargo test -p athena-context.",
+      "reason": "None is edited, so every pinned line is byte-identical."
+    },
+    {
+      "name": "repo defaults.toml parse and content",
+      "dependent": "Tests that embed defaults.toml: admission.rs:733, run/tests.rs:324, work_decisions.rs:495, scope_guard.rs:1074, hestia.rs:2899, code_health.rs:1009, cap-change lib.rs:143-160, cap-study lib.rs:135, athena-cli/tests/common/mod.rs, repo_config.rs:26",
+      "kind": "code",
+      "test": "cargo test --locked runs them all.",
+      "reason": "They parse the file or copy it into fixtures. The new entry has a unique id, a non-empty statement and source and the same fields, so `DefaultsModel::parse` (defaults.rs:36-49) accepts it. None counts entries."
+    },
+    {
+      "name": "defaults.toml and docs/system-facts.md as build paths",
+      "dependent": "crates/athena-core/src/status.rs:23-33 `BUILD_PATHS` and the mirrors registry comparing it with the CI cache key",
+      "kind": "rule",
+      "test": null,
+      "reason": "A change to either marks the installed binary stale after landing, the intended behavior. Neither list is edited. crates/athena-context/src/lib.rs is compiled code, covered by the existing crate build paths."
+    },
+    {
+      "name": "athena.toml `[budget]` and `[classes]`",
+      "dependent": "athena.toml:34-46 ([budget]) and 127-129 ([classes])",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The reader token budget is not an athena.toml key (grep: only reader_usd, reader_timeout_s, model and effort). athena.toml is left unchanged and no class is added."
+    },
+    {
+      "name": "Reading record contents and defaults version",
+      "dependent": "records/ and Reading records written by `read` (including `defaults_version`); records.rs Reading schema, `check_record_file`",
+      "kind": "rule",
+      "test": null,
+      "reason": "The records branch is not touched. A new reading gains one criterion and one defaults entry within the existing schema, so round-trip and `check_record_file` are unaffected. `version` stays 1."
+    },
+    {
+      "name": "Bug-word and fix-intent matching in the fallback trigger",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (drives `refusing_check`)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core bug_evidence",
+      "reason": "The fallback is not a refusal and sits outside `refusing_check`, so no corpus case maps to it and none is added. Its input forms (bug, bugs, bugfix, regression with and without 'test', slowdown(s), wrong output / wrong-output, compounds such as bug-evidence, a fix word near or far from the bug word, a study or declined reading, a retry request) are covered by the tables in `bug_evidence_*` tests. `cargo test -p athena-core --test refusal_corpus` is still run to show the added criterion text changes no existing refusal."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Parse the repo defaults.toml in an athena-data unit test and check the new entry's id, applies_to, key phrases and source. The test also asserts the `root-cause` statement equals its base text.",
+      "command": "cargo test -p athena-data bug_evidence",
+      "observes": "`bug_evidence_default_parses_and_renders_its_first_sentence` passes. It asserts: applies_to is [\"*\"]; the statement contains 'before any fix', 'root cause', 'data the job can read' and 'a guess labelled as an estimate does not meet this'; the source contains 20261104-054700-e6js, 20261105-051344-q9fv, 20261105-101121-qw9r and 20261105-205835-hk09; the `root-cause` statement is byte-identical to the base.",
+      "fails_without": "Without the defaults.toml entry `get(\"bug-evidence\")` is None and the test fails; a reworded `root-cause` fails the equality assertion.",
+      "seam": "Production `DefaultsModel::parse` and `get` (crates/athena-data/src/defaults.rs:36, 51) on the real file through the existing `REPO_DEFAULTS` const (defaults.rs:89). Exists; no double. The test is added by step 2."
+    },
+    {
+      "criterion": 2,
+      "method": "Grep reading.rs for `bug-evidence`, and run a source-text test (the style of the existing include_str! tests at reading.rs:9241 and 10944) that takes the body of `build_reading` and asserts the call order.",
+      "command": "cargo test -p athena-core bug_evidence_step_is_called_beside_ensure_changelog",
+      "observes": "Grep for `bug-evidence` in crates/athena-core/src/reading.rs shows the id constant and the entry. The test asserts that `build_reading`'s body contains `ensure_changelog(&mut reading)`, then `ensure_bug_evidence(&mut reading, request_text)`, then `reading.validate()`, in that order, and that `ensure_bug_evidence` returns early unless capability is `change`.",
+      "fails_without": "Removing the call from `build_reading`, or moving it after `validate()`, makes the test fail.",
+      "seam": "Reads the production source of reading.rs with `include_str!` and splits at `fn build_reading(`, as the existing source-text tests do. Exists in style; the new test is added by step 7."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests drive the real `Athena::build_reading` through a new helper with bug requests, and call the step directly over positive and negative tables. They cover both tiers, the negated tier-1 entry, the standing-default criterion, the retry-by-title case, idempotency, and that the added text trips no `refusing_check` step.",
+      "command": "cargo test -p athena-core bug_evidence",
+      "observes": "All `bug_evidence_*` tests pass. (a) A change reading built from request 'Fix the bug where the report shows the wrong output' has exactly one content criterion starting 'Before any fix, the change states the root cause' and exactly one `bug-evidence` entry; `refusing_check` on it is None. (b) Fallback positives: 'Fix the regression in the parser', 'Investigate the slowdown in queue drain', 'Fix wrong-output in the status line', 'Fix the regression and add a regression test', 'Bugfix for the parser crash'. Fallback negatives, which get neither the criterion nor the entry: 'Add a regression test for the parser', 'Add bug-evidence default and enforce root-cause criterion on bug', 'Throughput review: flag median slowdowns and queue a request', 'Fix the docs for the bug report form', 'Fix a typo in the regression section of the README', 'Describe the demo in README.md', 'Add debug logging', a study-capability bug request, a declined reading. (c) Tier 1: a change reading whose request has no keyword but whose defaults_applied lists `bug-evidence` gains the criterion and no second entry. A tier-1 reading whose only root-cause criterion is 'root-cause: the change description names the root cause' still gains the step's criterion. A reader entry whose `how` is 'not applicable: this is not a bug job' on a feature request gains no criterion. (d) Retry: request 'try again on 20261105-234147-88tw' with title 'Fix the regression in the parser' gains the criterion through the title; the same request with a neutral title gains nothing. (e) Calling the step twice leaves the reading equal.",
+      "fails_without": "With no step, (a) finds zero root-cause criteria and zero `bug-evidence` entries. With bare `has_phrase` matching, the negative table fails on 'bug-evidence', 'regression test' and 'slowdowns'. With a fix word allowed anywhere, the docs and typo cases fail. If condition (b) of the earlier plan were kept, the standing-default case in (c) finds no criterion. Without the negation check the 'not applicable' case gains a criterion. With a non-idempotent step, (e) finds duplicates. Without the capability gate, the study case gains the criterion.",
+      "seam": "Production entry point `Athena::build_reading` (reading.rs:685) through a new test helper `build_for_request(reading_json, request_text, capabilities)` added in step 7. It copies `build_sized` (reading.rs:5606-5640): `crate::test_support::make_athena` on tempdirs, the shipped athena.toml and defaults.toml, `Redactor::new(&athena_gate::builtin_config())`, capabilities [\"change\",\"study\"]. The reading JSON comes from the existing `sized_reading` (reading.rs:5580) with capability set to change. The step is also called directly on the existing `change_reading()` (reading.rs:6130). No double holds the logic under test: the real `build_reading`, `names_bug_work` and `refusing_check` run."
+    },
+    {
+      "criterion": 4,
+      "method": "An athena-data unit test parses the repo defaults.toml and checks the entry and its rendered first-sentence line.",
+      "command": "cargo test -p athena-data bug_evidence",
+      "observes": "`DefaultsModel::parse` succeeds on the real file. `render()` contains the exact line `- bug-evidence [*]: <first sentence>\\n` and does not contain the statement's second sentence.",
+      "fails_without": "Without the entry the line is absent. If the first sentence had no '. ' break, the render would carry the whole statement and the second-sentence assertion fails.",
+      "seam": "Production `DefaultsModel::parse`, `get` and `render` (defaults.rs:36, 51, 58) on the real file through `REPO_DEFAULTS` (defaults.rs:89). Exists; no double."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks, the budget tests that compose the reader set from the real defaults.toml, the briefs and pin tests that quote the reader figure, and the refusal corpus. Existing tests keep their outcomes.",
+      "command": "cargo test --locked",
+      "observes": "`cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` pass. `cargo test --locked` passes, including `cargo test -p athena-cli --test budgets` (`every_role_set_is_within_its_budget`, `system_facts_budgets_match_computed`), the run_pin_tests.rs:1624-1644 test now reading `BudgetSet::Reader.budget()`, the decision-entry structure tests, and `cargo test -p athena-core --test refusal_corpus`. The corpus adds no case: the step refuses nothing. That test reads docs/decisions.md for D164 (line 652) and D165 (line 1186) by `split_once` and `contains`, which the appended D166 leaves true; I read those lines and cite no result.",
+      "fails_without": "If the reader budget were not raised, `check_budget(BudgetSet::Reader, ..)` fails in `every_role_set_is_within_its_budget`. If system-facts.md kept 1997 of 2000, `system_facts_budgets_match_computed` fails. If run_pin_tests.rs kept the literal 2000, its brief-text assertion fails. If D25 were edited instead of appending, the append-only check fails.",
+      "seam": "Existing tests: `computed_rows` and `check_system_facts` in crates/athena-cli/tests/budgets.rs build the sets from the real files; the `refusal_corpus` target drives `refusing_check`. No double. Nothing is added except the run_pin_tests.rs edit."
+    },
+    {
+      "criterion": 6,
+      "method": "Read CHANGELOG.md, docs/decisions.md and docs/design/defaults-loop.md in a test, and inspect the diff paths.",
+      "command": "cargo test -p athena-core bug_evidence_changelog_and_design_doc_name_the_cause",
+      "observes": "The test passes. The CHANGELOG.md Unreleased item contains `bug-evidence`, states the cause (bug jobs were rejected at the final verdict because no criterion demanded data-backed root-cause evidence), and names the reader budget raise and each file outside the reading's list (lib.rs, run_pin_tests.rs, system-facts.md, decisions.md, context-engineer.md). The decisions.md tail holds an entry that names `bug-evidence`, D25 and `crates/athena-context/src/lib.rs`. defaults-loop.md has a section naming `bug-evidence`. `git diff --stat` lists defaults.toml and shows no athena.toml and no records/ path.",
+      "fails_without": "Without the CHANGELOG item, the decision entry or the doc section the test fails.",
+      "seam": "Reads the three files with `include_str!` relative to crates/athena-core/src/reading.rs, as existing doc-pin tests do. Added by step 8. No double."
+    },
+    {
+      "criterion": 7,
+      "method": "A test checks that the `bug-evidence` statement and the criterion constant state the same evidence to a newcomer. The CHANGELOG test shows the cause. The diff shows records/ untouched.",
+      "command": "cargo test -p athena-core bug_evidence_criterion_and_default_state_the_same_evidence",
+      "observes": "The criterion text and the repo default's statement both contain 'root cause', 'data the job can read', 'before any fix' and 'a guess labelled as an estimate does not meet this'. `git diff --stat` shows no records/ path. tested is met by the new passing tests; no-empty-success and thrash-stop apply unchanged.",
+      "fails_without": "If the criterion or the default drops the data requirement or the estimate rule, the test fails.",
+      "seam": "Production constant `ROOT_CAUSE_EVIDENCE_CRITERION` and `DefaultsModel::parse` on `include_str!(\"../../../defaults.toml\")`, the way `build_sized` loads it (reading.rs:5622). Added by step 8; no double."
+    }
+  ],
+  "open_questions": [
+    "User: The reading lists athena.toml as a deliverable, but the reader token budget is not an athena.toml key; it is `BudgetSet::Reader` in crates/athena-context/src/lib.rs:175. This plan leaves athena.toml unchanged and edits lib.rs, run_pin_tests.rs, docs/system-facts.md, docs/decisions.md (appended entry) and docs/design/context-engineer.md instead, each forced by a test or rule. Is that acceptable?",
+    "User: docs/design/context-engineer.md:201 says an addition to a prompt set above 95% of its budget must name what it displaces. The plan names the budget raise, recorded as its own decision, as the offset, as the behavior-evidence change did. Should a displacement be made instead of a raise?",
+    "Host: The exact reader size with the new line can only be measured by running `cargo test -p athena-cli --test budgets`, which the planner cannot run. The producer measures it and sets the budget to the smallest multiple of 50 at or above it (estimate: about 2,030, so 2,050)."
+  ],
+  "producer_section_sha256": "cf56f5dd7d5bb7881d3a9aa9f1dc6f7fb625ec0d7ce95cae96f1a11ab43586b2"
+}
