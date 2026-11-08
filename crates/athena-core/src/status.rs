@@ -1402,6 +1402,7 @@ mod mistake_tests {
     fn every_measure_label_names_a_status_view_field_and_a_printed_line() {
         let here = include_str!("status.rs");
         let display = include_str!("../../athena-cli/src/display.rs");
+        let status_view = include_str!("../../athena-cli/src/display/status_view.rs");
         // The `requirement` line is a next step built where the spec gaps are found.
         let hestia = include_str!("hestia.rs");
         for (label, field) in STATUS_MEASURE_LABELS {
@@ -1410,7 +1411,7 @@ mod mistake_tests {
                 "StatusView has no field {field} for the label {label:?}"
             );
             let printed = format!("\"{label} ");
-            let is_printed = [here, display, hestia]
+            let is_printed = [here, display, status_view, hestia]
                 .iter()
                 .any(|source| source.contains(&printed));
             assert!(
