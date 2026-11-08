@@ -31,6 +31,26 @@ pub fn pr_head_report(report: &athena_core::pr_check::PrReport) -> String {
     out
 }
 
+/// The result of `athena check --host-rules`: the per-rule report, then either one line saying every required
+/// rule is in force or one line per required rule that is not.
+pub fn host_rules_report(results: &[athena_core::host_rules::BranchRules]) -> String {
+    let mut out = athena_core::host_rules::render(results);
+    let missing = athena_core::host_rules::missing_required(results);
+    if missing.is_empty() {
+        out.push_str("host rules: all required rules are in force\n");
+    } else {
+        for line in &missing {
+            let _ = writeln!(out, "  - required rule not in force: {line}");
+        }
+        let _ = writeln!(
+            out,
+            "host rules FAIL: {} required rule(s) not in force",
+            missing.len()
+        );
+    }
+    out
+}
+
 /// The result of `athena check --attribution`: one line per finding naming the commit, a notice per pending
 /// commit, then a summary (docs/design/records-history.md §5.2, §6, §10; D111).
 pub fn attribution_report(report: &athena_gate::attribution::AttributionReport) -> String {
