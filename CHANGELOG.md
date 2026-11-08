@@ -494,6 +494,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   and runs once per batch. The review predicts a saving of 420.0 minutes per landed job (a prediction, not a
   measurement); the note says how the next review measures it and makes the first build job a split of the 440.1
   minutes by phase. `docs/design/async-drain.md` gains two pointer sentences and no renumbering.
+- `docs/design/per-job-landing-branches.md`: a design note, nothing built, for throughput review
+  `20261108-183648-5eya`, which found landing and rebuild at a median of 1537.1 of 1582.1 minutes per landed
+  job. Each job lands as one commit in one pull request cut from current main, not stacked on a long-lived
+  local branch. The review predicts a saving of 1530.0 minutes per landed job (a prediction, not a
+  measurement); the note says the next review measures it with the per-phase split from its first build job,
+  so a concurrent continuous-landing change is separated from this one. It lists the existing code kept and
+  changed, the alternatives rejected and the risks. `continuous-landing.md` and `squash-chain-landing.md` gain
+  a pointer sentence each.
 - `docs/design/warm-baseline-build.md`: a design note on the warm baseline build proposed by throughput review
   `20261029-155931-wfkr`, checked against the records. It lists the CI-first checks flow, the pull-request
   target-cache restore and the 6-shard test job as already present. It splits the review's 14.1-minute checks
