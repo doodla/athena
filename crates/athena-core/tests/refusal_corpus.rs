@@ -2109,8 +2109,24 @@ fn corpus_covers_the_listed_input_forms() {
 // ---------------------------------------------------------------------------------------------------------
 // The mechanism: every check of the gate has a case in which it refuses.
 
-/// The text of `reading.rs`, which holds the gate.
-const READING_SOURCE: &str = include_str!("../src/reading.rs");
+/// The text of `reading.rs` and its child modules, which hold the gate. The child modules come first, so a
+/// search for a function finds it before any test text that names it.
+fn reading_source() -> &'static str {
+    static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SOURCE.get_or_init(|| {
+        [
+            include_str!("../src/reading/retry.rs"),
+            include_str!("../src/reading/topics.rs"),
+            include_str!("../src/reading/checks.rs"),
+            include_str!("../src/reading/outcome.rs"),
+            include_str!("../src/reading/terms.rs"),
+            include_str!("../src/reading/surveys.rs"),
+            include_str!("../src/reading/replay.rs"),
+            include_str!("../src/reading.rs"),
+        ]
+        .join("\n")
+    })
+}
 
 /// The body of the function that starts at `heading`: up to the first line that is a lone `}`.
 fn function_body<'a>(source: &'a str, heading: &str) -> &'a str {
@@ -2156,7 +2172,7 @@ fn checks_that_refuse() -> BTreeSet<&'static str> {
 
 #[test]
 fn every_acceptance_check_has_a_refusing_corpus_case() {
-    let names = acceptance_check_names(READING_SOURCE);
+    let names = acceptance_check_names(reading_source());
     assert!(
         names.len() >= 6,
         "found only {names:?} in refusing_check; the extractor or the gate changed shape"
@@ -2178,8 +2194,8 @@ fn every_acceptance_check_has_a_refusing_corpus_case() {
 #[test]
 fn an_extra_check_with_no_case_is_reported() {
     let anchor = "    step!(check_reading_references(";
-    assert!(READING_SOURCE.contains(anchor), "the anchor line moved");
-    let doctored = READING_SOURCE.replacen(
+    assert!(reading_source().contains(anchor), "the anchor line moved");
+    let doctored = reading_source().replacen(
         anchor,
         &format!("    step!(check_new_rule(reading));\n{anchor}"),
         1,
@@ -2187,7 +2203,7 @@ fn an_extra_check_with_no_case_is_reported() {
     let names = acceptance_check_names(&doctored);
     assert_eq!(
         names.len(),
-        acceptance_check_names(READING_SOURCE).len() + 1
+        acceptance_check_names(reading_source()).len() + 1
     );
     assert_eq!(
         uncovered(&names, &checks_that_refuse()),
@@ -2208,9 +2224,10 @@ fn design_existing_code_refusal_is_declared_intended() {
     assert_eq!(declared.share, Some(5));
     // The step line is in refusing_check, and the check's doc comment is one paragraph with the sentence.
     assert!(
-        acceptance_check_names(READING_SOURCE).contains(&"check_design_existing_code".to_string())
+        acceptance_check_names(reading_source())
+            .contains(&"check_design_existing_code".to_string())
     );
-    let doc = READING_SOURCE
+    let doc = reading_source()
         .split("pub fn check_design_existing_code(")
         .next()
         .unwrap()
@@ -2257,9 +2274,9 @@ fn environment_reach_refusal_is_declared_intended() {
     assert_eq!(declared.share, Some(8));
     // The step line is in refusing_check, and the doc comment names the cause and the estimate.
     assert!(
-        acceptance_check_names(READING_SOURCE).contains(&"check_environment_reach".to_string())
+        acceptance_check_names(reading_source()).contains(&"check_environment_reach".to_string())
     );
-    let doc = READING_SOURCE
+    let doc = reading_source()
         .split("pub fn check_environment_reach(")
         .next()
         .unwrap()
@@ -2303,8 +2320,10 @@ fn history_fixture_refusal_is_declared_intended() {
     );
     assert_eq!(declared.share, Some(4));
     // The step line is in refusing_check, and the doc comment names the cause and the estimate.
-    assert!(acceptance_check_names(READING_SOURCE).contains(&"check_history_fixture".to_string()));
-    let doc = READING_SOURCE
+    assert!(
+        acceptance_check_names(reading_source()).contains(&"check_history_fixture".to_string())
+    );
+    let doc = reading_source()
         .split("pub fn check_history_fixture(")
         .next()
         .unwrap()
@@ -2338,7 +2357,7 @@ fn history_fixture_refusal_is_declared_intended() {
 
 #[test]
 fn no_check_bypasses_refusing_check() {
-    let body = function_body(READING_SOURCE, "pub fn check_reading_acceptance(");
+    let body = function_body(reading_source(), "pub fn check_reading_acceptance(");
     let (_, inside) = body
         .split_once(") -> Result<()> {\n")
         .expect("the signature of check_reading_acceptance");
