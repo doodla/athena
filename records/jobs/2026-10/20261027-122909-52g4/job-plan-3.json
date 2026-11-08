@@ -1,0 +1,438 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-122909-52g4",
+  "round": 3,
+  "at": "2026-11-08T19:37:28.184715112Z",
+  "invocation_seq": 6,
+  "approach": "Add one settle step at job close. After the closing commit of a rejected, failed or timed_out job that has an early PR link, Athena posts a comment through two new PrHost methods. The closing commit also carries a new job-level record `athena.pull-request/1` (`<job dir>/pull-request.json`: job, pr_number, repository). Final outcomes (rejected; failed for a non-environment reason) close the PR: `POST issues/{n}/comments`, then `PATCH pulls/{n}` state=closed. Retry-eligible outcomes (timed_out; failed for an environment reason) get a \"not landing\" comment only and stay open. When a later job ends, whatever its outcome except blocked, the same close step finds the job it retries with `crate::reading::retried_job(records, request text)`, the general \"try again on <job>\" relation, whether or not a kept seed was used. If that predecessor's outcome was a keep-open one and its pull-request.json exists, the step closes the predecessor's PR. So a kept-open PR ends when its retry ends. A job that is never retried keeps its marked PR open; §5.9 says so. Verified jobs' own PRs (landed, stale, blocked, and the gate-refused branch of land_or_block) get no call. A host error becomes one warning line and never changes an outcome. Decision logic and host calls sit in gh/early.rs beside open_early_pr, so gh/mod.rs needs no edit.",
+  "decisions": [
+    {
+      "choice": "Record the PR number in a new job-level record `athena.pull-request/1` (`<job dir>/pull-request.json`: job, pr_number, repository), pushed into the closing commit's files before any host call, for both Close and KeepOpen dispositions.",
+      "reason": "`Outcome` has deny_unknown_fields and is built by literal in many files across crates, so a new field would touch all of them. Criterion 5 expects a new record shape in athena-data/src/records.rs. The record also gives a later retry a durable way to find its predecessor's PR after clean_job deletes the state-dir link. It holds only job id, number and repository.",
+      "rejected": [
+        {
+          "option": "Add `pr_number: Option<u64>` to `Outcome`",
+          "why": "It touches every Outcome literal across crates and tests; not one focused change."
+        },
+        {
+          "option": "Put the number in the outcome reason text",
+          "why": "Free text, not queryable; tests and the score read reason strings."
+        },
+        {
+          "option": "Keep the number only in the state-dir pr-link.json",
+          "why": "That is the status quo: the file is outside the repository and clean_job removes it, so no job record would name its PR."
+        }
+      ]
+    },
+    {
+      "choice": "Disposition by outcome: rejected -> Close; failed with a non-environment reason -> Close; failed with an environment reason (`crate::disk::is_environment_reason`) and timed_out -> KeepOpen (comment 'not landing', no close); landed, stale, blocked and all other states -> no action. Then, in both close paths (close_dispatched and land_or_block), for any successor state except Blocked, find the predecessor with `retried_job(&Records::load(git, HEAD), ctx.job.request text)`. If it is Some(old), old differs from the closing job, `pr_disposition` of old's recorded outcome (state and reason) is KeepOpen, and `<old job dir>/pull-request.json` exists at HEAD, close old's PR with a comment naming old, the closing job and its outcome word. The relation does not depend on `closing.consumed_resume` or `ctx.resume`.",
+      "reason": "Criterion 3 requires a job that must stay open for a retry to be marked and not closed. Those jobs are exactly the ones `athena retry` resumes. A retry runs as a new job with its own PR (open_early_pr loads a link only for the new job), so a kept-open PR would be orphaned unless something closes it. Round 2 keyed that on consumed_resume and ctx.resume, but consumed_resume is set only when resume_seed returns a seed (run/mod.rs:542-557), and that returns None once any non-records file changed since the job's base. timeout_seed has the same guard, so on a moving branch the retry starts fresh and the PR stayed orphaned. `retried_job` (reading/retry.rs:201) is the relation stale_seed, timeout_seed (run/mod.rs:579, 887) and job_history already use, and it needs only the request text, which close_dispatched has as `ctx.job.request` (the same expression as run/mod.rs:1087). Checking the predecessor's recorded outcome means a retry of a rejected job (a tree retry) does not re-close a PR that was already closed, and a retry of a held job (state dispatched, no outcome) makes no call. Blocked successors are skipped to match the existing rule that a blocked job's kept state stays (close.rs:434). A failure to load records or parse the record is one warning. §5.9 states plainly that a kept-open PR closes only when a retry of its job ends, and that a job never retried keeps its marked PR open.",
+      "rejected": [
+        {
+          "option": "Find the predecessor from closing.consumed_resume / ctx.resume (round 2)",
+          "why": "It is set only when a kept seed was used; a fresh-start retry would orphan the PR (finding 2)."
+        },
+        {
+          "option": "Close every final non-landing PR including retry-eligible ones",
+          "why": "Criterion 3 asks for a mark-and-keep-open case, which would then have no production caller. This option is put to the user as an open question, since the request's keep-open clause is conditional."
+        },
+        {
+          "option": "Keep retry-eligible PRs open and never close them afterwards",
+          "why": "It orphans open non-landing PRs, the symptom reported."
+        },
+        {
+          "option": "Close only rejected",
+          "why": "Failed jobs are named in the request; the root cause is the missing settle step for every non-landing outcome."
+        }
+      ]
+    },
+    {
+      "choice": "Leave `land_or_block`'s landing arms, including the gate-refused Failed branch, unchanged: a verified job gets no close of its own PR. The only new line in land_or_block is the predecessor close beside `settle_resume_marks` at close.rs:433, skipped when the state is Blocked. `retry_landing` (a blocked job landed by a later `athena go`, close.rs:458) is not wired.",
+      "reason": "The request says never touch verified. Whether a gate-refused verified job should be closed is a user decision (open question). The predecessor close concerns a different job's PR and runs after the outcome is final, so it cannot change landing. retry_landing has no ctx or request text and is a separate flow; the gap is stated in §5.9.",
+      "rejected": [
+        {
+          "option": "Close the PR in the gate-refused Failed branch",
+          "why": "It resolves an ambiguity the user has not approved and adds a wiring site inside the retrying loop."
+        },
+        {
+          "option": "Skip the predecessor close on the landing path",
+          "why": "A retry that lands would leave its predecessor's PR open and marked."
+        }
+      ]
+    },
+    {
+      "choice": "Add two required `PrHost` methods, `comment_pr(number, body)` and `close_pr(number, comment)`. `GhClient::close_pr` is `comment_pr` then `PATCH repos/{r}/pulls/{n}` with `-f state=closed`, both through `GhClient::api`, logged under `HostOperation::CreatePr`. §5.9 states that the settle client is built as `early_pr_to` builds its client, with no host-error log (client.rs:460-467), so a refused comment or close writes no HostError record and no operation tag is recorded. I did not edit the `CreatePr` doc comment in records/core.rs, so it keeps reading 'Opening a pull request'.",
+      "reason": "Every call stays on the retrying REST wrapper so `crates/athena-core/tests/external_calls_guard.rs` holds. HostOperation is a persisted closed list (records/core.rs:20-42); a new variant would change ALL, parse and as_str, the docs and the cli backtests for one call. The watcher fires only on Merge. Since this path writes no tagged record, the stale enum doc comment misleads nobody and no unlisted file is edited (finding 6, option 2). The comment goes first, as the brief orders; it says Athena is closing the PR, so a failed PATCH leaves a truthful comment.",
+      "rejected": [
+        {
+          "option": "Add HostOperation::ClosePr",
+          "why": "It widens a persisted enum read by cli tests and docs outside the deliverables."
+        },
+        {
+          "option": "Edit the CreatePr doc comment in records/core.rs to 'any pull-request write'",
+          "why": "It adds an unlisted file for a tag this path never records."
+        },
+        {
+          "option": "PATCH first, then comment",
+          "why": "A closed PR with no comment loses the reason if the second call fails."
+        },
+        {
+          "option": "Mark by title edit or label",
+          "why": "It needs a read-modify-write or another permission; one comment is a single visible call."
+        }
+      ]
+    },
+    {
+      "choice": "Put the disposition, comment texts, `settle_pr(host, link, state, reason)` and `close_superseded_pr(host, record, successor, state)` in gh/early.rs as pub(super) functions, plus pub(crate) methods `Athena::job_pr_link`, `Athena::settle_pr_for_job` and `Athena::close_predecessor_pr(request_text, successor, state, ui)` that choose early_seam or GhCli/GhClient (the pattern of `early_pr_to`) and honour `self.nested` and `github_repository()`. gh/mod.rs is not edited; gh/tests.rs imports with `use super::early::...`.",
+      "reason": "The PR is opened in this file; the seam, github_repository and the nested guard are private to it. Avoiding a re-export keeps an unlisted file out of the diff.",
+      "rejected": [
+        {
+          "option": "Re-export from gh/mod.rs",
+          "why": "It is not needed and adds an unlisted file."
+        },
+        {
+          "option": "New file under gh/",
+          "why": "It would need a mod.rs edit for about 150 lines."
+        }
+      ]
+    },
+    {
+      "choice": "Keep one edit outside the reading's file list: crates/athena-core/src/store.rs, a single `AnyRecord::PullRequest(r) => Some(&r.job)` arm in `job_of`. Do not edit docs/records.md or crates/athena-cli/tests/external_calls.rs.",
+      "reason": "`Records::from_parts` ends in `.expect(\"every other record names its job\")` on `job_of` (store.rs:431-434), and `job_of` ends in `_ => None` (store.rs:342). Without the arm any records load that sees a pull-request.json panics. This holds for every new AnyRecord variant, and criterion 5 expects a new record shape (finding 1: unavoidable, one line, covered by the run test that loads Records at HEAD). The layout is documented in §5.9; the REST order is covered by a FakeRunner test.",
+      "rejected": [
+        {
+          "option": "Skip the job_of arm",
+          "why": "Records::load panics."
+        },
+        {
+          "option": "Avoid store.rs by adding a field to Outcome",
+          "why": "It touches every Outcome literal across crates, a larger unlisted diff."
+        }
+      ]
+    },
+    {
+      "choice": "The success line is `pr         #7 closed` / `#7 marked not landing` / `#7 closed (superseded)` with no `warning` text; failures are `warning: could not close the pull request #N: ...`. Comments hold only job ids and the outcome word.",
+      "reason": "run_pin_tests filters ui lines on 'warning' (run_pin_tests.rs `warnings()`); the public-data rule.",
+      "rejected": []
+    },
+    {
+      "choice": "Give EarlyFake a queue `pr_numbers: RefCell<VecDeque<u64>>`: open_pr pops the front, or returns 7 when the queue is empty. The retry tests use a fresh EarlyFake for the retry's `go`, with the queue set to [8].",
+      "reason": "Existing tests keep PR #7 unchanged. The retry's own PR is #8 and its predecessor's is #7, so 'one close of #7 and nothing on #8' can be asserted by number (finding 4). A fresh fake also avoids the shared `head` cell (test_support.rs:277, 358-364), which would show the first job's head on the retry's new branch.",
+      "rejected": [
+        {
+          "option": "One shared fake with an incrementing counter",
+          "why": "It changes the number existing tests see on a second open and shares the branch head across both jobs."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `JobPullRequest`, `PULL_REQUEST_SCHEMA`, the `AnyRecord::PullRequest` variant, arms in `parse`, `canonical_path` and `schema`, and the round-trip and refusal tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Not in the reading's file list, but unavoidable and one line: the `job_of` arm for the new record, so loading records does not hit `.expect`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "purpose": "Add `PrHost::comment_pr` and `close_pr` with docs, and implement them on `GhClient` through `api` (POST issues/{n}/comments, PATCH pulls/{n} state=closed), logged under CreatePr.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/early.rs",
+      "action": "modify",
+      "purpose": "Add `PrDisposition`, `pr_disposition`, comment texts, `settle_pr`, `close_superseded_pr`, and `Athena::job_pr_link`, `settle_pr_for_job`, `close_predecessor_pr`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "purpose": "In `close_dispatched`, push the pull-request record into the closing files and settle the PR after the commit; call `close_predecessor_pr` next to `settle_resume_marks` there and in `land_or_block` (not for Blocked). No landing arm changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Implement `comment_pr`/`close_pr` on `FakeHost` and `EarlyFake`; add `PrCall`, `pr_calls`, `fail_close` and the `pr_numbers` queue to `EarlyFake`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Implement the new methods on `FakeHost` and `RunHost`; add settle_pr unit tests and the REST-order test over `FakeRunner`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the end-to-end tests: rejected, landed left alone, environment stop kept open, retry closes predecessor (seeded and fresh-start), refused close (own and predecessor), no origin.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "action": "modify",
+      "purpose": "New §5.9 with the rule, outcome table, retry handling (including that an unretried kept-open PR stays open), alternatives, REST calls, record, failure handling, no host-error log note, and open questions; a row in §8.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet under Unreleased/Added naming the root cause and the change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "athena-data/src/records.rs: add `PULL_REQUEST_SCHEMA = \"athena.pull-request/1\"` and `#[serde(deny_unknown_fields)] pub struct JobPullRequest { job: JobId, pr_number: u64, repository: String }` with validation (number above 0, non-empty `owner/name`). Add `AnyRecord::PullRequest` with `#[serde(rename = \"athena.pull-request/1\")]`, a validate arm in `parse`, and arms in `canonical_path` (`<job dir>/pull-request.json`, as Replay does at records.rs:1312) and `schema`. Add the two tests, modeled on the replay test near line 3351.",
+    "store.rs: add `AnyRecord::PullRequest(r) => Some(&r.job)` to `job_of`; leave `JobRecords::add` on its catch-all.",
+    "gh/client.rs: add `comment_pr` and `close_pr` to `PrHost` with outside-reader docs (REST only; create-pr covers every PR write; the operation list is closed). Implement on `GhClient` via `self.api(HostOperation::CreatePr, ...)`: `POST` on `issues/{n}/comments` with `body`, and `close_pr` = comment then `PATCH` on `pulls/{n}` with `state=closed`.",
+    "gh/early.rs: add `pub(super) enum PrDisposition { Close, KeepOpen }`, `pr_disposition(state, reason) -> Option<PrDisposition>`, comment builders (job id and outcome word only; the predecessor comment names predecessor, successor and the successor's outcome), `settle_pr(host, link, state, reason)` and `close_superseded_pr`. Add `Athena::job_pr_link` (load_early_link, else load_link; a read error is one warning), `Athena::settle_pr_for_job(link, state, reason, ui)` and `Athena::close_predecessor_pr(request_text, successor, state, ui)`. They skip on `self.nested` and when `github_repository()` is None, choose early_seam or GhCli/GhClient as `early_pr_to` does, print one success line, and turn errors into one `warning:` line. The predecessor method returns early when state is Blocked, loads `Records::load(&self.git, HEAD)`, calls `retried_job(records, request_text)`, skips when the result is None or equals the successor, applies `pr_disposition` to the predecessor's recorded outcome, and reads `<old dir>/pull-request.json` through `self.git.show_file` and `check_record_file`. Do not edit gh/mod.rs.",
+    "test_support.rs: add `PrCall { kind, number, comment }`, `pr_calls: RefCell<Vec<PrCall>>`, `fail_close: Cell<bool>` and `pr_numbers: RefCell<VecDeque<u64>>` to `EarlyFake` and its `new` (signature unchanged). `open_pr` returns the queue's front or 7. Implement `comment_pr`/`close_pr` on `EarlyFake` (record, then bail if `fail_close`) and on the borrowed `FakeHost` (return Ok).",
+    "gh/tests.rs: implement the new methods on `FakeHost` (recorders and a refusal switch) and `RunHost` (delegate); import early items via `use super::early::...`. Add the settle_pr unit tests (rejected, failed, retry-eligible, verified/unsettled, refused close leaves the link unchanged) and the REST-order test over `FakeRunner`.",
+    "run/close.rs: in `close_dispatched`, after state and reason are final and the Landed branch has returned, load the link when `pr_disposition` says to act; push the pull-request record into the closing files inside the `commit_records_with` closure; after the commit succeeds and before `clean_job` (close.rs:151), call `settle_pr_for_job`. Next to `settle_resume_marks` at close.rs:155 and 433, call `close_predecessor_pr` with the request text from `ctx.job.request` (skipped when the state is Blocked). Leave all landing arms of `land_or_block` untouched.",
+    "run/tests.rs: add `a_rejected_job_records_its_pull_request_number_and_closes_it`, `a_landed_jobs_pull_request_is_left_alone`, `a_job_stopped_for_the_environment_keeps_its_pull_request_open_and_marked`, `a_retry_closes_the_pull_request_its_predecessor_left_open`, `a_retry_that_starts_fresh_still_closes_the_pull_request_its_predecessor_left_open`, `a_failed_close_is_one_warning_and_the_outcome_stays`, `a_refused_predecessor_close_is_one_warning_and_the_retry_outcome_stays` and `no_github_origin_means_no_pull_request_calls_and_no_record`.",
+    "docs/design/native-pr-landing.md: add §5.9 (rule, outcome table, retry handling via `retried_job` with the unretried-job and retry_landing gaps stated, alternatives, REST calls table in the style of §5.8, record, failure handling, the no-host-error-log note on create-pr, open questions) and a row in §8 naming the tests. CHANGELOG.md: one bullet under Unreleased/Added.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-data`, `cargo test -p athena-core`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-core --test external_calls_guard`, `cargo test -p athena-cli --test drain`, `cargo test -p athena-cli` and `cargo test --locked`, and list these commands in the final output as the request asks."
+  ],
+  "risks": [
+    {
+      "risk": "A host error on the comment or close changes a job's outcome or aborts `go`.",
+      "mitigation": "settle_pr returns a Result; the Athena wrapper turns any error into one warning line after the closing commit. Tests `a_failed_close_is_one_warning_and_the_outcome_stays` and `a_refused_predecessor_close_is_one_warning_and_the_retry_outcome_stays` check the state is unchanged and the record is present."
+    },
+    {
+      "risk": "The comment posts but the PATCH fails, leaving an open PR with a 'closing' comment.",
+      "mitigation": "The comment names the job and outcome; the warning says the PR is still open. Comment-then-PATCH is the order the brief asks for."
+    },
+    {
+      "risk": "The predecessor close fires wrongly (for a rejected predecessor already closed, a blocked successor, or twice).",
+      "mitigation": "It needs all of: the successor is not Blocked; `retried_job` returns a different job; that job's recorded outcome gives KeepOpen; its pull-request.json exists at HEAD. A rejected, landed, held or record-less predecessor makes no call. A second retry of the same predecessor repeats an idempotent PATCH and one more comment; the tests assert exactly one close in the single-retry flow."
+    },
+    {
+      "risk": "The landing or verified path changes by accident.",
+      "mitigation": "The disposition list is explicit; landed, stale and blocked are tested for no call. The only edit in land_or_block is the predecessor close after the outcome is final, with errors turned into warnings."
+    },
+    {
+      "risk": "The new record kind breaks a reader (job_of panic or a gate rule).",
+      "mitigation": "The job_of arm is added in store.rs; a run test loads Records at HEAD after a rejected GitHub job; the compiler flags exhaustive matches."
+    },
+    {
+      "risk": "`gh api` retries a POST and posts a duplicate comment.",
+      "mitigation": "The retry wrapper is the existing one; the effect is a repeated comment, not a wrong state."
+    },
+    {
+      "risk": "Records are read at HEAD for the predecessor's PR number; after the records-branch cutover they may not be at HEAD.",
+      "mitigation": "The code reads records as the rest of the run does (`Records::load` and `show_file` at the run's head, as resume_seed does at run/mod.rs:554); a missing file or record means no call and no error. §5.9 states the case."
+    },
+    {
+      "risk": "The extra ui line breaks a test that scans lines.",
+      "mitigation": "Success lines contain no `warning`; the full `cargo test` and `cargo test -p athena-cli --test drain` are run."
+    },
+    {
+      "risk": "A held job's early PR (opened before the hold) is never settled, because a held job commits no outcome and a retry opens its own PR.",
+      "mitigation": "Out of scope and unchanged. §5.9 states that only closed jobs are settled; the retry's close does not touch a held predecessor, since it has no recorded outcome."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "PrHost gains required methods comment_pr and close_pr",
+      "dependent": "crates/athena-core/src/gh/client.rs `GhClient`, and implementors `FakeHost` and `RunHost` (gh/tests.rs) and `FakeHost` and `EarlyFake` (test_support.rs)",
+      "kind": "code",
+      "test": "cargo test -p athena-core compiles every implementor; `closing_a_pull_request_comments_then_patches_state_closed_over_gh_api` covers GhClient. A search for `PrHost for` in crates/ found only these five; athena-cli names PrHost only in tests/external_calls.rs, which implements none.",
+      "reason": null
+    },
+    {
+      "name": "EarlyFake gains fields (pr_calls, fail_close, pr_numbers) and install_github_fakes carries it",
+      "dependent": "crates/athena-cli/tests/drain.rs `gate_run` (2772) and `assert_a_retry_with_space_runs_the_checks` (2842), which build `EarlyFake::new(|| 0)`, install it through `install_github_fakes` with origin https://github.com/owner/repo, then call `athena.retry` and `go` on the retry; the test_support.rs fixture holding an EarlyFake near line 753; run_pin_tests.rs `early_run` (3 EarlyFake uses)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain and cargo test -p athena-core. The constructor signature `EarlyFake::new(probe)` is unchanged, so these compile. In the drain retry the held predecessor is dispatched with no outcome and no pull-request.json (hold_for_disk commits no outcome), so `pr_disposition` on its recorded outcome gives no action and the predecessor close makes no call. The retry itself lands, so no settle call is made either. The drain test's `landed` assertion is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "close_dispatched / land_or_block call the predecessor close using retried_job",
+      "dependent": "crates/athena-core/src/reading/retry.rs `retried_job` (201) and its callers run/mod.rs 579 and 887, status/planning.rs 325, status/throughput.rs 604, evidence_labels.rs 173, steward.rs 451, gate_counts.rs 119, scope_guard.rs 631",
+      "kind": "code",
+      "test": null,
+      "reason": "The plan only calls `retried_job`; it is not changed, so no caller sees a different result. The new call loads Records at HEAD after the closing commit (one extra read) and writes nothing to records. A load error is one warning."
+    },
+    {
+      "name": "only the wrapper calls gh",
+      "dependent": "crates/athena-core/tests/external_calls_guard.rs (source scan for gh/HTTP use outside the wrapper)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test external_calls_guard",
+      "reason": null
+    },
+    {
+      "name": "list of GitHub-calling client operations",
+      "dependent": "crates/athena-cli/tests/external_calls.rs `operations()` table and the retry tests over it",
+      "kind": "code",
+      "test": null,
+      "reason": "The table is a hand-listed subset (default branch, open, checks, merge, merged commit, pages, reruns); no test iterates the PrHost trait. The new calls go through the same `GhClient::api` retry wrapper, covered by the FakeRunner test. The file is not edited."
+    },
+    {
+      "name": "AnyRecord gains the PullRequest variant",
+      "dependent": "crates/athena-data/src/records.rs `AnyRecord::canonical_path`, `schema`, `parse` and `check_record_file`; gate acceptance in crates/athena-gate/src/records.rs",
+      "kind": "code",
+      "test": "`a_job_pull_request_has_a_path_a_schema_and_round_trips` and `an_invalid_job_pull_request_is_refused`; the in-process gate accepts the closing commit in the criterion-1 run test.",
+      "reason": null
+    },
+    {
+      "name": "a job-level record must be named by job_of",
+      "dependent": "crates/athena-core/src/store.rs `job_of` (326-344) and `Records::from_parts` (431-434 `.expect`)",
+      "kind": "code",
+      "test": "Criterion-1 run test loads Records at HEAD after a rejected GitHub job with no panic and no invalid entry.",
+      "reason": null
+    },
+    {
+      "name": "gate and store matches over job-dir records",
+      "dependent": "crates/athena-gate/src/jobs.rs `JobFiles::load` and the closed-job scan; crates/athena-core/src/store.rs `JobRecords::add`",
+      "kind": "rule",
+      "test": null,
+      "reason": "Each match ends in a catch-all (`_ => {}` in jobs.rs, `other =>` in store.rs), so a pull-request record is ignored. The score recomputation reads only readings, invocations, candidate, verification and interventions."
+    },
+    {
+      "name": "AnyRecord variant added",
+      "dependent": "crates/athena-core/src/status.rs and other test helpers matching on AnyRecord",
+      "kind": "code",
+      "test": null,
+      "reason": "They end in `_` arms over hand-built record lists that never include the new variant; the compiler flags any exhaustive match."
+    },
+    {
+      "name": "close_dispatched settles the PR for non-landing outcomes",
+      "dependent": "Callers of `close_dispatched`: run/mod.rs planning stops (before verification), `finish_dispatched`, and `land_or_block`",
+      "kind": "code",
+      "test": "Existing ci_run tests (run/tests.rs:5492, 5529, 6664, 6679) plus new tests `no_github_origin_means_no_pull_request_calls_and_no_record` and `a_landed_jobs_pull_request_is_left_alone`; full `cargo test -p athena-core`.",
+      "reason": null
+    },
+    {
+      "name": "one extra ui line and one extra closing-commit file for rejected or failed GitHub jobs",
+      "dependent": "run/tests.rs:6664 `ci_branch_is_deleted_when_the_job_is_rejected_or_fails` and run_pin_tests.rs `early_run` with its `warnings()` filter",
+      "kind": "code",
+      "test": "cargo test -p athena-core",
+      "reason": "Those tests assert CI call kinds, warnings and state, not the closing commit's file list; the success line contains no `warning`."
+    },
+    {
+      "name": "which jobs a retry resumes (basis of the keep-open rule)",
+      "dependent": "crates/athena-core/src/run/mod.rs `settle_resume_marks` (860), `resume_seed` (533), `timeout_seed` (881); crates/athena-core/src/disk.rs `is_environment_reason` and `resumable_stop`",
+      "kind": "rule",
+      "test": "`a_job_stopped_for_the_environment_keeps_its_pull_request_open_and_marked`, `a_retry_closes_the_pull_request_its_predecessor_left_open` and `a_retry_that_starts_fresh_still_closes_the_pull_request_its_predecessor_left_open`",
+      "reason": "The plan only reads these; resume marks and retry behavior are unchanged. The predecessor close does not use them. It runs beside the existing settle_resume_marks calls (close.rs:155 and 433) and reads the number from the predecessor's committed record."
+    },
+    {
+      "name": "state-dir early link",
+      "dependent": "crates/athena-core/src/state.rs `clean_job` and pr.rs `link_path` (state-dir pr-link.json)",
+      "kind": "code",
+      "test": "`a_refused_close_is_an_error_and_leaves_the_link_unchanged`",
+      "reason": "Read only, in memory before the commit, and settled before clean_job runs (close.rs:151). A retry's predecessor lookup does not use it."
+    },
+    {
+      "name": "operation tag for a refused comment or close (create-pr)",
+      "dependent": "crates/athena-core/src/watcher.rs host-error signals; HostError records; docs/design/decision-sets.md (operation list); crates/athena-cli/tests/backtest.rs and watcher.rs; crates/athena-data/src/records/core.rs `HostOperation` doc comment",
+      "kind": "rule",
+      "test": null,
+      "reason": "No HostOperation variant is added, so the persisted list, parse and as_str are unchanged. The watcher fires only on Merge. The settle client has no host-error log (client.rs:460-467), so a refused comment or close writes no HostError record and nothing is tagged; the enum's doc comment is not made wrong by any record. §5.9 states this."
+    },
+    {
+      "name": "CHANGELOG.md edit",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (`include_str!` of CHANGELOG.md)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "One bullet under Unreleased/Added; no refusal or matching rule is added, so no corpus case is added."
+    },
+    {
+      "name": "stored PR link and landing of PRs",
+      "dependent": "crates/athena-core/src/pr.rs `PrLink`, `load_early_link`, `load_link`; `land_pr` in gh/landing.rs; `athena land` and reconcile",
+      "kind": "code",
+      "test": null,
+      "reason": "PrLink fields and LinkState are unchanged; landing code has no diff. A closed unmerged PR is never merged; `merged_commit` reports not merged. A rejected or failed job never reaches landing."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two tests. (a) gh/tests.rs `a_rejected_jobs_pull_request_is_commented_and_closed` calls the production `settle_pr` with the extended `FakeHost` and a PrLink for #7. (b) run/tests.rs `a_rejected_job_records_its_pull_request_number_and_closes_it` runs `Athena::go` through `ci_run(Some(GITHUB), FAILS_ON_EDIT, false, |_| {})`, so the job ends Rejected after the early PR was opened. It then reads `<job dir>/pull-request.json` at HEAD with `check_record_file` and loads `Records::load` at HEAD.",
+      "command": "cargo test -p athena-core a_rejected_job",
+      "observes": "The fake saw exactly one close of #7 whose comment contains the job id and the word `rejected`. The record at HEAD parses as `AnyRecord::PullRequest` with pr_number 7 and repository owner/repo. Records::load lists the job with no panic and no invalid entry. The outcome state stays Rejected.",
+      "fails_without": "Without the settle call in close_dispatched the fake's pr_calls is empty and the exactly-one-close assertion fails. Without the record push, show_file at HEAD is None and the parse assertion fails. Without the job_of arm Records::load panics.",
+      "seam": "Production entry points: `settle_pr` (gh/early.rs, added by step 4) for (a); `Athena::go` -> `close_dispatched` -> `Athena::settle_pr_for_job` for (b). Fakes: `FakeHost` (gh/tests.rs, exists; gains recorders in step 6) and `EarlyFake` (test_support.rs, exists; gains `pr_calls` in step 5), installed by `early_seam::install` inside the existing `ci_run` helper (run/tests.rs:5438, exists). Guards: https github.com origin, `self.nested` is None, a stored early link exists."
+    },
+    {
+      "criterion": 2,
+      "method": "gh/tests.rs `a_verified_or_unsettled_outcome_makes_no_host_call` calls `pr_disposition` and `settle_pr` for Landed, Stale, Blocked and other states. run/tests.rs `a_landed_jobs_pull_request_is_left_alone` runs `ci_run(Some(GITHUB), PASSES, false, ..)`.",
+      "command": "cargo test -p athena-core a_landed_job",
+      "observes": "State is Landed; `fake.pr_calls` is empty (no comment, no close); the early PR was still opened (`open_pr` recorded once); no pull-request.json exists at HEAD.",
+      "fails_without": "If the disposition returned Close for Landed, pr_calls would hold a close and the emptiness assertion fails. If the record were pushed for landed jobs the absence assertion fails.",
+      "seam": "Same as criterion 1: `Athena::go` via `ci_run` with `EarlyFake` through `early_seam` (exists) and `settle_pr` with `FakeHost`; the `pr_calls` recorders are added in steps 5-6."
+    },
+    {
+      "criterion": 3,
+      "method": "Five tests. gh/tests.rs `a_failed_jobs_pull_request_is_closed_naming_the_outcome` (settle_pr, Failed, non-environment reason) and `a_job_that_may_be_retried_gets_a_not_landing_comment_and_stays_open` (timed_out and environment-failed). run/tests.rs `a_job_stopped_for_the_environment_keeps_its_pull_request_open_and_marked` uses `ci_run(Some(GITHUB), PASSES, true, ..)` (check killed at the deadline, same setup as run/tests.rs:6669). `a_retry_closes_the_pull_request_its_predecessor_left_open` uses `athena_with` and an `EarlyFake` installed via `early_seam::install` and `check_seam::install` as `ci_run` does. The first `go` is killed at the deadline, then `athena.retry(first)` (as run/tests.rs:5215) and `go(retry.job)` run with a fresh EarlyFake whose pr_numbers queue is [8] and the check passing, so the retry lands. `a_retry_that_starts_fresh_still_closes_the_pull_request_its_predecessor_left_open` is the same flow, but between the first `go` and the retry a non-records file is committed with the existing `commit_file` helper (run/tests.rs:341). That makes resume_seed and timeout_seed return None, so `consumed_resume` and `ctx.resume` are None and the retry plans from scratch.",
+      "command": "cargo test -p athena-core a_failed_job a_job_that_may_be_retried a_job_stopped_for_the_environment a_retry_closes_the_pull_request a_retry_that_starts_fresh",
+      "observes": "Failed non-environment: one close whose comment holds the job id and `failed`. timed_out and environment-failed: exactly one comment containing the job id and `not landing`, zero closes, record written. In both retry tests, after the retry finishes, the second fake holds exactly one close of #7, read from the first job's pull-request.json, with a comment naming the first job id, the retry job id and `landed`. It holds no comment or close on #8. The fresh-start test also asserts the retry consumed no seed (no resumed-from line in the ui output).",
+      "fails_without": "Without the KeepOpen branch the environment-failed job gets a close and the zero-close assertion fails. Without the Failed case no close is recorded. Without the predecessor hook neither retry test sees a close of #7. With the hook keyed on consumed_resume, only the fresh-start test fails, which is why it exists.",
+      "seam": "`settle_pr` with `FakeHost`; `Athena::go`/`Athena::retry` through `athena_with`, `EarlyFake` and `early_seam` (all exist). `close_predecessor_pr` is added in step 4 and wired in step 7. The `pr_numbers` queue and `pr_calls` are added to EarlyFake in step 5. The Failed non-environment case has no end-to-end fixture reaching it after the early PR; it is covered at unit level only."
+    },
+    {
+      "criterion": 4,
+      "method": "gh/tests.rs `closing_a_pull_request_comments_then_patches_state_closed_over_gh_api` drives the real `GhClient::close_pr` over the existing `FakeRunner` (gh/tests.rs:64) and reads its recorded argument lists. A second test checks that the fake host's trait impls record `comment_pr` and `close_pr`. `git diff` shows the trait methods in client.rs and the impls in the fakes. `cargo test -p athena-core --test external_calls_guard` is also run.",
+      "command": "cargo test -p athena-core closing_a_pull_request_comments_then_patches",
+      "observes": "Two runner calls in order: `api --method POST repos/example/project/issues/7/comments -f body=...`, then `api --method PATCH repos/example/project/pulls/7 -f state=closed`. Both start with `api`; none uses a `pr` subcommand. The guard test still passes.",
+      "fails_without": "With the PATCH omitted or sent before the comment the ordered-calls assertion fails; without `close_pr` on GhClient the crate does not compile.",
+      "seam": "`GhClient::close_pr` (client.rs, added by step 3) driven through the existing `Runner` seam with `FakeRunner` (exists). No double holds logic under test."
+    },
+    {
+      "criterion": 5,
+      "method": "athena-data `a_job_pull_request_has_a_path_a_schema_and_round_trips` builds the record, checks `schema()` is `athena.pull-request/1`, round-trips to_json and parse, passes `check_record_file` at `<job dir>/pull-request.json` and gets `RecordError::Misplaced` elsewhere. `an_invalid_job_pull_request_is_refused` covers number 0 and an empty repository. The run test from criterion 1 reads the file back from the closing commit and loads Records.",
+      "command": "cargo test -p athena-data a_job_pull_request",
+      "observes": "The record is accepted at its canonical path, refused at another, and invalid values are refused. The closing commit of a rejected GitHub job holds the file with pr_number 7.",
+      "fails_without": "A wrong canonical_path flips the Misplaced assertion. Without the store.rs arm Records::load panics in the criterion-1 run test.",
+      "seam": "`check_record_file` and `AnyRecord` in crates/athena-data/src/records.rs (exist; the variant is added in step 1), modeled on the replay test at records.rs:3351."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of the design doc and the changelog.",
+      "command": "git diff docs/design/native-pr-landing.md CHANGELOG.md",
+      "observes": "A new §5.9 states the rule (close on rejected or failed; mark and keep open for a retry; close the predecessor when its retry ends; never touch verified). It gives a table of outcomes and the alternatives (leave open; close all; title or label mark; LinkState::Closed; field on Outcome; new HostOperation; keying the predecessor on a kept seed; backfill out of scope). It lists the REST calls (POST issues/{n}/comments, PATCH pulls/{n} state=closed) with the note that create-pr covers every PR write and that this client has no host-error log, so no record is tagged. It describes the record and failure handling. It states that a kept-open PR closes only when a retry of the job ends, that a job never retried keeps its marked PR open, and that retry_landing is not wired. It notes the gate-refused open question. One row is added to §8 and one changelog bullet under Unreleased/Added.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three Athena checks, then `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-core --test external_calls_guard` and `cargo test -p athena-cli --test drain` (these read files or fakes this change touches), and read the diff for landing code.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All pass. Existing tests are textually unchanged except new fields in the EarlyFake constructor and new trait impls in fakes. `git diff` shows no change to `land_pr`, gh/landing.rs, gh/records.rs, the Landed arm of `close_dispatched`, or the landing arms of `land_or_block` (only the one predecessor-close line next to settle_resume_marks).",
+      "fails_without": "A fake missing the new methods fails compilation; a malformed changelog entry fails the corpus test.",
+      "seam": "The ordinary cargo gates; the fakes are completed in steps 5-6."
+    },
+    {
+      "criterion": 8,
+      "method": "run/tests.rs `a_failed_close_is_one_warning_and_the_outcome_stays` sets `fail_close` on EarlyFake via the `ci_run` setup closure. `a_refused_predecessor_close_is_one_warning_and_the_retry_outcome_stays` sets `fail_close` on the retry's fake. `no_github_origin_means_no_pull_request_calls_and_no_record` loops over the origins used by the existing test at run/tests.rs:5535-5541. gh/tests.rs `a_refused_close_is_an_error_and_leaves_the_link_unchanged` covers settle_pr.",
+      "command": "cargo test -p athena-core a_failed_close no_github_origin a_refused_close a_refused_predecessor_close",
+      "observes": "With the refused close the state is still Rejected (or the retry's own state is unchanged), exactly one line starts with `warning: could not close the pull request`, and the record is still committed. With no GitHub origin, or a nested run, `pr_calls` is empty and no pull-request.json exists. settle_pr returns Err and the stored link equals the original.",
+      "fails_without": "If the error were propagated with `?` out of close_dispatched, `go` would return Err and `finished(..).unwrap()` panics. Without the link guard a no-origin job would call the host.",
+      "seam": "`Athena::go` via `ci_run` with `EarlyFake.fail_close` (added in step 5) through `early_seam` (exists). The fake only refuses; the decision and the warning are production code."
+    }
+  ],
+  "open_questions": [
+    "User: Should a verified job whose landing commit the gate refuses (the Failed branch inside land_or_block) have its own PR closed? This plan treats it as verified and leaves it alone; if you want it closed, add one settle call there.",
+    "User: The request's keep-open clause is conditional ('if it must stay open for a retry'). This plan keeps open the PRs of timed_out and environment-failed jobs, which `athena retry` resumes, and closes them only when a retry of the job ends. A job never retried keeps its marked PR open indefinitely, so part of the reported 10-of-14 can stay. Do you want every non-landing outcome closed at once instead (the resume reads local state, not the PR)?",
+    "User: A blocked job that is later landed by `athena go` (retry_landing) does not close its predecessor's kept-open PR in this plan. Do you want that path wired too?",
+    "Host: Does the token `gh` uses in target repositories have write access to pull requests and issues (comments)? Without it every close is a warning line and no outcome changes.",
+    "User: Is it acceptable that docs/records.md and docs/design/decision-sets.md are not updated for the new record and the create-pr tag (not in the brief's file list)? The record layout and the tag note are in §5.9 instead."
+  ],
+  "producer_section_sha256": "4bcf29bdc2127c5c57f104cddf4e165af55a5843c1184599c543e5e47b365ea4"
+}

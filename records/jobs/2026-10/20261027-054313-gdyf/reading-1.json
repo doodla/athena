@@ -1,0 +1,171 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-054313-gdyf",
+  "n": 1,
+  "at": "2026-11-08T19:19:18.679958591Z",
+  "invocation_seq": 1,
+  "base_commit": "743f5268001640f9040d99d3f140623584a3f48d",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Refuse scope limits that omit default-written and dependent files",
+  "summary": "Root cause (class scope-criterion-too-narrow-misses-dependent-tests, jobs 20261018-045437-7z81 and 20261023-052543-9bw7): reading acceptance never checks a \"only these files may change\" limit against files Athena always writes (CHANGELOG.md) or the consumers of a changed config. Fix it in reading acceptance with one new step in `refusing_check`, so the reader is refused and repairs the reading before a producer runs.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The check and its tests are Rust in athena-core."
+    },
+    {
+      "id": "tested",
+      "how": "Unit tests and a corpus case; cargo test, clippy and fmt required."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is a refusing step in reading acceptance, not prose."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fixed in reading acceptance, covering all scope limits, not the two jobs."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that fail without the step."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is that a too-narrow scope limit is refused before a producer runs."
+    },
+    {
+      "id": "small",
+      "how": "One new check and its tests."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: stop readings from writing a file-scope limit too narrow; the audience is the reader role, whose reading is judged by the reading gate, and then verifiers who fail a job that edits a default or dependent file.",
+    "Previous jobs: 20261018-045437-7z81 landed and verified (pass); its only findings were a nit on the triplicated [job_plan]-stripping test helper (not touched, still allowed by its criterion 4) and a minor note that the producer output was not visible; neither needs a fix here. Its changed files (athena.toml, the three test files, docs/decisions.md, docs/design/job-planning.md, CHANGELOG.md) are kept as landed and are all out_of_scope for this job. Job 20261023-052543-9bw7 was abandoned with no candidate (its content could not land because the base held a reverted spec); its design work is not redone here, and docs/design/records-history.md is out_of_scope. Its scope limit omitted CHANGELOG.md, which Athena always writes; that is the second instance this job fixes.",
+    "Code survey: read crates/athena-core/src/reading/checks.rs (check_reading_acceptance and refusing_check run checks as `step!` lines in order; check_governance_coverage at line 607 and GOVERNANCE_BY_DELIVERABLE at 559 map a deliverable to a governance file), and crates/athena-core/src/reading.rs and crates/athena-core/tests/refusal_corpus.rs (each step! needs a corpus case in which that check refuses). The change adds no record or data file under crates/, so check_record_file and AnyRecord are not touched. The property is measured directly by calling refusing_check on a Reading and asserting the returned check name.",
+    "Existing code: crates/athena-core/src/reading/checks.rs (refusing_check, check_governance_coverage, governance_is_covered, GOVERNANCE_BY_DELIVERABLE) and crates/athena-core/src/admission.rs (is_governance); the new check extends these step and table conventions and reuses the Reading fields, rather than adding a second mechanism.",
+    "Design of the new check, named check_scope_limit: a criterion or out_of_scope item is a scope limit when it says only/no other/nothing else files may change. When a reading has one, it must list CHANGELOG.md as a deliverable (Athena's default write) or name it in the limit; and when athena.toml or defaults.toml is a modify deliverable, it must list a crates/ test deliverable or carry an assumption starting `Consumers:` naming the search of the repo for files that load that config. The error names the missing file and why.",
+    "The reader prompt has 3 tokens left, so the prompt text is not changed; the check list in crates/athena-context/src/briefs.rs may need one short line, and the producer must stay inside the prompt token budget (or place it in a set with room).",
+    "Term ladder: not used; no structural term from the request needs defining."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-core/src/reading/checks.rs defines `check_scope_limit` with a doc comment that names the root cause (a scope limit written from the named files without listing default-written files and config consumers) and cites jobs 20261018-045437-7z81 and 20261023-052543-9bw7, and `refusing_check` calls it as a single `step!(check_scope_limit(..))` line.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a unit test in crates/athena-core/src/reading.rs builds a reading with a scope-limit criterion and no CHANGELOG.md deliverable and asserts refusing_check returns \"check_scope_limit\"; the same reading with CHANGELOG.md listed is accepted. The test fails when the step! line is removed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a test builds a reading with a modify deliverable athena.toml, a scope limit, and neither a crates/ test deliverable nor a `Consumers:` assumption, and asserts it is refused by check_scope_limit; adding either makes it pass. A reading without a scope limit and a reading with no config deliverable are unaffected.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core --test refusal_corpus`: a corpus case in crates/athena-core/tests/refusal_corpus.rs expects Refuse(\"check_scope_limit\") using the shape of job 20261023-052543-9bw7's scope, and the corpus's rule that every step! has a refusing case passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: the whole workspace passes, so existing accepted readings in the corpus are not newly refused beyond the intended cases: expected 3% of newly refused readings, and the higher refusal rate is intended because a scope limit that omits files Athena always writes would fail verification.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`: both pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the new check, and docs/decisions.md records the call (rule enforced by mechanism, not prose) naming the failure class scope-criterion-too-narrow-misses-dependent-tests.",
+      "kind": "content"
+    },
+    {
+      "text": "git diff shows no change to athena.toml, defaults.toml, workflows, records/, or the files kept from job 20261018-045437-7z81 beyond what is listed as deliverables.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.6
+    }
+  ],
+  "out_of_scope": [
+    "Files changed by job 20261018-045437-7z81 (athena.toml, crates/athena-cli/tests/common/mod.rs, crates/athena-data/src/config.rs, crates/athena-core/src/run_pin_tests.rs, docs/design/job-planning.md): kept as landed, not touched",
+    "Merging the three duplicated [job_plan]-stripping test helpers (a nit in job 20261018-045437-7z81)",
+    "docs/design/records-history.md and the records-history design of job 20261023-052543-9bw7",
+    "Changes to athena.toml, defaults.toml, workflows, [history] exempt entries, or records/",
+    "Changing prompt text of the reader role (3 tokens left)",
+    "Scanning file contents of the repo for consumers of a config file"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.6,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2200.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6785714285714286,
+      "p_user_intervenes": 0.07362428842504744,
+      "cost_usd": {
+        "p10": 0.5656278339630169,
+        "p50": 1.4678668,
+        "p90": 4.811315282128671
+      },
+      "wall_time_s": {
+        "p10": 570.2056324832829,
+        "p50": 2108.1592929438516,
+        "p90": 4309.820071613866
+      }
+    }
+  },
+  "departures": "The change adds a check with a corpus case and touches a gate, so cost and time are somewhat above the reference; the corpus rule that every step needs a refusing case adds work.",
+  "hard_reason": "Adds a new refusal rule to reading acceptance (a check that can refuse readings), which changes the gate that judges jobs.",
+  "producer_effort": "high"
+}

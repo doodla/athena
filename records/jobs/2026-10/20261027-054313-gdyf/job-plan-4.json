@@ -1,0 +1,480 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-054313-gdyf",
+  "round": 4,
+  "at": "2026-11-08T19:40:00.191784247Z",
+  "invocation_seq": 9,
+  "approach": "Add one reading-acceptance check, `check_scope_limit` in crates/athena-core/src/reading/checks.rs, as a single `step!(check_scope_limit(reading));` line in `refusing_check` after `check_defined_terms` and before `check_boundary_and_repo_files`. Root cause: nothing at the reading gate compares a scope limit with the files Athena always writes (CHANGELOG.md, forced by `ensure_changelog`, reading.rs:297, run before the gate at reading.rs:859) or with the readers of a changed config. A limit written from the named files therefore passes the gate and fails at verification (class scope-criterion-too-narrow-misses-dependent-tests; jobs 20261018-045437-7z81 and 20261023-052543-9bw7). A scope limit is a criterion for which `athena_context::briefs::limits_changed_files` (briefs.rs:146) is true, the same matcher that builds the allowlist at verification (`allowed_paths`, briefs.rs:115). The check runs for capability `change` readings with no question and does two mechanical things, with no scan of repo contents. (1) CHANGELOG half, now structural (round 4, finding 4): find the limit's allowed-list span, the words from the first `only`/`outside`/`except`/`beyond`/`besides` up to the first change word after it. A limiting criterion is accepted when CHANGELOG.md is a word inside that span, or the exact phrase `the deliverables` occurs, or the criterion has none of those trigger words (a bare form such as 'No other file is changed' or 'production unchanged'). Otherwise it is refused. There is no negation word list: a name outside the span ('...; CHANGELOG.md is not changed') is simply not permitted, and a name inside it ('Only X and CHANGELOG.md may change, keeping one entry') is. (2) Config half: when a limit exists and athena.toml or defaults.toml is a deliverable, the reading needs a `Consumers:` assumption that (a) names one or more path-like words, none the config file itself, every one a deliverable (or under a deliverable ending in '/'), or (b) says 'unchanged' or 'no change', or (c) says 'none found'. This half also fires for the defaults-proposal job (`accept_request`, proposals.rs:442), whose reader will write 'No other file is changed': that job must carry a `Consumers:` line too, and the error text and the new READING_RULES line say exactly what to write. Support work: one READING_RULES line, unit tests in reading.rs, corpus cases with new input-form tags, a one-constant fixture fix in run/tests.rs (forced), a steward test showing stored proposals leave the queue, a replay step with a stop rule, a CHANGELOG entry and decision D166. The CHANGELOG entry and D166 map criterion 2's 'CHANGELOG.md listed' to 'named in the limit', with the evidence that `ensure_changelog` (reading.rs:859) already lists it at the gate, so a deliverable-only test could never fire.",
+  "decisions": [
+    {
+      "choice": "CHANGELOG half uses the structure of the limit sentence. For every criterion with `limits_changed_files` true, tokenize as the matcher does (lowercase, hyphen to space, trim non-alphanumeric ends). Trigger words: only, outside, except, beyond, besides. If none occurs, the criterion is bare and exempt. Otherwise the span runs from the first trigger word to the first change word (change, changes, changed, modified, touched) after it, or to the end. Exempt when the span holds the word `changelog.md` (the row from the default-written table), or the two-word phrase `the deliverables` occurs anywhere. Else refused. A CHANGELOG.md deliverable alone does not repair the text.",
+      "reason": "`build_reading` calls `ensure_changelog` before `check_reading_acceptance`, so every change reading already lists CHANGELOG.md at the gate; a rule that accepted 'CHANGELOG.md listed' would never fire. The 9bw7 failure was a limit sentence that forbids the forced edit. The span reuses the shape `limits_changed_files` already parses ('only X may change', 'no file outside X changed'), so a name counts only where the sentence permits it. This answers round 4 finding 4: no free negation window ('keeping', 'kept', 'stays', 'remains' no longer matter), only the plural phrase 'the deliverables' exempts ('Only the deliverable src/a.rs may change' is refused), and 'than', 'apart' and 'aside' are dropped from the trigger list. Known misses, stated in D166: a limit with no trigger word that still forbids CHANGELOG.md, and a name placed in the span but negated inside it, are accepted; 'Only X may change; CHANGELOG.md may change too' is refused and repaired by moving the name into the list.",
+      "rejected": [
+        {
+          "option": "Accept when CHANGELOG.md is a deliverable (the literal reading of criterion 2)",
+          "why": "Inert for every production reading, so the class stays open."
+        },
+        {
+          "option": "Free negation-word window around the name (rounds 2 and 3)",
+          "why": "Finding 4: 'keeping', 'kept', 'stays' have positive uses and the window refused valid limits while missing other phrasings; the span needs no word list."
+        },
+        {
+          "option": "Exempt on any occurrence of 'deliverable'",
+          "why": "'Only the deliverable src/a.rs may change' omits CHANGELOG.md; only 'the deliverables' points to the list."
+        },
+        {
+          "option": "Fire only when the limit names a file (round 1)",
+          "why": "Leaves 'test-only change' and 'only the docs may change' accepted although the job must still edit CHANGELOG.md."
+        },
+        {
+          "option": "Make `ensure_changelog` append CHANGELOG.md to a limiting criterion's text instead of refusing",
+          "why": "It rewrites the reader's criterion silently, so the reader never learns that a limit must account for default-written files, and the config half would still need a refusal. The accepted reading chose refuse-and-repair before a producer runs."
+        }
+      ]
+    },
+    {
+      "choice": "Only criteria are scanned; out_of_scope items are not. The matcher is `limits_changed_files` imported from athena_context::briefs; the tokenizer and span finder are small private helpers in checks.rs.",
+      "reason": "One definition for the gate and for verification-time enforcement (`limiting_criterion` reads criteria only, briefs.rs:103-108), so the gate cannot drift from what is enforced. out_of_scope items are exclusions, never an allowlist, and 'files kept from job X' would cause false refusals. This departs from the reading's 'criterion or out_of_scope item'; raised as a User question.",
+      "rejected": [
+        {
+          "option": "A new phrase list ('only', 'nothing else', 'no other') as the trigger in checks.rs",
+          "why": "A second matcher that would drift from `limits_changed_files`."
+        },
+        {
+          "option": "Also scan out_of_scope items",
+          "why": "Enforcement ignores them, and exclusions would cause false refusals."
+        }
+      ]
+    },
+    {
+      "choice": "The config half fires only with a limiting criterion (exempt from the CHANGELOG half or not, bare or not) and a deliverable whose normalized path is athena.toml or defaults.toml. It is met only by a `Consumers:` assumption (trimmed, case-insensitive prefix, like `code_surveys` in surveys.rs:116) in one of three forms: (a) at least one path-like word other than the config file, every path-like word a deliverable path or under a deliverable ending in '/'; (b) 'unchanged' or 'no change'; (c) 'none found'. Path-like = contains '/' or ends .rs/.toml/.md/.json/.yml/.yaml after trimming quotes, backticks, brackets, a leading './' and end punctuation. The refusal text states the repair: 'add an assumption `Consumers: <each file that loads <config>, listed as a deliverable>`, or `Consumers: none found` / `Consumers: <config> readers unchanged` if no file must change'.",
+      "reason": "With a limit the deliverable list is the allowlist (briefs.rs:110-126). In 7z81 the tests that load the real athena.toml were not deliverables, so the scope guard failed the job; the introspection's prevention was that the reading should then allow those files. Requiring every named consumer to be a deliverable does that. athena.toml is also read outside crates/ (xtask/tests/policy.rs, xtask/src/main.rs), so every path-like word counts. Round 4 finding 3: the defaults-proposal job (`accept_request`, proposals.rs:442-450, sent through `ask` at proposals.rs:642 into `build_reading` and `check_reading_acceptance`) lists defaults.toml and tells the producer to touch no other file; its reader will write the bare criterion 'No other file is changed', which `limits_changed_files` matches, so the config half fires. Decision: it still fires. Applying a default changes what the tests that load the real defaults.toml see, which is the 7z81 failure; one `Consumers:` line is cheap and 'Consumers: none found' is accepted. The reading is refused at most once for this (the refusal text goes to the reader as the re-read feedback, reading.rs:688) because the text names the exact line; unit and corpus cases pin refuse without the line and accept with it. D166 records that proposal-apply jobs carry this line. This is a revised sense of criterion 3's 'either': a bare crates/ test deliverable no longer satisfies it, since that left 7z81's failure open.",
+      "rejected": [
+        {
+          "option": "Exempt bare limits on proposal-apply jobs from the config half",
+          "why": "The 7z81 failure was a config change whose consumers were not allowed; a defaults change has the same risk, and an exemption keyed to the request text would be a hole in the rule."
+        },
+        {
+          "option": "Accept any crates/ test deliverable as the answer (the literal criterion 3)",
+          "why": "An unrelated test deliverable such as refusal_corpus.rs satisfied the rule without any search and without widening the allowlist to the real consumers."
+        },
+        {
+          "option": "Accept a Consumers line naming paths that are not deliverables",
+          "why": "The producer would have to edit them and the scope guard would fail the job as in 7z81."
+        },
+        {
+          "option": "Only check words containing crates/",
+          "why": "An xtask/ consumer that is not a deliverable would pass, and one that is a deliverable would be refused."
+        },
+        {
+          "option": "Scan repo content for files that load the config",
+          "why": "Out of scope; readers see a plain copy and the gate must stay deterministic."
+        },
+        {
+          "option": "Require the consumer rule for every config deliverable, even without a limit",
+          "why": "Without a limit the producer may touch consumers freely; it would refuse readings that cannot suffer the failure."
+        }
+      ]
+    },
+    {
+      "choice": "Default-written files go in a const table `DEFAULT_WRITTEN_FILES: [(&str, &str); 1]` whose only row is (`super::CHANGELOG_PATH`, reason text), and config files in `CONFIG_FILES: [&str; 2]`, both in checks.rs.",
+      "reason": "`CHANGELOG_PATH` (reading.rs:293) is the constant `ensure_changelog` writes; checks.rs is a child module of reading with `use super::*` (checks.rs:3), so the gate and the writer share one source. The table follows GOVERNANCE_BY_DELIVERABLE; the reason text feeds the error; a future default file is one row.",
+      "rejected": [
+        {
+          "option": "Hard-code the string CHANGELOG.md in the logic",
+          "why": "Can drift from what ensure_changelog writes and loses the reason text."
+        }
+      ]
+    },
+    {
+      "choice": "Add the step after `check_defined_terms` and before `check_boundary_and_repo_files`; add one line to `READING_RULES` (briefs.rs:2252), at most 220 bytes, that names `check_scope_limit`, CHANGELOG.md / 'the deliverables' and the `Consumers:` line with its three forms (paths that are deliverables, none found, unchanged), including the defaults-proposal case in a few words; leave the reader prompt text alone.",
+      "reason": "refusing_check is the one place a check is added (`no_check_bypasses_refusing_check` enforces it). READING_RULES is written only at briefs.rs:2453, outside the reader's always-loaded set, so the 3-token headroom is untouched. The rule line answers finding 3: the reader is told what to write for a config deliverable.",
+      "rejected": [
+        {
+          "option": "Edit the reader prompt",
+          "why": "Out of scope; the budget has 3 tokens left."
+        },
+        {
+          "option": "Place the step first",
+          "why": "Changes which check refuses first in existing multi-fault tests with no benefit."
+        }
+      ]
+    },
+    {
+      "choice": "Change the `LIMIT` constant in crates/athena-core/src/run/tests.rs:3213 to 'No file outside README.md and CHANGELOG.md changed' and update its doc comment.",
+      "reason": "The scope tests push LIMIT into the fake reader's criteria (run/tests.rs:3249), so it goes through the real gate. The old text has 'outside', omits CHANGELOG.md and falls outside the new rule's exemptions, so the scope tests would fail. The new text keeps CHANGELOG.md inside the span, so it is accepted. Allowed paths already include CHANGELOG.md and asserts use `contains(LIMIT)` (3348, 3415). The edit is forced by the rule; the reason goes into the CHANGELOG entry and D166 (finding 6) and the file is raised as a User question (findings 1, 2).",
+      "rejected": [
+        {
+          "option": "Exempt README.md-only limits or this phrase in the check",
+          "why": "A test-shaped hole; the class would stay open for single-file limits."
+        },
+        {
+          "option": "Leave run/tests.rs unchanged",
+          "why": "The scope tests would fail and criterion 5 needs the workspace to pass."
+        },
+        {
+          "option": "Make the fake reader append CHANGELOG.md in code outside the constant",
+          "why": "A larger edit in the same file for the same result."
+        }
+      ]
+    },
+    {
+      "choice": "Add one steward test in crates/athena-core/src/steward.rs (tests module, next to `a_proposed_request_with_a_passing_stored_reading_is_listed_read`, line 2330): `a_proposed_request_whose_stored_limit_omits_changelog_leaves_the_queue`, with `stored_reading(1, \"b\", \"src/a.rs\")` whose criterion is 'Only src/a.rs may change' (queued_work empty) and a control 'Only src/a.rs and CHANGELOG.md may change' (stays listed, `read` true). State the effect in D166 and the CHANGELOG entry: Proposed jobs whose latest stored reading carries such a limit leave the drain queue (`queued_work`, steward.rs:416-425) until read again.",
+      "reason": "`queued_work` re-checks every Proposed job's stored reading with `check_reading_text`, so the new refusal reaches stored readings silently. No existing steward test stores a limit reading. Test-only edit; reason recorded in the change description (finding 6).",
+      "rejected": [
+        {
+          "option": "Cover it only with the whole-crate test run",
+          "why": "Nothing would show the effect."
+        },
+        {
+          "option": "Drop the steward test and only document the effect",
+          "why": "Documented but unshown behavior; the edit is a few lines in a tests module."
+        }
+      ]
+    },
+    {
+      "choice": "Add an in-loop replay step with a stop rule. After the suite passes, read the replay result the loop gives (the loop replays past readings through `check_reading_text` when crates/ changes: `touches_reading_rules`, replay.rs:314; limit `replay_limit_percent`, replay.rs:304) and run `athena check-reading` on any stored reading fixtures. If the newly refused share is above 8% (declared 3% plus REPLAY_DECLARED_MARGIN_POINTS = 5, replay.rs:161, 296-308), stop and report the measured share; do not narrow the check or edit the declared figure.",
+      "reason": "Proposal-apply readings and the broader trigger may raise the share above the 3% estimate; the hold at verification is `newly * 100 > total * 8`. Stopping gives the user the measurement and the declared figure stays an honest estimate.",
+      "rejected": [
+        {
+          "option": "Narrow the check or raise the declared share until the replay passes",
+          "why": "Tunes the rule to the corpus; the user decides on a measured number."
+        },
+        {
+          "option": "Leave measurement to verification only",
+          "why": "The producer's loop already runs the same replay and can report early."
+        }
+      ]
+    },
+    {
+      "choice": "Demonstrate criterion 6 with the checks Athena runs, `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`.",
+      "reason": "The criterion is about the real format and lint gates; no double is useful. Private helpers used only by `check_scope_limit` mean an unused helper or import fails `-D warnings`.",
+      "rejected": [
+        {
+          "option": "A test that shells out to cargo",
+          "why": "Duplicates the CI gate inside the test suite."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the proposal-apply drift guard inside reading.rs tests: a test reads `include_str!(\"proposals.rs\")` and asserts the request line 'Deliverable: defaults.toml (modify). Make one change to it and touch no other file.' is still in `accept_request`, and the proposal-shape unit test and corpus case use that same line as their request text.",
+      "reason": "Constructing a `ProposalRecord` from the reading.rs tests is heavy, and editing proposals.rs would add a ninth file. The guard fails if the request text changes so the cases cannot drift from the real flow.",
+      "rejected": [
+        {
+          "option": "Add the test to proposals.rs and call accept_request",
+          "why": "A ninth touched file, and a Reading fixture is needed there too."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "purpose": "Add `check_scope_limit` (doc comment naming the root cause, the class, both jobs and the intended refusal rate), the const tables DEFAULT_WRITTEN_FILES and CONFIG_FILES, private helpers (word tokenizer, allowed-list span finder, Consumers-line path parser and deliverable test), the `limits_changed_files` import, the step line after `check_defined_terms`, and an entry in the `check_reading_acceptance` doc list.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Unit tests only: scope_limit_changelog, scope_limit_config_consumers, scope_limit_proposal_apply_shape (with the proposals.rs drift guard), scope_limit_unaffected_readings, scope_limit_has_one_step_line, scope_limit_doc_and_changelog_name_the_cause.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add `scope_limit_cases()` (11 Refuse, 11 Accept), chain it in `cases()`, add the new tags to `INPUT_FORMS` and update its length.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add one rule line naming `check_scope_limit` to READING_RULES (type length 11, at most 220 bytes, covering CHANGELOG.md / 'the deliverables' and the `Consumers:` line); update the rule-count assertions, the check list and the size bound with its comment in the test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "One-constant fixture change forced by the rule: `LIMIT` (line 3213) becomes 'No file outside README.md and CHANGELOG.md changed' and its doc comment is updated, because the fake reader's criterion goes through the real gate. Not among the six reading deliverables; under crates/.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "purpose": "Tests module only: add `a_proposed_request_whose_stored_limit_omits_changelog_leaves_the_queue` and its control, showing `queued_work` drops a Proposed job whose stored reading carries a limit that omits CHANGELOG.md. Not among the six reading deliverables; under crates/.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased/Added bullet for `reading::check_scope_limit`: root cause, class, both jobs, the two refusals, the 'listed' to 'named in the limit' mapping with reading.rs:859, the proposal-apply Consumers requirement, why run/tests.rs and steward.rs were touched, the queue effect on Proposed jobs, and 'the higher refusal rate is intended, expected 3% of newly refused readings' (an estimate).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D166 (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance): rule enforced by mechanism in `refusing_check`, naming the failure class; departures from the reading (criteria only, limit span must name CHANGELOG.md or 'the deliverables', revised sense of criterion 3, proposal-apply jobs carry a Consumers line); known misses of the span rule; the unverified search; the queue effect; the ensure_changelog-append alternative rejected.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/src/reading/checks.rs (top, the `check_reading_acceptance` doc list at about 470-486, `refusing_check` at 515). Add `use athena_context::briefs::limits_changed_files;`.",
+    "In checks.rs add: const `DEFAULT_WRITTEN_FILES: [(&str, &str); 1]` (row: `CHANGELOG_PATH` from `super`, reason 'Athena always adds it to a change reading') and `CONFIG_FILES: [&str; 2]` (athena.toml, defaults.toml); a private tokenizer (lowercase, hyphen to space, trim non-alphanumeric ends, drop empties, as in `limits_changed_files`); `limit_span(words)` returning None when no trigger word (only, outside, except, beyond, besides) occurs, else the slice from the first trigger to the first change word (change, changes, changed, modified, touched) after it; a Consumers-line helper returning its path-like words (contains '/' or ends .rs/.toml/.md/.json/.yml/.yaml, trimmed of quotes, backticks, brackets, './', end punctuation) and checking each against the normalized deliverable paths (equal, or under a deliverable ending in '/'). Then `pub fn check_scope_limit(reading: &Reading) -> Result<()>`: Ok unless capability is Some(\"change\"), question is None and some criterion text has `limits_changed_files`. CHANGELOG half: a limiting criterion is fine when its tokens contain the two words `the deliverables` in a row, or `limit_span` is None, or the span holds a default-written file name from the table; otherwise that file is missing. Config half: when a deliverable's normalized path is in CONFIG_FILES, a `Consumers:` assumption must exist and satisfy (a) at least one path-like word besides the config files and every one a deliverable, (b) 'unchanged' or 'no change', or (c) 'none found'. One `bail!` in the style of the other checks ('the reading was refused because ...') naming each missing file, why and the repair (put the file in the limit's list or write 'the deliverables'; write `Consumers: <files, each a deliverable>`, `Consumers: none found` or `Consumers: ... unchanged`). Write the doc comment: root cause (a scope limit written from the named files without listing default-written files and config consumers), class scope-criterion-too-narrow-misses-dependent-tests, jobs 20261018-045437-7z81 and 20261023-052543-9bw7, 'higher refusal rate is intended' with 'expected 3% of newly refused readings' as an estimate not measured, and that the search itself is not verified.",
+    "In `refusing_check` add `step!(check_scope_limit(reading));` after `check_defined_terms` and before `check_boundary_and_repo_files`. Add [`check_scope_limit`] to the doc list of `check_reading_acceptance`.",
+    "In crates/athena-core/tests/refusal_corpus.rs add `scope_limit_cases()` with the 22 cases named in the criterion 4 demonstration (11 Refuse, 11 Accept, including the two proposal-apply cases whose request text carries the accept_request line) and chain it in `cases()`; add the new tags to `INPUT_FORMS` and update the array length; put athena.toml, defaults.toml and the consumer paths into the cases' `repo_files`. Run `cargo test -p athena-core --test refusal_corpus`; fix bullet counts and any earlier check that refuses first by changing one field only.",
+    "In crates/athena-core/src/run/tests.rs change `LIMIT` (line 3213) to 'No file outside README.md and CHANGELOG.md changed' and fix its doc comment (allowed paths are README.md and the CHANGELOG.md that ensure_changelog adds).",
+    "In crates/athena-context/src/briefs.rs add the READING_RULES line (at most 220 bytes; names `check_scope_limit`, CHANGELOG.md or 'the deliverables', and `Consumers:` with paths / none found / unchanged), change the array type to 11, and update the test (11 rules, the new check in the list, a rule-line assertion for `Consumers:`, the size bound and its comment).",
+    "In crates/athena-core/src/steward.rs tests, next to `a_proposed_request_with_a_passing_stored_reading_is_listed_read` (2330), add `a_proposed_request_whose_stored_limit_omits_changelog_leaves_the_queue`: a `stored_reading(1, \"b\", \"src/a.rs\")` with its criterion set to 'Only src/a.rs may change' gives an empty `queued_work`; the same with 'Only src/a.rs and CHANGELOG.md may change' stays listed with `read` true. If the control is refused by another check, change one field of the fixture, not the check.",
+    "In the reading.rs tests (the module holding `gate_refuser`, `governed_reading`, `scoped_reading`) add scope_limit_changelog, scope_limit_config_consumers, scope_limit_proposal_apply_shape (request text with the accept_request line, defaults.toml deliverable, 'No other file is changed'; plus the include_str!(\"proposals.rs\") drift assertion), scope_limit_unaffected_readings, scope_limit_has_one_step_line and scope_limit_doc_and_changelog_name_the_cause as described in the demonstrations.",
+    "Append the CHANGELOG.md Unreleased/Added bullet and decision D166 at the end of docs/decisions.md (next id after D165; heading `## D166 · ...`; all six bullets, Provenance last), naming the failure class scope-criterion-too-narrow-misses-dependent-tests, the mechanism, the departures from the reading (criteria only; the allowed-list span must name CHANGELOG.md or 'the deliverables'; revised sense of criterion 3; criterion 2's 'listed' read as 'named in the limit' with reading.rs:859; proposal-apply jobs carry a Consumers line), the span rule's known misses, the unverified search, the queue effect on Proposed jobs, why run/tests.rs and steward.rs were edited, and the rejected ensure_changelog-append option.",
+    "Measure the refusal share: read the loop's replay result for the changed crates (replay.rs `replay_limit_percent`), and run `athena check-reading` on any stored reading available in the snapshot. If the newly refused share is above 8%, stop and report the measured share in the output; do not narrow the check or edit the declared 3%. If no replay result is visible (the snapshot has no records/), say so in the output.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix failing fixtures by naming CHANGELOG.md in the limit text, never by weakening the check. Compare `git diff --stat` with the file list (eight files; proposals.rs must not appear)."
+  ],
+  "risks": [
+    {
+      "risk": "False refusals: `limits_changed_files` matches a criterion that mentions a limit in passing, and the CHANGELOG half refuses such limits unless the span names CHANGELOG.md.",
+      "mitigation": "The matcher already errs toward not matching (briefs.rs:140-145). The repair is one phrase ('and CHANGELOG.md' in the list, or 'the deliverables'), given in the error text. Bare forms stay accepted and are pinned by corpus Accept cases. Step 10 reads the replay and stops above 8%."
+    },
+    {
+      "risk": "The Consumers rule cannot verify that the search was done; 'none found' can be written without searching.",
+      "mitigation": "D166 states the limit: the gate forces the question and checks that every named consumer is a deliverable; scanning repo content is out of scope. A consumer the reader does not name is the remaining gap and is named in D166."
+    },
+    {
+      "risk": "The span rule refuses a valid limit or accepts a negated name.",
+      "mitigation": "The span rule has no word list for negation; the pinned forms are 'is not changed' and 'stays as it is' (Refuse, name outside the span), 'keeping one entry' and 'src not changed' (Accept, name inside the span). D166 names the remaining misses: a limit with no trigger word that forbids the file, and a negation inside the span. 'Only X may change; CHANGELOG.md may change too' is refused and repaired by moving the name into the list."
+    },
+    {
+      "risk": "A defaults-proposal job fails reading twice and stalls (finding 3).",
+      "mitigation": "The refusal text names the exact line to add (`Consumers: none found` / `... unchanged` / listed deliverable paths), the new READING_RULES line says the same, and the refusal text is the re-read feedback (reading.rs:688). Unit and corpus cases pin refuse-then-accept for the accept_request shape. If a reader still fails twice, the job is refused through the unchanged ReadError::Refused path; the replay step 10 shows how often proposal-apply-shaped readings are refused."
+    },
+    {
+      "risk": "The new READING_RULES line pushes a rule line past 220 bytes or the section past its bound.",
+      "mitigation": "Keep the line to about 200 bytes; if the section exceeds the bound, set the bound to the measured size plus a small margin and fix its comment. `cargo test -p athena-context` shows it. The reader prompt is untouched."
+    },
+    {
+      "risk": "Another test or fake reader outside the places found pushes a limit phrase through the gate and starts failing.",
+      "mitigation": "Step 11 runs `cargo test --locked` for the whole workspace. A failing fixture gets 'and CHANGELOG.md' in its limit text, as LIMIT does; the check is not weakened."
+    },
+    {
+      "risk": "run/tests.rs and steward.rs are not among the six listed deliverables, so a scope guard built from this job's deliverable list could flag them.",
+      "mitigation": "Both edits are small, listed in `files`, explained in the CHANGELOG entry and D166, raised as a User question and checked by `git diff --stat`. Exempting README.md-only limits in the check was rejected as a hole in the rule."
+    },
+    {
+      "risk": "A Consumers line with a `./` prefix, quotes or backticks, or a prose word, is mis-parsed and refused.",
+      "mitigation": "Trim quotes, backticks, brackets, './' and end punctuation as `allowed_paths` does (briefs.rs:119-120); a deliverable ending in '/' covers paths under it; unit and corpus cases pin both forms. A word like 'e.g.' is not path-like (no '/', no listed extension)."
+    },
+    {
+      "risk": "The replay share exceeds 8% and holds the job.",
+      "mitigation": "Step 10 stops and reports the measured share; the producer does not narrow the check or edit the declared figure. The producer snapshot has no records/, so the replay may only be visible in the loop's output; if it is not visible, the producer says so in its output."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusing_check step order and the new step check_scope_limit",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs: every_acceptance_check_has_a_refusing_corpus_case, an_extra_check_with_no_case_is_reported, no_check_bypasses_refusing_check, corpus_covers_the_listed_input_forms",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": null
+    },
+    {
+      "name": "check_reading_acceptance / refusing_check result for readings with a limiting criterion",
+      "dependent": "crates/athena-core/src/reading.rs:680 (build_reading refuse-and-re-read once; refusal text becomes reader feedback at :688); reading/replay.rs:55 (check_reading_text); run/tests.rs:1813, 1820, 2138 (replay checkers)",
+      "kind": "code",
+      "test": "cargo test -p athena-core (whole crate); scope_limit_proposal_apply_shape asserts the error text carries the repair",
+      "reason": null
+    },
+    {
+      "name": "defaults-proposal apply job: a defaults.toml modify deliverable with the request 'touch no other file' and a reader criterion such as 'No other file is changed' (round 4 finding 3)",
+      "dependent": "crates/athena-core/src/proposals.rs:442-450 (accept_request) and :638-642 (accept_proposal -> self.ask -> build_reading -> check_reading_acceptance); crates/athena-core/src/proposals.rs:993 (test of the request text)",
+      "kind": "code",
+      "test": "cargo test -p athena-core scope_limit_proposal_apply_shape (refused with no Consumers line, accepted with 'Consumers: none found'; a drift test reads proposals.rs with include_str!) and the corpus cases scope-limit-proposal-apply-without-consumers / -with-consumers; proposals.rs itself is not edited",
+      "reason": null
+    },
+    {
+      "name": "accept_proposal through the real gate with a fake reader",
+      "dependent": "crates/athena-cli/tests/proposals.rs:206 (accepting_submits_a_job_that_lists_defaults_toml_and_edits_nothing) and :238, via crates/athena-cli/tests/common/mod.rs:317 (reading builder)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test proposals",
+      "reason": null
+    },
+    {
+      "name": "Stored readings of Proposed jobs re-checked by queued_work",
+      "dependent": "crates/athena-core/src/steward.rs:416-425 (queued_work drops a Proposed job whose latest stored reading check_reading_text no longer accepts); steward.rs:2420 (test helper calling check_reading_text)",
+      "kind": "code",
+      "test": "cargo test -p athena-core a_proposed_request_whose_stored_limit_omits_changelog_leaves_the_queue (new, step 7); existing a_proposed_request_with_a_passing_stored_reading_is_listed_read keeps its limit-free reading",
+      "reason": null
+    },
+    {
+      "name": "LIMIT criterion text in the scope tests",
+      "dependent": "crates/athena-core/src/run/tests.rs:3213 (LIMIT), pushed into the fake reader's criteria at 3249; asserts at 3348 and 3415 use contains(LIMIT)",
+      "kind": "code",
+      "test": "cargo test -p athena-core run::tests",
+      "reason": null
+    },
+    {
+      "name": "limits_changed_files / allowed_paths / limiting_criterion (read, not changed)",
+      "dependent": "crates/athena-context/src/briefs.rs:103-146 and its tests; crates/athena-core/src/run_pin_tests.rs:1353-1396; crates/athena-core/src/run/mod.rs:1626",
+      "kind": "code",
+      "test": null,
+      "reason": "The check only calls the matcher; it does not edit it. Verification-time enforcement is unchanged and the existing matcher tests still pass."
+    },
+    {
+      "name": "ensure_changelog and CHANGELOG_PATH (read, not changed)",
+      "dependent": "crates/athena-core/src/reading.rs:859 (build_reading), :293-319 (CHANGELOG_PATH, ensure_changelog); tests at reading.rs:2102-2155",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged. The check reads CHANGELOG_PATH through `use super::*` and reads the limit text, because the CHANGELOG.md deliverable is always present at the gate."
+    },
+    {
+      "name": "check_governance_coverage and governance refusal order",
+      "dependent": "crates/athena-core/src/reading/checks.rs:559-657 (check_governance_coverage, GOVERNANCE_BY_DELIVERABLE); crates/athena-core/src/admission.rs:63-132 (is_governance, governance_change_is_listed)",
+      "kind": "rule",
+      "test": null,
+      "reason": "They run earlier and are unchanged; a reading with athena.toml as a deliverable still needs the file named in a criterion, as the new fixtures do. The new step sits later, so governance refusals keep their order."
+    },
+    {
+      "name": "`Code survey:` label convention (mirrored, not reused or changed)",
+      "dependent": "crates/athena-core/src/reading/surveys.rs:116-134 (code_surveys, names_crates_path)",
+      "kind": "code",
+      "test": null,
+      "reason": "The Consumers parser has its own path-like test; surveys.rs is not edited and check_code_survey is unaffected."
+    },
+    {
+      "name": "READING_RULES count and size (adds an 11th line)",
+      "dependent": "crates/athena-context/src/briefs.rs: test the_reader_brief_names_each_reading_rule_in_one_short_line (rule-count assertions, the 220-byte line bound, the section bound near 4578-4627) and the READING_RULES array type at 2252",
+      "kind": "code",
+      "test": "cargo test -p athena-context the_reader_brief_names_each_reading_rule_in_one_short_line",
+      "reason": null
+    },
+    {
+      "name": "Reader prompt budget (budget reader: 1997 of 2000)",
+      "dependent": "docs/system-facts.md budget lines; system_facts_budgets_match_computed (crates/athena-cli/tests/budgets.rs); BudgetSet::budget in crates/athena-context/src/lib.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets",
+      "reason": "READING_RULES is written only into the reader brief (briefs.rs:2453), not into the always-loaded set the budget measures, and the prompt text is not edited, so computed sizes and the system-facts lines are unchanged."
+    },
+    {
+      "name": "Replay hold of past accepted readings (declared refusal share)",
+      "dependent": "crates/athena-core/src/reading/replay.rs: check_reading_text (55), replay_is_held (296), replay_limit_percent (304), REPLAY_DECLARED_MARGIN_POINTS (161), touches_reading_rules (314); the verifier brief's replay section in briefs.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "The replay calls the new step through check_reading_text with no repo files. The declared 3% (estimate) plus 5 points gives a hold above 8%. Plan step 10 reads the loop's replay result and stops with the measured share when it is above 8%; the figure is not edited."
+    },
+    {
+      "name": "cli tests with athena.toml as a deliverable",
+      "dependent": "crates/athena-cli/tests/lifecycle.rs:872 and 1009; crates/athena-cli/tests/common/mod.rs:245; crates/athena-cli/tests/job_plan.rs:700",
+      "kind": "code",
+      "test": "cargo test -p athena-cli",
+      "reason": "The config half needs a limiting criterion. A grep of crates/ for limit phrases found none in these readings' criteria, so check_scope_limit returns Ok for them."
+    },
+    {
+      "name": "athena.toml readers outside crates/ (named by the Consumers rule, not edited)",
+      "dependent": "xtask/tests/policy.rs and xtask/src/main.rs (read athena.toml)",
+      "kind": "code",
+      "test": null,
+      "reason": "These are why the Consumers parser checks path-like words and not only crates/ words. The check does not edit athena.toml or these files; xtask tests are unaffected."
+    },
+    {
+      "name": "docs/decisions.md append-only and entry-shape rules",
+      "dependent": "crates/athena-core/src/mirrors.rs (decision log structure, lines 23, 241-265); docs/decision-links.toml [[governs]]",
+      "kind": "rule",
+      "test": "cargo test -p athena-core mirrors",
+      "reason": "D166 is appended after D165 with all six bullets; only D08 governs files and none of them is touched."
+    },
+    {
+      "name": "CHANGELOG.md Unreleased section",
+      "dependent": "history_fixture_doc_and_changelog_name_the_cause (reading.rs:7945) and the corpus tests at refusal_corpus.rs:2365-2554, which include_str! CHANGELOG.md",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "The entry is a new bullet; existing needles are unchanged."
+    },
+    {
+      "name": "Request-side parser forms feeding corpus criteria",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (bullets_expected per case); crates/athena-core/src/plan.rs and reading.rs (is_bullet, plan_entry)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus (corpus_cases_get_the_expected_outcome checks the bullet count of each new case)",
+      "reason": null
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in the reading.rs tests (pattern of `history_fixture_doc_and_changelog_name_the_cause`, reading.rs:7945) reads checks.rs and CHANGELOG.md with `include_str!`, takes the contiguous `///` block above `pub fn check_scope_limit(`, and asserts it holds the root-cause sentence (a scope limit written from the named files without listing default-written files and config consumers) and both job ids 20261018-045437-7z81 and 20261023-052543-9bw7. It asserts the body of `refusing_check` holds exactly one line `step!(check_scope_limit(reading));`.",
+      "command": "cargo test -p athena-core scope_limit_doc_and_changelog_name_the_cause",
+      "observes": "The test passes: the doc comment, the single step line and the needles exist and name both jobs.",
+      "fails_without": "Without the function, its doc comment or the step line, the split/count assertions fail; removing a job id from the doc comment fails the needle checks.",
+      "seam": "Production entry points: the source text of checks.rs and CHANGELOG.md read through `include_str!`, as the existing doc tests do. No double. The seam exists today (reading.rs:7945 pattern); plan step 8 adds the test."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test `scope_limit_changelog` calls `refusing_check` through the existing `gate_refuser` helper (reading.rs:6977) on readings built by `governed_reading` (reading.rs:4329; capability change, no question). Refused with Some(\"check_scope_limit\"): 'Only docs/x.md may change' with no CHANGELOG.md deliverable; the same with a CHANGELOG.md deliverable but a limit that omits it (production shape after `ensure_changelog`); 'test-only change'; 'only the docs may change'; 'Only the deliverable src/a.rs may change'; 'Only docs/x.md may change; CHANGELOG.md is not changed'; 'Only docs/x.md may change and CHANGELOG.md stays as it is'. Accepted (None): 'Only docs/x.md and CHANGELOG.md may change' with the CHANGELOG.md deliverable; 'Only docs/x.md and CHANGELOG.md may change, keeping one entry'; 'Only docs/x.md and CHANGELOG.md may change; src not changed'; 'No file outside docs/x.md and CHANGELOG.md changed'; 'Only the deliverables may change'; bare 'No other file is changed'; 'production unchanged'; the same limits as an out_of_scope item or on a reading with a question or capability other than change. Criterion 2's 'with CHANGELOG.md listed' is shown as CHANGELOG.md named in the limit text; the deliverable alone is refused because `ensure_changelog` (reading.rs:859) lists it before the gate in production. A second test asserts `check_reading_acceptance` returns Err whose text names CHANGELOG.md, its reason and the repair.",
+      "command": "cargo test -p athena-core scope_limit_changelog",
+      "observes": "The first reading is refused under the name check_scope_limit; the repaired, in-span and bare readings return None.",
+      "fails_without": "Without the step line `refusing_check` returns None for the first reading, so the Some(\"check_scope_limit\") assertion fails; a rule that accepted a CHANGELOG.md deliverable alone, fired only on named files, accepted any 'deliverable' word, or accepted a name outside the allowed-list span would fail the production-shaped, 'test-only change', 'deliverable src/a.rs' and 'is not changed' assertions; a rule that refused a name inside the span fails the 'keeping one entry' assertion.",
+      "seam": "Production entry points: `refusing_check` and `check_reading_acceptance` (checks.rs:515, :487). Fixture: an in-memory `Reading` from `governed_reading`/`scoped_reading` (reading.rs:4329, 3473) passed as an argument; no double. The seam exists today; steps 2-3 add the check and step 8 the tests."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test `scope_limit_config_consumers` builds `governed_reading(&[\"athena.toml\", \"docs/x.md\"], &[\"Only athena.toml, docs/x.md and CHANGELOG.md may change\"], &[])` (the limit names CHANGELOG.md in its span so only the config half fires; athena.toml is named so `check_governance_coverage` passes). Mapping of criterion 3's 'neither a crates/ test deliverable nor a Consumers: assumption ... adding either makes it pass': 'adding the test deliverable' stands for adding the consumer as a deliverable AND naming it in a Consumers line; 'adding the Consumers assumption' stands for a line that says unchanged, none found, or names only deliverables. Refused (check_scope_limit; error names athena.toml and `Consumers:` and the repair): the base reading; the base plus an unrelated crates/athena-core/tests/refusal_corpus.rs deliverable and no Consumers line; `Consumers: crates/athena-cli/tests/common/mod.rs loads athena.toml` when that path is not a deliverable; `Consumers: crates/a.rs (deliverable), xtask/tests/policy.rs` when the xtask path is not a deliverable; a Consumers line with no path and no phrase; a Consumers line naming only athena.toml. Accepted (None): the same Consumers line with crates/athena-cli/tests/common/mod.rs added as a deliverable; `Consumers: xtask/tests/policy.rs` with that deliverable; a path under a deliverable directory ending in '/'; a Consumers line naming a non-deliverable and saying 'unchanged'; `Consumers: none found, searched the repo for athena.toml reads`. Unaffected (None): the same deliverables with a criterion that is not a limit; a limit with docs/x.md and no config deliverable; defaults.toml covered by the same cases. A second test `scope_limit_proposal_apply_shape` (finding 3) uses the request text of `accept_request` (the line 'Deliverable: defaults.toml (modify). Make one change to it and touch no other file.' plus bullets) with a defaults.toml modify deliverable and the criterion 'No other file is changed': refused with no Consumers line, the error text containing 'Consumers:' and 'none found'; accepted with 'Consumers: none found' and with 'Consumers: tests that load defaults.toml unchanged'. A drift test asserts `include_str!(\"proposals.rs\")` still holds that request line.",
+      "command": "cargo test -p athena-core scope_limit_config_consumers scope_limit_proposal_apply_shape",
+      "observes": "The config reading is refused until every named consumer path is a deliverable or the line says unchanged or none found; readings without a limit or without a config deliverable return None; the proposal-apply shape is refused once and accepted with the repair line.",
+      "fails_without": "Without the config half the first assertion returns None and the test fails; a rule that accepted any test deliverable fails the 'unrelated test deliverable' assertion; a crates/-only parser fails the xtask assertions; a rule that fired without a limit fails the 'not a limit' assertion; a rule that exempted bare limits fails the proposal-apply refusal.",
+      "seam": "Production entry points: `refusing_check` through `gate_refuser`, `check_reading_acceptance` with the request text argument, and `check_scope_limit` directly. Fixture: in-memory `Reading`; no double. The seam exists today; step 2 adds the check and step 8 the tests."
+    },
+    {
+      "criterion": 4,
+      "method": "Step 4 adds `scope_limit_cases()` to `cases()` in crates/athena-core/tests/refusal_corpus.rs, built with the existing `case(..)` helper from `base_reading` with one field changed each (harness `run(&Case)` at refusal_corpus.rs:2189 and the wrapper test at 2220). Refuse(\"check_scope_limit\"), 11 cases: 'only X may change' with a dash bullet, shape of 9bw7's scope (`scope-limit-only-may-change-omits-changelog`); 'no file outside X changed' with a star bullet (`scope-limit-no-file-outside-omits-changelog`); a `1.` numbered request (`scope-limit-numbered-part-omits-changelog`); 'test-only change' naming no file (`scope-limit-test-only-change-omits-changelog`); 'only the docs may change' (`scope-limit-only-the-docs-omits-changelog`); 'Only the deliverable src/a.rs may change' (`scope-limit-singular-deliverable-omits-changelog`); a limit that puts CHANGELOG.md outside the span and forbids it (`scope-limit-names-changelog-but-forbids-it`); a config deliverable with a limit and no Consumers line, shape of 7z81 (`scope-limit-config-deliverable-without-consumers`); a Consumers line naming a non-deliverable crates/ path (`scope-limit-consumer-not-a-deliverable`); a Consumers line naming a non-deliverable xtask/ path (`scope-limit-xtask-consumer-not-a-deliverable`); the proposal-apply shape: request line from `accept_request`, defaults.toml modify deliverable, criterion 'No other file is changed', no Consumers line (`scope-limit-proposal-apply-without-consumers`). Accept, 11 cases: bare 'No other file is changed' (`scope-limit-bare-no-other-file`); 'production unchanged' (`scope-limit-bare-production-unchanged`); a limit with CHANGELOG.md in the span (`scope-limit-names-changelog`); 'Only X and CHANGELOG.md may change, keeping one entry' (`scope-limit-names-changelog-with-keeping`); a limit pointing to 'the deliverables' (`scope-limit-points-to-deliverables`); config deliverable with Consumers paths that are deliverables (`scope-limit-config-consumers-are-deliverables`); with an xtask/ deliverable consumer (`scope-limit-xtask-consumer-is-a-deliverable`); with 'unchanged' (`scope-limit-config-consumers-unchanged`); with 'none found' (`scope-limit-config-consumers-none-found`); a config deliverable with no limit (`config-deliverable-without-a-limit`); the proposal-apply shape with 'Consumers: none found' (`scope-limit-proposal-apply-with-consumers`). New `INPUT_FORMS` tags: `scope-limit-omits-default-file`, `scope-limit-forbids-default-file`, `scope-limit-config-without-consumers`, `scope-limit-names-default-file`, `scope-limit-consumer-not-a-deliverable`, `scope-limit-proposal-apply`; the array length is updated. athena.toml, defaults.toml and the consumer paths go in the cases' `repo_files` so the later boundary check passes. I read the corpus layout (existing cases such as `code-reading-without-a-survey`, `criterion-rests-on-the-producer-report`) but saw no test result; the producer and verifier run the command.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "All cases give their expected outcome (`corpus_cases_get_the_expected_outcome`, which also checks bullet counts); `every_acceptance_check_has_a_refusing_corpus_case` finds a case in which check_scope_limit refuses; `corpus_covers_the_listed_input_forms` and `the_wrapper_agrees_with_refusing_check_on_every_case` pass.",
+      "fails_without": "Without the step the eleven Refuse cases are accepted and `corpus_cases_get_the_expected_outcome` fails; without the cases `every_acceptance_check_has_a_refusing_corpus_case` fails with 'no corpus case in which [\"check_scope_limit\"] refuses'.",
+      "seam": "Production entry points: `refusing_check` and `check_reading_acceptance`, called by `run(&Case)` and the wrapper test in refusal_corpus.rs. Fixture: `Case` values built in memory by `case`/`base_reading`; no double. The harness exists today; step 4 adds the cases and tags."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the whole workspace suite. Newly refused readings are limited to those with a limiting criterion that has a trigger word, omits CHANGELOG.md from its span and lacks 'the deliverables', or a config deliverable without a valid Consumers line. The one fixture found in crates/ that reaches the gate is `LIMIT` in run/tests.rs:3213 (changed in step 5). Other limit phrases call `limits_changed_files`/`allowed_paths` directly (run_pin_tests.rs:1355-1396, briefs.rs tests) or sit in a reason string and do not reach the gate. cli tests with athena.toml as a deliverable (lifecycle.rs:872, 1009; common/mod.rs:245; job_plan.rs:700) have no limiting criterion, so the check returns Ok. The cli proposals test (`accepting_submits_a_job_that_lists_defaults_toml_and_edits_nothing`, crates/athena-cli/tests/proposals.rs:206) runs `accept_proposal` through the real gate with a fake reader; I did not read the criteria that fake supplies, so the suite run is the evidence. The steward test of step 7 shows the stored-reading effect. The 3% share is an estimate (not measured); step 10 reads the loop replay and stops above 8%.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass, including the scope tests in run/tests.rs, the cli lifecycle and proposals tests, steward tests, briefs tests and the budgets test.",
+      "fails_without": "If LIMIT in run/tests.rs were not updated, the new step refuses the fake reader's reading and the scope tests (run/tests.rs near 3340-3420) fail; if the check wrongly fired on the base reading, the corpus Accept cases fail; without the check the steward test's stored limit reading stays queued and its empty-queue assertion fails.",
+      "seam": "The whole existing suite with its in-memory fakes (the athena_agent::fake script built by `scoped` in run/tests.rs:3228; `proposed_with` and `stored_reading` in steward.rs tests; the Fixture in crates/athena-cli/tests/proposals.rs). The seam exists today; steps 5 and 7 edit the fixture constant and add the steward test."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the two gates Athena runs over the whole workspace after all edits. The new helpers are private and used only by `check_scope_limit`; imports are used.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Both `cargo fmt --all --check` and this command exit 0: fmt reports no diff and clippy reports no warning.",
+      "fails_without": "A badly formatted line makes `cargo fmt --all --check` exit nonzero; an unused import such as `limits_changed_files`, an unused helper (dead_code) or a needless clone makes clippy exit nonzero under `-D warnings`.",
+      "seam": "Production entry points: the same fmt and clippy commands Athena runs on the result. Fixture: the working tree with the new code, tests and corpus cases; no double. The seam exists today; step 11 runs both."
+    },
+    {
+      "criterion": 7,
+      "method": "The doc test of criterion 1 also asserts the Unreleased CHANGELOG item naming `check_scope_limit` exists with the failure class name 'scope-criterion-too-narrow-misses-dependent-tests', both job ids, 'higher refusal rate is intended' with 'expected 3% of newly refused readings' and 'estimate', the sentence mapping criterion 2's 'CHANGELOG.md listed' to 'named in the limit' with reading.rs:859, the proposal-apply Consumers sentence, and the sentence that proposed jobs with such a stored limit leave the queue until read again. `git diff -- docs/decisions.md` shows an appended D166 whose Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance bullets name the failure class, say the rule is enforced by mechanism (a `step!` in `refusing_check`) and not prose, record the revised sense of criterion 3, the proposal-apply decision, the span rule's known misses, the unverified search and the queue effect. The log is append-only (mirrors.rs:23, 241-265), so D166 follows D165.",
+      "command": "cargo test -p athena-core scope_limit_doc_and_changelog_name_the_cause",
+      "observes": "The test passes; the docs/decisions.md diff contains only added lines and CHANGELOG.md gains one item. `cargo test -p athena-core mirrors` also passes.",
+      "fails_without": "Without the CHANGELOG item the needle assertions fail; a D166 that breaks the entry shape or edits earlier lines fails the mirrors tests.",
+      "seam": "Production entry points: CHANGELOG.md read by `include_str!` in the unit test; the decision-log structure check in mirrors.rs. No double. The seam exists today; step 9 adds the entries and step 8 the test."
+    },
+    {
+      "criterion": 8,
+      "method": "Read the diff stat: only the eight files in `files` appear (the six named deliverables plus run/tests.rs and steward.rs, both under crates/ and raised as a User question). athena.toml, defaults.toml, .github/workflows, records/, proposals.rs, crates/athena-cli/tests/common/mod.rs, crates/athena-data/src/config.rs, crates/athena-core/src/run_pin_tests.rs and docs/design/*.md are absent.",
+      "command": "git diff --stat",
+      "observes": "No path outside the listed files is changed.",
+      "fails_without": "If the producer touched athena.toml, defaults.toml, a workflow, records/, proposals.rs or a kept file, the stat would list it and the criterion would fail.",
+      "seam": "Production entry point: git's own diff of the working tree against the base; no fixture or double. The seam exists today."
+    }
+  ],
+  "open_questions": [
+    "User: crates/athena-core/src/run/tests.rs (LIMIT constant, forced) and crates/athena-core/src/steward.rs (one test) are outside the six deliverables of the accepted reading. If the verification scope guard treats the deliverable list as an allowlist for this job, please add both files to the reading's deliverables; otherwise the plan keeps them as minimal edits under the request's crates/ scope.",
+    "User: criterion 3 says a reading with an athena.toml deliverable and a limit passes by adding 'a crates/ test deliverable' or a `Consumers:` assumption. This plan passes it only when every consumer path named in the Consumers line is a deliverable, or the line says unchanged or none found; a bare test deliverable with no Consumers line stays refused, because that left 7z81's failure open. The same applies to the defaults-proposal job, whose reader must add `Consumers: none found` (or a real list). Say if you want the literal wording or a proposal-apply exemption instead.",
+    "User: the accepted reading says a scope limit may also be an out_of_scope item, and that listing CHANGELOG.md as a deliverable is enough. The code settles both: verification reads criteria only (briefs.rs:103-108), and the gate always sees the CHANGELOG.md deliverable because ensure_changelog runs first (reading.rs:859). This plan checks criteria only and requires the limit's allowed-list span to name CHANGELOG.md, or the text to say 'the deliverables', or to be bare. Criterion 2's 'with CHANGELOG.md listed' is shown as the limit naming it.",
+    "Host: the share of past accepted readings newly refused cannot be measured from the plan copy, which has no records/. The 3% figure is an estimate, and the broader trigger and the proposal-apply readings may raise it; the loop replay at the producer and verifier measures it, and the hold is above 8%."
+  ],
+  "producer_section_sha256": "fac20571766e55c7e72b4b4486e98b216b2e3ff8221442fd69b7092079b423f6"
+}

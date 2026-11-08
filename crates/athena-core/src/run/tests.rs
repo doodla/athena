@@ -3209,8 +3209,9 @@ mod produce_and_verify_order_tests {
     }
 
     /// The criterion that limits which files may change in the scope tests. The base reading's one deliverable
-    /// is README.md, so that is the only allowed path.
-    const LIMIT: &str = "No file outside README.md changed";
+    /// is README.md and `ensure_changelog` adds CHANGELOG.md, so those are the allowed paths. The limit names
+    /// both because the reading gate (`check_scope_limit`) refuses a limit that leaves out CHANGELOG.md.
+    const LIMIT: &str = "No file outside README.md and CHANGELOG.md changed";
     const NOTES: &str = "NOTES.md";
     const EXTRA: &str = "EXTRA.md";
 

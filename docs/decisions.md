@@ -4747,3 +4747,58 @@ should replace those estimates with its figures.
   20261014-082328-g6vy, 20261014-174815-7bf8 and 20261017-173508-0wtc (g6vy by `check_outcome_state`, 7bf8 and 0wtc by
   `check_defined_terms`), and the accepted and refused `ambiguous-name-*` cases built with the real generators. Not
   measured: the share of past readings newly refused; the loop replay records it at verification.
+
+## D166 · A criterion that limits which files may change must allow the files Athena always writes and the readers of a changed config; enforced by `check_scope_limit`, not by prose
+
+- **Case:** Failure class scope-criterion-too-narrow-misses-dependent-tests, seen in two jobs. Job
+  20261018-045437-7z81 changed `athena.toml`; its reading limited the diff to the files the request named, and the
+  tests that load the real `athena.toml` were not among them, so the scope guard failed a correct change. Job
+  20261023-052543-9bw7 wrote a limit that left out `CHANGELOG.md`, which Athena adds to every change reading. Root
+  cause: a scope limit written from the named files without listing default-written files and config consumers.
+  Verification builds its allowed list from the limit (`AcceptedReading::allowed_paths`), and nothing at reading
+  acceptance compared the limit with what the job must change anyway, so the fault surfaced after the producer
+  had finished. Both introspections proposed a check at reading acceptance.
+- **Decision:** The rule is a mechanism: `check_scope_limit` in `crates/athena-core/src/reading/checks.rs`, one
+  `step!` in `refusing_check` after `check_defined_terms`, with a corpus case in which it refuses. It reads the limit
+  with one matcher, `change_limit` in `crates/athena-context/src/briefs.rs`, which `limits_changed_files` now wraps,
+  so the gate and verification cannot read a sentence differently. Only criteria are read, and only the first
+  limiting one, as `limiting_criterion` does. (1) A limit that names its allowed files must name `CHANGELOG.md`
+  (the row of `DEFAULT_WRITTEN_FILES`) or say "the deliverables"; the bare forms "no other file is changed" and
+  "production unchanged" name no list and pass. (2) When `athena.toml` or `defaults.toml` is a deliverable and a limit
+  exists, the reading needs a `Consumers:` assumption whose path-like words are all deliverables (or under a
+  deliverable directory), and which names at least one or says "none found", "unchanged" or "no change". The error
+  names the file, why, and the repair; a new `READING_RULES` line says the same, and the reader prompt text is
+  unchanged. Departures from the accepted reading: it said a limit may also be an out-of-scope item, but
+  verification reads criteria only, so those are not scanned; it said listing CHANGELOG.md as a deliverable is
+  enough, but `ensure_changelog` lists it before the gate in production, so that would never refuse, and "listed"
+  is read as named in the limit's allowed words; it said a crates/ test deliverable or a `Consumers:` assumption
+  passes, but an unrelated test deliverable names no real consumer, so a deliverable counts only through a
+  `Consumers:` line that names it. A defaults-proposal job lists `defaults.toml`, so its reader writes one
+  `Consumers:` line. The scope tests in `crates/athena-core/src/run/tests.rs` push their `LIMIT` through the real gate,
+  so that constant now names CHANGELOG.md; it is the one edit outside the six deliverables of the reading.
+- **Alternatives:** Accept the limit when `CHANGELOG.md` is a deliverable: inert, since `ensure_changelog` always
+  adds it. Make `ensure_changelog` append `CHANGELOG.md` to the limit text: rewrites the reader's criterion silently,
+  so the reader never learns the rule, and the config half would still need a refusal. A second sentence parser in
+  the gate: it drifted from the matcher on the first attempt (an earlier unmatched "only", and "beyond" read as a
+  limit word), so the gate reads the matcher's own clause. Scan the repo for the files that load a config: out of
+  scope, readers see a plain copy, and the gate must stay deterministic. Accept any test deliverable as the
+  answer to the config half: no search and no widening of the allowed list. Exempt bare limits on proposal-apply
+  jobs: a defaults change has the same risk and an exemption keyed to request text is a hole. Prose in the reader
+  prompt: it has 3 tokens left, and rules that matter are enforced by mechanism.
+- **Tradeoff:** This check refuses more readings; the higher refusal rate is intended: a limit that omits files
+  Athena always writes fails verification. Expected 3% of newly refused readings, an estimate and not a measurement;
+  the replay at verification measures it, and the producer snapshot has no records. A proposed request whose latest
+  stored reading has such a limit leaves the drain queue until it is read again (`steward::queued_work` re-checks
+  it). Known misses: a bare form that really forbids `CHANGELOG.md`, a negation inside the allowed words, and a
+  second limiting criterion after the first. The search itself is not verified: `Consumers: none found` can be written
+  without searching, and a consumer the reader does not name is not caught; the gate forces the question and checks
+  that every named consumer is a deliverable.
+- **Reversal cost:** Low. Remove the `step!` line, `check_scope_limit`, its two tables and helpers, the rule line and
+  the corpus cases; `change_limit` can stay as the matcher behind `limits_changed_files`, and the `LIMIT` constant can
+  go back. Nothing recorded depends on the check.
+- **Provenance:** Read: `crates/athena-core/src/reading/checks.rs` (`refusing_check`, `check_governance_coverage`),
+  `crates/athena-core/src/reading.rs` (`ensure_changelog`), `crates/athena-context/src/briefs.rs`
+  (`limiting_criterion`, `allowed_paths`, `limits_changed_files`), `crates/athena-core/src/proposals.rs`
+  (`accept_request`), `crates/athena-core/src/run/tests.rs`, and the two introspections' proposed preventions.
+  Measured: unit and corpus cases that call `refusing_check` and assert the refusing check by name. Not measured: the
+  share of past readings newly refused; the loop replay records it at verification.

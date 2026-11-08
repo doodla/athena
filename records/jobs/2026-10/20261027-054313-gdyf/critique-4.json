@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-054313-gdyf",
+  "round": 4,
+  "at": "2026-11-08T19:41:55.864438746Z",
+  "invocation_seq": 10,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/steward.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/steward.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Two callers of check_reading_text are missing from the dependents list: crates/athena-cli/tests/drain.rs and the `athena check-reading` command in crates/athena-cli/src/main.rs.",
+      "evidence": "Grep for check_reading_text( in crates/athena-cli finds drain.rs:4073 and :4093 (test a_proposed_request_whose_latest_reading_fails_a_reading_check_is_not_run_by_the_batch, which seeds stored readings and asserts Refuse and Accept) and main.rs:678 (check-reading maps Accept to exit 0 and Refuse to exit 2). The plan's entry lists reading.rs:680, replay.rs:55 and run/tests.rs only. The seeded readings in drain.rs have no limit criterion, so they should still pass, but nothing in the list says so or names their test. Fix: Add a dependents entry for drain.rs:4073/4093 with test `cargo test -p athena-cli --test drain`, and one for main.rs:678 (check-reading exit codes) with its existing tests. State that neither seeded reading carries a limiting criterion, so their outcomes do not change.",
+      "location": "Dependents (check_reading_acceptance / refusing_check result entry)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The span parser is a second sentence parser that can drift from limits_changed_files. It uses trigger words the matcher never uses (except, beyond, besides) and starts at the first trigger word anywhere in the criterion, not at the clause that matched.",
+      "evidence": "limits_changed_files (briefs.rs:146-222) recognises only 'no file … outside … changed', 'no other file …', 'only … may change', 'test only' and 'production … unchanged'. Decision 2 rejects a second matcher because it 'would drift', yet limit_span adds its own trigger list. Example of a false refusal: 'No other file is changed beyond formatting' matches the bare 'no other file' form, but 'beyond' then opens a span without CHANGELOG.md, so it is refused. Another: a criterion with an earlier 'only' before 'no file outside crates/ and CHANGELOG.md changed' is refused. Fix: Have one helper in briefs.rs next to limits_changed_files return the matched form and its allowed-list words, and use that at the gate. Failing that, start the span at the trigger the matched form uses and drop except/beyond/besides.",
+      "location": "Decision 1 / step 2 (limit_span)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Any Consumers line containing 'unchanged' or 'no change' is accepted, even when it names a consumer that must change and is not a deliverable. That is the 7z81 shape.",
+      "evidence": "The criterion 3 demonstration pins as Accept 'a Consumers line naming a non-deliverable and saying unchanged'. So 'Consumers: crates/athena-cli/tests/common/mod.rs must be updated; others unchanged' passes, and the scope guard would then fail the job as in 7z81. Fix: Accept a path that is not a deliverable only when the line says that same path is unchanged (for example, nothing between the path and 'unchanged' other than a reason clause), or allow form (b) only when the line names no path that is not a deliverable.",
+      "location": "Decision 3, form (b) of the Consumers line",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The replay measurement step cannot work in the producer snapshot.",
+      "evidence": "System facts: the producer snapshot has no records/ and no history, so there are no stored readings to run `athena check-reading` on and no loop replay result to read. The replay runs at verification (replay.rs replay_is_held). Fix: Say that the share is measured by the verification replay. Keep the stop rule as an instruction to report, not as a producer step that is expected to produce a number.",
+      "location": "Step 10 / Decision 8",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes the cause where it starts: one new refusing step in the reading checks, reusing the matcher that verification itself uses to find a limit. Its key departure is backed by the code: ensure_changelog runs before the gate (reading.rs:859) and lists CHANGELOG.md on every change reading, so the literal 'CHANGELOG.md listed' test could never refuse anything. The forced LIMIT edit (run/tests.rs:3213) and the stored-reading effect through queued_work (steward.rs:421) are real and covered by tests. The cli proposals and cutover fixtures carry no limit, so they are unaffected. One major gap: the dependents list leaves out two callers of check_reading_text, the drain.rs test (4073/4093) and the `athena check-reading` command (main.rs:678). Three minor soundness points: the sentence parser that finds the allowed list is a second parser with its own trigger words, which cuts against the plan's one-definition reasoning; the word 'unchanged' in a Consumers line lets a named consumer that is not a deliverable through; and step 10 cannot see the replay result from the producer snapshot. Fix the dependents list and the plan can be accepted."
+}

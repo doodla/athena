@@ -1,0 +1,212 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-122909-52g4",
+  "n": 1,
+  "at": "2026-11-08T19:19:21.250167529Z",
+  "invocation_seq": 1,
+  "base_commit": "743f5268001640f9040d99d3f140623584a3f48d",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Record and close the PR of a rejected or failed job",
+  "summary": "When a job ends rejected or failed and Athena opened a PR for its branch, record the PR number in the job's records and close the PR over REST with a comment naming the job id and outcome. A verified job's PR is untouched. A fake-host test covers both cases, and the design doc is updated. The audience is the Athena maintainer, who sees 10 of 14 open PRs belonging to such jobs.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Fake-host tests for the rejected, failed and verified cases, and a run of cargo test and clippy."
+    },
+    {
+      "id": "verified",
+      "how": "Criteria are checked by running the tests and fmt/clippy."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that the close call and comment happen, not just that the method exists."
+    },
+    {
+      "id": "small",
+      "how": "One focused change that reuses PrHost and PrLink."
+    },
+    {
+      "id": "root-cause",
+      "how": "The close step runs once at job close for every non-landing outcome, not only for the rejected case."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and the design section are written for an outside reader."
+    },
+    {
+      "id": "rust",
+      "how": "All code is Rust."
+    },
+    {
+      "id": "mechanism",
+      "how": "The close rule is enforced in the close step and covered by tests."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is on the PR state (closed, with a comment) and the record, not on the activity."
+    },
+    {
+      "id": "public",
+      "how": "The comment and records hold only the job id and outcome."
+    },
+    {
+      "id": "designed",
+      "how": "The named design doc is updated with the rule and the alternatives."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/gh/early.rs (open_early_pr opens the PR at verification start and stores a PrLink with pr_number via store_early_link), crates/athena-core/src/gh/client.rs (the PrHost trait has open_pr, merge and the rest, but no close or comment method), crates/athena-core/src/run/close.rs (close_dispatched sets OutcomeState::Rejected and the closing records are built in push_closing_records), crates/athena-core/src/gh/tests.rs (FakeHost implements PrHost; this is the fake transport to extend). Order: the early PR is opened first, verification runs, then the job closes with an outcome state. The new close step must run only after the outcome is known and only when a PrLink exists.",
+    "Code survey: records are validated by check_record_file and AnyRecord in crates/athena-data/src/records.rs. If the PR number is stored as a new record or new field, it must be added to that allow-list and covered by the round-trip test there. Preferred approach: reuse the existing PrLink data and put the number into the job's closing records rather than adding a new record kind.",
+    "The request says 'fake gh transport'. I read it as extending the existing FakeHost/PrHost seam (a new close_pr method taking a number and a comment, implemented over `gh api` REST: POST issues/{n}/comments, then PATCH pulls/{n} with state=closed). No new gh operation outside the closed REST-path list in the design doc §5.8.",
+    "Retry rule: a job whose PR must stay open for a retry is not closed. It gets a comment or title marking it as not landing. Default: close for a final rejected or failed outcome; mark and leave open only when the job is being retried. A close failure is reported but must not change the job's outcome.",
+    "Environment: site is the GitHub REST API via gh, using the repository's configured token. It needs write access to pull requests and issues (comments). It reaches PR state and comments only. Tests use the fake host and make no network calls.",
+    "Existing code: extends docs/design/native-pr-landing.md and the PrHost trait in crates/athena-core/src/gh/client.rs; nothing under crates/ is created except possibly a new test module beside gh/tests.rs.",
+    "Files names: the one named file is docs/design/native-pr-landing.md, so it gets a new section on closing PRs of non-landing jobs, with the alternative of leaving them open for a retry.",
+    "No refusal rule is added, so no refusal-rate criterion applies. Governance files (athena.toml, defaults.toml, workflows) are not needed and not changed.",
+    "The request also asks to 'report the commands that were run'. This is read as the producer listing cargo fmt --check, cargo clippy, and cargo test in its final output. That is not a repository deliverable."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-core`: a new test with the fake PrHost shows that a rejected job with a PR link gets exactly one close call whose comment contains the job id and the word rejected, and that the link/records now hold the PR number.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a new test shows a verified (landed) job's PR gets no close call and no comment from the new close path.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a new test shows a failed job gets its PR closed with a comment naming the job id and the outcome failed. A second test shows a job that must stay open for a retry gets a not-landing mark and is not closed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`git diff` shows the PrHost trait in crates/athena-core/src/gh/client.rs gains a close method implemented through `gh api` REST paths only (comment, then PATCH state closed), and the fake host in the tests implements it.",
+      "kind": "content"
+    },
+    {
+      "text": "`git diff` shows the PR number is written to the job's records at close time, and any new record shape is accepted by check_record_file in crates/athena-data/src/records.rs and covered by the round-trip test.",
+      "kind": "content"
+    },
+    {
+      "text": "`git diff` shows docs/design/native-pr-landing.md has a new section stating the rule (close on rejected or failed, mark and keep open for a retry, never touch verified), the alternatives considered, and the REST calls used.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`: all pass, and the existing tests are unchanged and pass. `git diff` shows no change to landing or merge behavior for verified jobs.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Outcome check: a failure of the close call (fake host returns an error) leaves the job's recorded outcome unchanged, and a job with no PR link makes no host call. Check with `cargo test -p athena-core`.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "docs/design/native-pr-landing.md",
+      "action": "modify",
+      "p": 0.93
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/gh/early.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/gh/records.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Closing PRs that are already open from past jobs (a backfill of the 10 existing PRs).",
+    "Changing how verified jobs are merged or landed.",
+    "Changes to athena.toml, defaults.toml, workflows or other governance files.",
+    "Stealth mode or third-party repositories beyond reusing the same close path."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.58,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2300.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6785714285714286,
+      "p_user_intervenes": 0.07362428842504744,
+      "cost_usd": {
+        "p10": 0.5656278339630169,
+        "p50": 1.4678668,
+        "p90": 4.811315282128671
+      },
+      "wall_time_s": {
+        "p10": 570.2056324832829,
+        "p50": 2108.1592929438516,
+        "p90": 4309.820071613866
+      }
+    }
+  },
+  "departures": "Higher cost and time than the reference: the change touches the PrHost trait, the fake host, the close step and the records, plus a design doc edit.",
+  "hard_reason": "It changes the run pipeline's close step and what a job's records hold, adding a host action (closing a PR) that is costly if it wrongly closes a PR.",
+  "producer_effort": "high"
+}

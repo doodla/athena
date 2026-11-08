@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-082810-q9j5",
+  "round": 5,
+  "at": "2026-11-08T17:38:28.484253745Z",
+  "invocation_seq": 13,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "A second text-similarity rule is added in retry.rs, apart from the scope guard's compare_criteria.",
+      "evidence": "The plan adds a second text-similarity rule beside scope_guard::compare_criteria (scope_guard.rs:189-220). Findings would use a new stop-word list while criteria keep the T4 rule. That leaves two near-duplicate matchers, one of them in retry.rs, far from the scope guard that owns the T4 comparison. Fix: Put `same_summary` (and its stop-word list) in scope_guard.rs next to compare_criteria, or name it there as a stricter variant. Then the thrash guard and the lineage stop share one home for text matching. Note the choice in the change description.",
+      "location": "Plan decision 6 / step 3 (`same_summary` stop-word rule in retry.rs)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "For a root with one bullet, the 'narrower' request can be as large as the root.",
+      "evidence": "For a root with one bullet, the cap max(1, root bullets - 1) allows a request with one bullet, the same size as the root. Only the wording (`Meet: <criterion>`) differs. The second-generation Refused rule bounds this to one generation, but for that case 'narrower' is not shown. Fix: For a one-bullet root, state in the request body and the default text that the replacement is a re-scope, not a split. Or add one unit test that pins what a one-bullet root produces, so the behavior is visible rather than implied.",
+      "location": "Plan decision 3 (acceptance cap) / risk 'narrower request could be as large as its root'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The step numbers cited in the demonstrations and risks do not match the Steps list.",
+      "evidence": "The demonstrations say the entry is added 'by plan step 10' and tests 'by step 13/14', and that 'Plan step 15 removes each in turn'. Risk 1 says 'Step 13 runs cargo test -p athena-cli --test budgets'. In the Steps list these are steps 12 (defaults edit and budgets run), 15 and 16 (tests) and 17 (removal checks). Fix: Renumber the step references in the demonstrations and risks to match the current Steps list.",
+      "location": "Demonstrations (criteria 1, 3, 6) and Risks, against the Steps list",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code behind the plan's main claims, and the code matches them. retry.rs has retried_job (201), job_history (210), retries_by_job (246), MAX_RETRY_DEPTH and earlier_jobs (583-592). In drain.rs: `failures += 1` is at 1941, before the `failures >= ATTEMPTS` block. Drain::prepare computes `paused` at 2126-2129, skips paused items in the read loop at 2136, builds `held` at 2202 with the dependents message at 2215, and stores `pause_held` at 2277. The drain loop calls prepare at 3002 and 3069 and breaks on `batches.is_empty()` at 3046. That supports the plan's claim that test (B) sees no new agent call: in the first wave the narrower request is not yet in the queue view, so the loop ends without reading it. Athena::close (manage.rs:74-109) drops a job that is Queued or Proposed, as the plan says. I checked the reader-budget offset by counting bytes against DefaultsModel::render (`- {id} [{applies}]: {first_sentence}\\n`, where the first sentence ends at '. '). The new line `- lineage-limit [*]: Retries stop after 3 failed attempts.` plus its newline is 59 bytes. Splitting buy-first at `; ` removes a net 59 bytes from the reader's view. So the ⌈bytes/3⌉ estimate stays at 1997, and docs/system-facts.md needs no edit. Both stop points are placed where the fault starts and can be tested. The planning hold, before the paid Reader call, is shown by test (B). The stop after the item's own failure is shown by tests (A) and (C). Each demonstration goes through production entry points (drain::drain over RealSteps, Drain::narrow, core functions over real Records), and the plan names how each one fails without the behavior. The dependents list covers the Steps implementors, the prepare callers including `athena plan`, the ItemEnd matches, the defaults hash re-read, and the budget and defaults tests. The repeat matcher is a hand-written heuristic. But it errs toward not matching, has contrasting tests, and only affects the text of the queued request, not whether the stop fires. So I find it sound enough. My findings are minor (overlap with scope_guard's matcher, a narrower request for a one-bullet root can be as large as its root) or nits (step numbers out of sync)."
+}

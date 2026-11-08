@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-054313-gdyf",
+  "round": 2,
+  "at": "2026-11-08T19:32:59.502908232Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan's test contradicts criterion 3's literal wording, and the departure is not raised with the user",
+      "evidence": "Criterion 3: 'neither a crates/ test deliverable nor a `Consumers:` assumption ... adding either makes it pass.' The plan's demonstration asserts the opposite in two places. It keeps 'the same plus an unrelated crates/ test deliverable ... and no Consumers line' refused. It also refuses 'a Consumers line with no crates/ path and no none found/unchanged', which covers the reading's own design ('an assumption starting `Consumers:` naming the search of the repo'). The open questions raise the departures for criterion 2 and for out_of_scope items, but not this one. A verifier reading criterion 3 literally sees a test that shows the reverse of what the criterion states. Fix: Add a User open question saying criterion 3 is shown in a revised sense: either fix passes only when every named consumer is a deliverable, or the line says unchanged or none found. Explain why: a bare test deliverable left 7z81's failure open. Record the departure in D166. In the criterion 3 demonstration, state which passing forms stand for 'adding either' (for example, a crates/ test deliverable that is named in the Consumers line) so the verifier can map the criterion to the test.",
+      "location": "Demonstrations, Criterion 3; Decisions 3; Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The rule that every named consumer must be a deliverable only checks crates/ paths, but athena.toml has readers outside crates/",
+      "evidence": "Grep finds athena.toml read in xtask/tests/policy.rs and xtask/src/main.rs. The parser takes only 'words containing `crates/`'. So `Consumers: crates/a.rs (deliverable), xtask/tests/policy.rs` is accepted even though xtask/tests/policy.rs is not a deliverable, and the scope guard would then fail the job just as it did in 7z81. A line naming only an xtask path is refused even when that path is a deliverable. Fix: Check every path-like word in the Consumers line (a word containing '/' or ending in a file extension, trimmed the same way) against the deliverables, not only crates/ words. Add a unit or corpus case with an xtask/ consumer.",
+      "location": "Decisions 3 (form a); Steps 2 (Consumers-line parser)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The wider trigger may push the replay above its hold limit, and the plan has no step for that case",
+      "evidence": "replay.rs:296-307: with a declared share, a job is held when newly refused readings exceed the declared share plus REPLAY_DECLARED_MARGIN_POINTS = 5, so 3% + 5 = 8%. Round 2 widened the trigger so that every 'only/outside' limit not naming CHANGELOG.md is refused. The plan admits this 'may raise' the share, but its only answer is that verification will measure it. The producer's loop already runs a replay against the same limit (replay.rs:300-303 doc). Fix: Add a step: run the in-loop replay or `check-reading` on the past readings. If the newly refused share is above 8%, stop and report the measured share instead of narrowing the check or editing the declared figure.",
+      "location": "Risks (false refusals); Open questions (Host); Steps 9",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A limit that excludes CHANGELOG.md is accepted because it mentions the name",
+      "evidence": "The exemption is a plain substring test on 'changelog.md'. A limit such as 'Only README.md may change; CHANGELOG.md is not changed' (compare the fixture at reading.rs:3990, 'CHANGELOG.md stays as it is') is exempt even though it forbids the edit Athena forces. That is the very failure this check exists to stop. Fix: Exempt on the name only when no negation or change word sits next to it (for example 'not', 'unchanged', 'stays'), or refuse when the text both names CHANGELOG.md and negates it. Pin the shape with a corpus Refuse case.",
+      "location": "Decisions 1 (exemption when text contains 'changelog.md')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The effect on stored readings of proposed jobs is listed but never described",
+      "evidence": "steward.rs:416-425: `queued_work` returns None for a Proposed job whose latest stored reading `check_reading_text` no longer accepts. Proposed jobs whose readings carry a limit without CHANGELOG.md will quietly drop out of the drain queue once this lands. The plan lists the line but covers it only with 'whole crate' tests, which use no such stored reading. Fix: Say in D166 and the CHANGELOG entry that such proposed jobs leave the queue until they are read again. Optionally add a steward test that shows the behavior with a stored limit reading.",
+      "location": "Dependents: steward.rs:421",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A simpler alternative exists for the CHANGELOG half, and the plan should say why it was not taken",
+      "evidence": "`ensure_changelog` already adds CHANGELOG.md to the deliverables without asking. It could also append CHANGELOG.md to a limiting criterion's allowed list, which would fix 9bw7's shape with no new refusals. The accepted reading asks for a refusal, so the plan is within scope, but it does not list this option under Rejected. Fix: Add it as a rejected alternative under Decisions 1, citing the reading's choice of refuse-and-repair.",
+      "location": "Approach",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's claims against the code and they hold. `limits_changed_files` (briefs.rs:146), `allowed_paths` and `limiting_criterion` (briefs.rs:103-126) exist. `CHANGELOG_PATH` and `ensure_changelog` exist (reading.rs:293-319), and `build_reading` calls `ensure_changelog` (reading.rs:859) before the gate runs `check_reading_acceptance` (reading.rs:680), so the CHANGELOG half has to read the limit text rather than the deliverable list. `names_crates_path` is visible to sibling modules as `pub(super)` (surveys.rs:127). The `refusing_check` step list is at checks.rs:529-543, `READING_RULES` holds 10 rules (briefs.rs:2252), and the `LIMIT` fixture (run/tests.rs:3213) goes through the real gate at line 3249. The helpers `gate_refuser`, `governed_reading` and `scoped_reading` exist, and the corpus has the `INPUT_FORMS` list and the coverage tests. The design follows the reading's intent, fits one producer run, and its demonstrations call real entry points with no doubles. One major problem remains. Criterion 3 says adding either a crates/ test deliverable or a `Consumers:` assumption makes the config reading pass. The plan's own test asserts the opposite for both: an unrelated test deliverable is still refused, and so is a Consumers line that only names the search. The plan does not raise this departure in its open questions, so a verifier reading the criterion literally could fail it. Four smaller soundness gaps are listed below: the consumer-path rule only looks at crates/ paths, the replay-hold risk has no fallback step, the CHANGELOG.md name exemption can be fooled by a negation, and the effect on stored proposed readings is not stated."
+}

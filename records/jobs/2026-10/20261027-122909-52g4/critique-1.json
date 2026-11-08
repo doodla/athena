@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-122909-52g4",
+  "round": 1,
+  "at": "2026-11-08T19:27:30.700918299Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/store.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/store.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/external_calls.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/external_calls.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/records.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/records.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The keep-open branch leaves PRs open that no code path will ever close, because a retry never reuses the old job's PR.",
+      "evidence": "A retry runs as a new job: a \"try again on <job>\" request (timeout_seed, run/mod.rs:876), and settle_resume_marks spends the old job's mark through `consumed` (run/mod.rs:860-874). open_early_pr loads the link only for `early.job`, the new job, and opens a new PR on work_branch(new job). It never touches the old PR. clean_job, called after every non-blocked close (close.rs:151, 435), removes the whole state job directory, and link_path is job_dir/pr-link.json (pr.rs:54). After close, nothing in Athena can find the kept-open PR except the new record, and nothing reads that record to close it. The plan rejects 'close all' because it 'would close the PR of a job whose kept candidate is about to be resumed'. But the resume reads the kept candidate from local state, not from the PR, so closing the PR does not affect the resume. The result: timed_out and environment-failed jobs keep adding open non-landing PRs, which is the symptom the request reports. Fix: Choose one and update the doc section and demonstrations to match. (a) Simplest: close every final non-landing PR, including retry-eligible ones. The comment names the job id and outcome and says a retry, if any, runs as a new job with its own PR. Criterion 3's 'mark and keep open' case then becomes a documented decision that nothing must stay open, because retries never reuse the PR. (b) Keep the mark-and-keep-open path, and also have the retry job's close (when ctx.resume or closing.consumed_resume names the old job) close the predecessor's PR. Read its number from the predecessor's pull-request.json record, not from the state directory, which clean_job has already removed. Add a run test for that. Either way, correct the reason given for rejecting 'close all'.",
+      "location": "Decision 2 (timed_out and environment-failed jobs are kept open); Risks item 3; crates/athena-core/src/gh/early.rs:292-299; crates/athena-core/src/state.rs:387-397",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Comment and close calls are logged as HostOperation::CreatePr, which mislabels host-error records.",
+      "evidence": "HostOperation is persisted as 'create-pr' and listed in docs/design/decision-sets.md:176 and 470 and in docs/records.md. It is also read by cli tests (backtest.rs:426, watcher.rs:92). A refused close would be recorded as a refused PR creation, which misleads anyone reading host-error records or backtests. The watcher is not affected (it fires only on Merge). Fix: Either add a `close-pr` (or `write-pr`) variant and update ALL, parse, as_str and the docs that list operations, or state plainly in the doc comment and in §5.9 that create-pr covers every PR write, and update the operation description in decision-sets.md to match.",
+      "location": "Decision 3; Step 3; crates/athena-data/src/records/core.rs:22-42",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Closing the PR of a verified job that the gate refused at landing conflicts with the reading's 'never touch verified'.",
+      "evidence": "That branch runs only after the job was verified (closing.verified is Some and state was Landed). The reading and criterion 6 say 'never touch verified'. The plan resolves this ambiguity toward closing, which the user has not approved, and it adds a second wiring site inside a retrying loop. Fix: By default, leave this branch untouched: a verified job gets no close. Keep the open question for the user. If the user later wants it closed, add it then. This also keeps land_or_block free of diffs, as criterion 7 expects.",
+      "location": "Decision 4 / Step 7 (gate-refused Failed branch of land_or_block); Open question 3; crates/athena-core/src/run/close.rs:332-363",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The Failed (non-environment) case has no end-to-end demonstration.",
+      "evidence": "The plan says no existing go fixture reaches a non-environment Failed outcome after the early PR, so that case is shown only through the settle_pr unit test. Fix: Acceptable as stated. If a cheap fixture exists (for example a verifier that errors), add the run test. Otherwise keep the note in the change description.",
+      "location": "Demonstrations, criterion 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is mostly sound and checks out against the code. I read close.rs, early.rs, test_support.rs, store.rs, client.rs, pr.rs, disk.rs, run/mod.rs and both external-calls tests. close_dispatched builds the closing files inside the commit_records_with closure, so the record can go into the closing commit. early_pr runs before the checks, so both FAILS_ON_EDIT and the killed-check fixture in ci_run reach close with an early link. EarlyFake::open_pr returns 7. Grep finds exactly five PrHost implementors. job_of does end in an `.expect`, so the store.rs arm is needed. GhClient::api produces `api --method M path -f k=v`. The dependents list matches what I found. One design decision does not hold up against the code: the keep-open branch for timed_out and environment-failed jobs. Every retry is a new job (a \"try again on <job>\" request, or `consumed_resume` in settle_resume_marks). open_early_pr looks up only the new job's own link, and clean_job deletes the old job's state directory, which holds pr-link.json. So no PR ever has to stay open for a retry, and no code would ever close the ones the plan marks. For those outcomes the reported symptom stays, and the plan's reason for rejecting \"close all\" is wrong. Two smaller points: closes are logged under the create-pr operation, and a verified job refused by the gate is closed. Verdict: revise."
+}

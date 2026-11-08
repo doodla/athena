@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-082810-q9j5",
+  "round": 1,
+  "at": "2026-11-08T17:11:18.284288122Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The criterion 3 and 4 fixture never reaches the new check: the 4th attempt is not dispatched even without the gate, and with the gate no narrower request is queued.",
+      "evidence": "One loop pass of `Drain::attempts` is one `run_job`, which reads and runs (drain.rs:1529-1650). After each failure, `failures += 1`, and at `failures >= ATTEMPTS` (2) the function returns `ItemEnd::Failed` without going back to the loop top. `finish` then passes the item over for the batch. In the planned fixture, the drain's first attempt makes j2 (rejected) and its second makes j3 (rejected), and the item ends Failed. The new check sits at the loop top, so it never sees a lineage of 3. Without the gate, there is still no `try again on <j3>` job and the count is still 3, so the criterion 3 test does not fail without the behavior. With the gate, no narrower request is queued and the item's line says \"failed twice\", so the criterion 4 test and the criterion 3 passed-over-line assertion fail. Fix: Build the lineage so the drain's own next attempt would be the 4th. Reject j1 by hand, run `athena retry j1` to get a rejected j2, then queue `try again on <j2>`. The drain then runs j3 (rejected), and the check blocks `ReadOf::Retry(j3)`; without the gate, a j4 `try again on <j3>` is read and run, and the assertion fails. Also add a case where the queued item is itself a `try again on <j3>` over 3 failures, so the check stops it before its first read. In each test, assert that Steps::read is never called for the 4th attempt, or that no job's request retries j3.",
+      "location": "Demonstrations, criteria 3 and 4 (fixture: j1 rejected by hand, then the drain runs j2 and j3); crates/athena-cli/src/drain.rs:1855-1956, 2576-2588",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A lineage that reaches 3 failures on an item's last in-run attempt ends as Failed, so no narrower request is queued and no repeated findings are recorded.",
+      "evidence": "The check runs only at the top of the loop, before an attempt. When the 3rd failure of a lineage is the item's 2nd in-run attempt (for example, one earlier failure plus the drain's two), `attempts` returns `ItemEnd::Failed` at drain.rs:1942-1954. The narrower request is never queued and the repeated findings are never recorded. A later run may never pick the lineage up again, because the request job is closed. The request wants the narrower request queued once a lineage has 3 rejected or failed attempts, whatever the path. Fix: Also ask `lineage_stop` right after each failed attempt, before the `failures >= ATTEMPTS` return, or in the same branch. When it returns Some, queue the narrower request and return `ItemEnd::LineageStopped`. Keep the loop-top check for queued items whose lineage is already at the limit. Cover both paths with tests.",
+      "location": "Decision 1 / Step 6 (where the check sits in Drain::attempts)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The budget workaround edits the text of unrelated defaults, one planned split has nothing to split at, and tuning bytes to hit exactly 1997 is fragile.",
+      "evidence": "defaults.toml:53: the `verified` statement has no `; ` to split. Changing `; ` to `. ` in `buy-first` changes its statement text and drops \"build only for needs they don't meet, and record the call\" from what the reader sees (render() shows only the first sentence, defaults.rs:58-83). That is a change to an unrelated default. Tuning the new sentence a few bytes at a time to land on exactly 1997 tokens is fragile, and the next edit to the reader set will break it. Fix: Split only entries that have a real sentence break (`buy-first`, `lazy-requests`), and say in the change description that the reader now sees less of them. Better, raise the open question now: trim as little as needed to fit 2000, then update the `budget reader` line in docs/system-facts.md, which is what that file says to do.",
+      "location": "Decision 5 / Step 8 (budget workaround in defaults.toml)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The lineage check walks all job history before every attempt of every item, including items that are in no lineage.",
+      "evidence": "`job_history` resolves the request text of every request job (retry.rs:210-239), and `retries_by_job` calls it again. The plan loads `self.records()` and walks both for every attempt of every item, including first attempts of unrelated requests. Fix: Return early when the job is not in a lineage (its request has no `retry_reference` and no job retries it). Or build `retries_by_job` once per call and reuse it for both walks.",
+      "location": "Step 5 (RealSteps::lineage_stop called before every attempt)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Three of the Steps-implementor line numbers in the dependents list are wrong.",
+      "evidence": "The unit-test `Steps` impls are at drain.rs 4655, 4722, 4834 (Housekeeping), 5972 (World) and 6895 (Lane). The plan cites 4849, 5980 and 6903. Fix: Correct the line references, or name the impls by type.",
+      "location": "Dependents, Steps implementors",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is mostly sound. It reads the lineage from the job records through the existing retried_job, job_history and retries_by_job helpers. It adds a named constant and defaulted Steps methods. It queues an ordinary request with StewardRequest::new and Athena::queue, and every name it uses exists in the snapshot. The core demonstration does not work, though. One drain attempt is one read plus one run, and an item gets ATTEMPTS = 2 (drain.rs:284, 1941-1954). In the planned fixture (j1 rejected by hand, then the drain runs j2 and retries it as j3), the item ends ItemEnd::Failed straight after j3. It is passed over for the rest of the batch (finish, drain.rs:2576-2588), and the loop-top check never runs. So the \"no 4th attempt\" assertions pass without the change, and the criterion 4 test fails with it, because no narrower request is ever queued. This points to a design gap: a lineage that reaches 3 failures on an item's last in-run attempt, which is the common case, never gets its narrower request queued. The budget workaround in defaults.toml is workable but fragile, and it edits unrelated defaults. I read drain.rs (attempts, run_job, ItemEnd, finish), retry.rs (job_history, retries_by_job), steward.rs (StewardRequest::new), reading.rs (Athena::queue) and defaults.rs (render)."
+}

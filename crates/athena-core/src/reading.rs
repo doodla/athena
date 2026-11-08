@@ -8023,6 +8023,345 @@ mod tests {
         );
     }
 
+    /// A change reading as the gate sees it in production: `CHANGELOG.md` is always a deliverable.
+    fn limited(deliverables: &[&str], criterion: &str) -> Reading {
+        let mut paths = deliverables.to_vec();
+        if !paths.contains(&"CHANGELOG.md") {
+            paths.push("CHANGELOG.md");
+        }
+        governed_reading(&paths, &[criterion], &[])
+    }
+
+    #[test]
+    fn scope_limit_changelog() {
+        // A limit that does not let the job write CHANGELOG.md is refused, with or without the deliverable.
+        let bare_list = governed_reading(&["docs/x.md"], &["Only docs/x.md may change"], &[]);
+        assert_eq!(gate_refuser(&bare_list), Some("check_scope_limit"));
+        for criterion in [
+            "Only docs/x.md may change",
+            "Only docs/x.md may change; CHANGELOG.md is not changed",
+            "Only docs/x.md may change and CHANGELOG.md stays as it is",
+            "No file outside docs/x.md changed",
+            "Test-only change",
+            "Only the docs may change",
+            "Only the deliverable src/a.rs may change",
+        ] {
+            let reading = limited(&["docs/x.md"], criterion);
+            assert_eq!(
+                gate_refuser(&reading),
+                Some("check_scope_limit"),
+                "should refuse: {criterion}"
+            );
+        }
+        for criterion in [
+            "Only docs/x.md and CHANGELOG.md may change",
+            "Only docs/x.md and CHANGELOG.md may change, keeping one entry",
+            "Only docs/x.md and `CHANGELOG.md` may change; src is not changed",
+            "No file outside docs/x.md and CHANGELOG.md changed",
+            "Only the deliverables may change",
+            "Test-only change that also edits CHANGELOG.md",
+            // A bare form names no list of allowed files.
+            "No other file is changed",
+            "No other file is changed beyond formatting",
+            "Only maybe tidy things; no file outside docs/x.md and CHANGELOG.md changed",
+            "Production code is unchanged",
+            // Not a limit at all.
+            "docs/x.md explains the check",
+        ] {
+            let reading = limited(&["docs/x.md"], criterion);
+            assert_eq!(gate_refuser(&reading), None, "should accept: {criterion}");
+        }
+        // The limit is read from criteria only, as verification reads it, so an out-of-scope item is no limit.
+        let reading = governed_reading(
+            &["docs/x.md", "CHANGELOG.md"],
+            &["docs/x.md explains the check"],
+            &["Only docs/x.md may change"],
+        );
+        assert_eq!(gate_refuser(&reading), None);
+        // A reading with a question or another capability has no change to scope.
+        let mut reading = limited(&["docs/x.md"], "Only docs/x.md may change");
+        reading.question = Some("Which file?".into());
+        assert!(check_scope_limit(&reading).is_ok());
+        let mut reading = limited(&["docs/x.md"], "Only docs/x.md may change");
+        reading.capability = Some("research".into());
+        assert!(check_scope_limit(&reading).is_ok());
+    }
+
+    #[test]
+    fn scope_limit_error_names_the_file_the_reason_and_the_repair() {
+        let reading = limited(&["docs/x.md"], "Only docs/x.md may change");
+        let error = check_reading_acceptance(&reading, "change the reading rules", None, &[], None)
+            .unwrap_err()
+            .to_string();
+        for needle in [
+            "CHANGELOG.md",
+            "Athena always adds it",
+            "the deliverables",
+            "verification fails a diff outside it",
+        ] {
+            assert!(
+                error.contains(needle),
+                "the error lacks {needle:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn scope_limit_refusal_reaches_a_stored_reading_and_the_repair_clears_it() {
+        // `queued_work` drops a Proposed job whose latest stored reading `check_reading_text` no longer accepts.
+        let request = "change the reading rules";
+        let reading = limited(&["docs/x.md"], "Only docs/x.md may change");
+        match check_reading_text(&reading, request) {
+            ReadingCheck::Refuse(reason) => assert!(reason.contains("CHANGELOG.md"), "{reason}"),
+            ReadingCheck::Accept => panic!("a limit without CHANGELOG.md was accepted"),
+        }
+        let repaired = limited(&["docs/x.md"], "Only docs/x.md and CHANGELOG.md may change");
+        assert_eq!(check_reading_text(&repaired, request), ReadingCheck::Accept);
+    }
+
+    /// A limited reading with these deliverables and, when given, a `Consumers:` assumption.
+    fn config_reading(deliverables: &[&str], consumers: Option<&str>) -> Reading {
+        let mut reading = limited(
+            deliverables,
+            "Only athena.toml, defaults.toml, docs/x.md and CHANGELOG.md may change",
+        );
+        reading.assumptions = consumers.iter().map(|c| c.to_string()).collect();
+        reading
+    }
+
+    #[test]
+    fn scope_limit_config_consumers() {
+        for config in ["athena.toml", "defaults.toml"] {
+            let base = [config, "docs/x.md"];
+            let with = |extra: &[&'static str]| -> Vec<&'static str> {
+                base.iter().chain(extra).copied().collect::<Vec<_>>()
+            };
+            let consumer = "crates/athena-cli/tests/common/mod.rs";
+            let refused: Vec<(Vec<&str>, Option<String>)> = vec![
+                (with(&[]), None),
+                // An unrelated test deliverable is no answer.
+                (with(&["crates/athena-core/tests/refusal_corpus.rs"]), None),
+                (
+                    with(&[]),
+                    Some(format!("Consumers: {consumer} loads {config}")),
+                ),
+                (
+                    with(&[]),
+                    Some(format!(
+                        "Consumers: {consumer} must be updated; others unchanged"
+                    )),
+                ),
+                (with(&[]), Some("Consumers: crates/a.rs unchanged".into())),
+                (
+                    with(&["crates/a.rs"]),
+                    Some("Consumers: crates/a.rs (deliverable), xtask/tests/policy.rs".into()),
+                ),
+                (with(&[]), Some("Consumers: they load it".into())),
+                (with(&[]), Some(format!("Consumers: {config}"))),
+            ];
+            for (deliverables, consumers) in refused {
+                let reading = config_reading(&deliverables, consumers.as_deref());
+                assert_eq!(
+                    gate_refuser(&reading),
+                    Some("check_scope_limit"),
+                    "should refuse {deliverables:?} with {consumers:?}"
+                );
+            }
+            let accepted: Vec<(Vec<&str>, String)> = vec![
+                (
+                    with(&[consumer]),
+                    format!("Consumers: {consumer} loads {config}"),
+                ),
+                (
+                    with(&["xtask/tests/policy.rs"]),
+                    "Consumers: xtask/tests/policy.rs".into(),
+                ),
+                (
+                    with(&["crates/athena-cli/tests/"]),
+                    "Consumers: crates/athena-cli/tests/lifecycle.rs".into(),
+                ),
+                (
+                    with(&["xtask/tests/policy.rs"]),
+                    "consumers: `./xtask/tests/policy.rs`, and tests that load it.".into(),
+                ),
+                (
+                    with(&[]),
+                    format!("Consumers: tests that load {config} unchanged"),
+                ),
+                (
+                    with(&[]),
+                    format!("Consumers: none found, searched the repo for {config} reads"),
+                ),
+                (with(&[]), "Consumers: no change to any test".into()),
+            ];
+            for (deliverables, consumers) in accepted {
+                let reading = config_reading(&deliverables, Some(&consumers));
+                assert_eq!(
+                    gate_refuser(&reading),
+                    None,
+                    "should accept {deliverables:?} with {consumers:?}"
+                );
+            }
+        }
+        // The error names the config, the label and the repair.
+        let reading = config_reading(&["athena.toml", "docs/x.md"], None);
+        let error = check_scope_limit(&reading).unwrap_err().to_string();
+        for needle in ["athena.toml", "Consumers:", "none found", "unchanged"] {
+            assert!(
+                error.contains(needle),
+                "the error lacks {needle:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn scope_limit_unaffected_readings() {
+        // No limit: a config deliverable asks for nothing.
+        let reading = governed_reading(
+            &["athena.toml", "CHANGELOG.md"],
+            &["athena.toml has the key"],
+            &[],
+        );
+        assert_eq!(gate_refuser(&reading), None);
+        // A limit that names CHANGELOG.md and no config deliverable asks for no Consumers line.
+        let reading = limited(&["docs/x.md"], "Only docs/x.md and CHANGELOG.md may change");
+        assert_eq!(gate_refuser(&reading), None);
+        // A bare limit without a config deliverable asks for nothing.
+        let reading = limited(&["docs/x.md"], "No other file is changed");
+        assert_eq!(gate_refuser(&reading), None);
+        // A bare limit with a config deliverable needs the Consumers line, not the CHANGELOG.md words.
+        let mut reading = governed_reading(
+            &["defaults.toml", "CHANGELOG.md"],
+            &["defaults.toml has the entry", "No other file is changed"],
+            &[],
+        );
+        assert_eq!(gate_refuser(&reading), Some("check_scope_limit"));
+        reading.assumptions = vec!["Consumers: none found".into()];
+        assert_eq!(gate_refuser(&reading), None);
+    }
+
+    /// The request line the defaults-proposal job carries (see `accept_request` in proposals.rs).
+    const PROPOSAL_REQUEST: &str = "apply defaults proposal 20261027-054151-ace0\n\n\
+         Deliverable: defaults.toml (modify). Make one change to it and touch no other file.\n\
+         - Add the default with id = \"x\".\n";
+
+    #[test]
+    fn scope_limit_proposal_apply_shape() {
+        // The request line is still the one `accept_request` writes.
+        assert!(include_str!("proposals.rs").contains(
+            "Deliverable: defaults.toml (modify). Make one change to it and touch no other file."
+        ));
+        let mut reading = governed_reading(
+            &["defaults.toml", "CHANGELOG.md"],
+            &["defaults.toml has the entry", "No other file is changed"],
+            &[],
+        );
+        assert_eq!(
+            refuser_for(&reading, PROPOSAL_REQUEST),
+            Some("check_scope_limit")
+        );
+        let error = check_reading_acceptance(&reading, PROPOSAL_REQUEST, None, &[], None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Consumers:") && error.contains("none found"),
+            "{error}"
+        );
+        for consumers in [
+            "Consumers: none found",
+            "Consumers: tests that load defaults.toml unchanged",
+        ] {
+            reading.assumptions = vec![consumers.into()];
+            assert_eq!(refuser_for(&reading, PROPOSAL_REQUEST), None, "{consumers}");
+        }
+    }
+
+    #[test]
+    fn scope_limit_has_one_step_line() {
+        let body = reading_source()
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        assert_eq!(
+            body.lines()
+                .filter(|l| l.trim() == "step!(check_scope_limit(reading));")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn scope_limit_doc_and_changelog_name_the_cause() {
+        fn collapse(text: &str) -> String {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        let source = include_str!("reading/checks.rs");
+        assert!(source.contains("pub fn check_scope_limit(reading: &Reading) -> Result<()>"));
+        let before = source.split("pub fn check_scope_limit(").next().unwrap();
+        let mut doc_lines: Vec<&str> = before
+            .lines()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("///"))
+            .map(|l| l.trim_start().trim_start_matches('/'))
+            .collect();
+        doc_lines.reverse();
+        let doc = collapse(&doc_lines.join(" "));
+        let changelog = include_str!("../../../CHANGELOG.md");
+        let unreleased = changelog
+            .split("## [Unreleased]")
+            .nth(1)
+            .unwrap()
+            .split("\n## [")
+            .next()
+            .unwrap();
+        let mut items: Vec<String> = Vec::new();
+        for line in unreleased.lines() {
+            if line.starts_with("- ") {
+                items.push(line.to_string());
+            } else if let Some(last) = items.last_mut() {
+                last.push(' ');
+                last.push_str(line);
+            }
+        }
+        let items: Vec<String> = items.iter().map(|i| collapse(i)).collect();
+        let item = items
+            .iter()
+            .find(|i| i.contains("reading::check_scope_limit"))
+            .expect("a changelog item names the check");
+        for (label, text) in [("doc comment", &doc), ("changelog item", item)] {
+            for needle in [
+                "a scope limit written from the named files without listing default-written files and config consumers",
+                "scope-criterion-too-narrow-misses-dependent-tests",
+                "20261018-045437-7z81",
+                "20261023-052543-9bw7",
+                "higher refusal rate is intended",
+                "expected 3% of newly refused readings",
+                "estimate",
+            ] {
+                assert!(text.contains(needle), "the {label} lacks {needle:?}");
+            }
+        }
+        for needle in [
+            "ensure_changelog",
+            "named in the limit",
+            "Consumers:",
+            "leave the drain queue",
+            "run/tests.rs",
+        ] {
+            assert!(item.contains(needle), "the changelog item lacks {needle:?}");
+        }
+        let decisions = include_str!("../../../docs/decisions.md");
+        let d166 = decisions.split("## D166").nth(1).expect("D166 is recorded");
+        for needle in [
+            "scope-criterion-too-narrow-misses-dependent-tests",
+            "check_scope_limit",
+            "mechanism",
+        ] {
+            assert!(d166.contains(needle), "D166 lacks {needle:?}");
+        }
+    }
+
     const EXISTING: &str =
         "Existing code: crates/athena-core/src/reading.rs and docs/design/jev-code-health.md";
     const EXISTING_CRITERION: &str =

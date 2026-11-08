@@ -87,7 +87,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 45] = [
+const INPUT_FORMS: [&str; 52] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -133,6 +133,13 @@ const INPUT_FORMS: [&str; 45] = [
     "ci-result-reuse-criterion",
     "cache-scope-assumption",
     "cache-word-in-product-or-path",
+    "scope-limit-omits-default-file",
+    "scope-limit-forbids-default-file",
+    "scope-limit-config-without-consumers",
+    "scope-limit-names-default-file",
+    "scope-limit-consumer-not-a-deliverable",
+    "scope-limit-proposal-apply",
+    "scope-limit-bare-form",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -288,7 +295,406 @@ fn cases() -> Vec<Case> {
     out.extend(reading_check_cases());
     out.extend(delivery_cases());
     out.extend(defined_terms_cases());
+    out.extend(scope_limit_cases());
     out
+}
+
+/// A change reading in the production shape for a request whose bullets are `criteria` after the `head` lines,
+/// each bullet starting with `marker`. It lists `paths` and `CHANGELOG.md`, which Athena always adds, all of
+/// them at the base commit, and carries `assumptions`.
+fn scope_case(
+    meta: (&'static str, &'static str, &'static [&'static str]),
+    head: &[&str],
+    marker: &str,
+    criteria: &[&str],
+    paths: &[&str],
+    assumptions: &[&str],
+    expected: Expected,
+) -> Case {
+    let mut text: Vec<String> = head.iter().map(|l| l.to_string()).collect();
+    text.extend(criteria.iter().map(|c| format!("{marker}{c}")));
+    let request = text.join("\n");
+    let mut c = case(meta.0, meta.1, meta.2, &request, criteria.len(), expected);
+    c.reading.deliverables = paths
+        .iter()
+        .chain(&["CHANGELOG.md"])
+        .map(|p| deliverable(p, DeliverableAction::Modify))
+        .collect();
+    c.reading.assumptions = assumptions.iter().map(|a| a.to_string()).collect();
+    let mut files = repo_files();
+    files.extend(paths.iter().map(|p| p.to_string()));
+    files.insert("CHANGELOG.md".into());
+    c.repo_files = Some(files);
+    c
+}
+
+/// Readings whose criterion limits which files may change. The refusing cases leave out a file the job must
+/// change anyway: `CHANGELOG.md`, which Athena always writes, or the readers of a changed config.
+fn scope_limit_cases() -> Vec<Case> {
+    const SOURCE_9BW7: &str =
+        "job 20261023-052543-9bw7, a limit that omits CHANGELOG.md; rebuilt from the job brief";
+    const SOURCE_7Z81: &str = "job 20261018-045437-7z81, a limit that omits the tests that load athena.toml; rebuilt from the job brief";
+    let head = ["Update the guide."];
+    let proposal_head = [
+        "apply defaults proposal 20261027-054151-ace0",
+        "",
+        "Deliverable: defaults.toml (modify). Make one change to it and touch no other file.",
+    ];
+    let guide = ["docs/guide.md"];
+    let config = ["athena.toml", "docs/guide.md"];
+    let limit = "Only athena.toml, docs/guide.md and CHANGELOG.md may change";
+    let consumer = "crates/athena-cli/tests/common/mod.rs";
+    let refuse = Expected::Refuse("check_scope_limit");
+    vec![
+        // Refused: the limit leaves out CHANGELOG.md.
+        scope_case(
+            (
+                "scope-limit-only-may-change-omits-changelog",
+                SOURCE_9BW7,
+                &["dash-bullet", "scope-limit-omits-default-file"],
+            ),
+            &head,
+            "- ",
+            &["Only docs/guide.md may change"],
+            &guide,
+            &[],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "scope-limit-no-file-outside-omits-changelog",
+                SOURCE_9BW7,
+                &["star-bullet", "scope-limit-omits-default-file"],
+            ),
+            &head,
+            "* ",
+            &["No file outside docs/guide.md changed"],
+            &guide,
+            &[],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "scope-limit-numbered-part-omits-changelog",
+                SOURCE_9BW7,
+                &["number-dot-parts", "scope-limit-omits-default-file"],
+            ),
+            &head,
+            "1. ",
+            &["Only docs/guide.md may be changed"],
+            &guide,
+            &[],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "scope-limit-test-only-change-omits-changelog",
+                SOURCE_9BW7,
+                &["scope-limit-omits-default-file"],
+            ),
+            &head,
+            "- ",
+            &["This is a test-only change"],
+            &guide,
+            &[],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "scope-limit-only-the-docs-omits-changelog",
+                SOURCE_9BW7,
+                &["scope-limit-omits-default-file"],
+            ),
+            &head,
+            "- ",
+            &["Only the docs may change"],
+            &guide,
+            &[],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "scope-limit-singular-deliverable-omits-changelog",
+                SOURCE_9BW7,
+                &["scope-limit-omits-default-file"],
+            ),
+            &head,
+            "- ",
+            &["Only the deliverable docs/guide.md may change"],
+            &guide,
+            &[],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "scope-limit-names-changelog-but-forbids-it",
+                SOURCE_9BW7,
+                &["scope-limit-forbids-default-file"],
+            ),
+            &head,
+            "- ",
+            &["Only docs/guide.md may change; CHANGELOG.md is not changed"],
+            &guide,
+            &[],
+            refuse.clone(),
+        ),
+        // Refused: a config deliverable with a limit and no answer for the files that load it.
+        scope_case(
+            (
+                "scope-limit-config-deliverable-without-consumers",
+                SOURCE_7Z81,
+                &[
+                    "dash-bullet",
+                    "governance-path",
+                    "scope-limit-config-without-consumers",
+                ],
+            ),
+            &head,
+            "- ",
+            &[limit],
+            &config,
+            &[],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "scope-limit-consumer-not-a-deliverable",
+                SOURCE_7Z81,
+                &["scope-limit-consumer-not-a-deliverable"],
+            ),
+            &head,
+            "- ",
+            &[limit],
+            &config,
+            &["Consumers: crates/athena-cli/tests/common/mod.rs loads athena.toml"],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "scope-limit-consumer-not-a-deliverable-says-unchanged",
+                SOURCE_7Z81,
+                &["scope-limit-consumer-not-a-deliverable"],
+            ),
+            &head,
+            "- ",
+            &[limit],
+            &config,
+            &["Consumers: crates/athena-cli/tests/common/mod.rs must be updated; others unchanged"],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "scope-limit-xtask-consumer-not-a-deliverable",
+                SOURCE_7Z81,
+                &["scope-limit-consumer-not-a-deliverable"],
+            ),
+            &head,
+            "- ",
+            &[limit],
+            &config,
+            &["Consumers: xtask/tests/policy.rs reads athena.toml"],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "scope-limit-proposal-apply-without-consumers",
+                "the request of a defaults-proposal job (`accept_request` in proposals.rs) with the reading its reader writes",
+                &[
+                    "dash-bullet",
+                    "governance-path",
+                    "scope-limit-proposal-apply",
+                    "scope-limit-bare-form",
+                ],
+            ),
+            &proposal_head,
+            "- ",
+            &[
+                "defaults.toml carries the proposed entry",
+                "No other file is changed",
+            ],
+            &["defaults.toml"],
+            &[],
+            refuse,
+        ),
+        // Accepted: the limit allows the files, or names no list.
+        scope_case(
+            (
+                "scope-limit-bare-no-other-file",
+                SOURCE_9BW7,
+                &["scope-limit-bare-form"],
+            ),
+            &head,
+            "- ",
+            &["No other file is changed"],
+            &guide,
+            &[],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "scope-limit-bare-beyond-formatting",
+                SOURCE_9BW7,
+                &["scope-limit-bare-form"],
+            ),
+            &head,
+            "- ",
+            &["No other file is changed beyond formatting"],
+            &guide,
+            &[],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "scope-limit-earlier-only-then-outside-list",
+                SOURCE_9BW7,
+                &["scope-limit-names-default-file"],
+            ),
+            &head,
+            "- ",
+            &["Only maybe tidy things; no file outside docs/guide.md and CHANGELOG.md changed"],
+            &guide,
+            &[],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "scope-limit-bare-production-unchanged",
+                SOURCE_9BW7,
+                &["scope-limit-bare-form"],
+            ),
+            &head,
+            "- ",
+            &["Production code is unchanged"],
+            &guide,
+            &[],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "scope-limit-names-changelog",
+                SOURCE_9BW7,
+                &["scope-limit-names-default-file"],
+            ),
+            &head,
+            "- ",
+            &["Only docs/guide.md and CHANGELOG.md may change"],
+            &guide,
+            &[],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "scope-limit-names-changelog-with-keeping",
+                SOURCE_9BW7,
+                &["scope-limit-names-default-file"],
+            ),
+            &head,
+            "- ",
+            &["Only docs/guide.md and CHANGELOG.md may change, keeping one entry"],
+            &guide,
+            &[],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "scope-limit-points-to-deliverables",
+                SOURCE_9BW7,
+                &["scope-limit-names-default-file"],
+            ),
+            &head,
+            "- ",
+            &["Only the deliverables may change"],
+            &guide,
+            &[],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "scope-limit-config-consumers-are-deliverables",
+                SOURCE_7Z81,
+                &["governance-path", "scope-limit-config-without-consumers"],
+            ),
+            &head,
+            "- ",
+            &[limit],
+            &["athena.toml", "docs/guide.md", consumer],
+            &["Consumers: crates/athena-cli/tests/common/mod.rs loads athena.toml"],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "scope-limit-xtask-consumer-is-a-deliverable",
+                SOURCE_7Z81,
+                &["governance-path", "scope-limit-config-without-consumers"],
+            ),
+            &head,
+            "- ",
+            &[limit],
+            &["athena.toml", "docs/guide.md", "xtask/tests/policy.rs"],
+            &["Consumers: xtask/tests/policy.rs reads athena.toml"],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "scope-limit-config-consumers-unchanged",
+                SOURCE_7Z81,
+                &["governance-path", "scope-limit-config-without-consumers"],
+            ),
+            &head,
+            "- ",
+            &[limit],
+            &config,
+            &["Consumers: tests that load athena.toml unchanged"],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "scope-limit-config-consumers-none-found",
+                SOURCE_7Z81,
+                &["governance-path", "scope-limit-config-without-consumers"],
+            ),
+            &head,
+            "- ",
+            &[limit],
+            &config,
+            &["Consumers: none found, searched the repo for athena.toml reads"],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "config-deliverable-without-a-limit",
+                SOURCE_7Z81,
+                &["governance-path"],
+            ),
+            &head,
+            "- ",
+            &["athena.toml has the new key"],
+            &config,
+            &[],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "scope-limit-proposal-apply-with-consumers",
+                "the request of a defaults-proposal job (`accept_request` in proposals.rs) with the reading its reader writes",
+                &[
+                    "dash-bullet",
+                    "governance-path",
+                    "scope-limit-proposal-apply",
+                    "scope-limit-bare-form",
+                ],
+            ),
+            &proposal_head,
+            "- ",
+            &[
+                "defaults.toml carries the proposed entry",
+                "No other file is changed",
+            ],
+            &["defaults.toml"],
+            &["Consumers: none found"],
+            Expected::Accept,
+        ),
+    ]
 }
 
 /// The recorded request of job 20261014-082328-g6vy, verbatim.
