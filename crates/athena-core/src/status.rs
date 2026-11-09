@@ -1646,6 +1646,27 @@ pub(crate) mod planning_cost_tests {
         }
     }
 
+    #[test]
+    fn the_status_title_skips_a_leading_priority_line() {
+        for (text, title) in [
+            ("Priority: urgent\n\nFix the widget", "Fix the widget"),
+            ("  priority: high\nFix the widget", "Fix the widget"),
+            ("Fix the widget\nmore", "Fix the widget"),
+            ("Priority: high\nPriority: low", "Priority: high"),
+        ] {
+            let j = job(
+                "20260101-000000-aaaa",
+                text,
+                "2026-01-01T00:00:00Z",
+                1,
+                None,
+                OutcomeState::Landed,
+                1.0,
+            );
+            assert_eq!(job_line(&j, "closed").title, title, "{text:?}");
+        }
+    }
+
     /// A job with `rounds` plans, each costing `usd` for the planner and the same for the critic, a producer
     /// invocation that must not count, a request text, and the outcome.
     fn job(

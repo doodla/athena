@@ -109,6 +109,20 @@ impl Priority {
     }
 }
 
+/// The line of a request that names it: the first non-empty line that is not a `Priority:` line. When
+/// every line is blank or a Priority line, the first line, as before.
+pub fn title_line(text: &str) -> &str {
+    let is_priority = |l: &str| {
+        l.trim()
+            .get(..9)
+            .is_some_and(|h| h.eq_ignore_ascii_case("priority:"))
+    };
+    text.lines()
+        .find(|l| !l.trim().is_empty() && !is_priority(l))
+        .or_else(|| text.lines().next())
+        .unwrap_or("")
+}
+
 /// The priority of the job that carries out an approved steward proposal.
 ///
 /// Root cause it addresses: an approved proposal had no rule of its own for how soon it is worked, and drain
@@ -1068,6 +1082,29 @@ impl GapLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_title_line_skips_priority_lines_and_blanks() {
+        assert_eq!(
+            title_line("Priority: urgent\n\nFix the widget\nmore"),
+            "Fix the widget"
+        );
+        assert_eq!(
+            title_line("  priority: high\nFix the widget"),
+            "Fix the widget"
+        );
+        assert_eq!(
+            title_line("Fix the widget\nPriority: low"),
+            "Fix the widget"
+        );
+        assert_eq!(title_line("\n\nFix it"), "Fix it");
+        // Only Priority lines: the first line, as before.
+        assert_eq!(
+            title_line("Priority: high\nPriority: low"),
+            "Priority: high"
+        );
+        assert_eq!(title_line(""), "");
+    }
 
     fn entry(id: &str, rung: Ladder, touches: &[&str], deps: &[&str]) -> PlanEntry {
         PlanEntry {

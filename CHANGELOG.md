@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- A request's title in `athena plan` and `athena status` skips leading `Priority:` lines and blank lines, so a
+  request that starts with `Priority: urgent` is titled by its next line. Root cause: the shared title in
+  `JobRecords::title` (`store.rs`) took the request's first line; it now calls `plan::title_line`. A request
+  made only of Priority lines keeps its first line. Titles that come from a reading are unchanged.
+
 ### Added
 
 - Earlier pull requests are closed when a later job's pull request lands their commits. Root cause: a job built
