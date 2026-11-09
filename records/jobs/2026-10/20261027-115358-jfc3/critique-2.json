@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-115358-jfc3",
+  "round": 2,
+  "at": "2026-11-09T02:57:34.11048966Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/invariant.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/invariant.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/landing_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/landing_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/records.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/records.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/after_merge_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/after_merge_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The verbatim-from-any-parent rule lets a merge revert governed content to an older commit's version and still classify as RecordsOnly.",
+      "evidence": "The rule accepts a merge when every path that differs from the first parent equals some other parent's content. Take a merge whose second parent is an ancestor of the first parent, for example an older main commit. Taking that parent's version of a governed file reverts the newer content, which the plan's rule calls 'verbatim from a parent'. The second parent's commits are on main, so check_after_cutover (history.rs:142-153) puts none of them in merge_base..tip, and the merge itself passes as RecordsOnly. Before the change, rule 3 (invariant.rs:341-344) refused it as GovernedChange. The plan's risk entry claims the parent's 'own commits are in the range or on main and are judged one by one', but that does not cover a revert to an ancestor's content. The rule is also not needed for the normal case. land_pr pushes the landed commit as the PR head (landing.rs:892-905), and main requires branches to be up to date (System facts), so the squash's tree equals the landed tree. merge_tree(landed, head, merged) then returns head's tree, and the existing rule 4 already gives RecordsOnly, as the plan's own commit-shape table admits ('before, rule 4'). Fix: Either drop the gate change and have resync_tip refuse, with the branch unchanged, any merge whose governed fingerprint differs from head's. That removes invariant.rs and landing_tests.rs from scope. Or tighten the rule to a true one-sided merge: a path counts only when it equals the second parent's content and the first parent's content at that path is unchanged since merge-base(first parent, second parent). A second parent that is an ancestor then gets nothing. Whichever you choose, add a gate test where a merge with an older main commit as second parent reverts a governed file, and show it is GovernedChange.",
+      "location": "Plan step 1/2 and Decision 2: invariant::merge_paths_not_taken as the new first rule of classify_pre_merge (crates/athena-gate/src/invariant.rs:320)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The drain test sees only a double's log, so the RealSteps override and any push that actually reaches a remote are never shown during a drain.",
+      "evidence": "The proposed test checks that Stub.calls holds 'land job-a' and then 'push'. The Stub's push_after_landing only records a string. If RealSteps::push_after_landing were left empty or wired wrong, the test would still pass. The core push_working_branch tests call the helper directly, not through the drain. A real seam exists: crates/athena-cli/tests/drain.rs already runs RealSteps with a fake Lander (RecordingLander, line 2289; used at 2108, 2344, 2408, 2443). Fix: Add a tests/drain.rs test that runs the drain through RealSteps with a fake Lander that makes a local commit per landing, using a checkout with a bare origin. After each of two landings, assert that the bare origin's branch equals the local head (two pushes) and that no force was used. Keep the Stub test for ordering if you like. Optionally add a case where origin points at a missing path, and show the drain prints the warning line and still counts the job as landed.",
+      "location": "Demonstration for criterion 2; Plan step 9 (Stub push_after_landing, RealSteps override)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In a real drain the push logic runs twice for each landing, which costs an extra ls-remote while the landing lock is held.",
+      "evidence": "PrLander -> land_pr -> after_merge pushes (step 8). Drain::land then calls push_after_landing, which RealSteps overrides to call push_working_branch again. That second call runs remote_head (ls-remote, remote.rs:38-50) inside the landing lock (drain.rs:1786). Fix: Make one place own the drain push. For example, let RealSteps::push_after_landing do nothing when the lander already pushed, by having push_working_branch remember the last head it pushed. Or accept the cost and state it in the risks.",
+      "location": "Decision 5 / step 9: RealSteps::push_after_landing after after_merge already pushed",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The table presents a case the host's rules rule out as the main reason for the gate change, without saying so.",
+      "evidence": "The System facts say main requires branches to be up to date before merging, and land_pr pushes the landed commit as the PR head. So the squash tree equals the landed tree, and the resync merge's tree equals head's. Fix: Say that this row only happens when the up-to-date rule is off, and size the gate change to match (see the first finding).",
+      "location": "Commit-shape table row 'Resync merge, main also carries other governed content'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code at every place the plan names: land.rs (resync_tip, pr_commits, classify_commit, resync_onto_merge), invariant.rs (classify_pre_merge), history.rs (check_after_cutover), pr_check.rs, gh/records.rs, gh/landing.rs (land_pr, after_merge), gh/remote.rs, drain.rs (Steps, Drain::land, RealSteps) and throughput.rs. All of them exist and do what the plan says. The core change fits the request and the reading: build a merge with merge_tree and commit_tree (head first), move the branch with reset_keep, and push with GitRemote::push. The dependents list is thorough. The commit-shape table, the realistic-branch fixtures and the per-crate test runs are all present. The record-based exclusion in records.rs is justified: throughput.rs:391-402 takes the newest landing record that names a job, so if old landing commits were listed again, landing times would be wrong. Two problems remain. First, the new gate rule in invariant.rs is looser than it needs to be. Because it accepts any path that is \"verbatim from some parent\", a hand merge whose second parent is an old main commit can revert governed content and still classify as RecordsOnly, and nothing in the range judges that revert. Under the host's up-to-date rule the resync merge's tree already equals the head's, so the existing rule 4 classifies it as RecordsOnly without any change. Second, the drain demonstration only sees the Stub's call log. The RealSteps override and any push that reaches a remote during a drain are never shown. Athena's four scope findings are reasonable to put to the user, as the plan does. Shrinking or dropping the gate rule would also remove two of those out-of-list files."
+}
