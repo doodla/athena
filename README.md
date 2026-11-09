@@ -240,6 +240,21 @@ The tests that call real models are opt-in: `cargo test -p athena-cli --test liv
 --test-threads=1` (a few cents with Haiku). The last step of accepting v0 is closing the bootstrap range:
 see "Closing the bootstrap" in [`docs/records.md`](docs/records.md).
 
+## What can be changed
+
+No part of Athena's design is fixed: its code, rules, roles, prompts and docs can all be changed by a job.
+A change is an ordinary request through the same pipeline as any other (`athena ask`, described under "What
+happens when you ask" above). Where a design choice changes, the decision log records it as a new entry that
+supersedes the old one, because accepted entries are never rewritten
+([`docs/decisions.md`](docs/decisions.md), "How entries change").
+
+Two things are not open to a job:
+
+- [`BRIEF.md`](BRIEF.md) holds the requirements. Its header says changes come only from Sri, appended as dated
+  addenda.
+- `records/` is immutable: each fact is a JSON file that is never edited
+  ([D06 in `docs/decisions.md`](docs/decisions.md), "Records are immutable JSON files").
+
 ## Picking up the work
 
 Nothing about the state of the work lives in a hand-maintained file. A new context needs this page, then
