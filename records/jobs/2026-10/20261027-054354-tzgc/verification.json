@@ -1,0 +1,152 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261027-054354-tzgc",
+  "candidate_commit": "406e3f13bf60f748344f3dedf18946c532a1ae28",
+  "verified_fingerprint": "sha256:5d45b646a092f78408345d0c73e73530b2d1e532f3cde7a2a88dcd5e995ff678",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42537184620 for 406e3f13bf60f748344f3dedf18946c532a1ae28",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42537184620 for 406e3f13bf60f748344f3dedf18946c532a1ae28",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42537184620 for 406e3f13bf60f748344f3dedf18946c532a1ae28",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 3,
+  "criteria": [
+    {
+      "criterion": "A new unit test, run with `cargo test -p athena-core`, builds a request whose text starts with 'Priority: urgent', then a blank line, then 'Fix the widget'. It asserts the title is 'Fix the widget' in both the plan entry (topics/plan path) and the status output (status.rs).",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Both tests passed: reading::tests::the_plan_entry_title_skips_a_leading_priority_line calls topics::plan_entry and checks .title; status::planning_cost_tests::the_status_title_skips_a_leading_priority_line calls job_line(...).title. Both include the case (\"Priority: urgent\\n\\nFix the widget\", \"Fix the widget\"). The status test's job helper adds no readings, so title() falls back to the request text, and on the base code this case would return 'Priority: urgent'.",
+      "commands": [
+        "cargo test -p athena-core skips_a_leading_priority_line"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Tests cover a lowercase/indented 'priority: high' line, a request with no Priority line (the title is still its first line), and a request made only of Priority lines (falls back to the first line). `cargo test` passes.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "All three new tests include '  priority: high\\nFix the widget', 'Fix the widget\\nmore' and 'Priority: high\\nPriority: low' → 'Priority: high'. All passed when I ran them. Athena's CI record shows `cargo test --locked` passed for 406e3f13.",
+      "commands": [
+        "cargo test -p athena-core title_line_skips",
+        "cargo test -p athena-core skips_a_leading_priority_line",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` pass.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Both passed, per Athena's recorded check results from CI run 42537184620 for 406e3f13bf60.",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The diff to crates/athena-core/src/plan.rs adds the shared title helper, and the diff to crates/athena-core/src/status.rs adds or updates a status test; the title logic in store.rs uses the helper instead of `lines().next()`.",
+      "kind": "content",
+      "met": true,
+      "evidence": "plan.rs adds `pub fn title_line(text: &str) -> &str` and a unit test. status.rs adds the_status_title_skips_a_leading_priority_line. In store.rs, JobRecords::title now calls `crate::truncate_at_word(crate::plan::title_line(&req.text), crate::SUBJECT_MAX)` in place of `req.text.lines().next()`.",
+      "commands": [
+        "git diff HEAD~1 --stat"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "CHANGELOG.md has a new entry under the unreleased section describing the title fix.",
+      "kind": "content",
+      "met": true,
+      "evidence": "A new '### Fixed' entry under '## [Unreleased]' describes how the title skips Priority and blank lines, names the root cause (JobRecords::title in store.rs), and states the fallback and that reading titles are unchanged.",
+      "commands": [],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "title_line treats any line starting with 'Priority:' as a priority line, even when what follows is not a valid priority value, and it repeats the prefix check from Priority::from_text instead of sharing it.",
+      "evidence": "`is_priority` checks only `trim().get(..9)` against 'priority:'. Priority::from_text (plan.rs:97-109) also requires Priority::parse to accept the rest of the line. So a request starting 'Priority: make search faster' is not parsed as a priority, yet that line is skipped as the title. One shared `fn priority_line(l) -> Option<Priority>` used by both functions would keep them in step. This is rare in practice, so it is minor.",
+      "location": "crates/athena-core/src/plan.rs:114-124",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "pass",
+  "final_verdict": "pass",
+  "reasons": [],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "The change fixes the problem at its source. `JobRecords::title` in store.rs fed both `athena plan` (through topics.rs `plan_entry`) and `athena status` (through status.rs `job_line`), and it used to take the request's first line. It now calls a new helper, `plan::title_line`. The helper returns the first line that is neither blank nor a `Priority:` line. If every line is blank or a Priority line, it returns the first line, as before. Titles that come from a reading are unchanged. I ran the three new tests and all pass: the helper test in plan.rs, a plan-entry test in reading.rs and a status test in status.rs. Each covers 'Priority: urgent' then a blank line then 'Fix the widget', an indented lowercase 'priority: high', a request with no Priority line, and a request made only of Priority lines. Each would fail on the base code. fmt, clippy -D warnings and the full test suite passed in Athena's CI record. CHANGELOG.md has a Fixed entry under [Unreleased]. Every changed file is on the expected deliverables list. One minor soundness point: the helper skips any line starting with `Priority:`, even when what follows is not a real priority value (`Priority::from_text` only accepts urgent, high, normal or low), and it repeats that detection code instead of sharing it."
+}

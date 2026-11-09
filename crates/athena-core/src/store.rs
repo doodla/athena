@@ -146,12 +146,13 @@ impl JobRecords {
         self.invocations.iter().map(|i| i.seq).max().unwrap_or(0) + 1
     }
 
-    /// The title to show: the latest reading's, else the request's first line.
+    /// The title to show: the latest reading's, else the request's first line
+    /// that is not a Priority line ([`crate::plan::title_line`]).
     pub fn title(&self) -> String {
         match (self.latest_reading(), &self.request) {
             (Some(r), _) => r.title.clone(),
             (None, Some(req)) => {
-                crate::truncate_at_word(req.text.lines().next().unwrap_or(""), crate::SUBJECT_MAX)
+                crate::truncate_at_word(crate::plan::title_line(&req.text), crate::SUBJECT_MAX)
             }
             _ => String::new(),
         }
