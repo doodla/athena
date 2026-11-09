@@ -1,0 +1,452 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261109-035221-jj8g",
+  "round": 1,
+  "at": "2026-11-09T04:08:01.191007069Z",
+  "invocation_seq": 2,
+  "approach": "Rewrite each always-loaded prompt so it holds only the role's job, the output points the schema does not carry, and the hard rules a check enforces. Cut text that restates the output schema, the brief (checks, catalog, defaults, banned words, READING_RULES) or the contract. Move lookup-style knowledge (forecast scoring, governance file list, plan-field examples, verdict-rule rationale, report contents) into one new on-demand file, docs/agent-reference.md. That file is not compiled in; each of the five common frames names its path. Every phrase a test or check pins stays verbatim. Then measure the sets with the existing budgets test and set the Producer and Verifier budgets to the measured largest set rounded up to the next 50. Contract and Reader budgets stay at 350 and 2000 because other tests pin those numbers outside the deliverables; their extra headroom is stated. Update the budget lines in docs/system-facts.md (a test requires it), add a test that every pointer resolves, tighten two size ratchets in lib.rs, and record before and after token counts in CHANGELOG.md.",
+  "decisions": [
+    {
+      "choice": "Lower BudgetSet::Producer and BudgetSet::Verifier (both 1300 today, crates/athena-context/src/lib.rs:176-177) to the measured largest set rounded up to the next multiple of 50. I expect about 950 and 1000, estimated from byte targets, not measured. Leave Contract (350) and Reader (2000) unchanged, and state their extra headroom.",
+      "reason": "Producer and verifier sets, which the planner and critic also run against, shrink by roughly a quarter, so a tighter budget keeps the 'pay for additions with removals' tripwire useful. Reader stays at 2000 because the set also holds defaults.toml and the catalog, which grow with the user's defaults and are not part of this job. run_pin_tests.rs:1625 pins the literal 'of 2000 tokens' and live.rs:250 pins 350; neither file is a deliverable. No budget rises.",
+      "rejected": [
+        {
+          "option": "Also lower Reader and Contract and edit run_pin_tests.rs and live.rs",
+          "why": "Both files are outside the expected deliverables, so the verifier would raise a scope finding; the choice is raised as a User question."
+        },
+        {
+          "option": "Keep every budget and only state the headroom",
+          "why": "The job title asks to rebase the budgets; a 1300 budget over a ~930-token set leaves about 370 tokens of unreviewed room."
+        },
+        {
+          "option": "Set each budget to the exact measured size",
+          "why": "The next one-line edit would break the test, and the shared frames cost several sets, so a little room is needed."
+        }
+      ]
+    },
+    {
+      "choice": "Put reference knowledge in docs/agent-reference.md, read on demand with the Read tool, not compiled into the binary. Do not use include_str! on it.",
+      "reason": "The reader, planner, critic, producer and verifier all have Read over a copy that holds docs/. A compiled-in file would have to be added to BUILD_PATHS (xtask/src/main.rs:292-303) and the CI cache key (xtask/tests/policy.rs:937-971), and would count toward the sets, defeating the purpose. A new test makes the pointers mechanical instead of prose-only.",
+      "rejected": [
+        {
+          "option": "Embed the reference as a sixth prompt component",
+          "why": "It would count against every set's budget and need CI cache-key changes."
+        },
+        {
+          "option": "Put the knowledge in docs/system-facts.md",
+          "why": "It is compiled into the planner and critic briefs and capped at 5000 bytes by a briefs.rs test; it also carries only facts, not procedures."
+        }
+      ]
+    },
+    {
+      "choice": "Keep verbatim every anchor phrase that a test or check reads, and edit around them. Do not loosen or delete those tests.",
+      "reason": "They are mechanism for rules the user asked to keep. Anchors: lib.rs:441-543 (reader, producer, planner, critic and verifier wording); briefs.rs:1585-1616 ('seam, fake or fixture', 'Never put the logic under test inside the double', 'major finding when a demonstration names no seam', 'refusal_corpus'); verify.rs REQUIRED_FIELDS (1221-1233), whose sentences are 'list them in commands exactly as run', 'say how in request_reading_mismatch' and 'as a whole simple command'; and 'evidence text alone is not enough' in the cap-change verifier fragment (verify.rs:3232). Also the '## Capability: study' heading (cap-study lib.rs:150-160).",
+      "rejected": [
+        {
+          "option": "Rewrite the tests to match new prose",
+          "why": "This weakens the mechanisms and makes criterion 6 (every enforced rule still stated) harder to show."
+        }
+      ]
+    },
+    {
+      "choice": "Cut by role: planner and critic lose the per-field lines that restate the PlanOutput and critique schema descriptions; reader loses lines that repeat READING_RULES and CODE_SURVEY_GUIDE (briefs/reader.rs:287-314); producer and verifier lose lines the brief or the structured output already state. The study sections lose wording only.",
+      "reason": "The model reads the schema and the brief on every call. The Code survey, evidence and governance rules stay stated in the reader brief, which this job does not touch, and the reader frame keeps the acceptance-criteria rule and the governance-file anchor.",
+      "rejected": [
+        {
+          "option": "Rewrite briefs.rs and briefs/reader.rs too",
+          "why": "Out of the reading, which covers always-loaded prompts; the brief is job-specific and already tested by many wording tests."
+        }
+      ]
+    },
+    {
+      "choice": "Do not modify crates/athena-context/src/briefs.rs. Its headroom test (briefs.rs:3586-3600) builds a synthetic HeadroomRow of 1298 of 1300 and does not read the real budgets.",
+      "reason": "Changing the fixture adds churn and shows nothing. The real rows are covered by budgets.rs and run_pin_tests.rs:1581.",
+      "rejected": [
+        {
+          "option": "Update the fixture to the new real figures",
+          "why": "The fixture is independent of the real sets; the change would be cosmetic."
+        }
+      ]
+    },
+    {
+      "choice": "Update docs/system-facts.md budget lines (lines 21-26) even though it is not in the deliverables list.",
+      "reason": "system_facts_budgets_match_computed (budgets.rs:125) fails when any size or budget differs, so cargo test cannot pass otherwise. The facts text says to update the line, never the budget; here the budget is changed on purpose, so both change together.",
+      "rejected": [
+        {
+          "option": "Leave the file stale",
+          "why": "Criterion 1 would fail."
+        }
+      ]
+    },
+    {
+      "choice": "Ratchet two size tests in lib.rs: the frame bound `estimate_tokens(frame.text) < 900` (lib.rs:406) tightens to the new size class (about 700), and the contract test drops `len() == 977` for `len() <= 977` plus the rule count of 8.",
+      "reason": "An exact byte count breaks on every wording fix; a ceiling keeps the 'may not grow' intent.",
+      "rejected": [
+        {
+          "option": "Keep the exact 977 check",
+          "why": "The contract text changes, so the test would have to change anyway; a ceiling is the better mechanism."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/agent-reference.md",
+      "action": "create",
+      "purpose": "Reference knowledge moved out of the prompts, one short section per role, written for an outside reader. It holds: the forecast fields and how proper scoring rewards honesty; the governance file list; how a reading is judged; the plan-field examples (dependents entries, seam wording, commit-shape table, external-service state); the verdict rules in plain words (D43, D63, D115); what the producer report holds; and the severity scale. Each section says where the rule is enforced. No banned words and no email-like text.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-context/prompts/contract.md",
+      "action": "modify",
+      "purpose": "Tighten wording without losing any of the eight rules. Target about 830 bytes, from 977.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/reader.md",
+      "action": "modify",
+      "purpose": "Drop lines that repeat READING_RULES and the brief; keep the goal and audience rule, the closed lists, acceptance-criteria rules and the governance anchors. Point to the doc for forecast scoring, the defaults examples and the deliverable cost. Target about 1900 bytes, from 2756.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/producer.md",
+      "action": "modify",
+      "purpose": "Keep the criteria-are-a-floor, governance, requirement-row, checks_run, criteria_check and report rules. Drop the Bash and Read tool restatements that the brief and tool grant carry. Point to the doc. Target about 1100 bytes, from 1773.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/verifier.md",
+      "action": "modify",
+      "purpose": "Keep the judging order, the three REQUIRED_FIELDS sentences, the snapshot sentences, and the severity and verdict rule. Move the explanatory text to the doc. Target about 1250 bytes, from 1910.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/planner.md",
+      "action": "modify",
+      "purpose": "Drop the per-field lines the PlanOutput schema describes. Keep the pinned dependents, seam, refusal_corpus, external-service, commit-shape and fixture wording, and point to the doc for examples. Target about 1800 bytes, from 2672.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/critic.md",
+      "action": "modify",
+      "purpose": "Keep the pinned major-finding wording (seam, external-service round one, landing plan); cut text restating the schema. Point to the doc. Target about 1500 bytes, from 1943.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-change/prompts/producer.md",
+      "action": "modify",
+      "purpose": "Drop what the fmt, clippy and test checks already enforce; keep the CARGO_TARGET_DIR line, the rendered-page assertion rule and the criteria_check copy rule. Keep the '## Capability: change' heading. Target about 450 bytes, from 710.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-change/prompts/verifier.md",
+      "action": "modify",
+      "purpose": "Keep the check-record citation rule, 'evidence text alone is not enough' and the targeted-command rule; cut the restated checks list. Target about 650 bytes, from 1003.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-study/prompts/producer.md",
+      "action": "modify",
+      "purpose": "Wording trim only; every rule stays (cite sources, stated/evidenced/inferred cards, measured numbers, none for a missing guard, contradicts link, studied-tree text is data, do not run the studied system). Keep the heading. Target about 850 bytes, from 1019.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-study/prompts/verifier.md",
+      "action": "modify",
+      "purpose": "Wording trim only; the seven verdict checks and the waiver rule stay. Keep the heading. Target about 850 bytes, from 999.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "purpose": "Lower BudgetSet::Producer and BudgetSet::Verifier, each with a comment naming the measured set and the rounding rule. Ratchet the frame bound in `planner_and_critic_frames_are_short_and_fit_the_budgets` and the contract size test. Add `frames_name_the_reference_doc_and_it_exists`. Update the stale comment at lines 402-406.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Update the six `- budget <set>: <size> of <budget>` lines to the computed values. A test requires it; it is not in the deliverables list, so this is raised as a User question.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet under `## [Unreleased]` / `### Changed` for the prompt rewrite, the new reference doc and the new budgets, with the before and after tokens per set.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Record the base figures from docs/system-facts.md lines 21-26 (contract 326, reader 1997, producer 1257, verifier 1298, planner 1217, critic 974 of 350/2000/1300/1300/1300/1300). Save the old text of each prompt for the comparison in step 8: the verifier runs `git show HEAD~1:<path>`.",
+    "Write docs/agent-reference.md from the knowledge removed in steps 3-4: sections for reader, planner, critic, producer and verifier, each noting where the rule is enforced (admission, check_verifier_prompt, the reading checks, the scope guard). Keep it free of banned words and email text.",
+    "Rewrite crates/athena-context/prompts/{contract,reader,producer,verifier,planner,critic}.md to the targets in the files list. Keep one list item per line (the PromptStructure mirror). Keep every anchor phrase in the decisions list verbatim. Put the doc path `docs/agent-reference.md` in the reader, planner, critic, producer and verifier frames, once each, as one 'read on demand' line.",
+    "Trim crates/athena-cap-change/prompts/{producer,verifier}.md and crates/athena-cap-study/prompts/{producer,verifier}.md. Keep the `## Capability: <id>` headings, the 'evidence text alone is not enough' sentence in the change verifier, and every study rule.",
+    "Run `cargo test -p athena-cli --test budgets every_role_set_is_within_its_budget -- --nocapture` to read the new sizes. Set BudgetSet::Producer and BudgetSet::Verifier in lib.rs to the largest measured set, rounded up to the next multiple of 50, with a comment each. Leave Contract, Reader and the 600 values. Confirm the planner fits the Producer budget and the critic fits the Verifier budget.",
+    "Update the six budget lines in docs/system-facts.md to the computed `- budget <set>: <size> of <budget>` values, with the same format. Run `cargo test -p athena-cli --test budgets` and `cargo test -p athena-core --lib the_reading_brief_carries_the_token_headroom`.",
+    "In lib.rs tests: replace the `len() == 977` assertion with `len() <= 977` and the eight-rule count, and refresh its comment; lower the `< 900` frame bound to the nearest 100 above the larger of the planner and critic frames and rewrite the comment at lines 402-406; add `frames_name_the_reference_doc_and_it_exists`, which asserts that the five common frames each contain `docs/agent-reference.md` and that the file exists via `env!(\"CARGO_MANIFEST_DIR\")` + `../../docs/agent-reference.md`.",
+    "Check criterion 6 against the old text: for each rule the old prompts stated that a test, a check or the brief enforces, Grep the new prompts or the doc for it. Run `cargo test -p athena-context`, `cargo test -p athena-core --lib verify`, `cargo test -p athena-cli --test mirrors` and `cargo test -p athena-cap-study`.",
+    "Add one bullet under `## [Unreleased]` / `### Changed` in CHANGELOG.md with a before and after token table (contract, reader, producer, verifier, planner, critic; estimates of ⌈bytes/3⌉), the new budgets, the reasons Contract and Reader are unchanged and their stated headroom, and a pointer to docs/agent-reference.md.",
+    "Run `cargo fmt --all` then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked` once."
+  ],
+  "risks": [
+    {
+      "risk": "A rewrite drops a phrase a test pins, or states something a verdict rule forbids; the verifier-prompt check splits clauses on commas and full stops, so an innocent sentence can match a forbidden pattern.",
+      "mitigation": "Keep the anchor list verbatim (lib.rs:441-543, briefs.rs:1585-1616, verify.rs REQUIRED_FIELDS, the 'evidence text alone is not enough' fragment line). After each prompt file, run `cargo test -p athena-context` and `cargo test -p athena-core --lib verify` and fix before moving on."
+    },
+    {
+      "risk": "The new Verifier budget is set so tight that contract + 2 verifier frames no longer exceeds it, which breaks the assertion at run_pin_tests.rs:1618.",
+      "mitigation": "Step 5 runs `the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets` after the budgets are set. If it fails, round the budget differently (the measured set's own size rounded up to 25) while keeping it at or above the largest set."
+    },
+    {
+      "risk": "The pointer to docs/agent-reference.md is read in a study job, where only pinned-source/ is meant to be read.",
+      "mitigation": "The common frames say 'read on demand' and the doc holds no study rules. The study capability sections name no pointer. The doc is in the working copy, not in pinned-source/."
+    },
+    {
+      "risk": "Agents now need an extra Read call, and the knowledge moved out of the prompt could be skipped.",
+      "mitigation": "Move only knowledge that a check or the schema enforces or restates. Every enforced hard rule stays in the frame (criterion 6 anchors). The doc says where each rule is enforced."
+    },
+    {
+      "risk": "The doc, a new tracked file, trips the boundary scan or the personal-data allow-list.",
+      "mitigation": "Do not name the people or machines the scan lists, and write no email-like text. Run `cargo test -p xtask --test policy` before finishing, or the full suite."
+    },
+    {
+      "risk": "The full suite takes 9 to 11 minutes, and the last step may be skipped.",
+      "mitigation": "Run the targeted tests after each step, and the full `cargo test --locked` once at the end."
+    },
+    {
+      "risk": "A prompt rewrite makes the agents worse, which a byte count cannot show.",
+      "mitigation": "The rewrite removes only restatements and moves lookup knowledge; hard rules stay. Quality shows only on later jobs. The CHANGELOG states the token counts as estimates of the ⌈bytes/3⌉ tripwire, not live measurements."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "contract.md text (977 bytes, 8 numbered rules)",
+      "dependent": "crates/athena-context/src/lib.rs:366-378 `the_contract_keeps_one_rule_per_line_as_measured`",
+      "kind": "code",
+      "test": "The plan changes the test to `len() <= 977` plus the eight-rule count; `cargo test -p athena-context` runs it.",
+      "reason": null
+    },
+    {
+      "name": "contract.md text",
+      "dependent": "Steward, audience and auditor sets (600 budget each) in lib.rs:411-438, and CONTRACT users in hestia.rs:2278, pin.rs:437 and run_pin_tests.rs:1609",
+      "kind": "code",
+      "test": "`the_steward_prompt_follows_the_contract_and_fits_its_budget` and the audience and auditor equivalents; a smaller contract only adds headroom, and the callers only compose it.",
+      "reason": null
+    },
+    {
+      "name": "BudgetSet::Contract = 350",
+      "dependent": "crates/athena-cli/tests/live.rs:249-252 (ignored live test, literal 350)",
+      "kind": "code",
+      "test": null,
+      "reason": "The Contract budget stays 350, so the live test's literal still matches; the file is not edited."
+    },
+    {
+      "name": "BudgetSet::Reader = 2000",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:1625 (literal 'of 2000 tokens used')",
+      "kind": "code",
+      "test": "The Reader budget is unchanged. `the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets` (run_pin_tests.rs:1581) recomputes the used figure from READER_FRAME, so the reader rewrite flows through.",
+      "reason": null
+    },
+    {
+      "name": "reader.md text",
+      "dependent": "crates/athena-context/src/lib.rs:441-462 `reader_checks_for_governance_files_and_producer_stops_on_unlisted_ones`; crates/athena-core/src/reading.rs:230 composes it",
+      "kind": "code",
+      "test": "`cargo test -p athena-context`: the three reader anchors stay verbatim. reading.rs only composes the constant.",
+      "reason": null
+    },
+    {
+      "name": "reader.md versus the reader brief",
+      "dependent": "crates/athena-context/src/briefs/reader.rs:287-314 (READING_RULES, CODE_SURVEY_GUIDE); briefs.rs:3541-3560 tests; check_code_survey in crates/athena-core/src/reading/surveys.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "The brief and the checks are not edited, so the Code survey and criterion-evidence rules stay stated in the brief."
+    },
+    {
+      "name": "producer.md text",
+      "dependent": "lib.rs:451-460 (governance wording); scope_guard.rs:990, run/tests.rs:115 and run_pin_tests.rs:44 use PRODUCER_FRAME only as a stub section",
+      "kind": "code",
+      "test": "`cargo test -p athena-context` for the anchors; the stubs use the constant, not its wording.",
+      "reason": null
+    },
+    {
+      "name": "producer.md requirement: 'Never mark a requirement row Covered in docs/design/requirements-map.md'",
+      "dependent": "Athena's major-finding rule for a Covered row (named in the old producer frame)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The sentence stays in the producer frame, so the rule remains stated for the agent."
+    },
+    {
+      "name": "verifier.md text",
+      "dependent": "crates/athena-core/src/verify.rs: REQUIRED_FIELDS (1221), VERDICT_RULES (1172-1213), `check_verifier_prompt` (1263)",
+      "kind": "rule",
+      "test": "`shipped_verifier_prompts_have_no_verdict_rule_conflict`, `deleting_the_commands_instruction_names_the_missing_field` and `consistent_edits_are_accepted_and_negation_is_per_clause` (verify.rs:3122-3248): the three required sentences stay verbatim and no clause matches a forbidden pattern. Clauses split on commas and full stops, so new wording avoids 'part ... command ... counts' and 'another tree ... counts'.",
+      "reason": null
+    },
+    {
+      "name": "verifier.md and cap-change verifier.md text",
+      "dependent": "verify.rs:3103-3104 `include_str!` of the cap-change and cap-study verifier files; lib.rs:531-543 `the_verifier_frame_limits_snapshot_runs_to_the_snapshot`",
+      "kind": "code",
+      "test": "verify.rs:3232 asserts CHANGE_FRAGMENT contains 'evidence text alone is not enough'; the lib.rs verifier test pins five snapshot phrases. Both run under `cargo test`.",
+      "reason": null
+    },
+    {
+      "name": "BudgetSet::Verifier (new value) and the verifier frame size",
+      "dependent": "run_pin_tests.rs:1607-1618 (asserts contract + 2 verifier frames exceed the Verifier budget, left == 0)",
+      "kind": "code",
+      "test": "`the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets`: the step sizes the budget so that contract + 2 × frame stays above it. Rounding up to the next 50 from a set of contract + frame + a smaller study section keeps that true; the test confirms it.",
+      "reason": null
+    },
+    {
+      "name": "BudgetSet::Producer and Verifier values",
+      "dependent": "budgets.rs `an_over_budget_role_set_fails` (budgets.rs:449-459); lib.rs `producer_and_verifier_frames_leave_room_for_capability_sections`; prompt budgets are enforced only in tests (no production caller of BudgetSet::budget besides headroom_rows, lib.rs:259)",
+      "kind": "code",
+      "test": "`cargo test -p athena-cli --test budgets` and `cargo test -p athena-context`. The padded set is about 1600 tokens, over any new budget. headroom_rows reads the budgets dynamically (reading.rs:251 feeds it), and the briefs.rs:3586 test uses its own synthetic row.",
+      "reason": null
+    },
+    {
+      "name": "planner.md and critic.md text",
+      "dependent": "lib.rs:393-408 (size bound 900), 464-529 (external-service, commit-shape, shape wording); briefs.rs:1581-1617 (seam, refusal_corpus anchors); reading.rs `check_history_fixture`, which the lib.rs test cites as the same three shapes",
+      "kind": "rule",
+      "test": "`planner_and_critic_frames_are_short_and_fit_the_budgets` (bound ratcheted), `external_service_calls_need_a_named_state_and_a_wait`, `landing_rules_need_a_commit_shape_table_and_a_realistic_fixture`, `planning_prompts_and_brief_require_a_named_test_seam` and `planner_prompt_and_brief_carry_the_refusal_corpus_rule` in `cargo test -p athena-context`.",
+      "reason": null
+    },
+    {
+      "name": "Admission rule that a plan without a dependents list is refused (the planner frame states it)",
+      "dependent": "crates/athena-core/src/admission.rs (dependents checks, DEFERRAL_DETAIL at 387)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The planner frame keeps the dependents rule and the 'never write producer to check' wording, so the admission check and the frame stay aligned; the admission code is not edited."
+    },
+    {
+      "name": "Refusal-corpus cases (crates/athena-core/tests/refusal_corpus.rs)",
+      "dependent": "refusal_corpus.rs:222 lists crates/athena-context/prompts/planner.md only as a repo_files path fixture",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan adds or changes no refusal or matching rule. The path planner.md still exists, so no corpus case or expected outcome changes and no new input form is introduced."
+    },
+    {
+      "name": "docs/system-facts.md budget lines 21-26",
+      "dependent": "budgets.rs:125-150 (computed vs file); briefs.rs:2680-2725 (marker '- budget reader: ', size under 5000 bytes); briefs.rs:1375 `include_str!`; xtask BUILD_PATHS (xtask/src/main.rs:303) and policy.rs:937-998",
+      "kind": "code",
+      "test": "`system_facts_budgets_match_computed`, `system_facts_drift_is_rejected` and `the_system_facts_state_every_fact_with_a_source_and_stay_short`. Only digits change (the file gets no longer), and the file is already in BUILD_PATHS.",
+      "reason": null
+    },
+    {
+      "name": "New file docs/agent-reference.md",
+      "dependent": "xtask BUILD_PATHS (compiled-in files only, xtask/src/main.rs:292-303); xtask/tests/policy.rs `athena_bin_keys_cover_every_compiled_in_file`; boundary scan `boundary_words()` (policy.rs:88); docs/ontology.toml sources; non-Rust file allow-list (policy.rs:272-340)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The file is not read by include_str!, so no cache key covers it. It is Markdown, which the non-Rust allow-list permits anywhere. docs/ontology.toml lists no source for it, so the term walk does not scan it. The producer must keep it free of banned words and email text; the existing boundary test scans tracked files."
+    },
+    {
+      "name": "Prompt-structure mirror (crates/*/prompts/*.md)",
+      "dependent": "crates/athena-core/src/mirrors.rs:145-150 and 1033; run in the producer loop and by the athena-cli `mirrors` test target",
+      "kind": "rule",
+      "test": "`cargo test -p athena-cli --test mirrors`: one list item per line in every rewritten prompt; no item glued onto another line.",
+      "reason": null
+    },
+    {
+      "name": "Capability section headings",
+      "dependent": "crates/athena-cap-study/src/lib.rs:148-161 (starts_with '## Capability: study'); the change capability has the same heading",
+      "kind": "code",
+      "test": "`the_capability_identifies_itself_with_prompts` in `cargo test -p athena-cap-study`; the heading line is kept.",
+      "reason": null
+    },
+    {
+      "name": "CHANGELOG.md Unreleased",
+      "dependent": "crates/athena-core/src/reading.rs tests at 4129, 5296, 5639, 6721, 7363-7404, 8036, 8382 and crates/athena-cli/src/decisions.rs:526 and main.rs:1588 (find items by content within Unreleased)",
+      "kind": "code",
+      "test": null,
+      "reason": "The change adds one bullet under `### Changed` and edits no existing bullet; the readers locate their items by content, so a new bullet cannot hide them. Keep it as one `- ` line followed by indented continuation lines."
+    },
+    {
+      "name": "docs/design/context-engineer.md figures (lines 54-55, 141)",
+      "dependent": "Prose reading only; no test or code references this file (Grep for 'context-engineer' in .rs, .toml and .yml files found nothing)",
+      "kind": "rule",
+      "test": null,
+      "reason": "These are prose snapshots that are already stale (planner 788 against 1217 measured); no check reads them. The job leaves them as they are."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Run the whole suite. Entry points are the existing `check_budget` and `compose` (lib.rs:222, 142), reached through `athena_cli::wiring::capabilities()` in budgets.rs, which builds the real sets from the compiled-in prompt files. The tests are `every_role_set_is_within_its_budget`, `system_facts_budgets_match_computed`, `system_facts_drift_is_rejected` and `the_reader_headroom_rows_equal_the_budget_figures_and_name_shared_files`. The athena-context tests are the wording and ratchet tests, plus the added test `frames_name_the_reference_doc_and_it_exists`. In athena-core, `the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets` (run_pin_tests.rs:1581), `shipped_verifier_prompts_have_no_verdict_rule_conflict` and `deleting_the_commands_instruction_names_the_missing_field` (verify.rs) also run. The athena-cli `mirrors` test target runs the PromptStructure rule. No double is involved: the prompt files and budgets are the real ones, and `include_str!` injects them. The full run takes 9 to 11 minutes. Targeted reruns: `cargo test -p athena-context`, `cargo test -p athena-cli --test budgets`, `cargo test -p athena-cli --test mirrors`, `cargo test -p athena-core --lib verify`.",
+      "command": "cargo test --locked",
+      "observes": "Every budget set is at or under its budget; the facts file lines equal the computed sizes; every pinned anchor phrase is still present; the added pointer test passes; no verdict-rule conflict in the verifier prompts; the headroom-brief test still sees contract + 2 verifier frames over the Verifier budget (left = 0).",
+      "fails_without": "A frame left over the new Producer or Verifier budget fails `every_role_set_is_within_its_budget`. A stale docs/system-facts.md line fails `system_facts_budgets_match_computed`. A dropped anchor phrase fails the lib.rs wording tests. A pointer to a missing doc fails the new test. A verifier frame shrunk so that contract plus two frames no longer exceeds the Verifier budget fails run_pin_tests.rs:1618.",
+      "seam": "`check_budget`, `compose`, `athena_cli::wiring::capabilities()` and the `*_FRAME` constants: exist (read in lib.rs and budgets.rs). The pointer test is added in plan step 7."
+    },
+    {
+      "criterion": 2,
+      "method": "Run fmt in check mode and clippy with warnings denied over all targets. Each is a simple command. The only Rust edits are in lib.rs: budget constants, a new test and the ratchet tests.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Both exit 0 with no diagnostics.",
+      "fails_without": "An unformatted edit to lib.rs fails fmt; an unused variable or needless borrow in the new test fails clippy.",
+      "seam": "The Athena checks named in the brief (fmt, clippy); they exist."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the diff of every prompt file. For each role, find the removed lines and confirm each is one of: a restatement of the output schema, the brief or the catalog, or a defaults restatement. Confirm the retained lines are the role's job, the output points not in the schema and the hard rules. `git diff HEAD~1 --stat` also shows that the 10 prompt files shrank.",
+      "command": "git diff HEAD~1 -- crates/athena-context/prompts crates/athena-cap-change/prompts crates/athena-cap-study/prompts",
+      "observes": "All 10 prompt files appear in the diff with net byte reductions, and no deleted line states a rule a check enforces (compare with the criterion-6 anchors).",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Check that the file exists, then that the five common frames (reader, planner, critic, producer, verifier) each name its exact path. The added test `frames_name_the_reference_doc_and_it_exists` in lib.rs (step 7) does this: for each of the five frames it asserts the text contains `docs/agent-reference.md` and that `Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../../docs/agent-reference.md\").is_file()`. The test reads the real prompt constants and the real repository file; it uses no double. Run it, then list the file.",
+      "command": "cargo test -p athena-context frames_name_the_reference_doc_and_it_exists",
+      "observes": "The test passes; `ls docs/agent-reference.md` shows the file; a Grep of the three directories shows the path in exactly the five common frames.",
+      "fails_without": "A misspelled pointer, a missing doc, or a frame that omits the pointer fails the test.",
+      "seam": "The `*_FRAME` constants and `env!(\"CARGO_MANIFEST_DIR\")` file read (the same pattern as budgets.rs:185): the constants exist; the test is added in step 7."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the lib.rs diff. Only the Producer and Verifier constants change, each with an adjacent comment giving the measured set and the rounding rule. No constant rises. Then confirm the sizes the budgets test prints stay at or under them.",
+      "command": "git diff HEAD~1 -- crates/athena-context/src/lib.rs",
+      "observes": "`BudgetSet::budget` lines for Producer and Verifier go down; Contract 350, Reader 2000 and the 600 values are unchanged. The diff also holds the reason comments and the ratcheted tests.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "For each rule in the old prompts that a check or test enforces, show it in the new prompts or in the doc. (a) Read `git show HEAD~1:<path>` for each old prompt and Grep the new text for each anchor: reader 'Check whether the outcome needs a change to athena.toml, defaults.toml', '.github/workflows/', 'list that file as a deliverable and name it in an acceptance criterion'; producer 'governance file', 'does not list as a deliverable', 'stop and report it in open_issues; do not edit it', 'Never mark a requirement row Covered'; verifier the REQUIRED_FIELDS sentences and the snapshot sentences; planner the external-service, commit-shape, seam, refusal_corpus and dependents wording; critic its matching major-finding wording. (b) The reader's Code survey, evidence, governance and terms rules live in READING_RULES and CODE_SURVEY_GUIDE (briefs/reader.rs:287-314), which are not edited; the test at briefs.rs:3541 pins them. The criterion rules ('acceptance_criteria: each checkable...') stay in the reader frame. (c) The tests listed in the command pin the rest.",
+      "command": "cargo test -p athena-context",
+      "observes": "All wording tests in lib.rs and briefs.rs pass: reader/producer governance wording, the external-service rule, the landing and commit-shape rules, the verifier snapshot rule, the seam and refusal_corpus rules, and the READING_RULES and CODE_SURVEY_GUIDE section tests. Also run `cargo test -p athena-core --lib verify` for the verdict-rule check on the three verifier prompts.",
+      "fails_without": "Deleting any pinned phrase fails the matching assertion, for example `planner frame lacks: ...` or `D43: no instruction names the field `commands``.",
+      "seam": "`PLANNER_FRAME`, `CRITIC_FRAME`, `PRODUCER_FRAME`, `READER_FRAME`, `VERIFIER_FRAME` text; `check_verifier_prompt` (verify.rs:1263); `READING_RULES`; all exist."
+    },
+    {
+      "criterion": 7,
+      "method": "The budgets test prints the measured sets after the change (`estimated tokens: ...`). Run it with --nocapture and compare with the base figures in docs/system-facts.md at the base commit (326, 1997, 1257, 1298, 1217 and 974, each read from lines 21-26). The producer records both columns, before and after, per set in one CHANGELOG bullet, and docs/system-facts.md shows the after figures. The Reader and Contract lines state extra headroom instead of a smaller budget.",
+      "command": "cargo test -p athena-cli --test budgets every_role_set_is_within_its_budget -- --nocapture",
+      "observes": "The printed 'estimated tokens' line lists the reader, the study and change producer and verifier sets, the planner and critic, and the contract. The producer, verifier, planner and critic figures are under their base figures. `git diff HEAD~1 -- docs/system-facts.md` shows each budget line's new size.",
+      "fails_without": "If a set is over its new budget, `check_budget(...).unwrap()` panics. If the CHANGELOG figures differ from the facts lines, the criterion is unmet by reading, and the facts lines are checked by `system_facts_budgets_match_computed`.",
+      "seam": "`check_budget` over `compose` of the real constants and `athena_cli::wiring::capabilities()`: exists (budgets.rs:339-393)."
+    },
+    {
+      "criterion": 8,
+      "method": "Read the CHANGELOG diff. One bullet under `## [Unreleased]` / `### Changed` names the rewritten prompts, the new reference doc, the new Producer and Verifier budgets, and the before and after tokens per set. Other tests read this file by content, so one added bullet leaves them as they are.",
+      "command": "git diff HEAD~1 -- CHANGELOG.md",
+      "observes": "A single added bullet under the existing Unreleased Changed list with the before and after table; no other change to the file.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: docs/system-facts.md is not in the expected deliverables, but `system_facts_budgets_match_computed` fails unless its six budget lines change, so the plan edits it. Confirm that edit is wanted, rather than treating it as a scope violation.",
+    "User: Contract (350) and Reader (2000) budgets stay unchanged because run_pin_tests.rs:1625 and live.rs:250 pin those literals and neither file is a deliverable. Do you want them lowered too, with those two files added as deliverables?",
+    "User: the Producer and Verifier targets of about 950 and 1000 tokens are estimates from byte targets (each token about 3 bytes) and are not measured. The producer sets the final numbers from the budgets test output (roughly the largest measured set rounded up to the next 50). Is a 50-token margin acceptable, or do you want a larger one?"
+  ],
+  "producer_section_sha256": "f93bbaf968a927d151060558b5b0ef6f4a7320621cb66dd2eb1e531b36cd7e42"
+}

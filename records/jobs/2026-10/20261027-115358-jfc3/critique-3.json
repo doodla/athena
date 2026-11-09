@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-115358-jfc3",
+  "round": 3,
+  "at": "2026-11-09T03:05:46.700914396Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/records.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/records.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/after_merge_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/after_merge_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The push helper pushes any checked-out branch, the default branch included, and goes around the existing push guard and the documented push rule.",
+      "evidence": "Step 5 reads current_branch() and calls GitRemote::push(branch, head) with no check on which branch it is. The codebase has one push guard: check_push (crates/athena-core/src/pr.rs:298-316) refuses any branch other than the job's own (\"refusing to push …: Athena pushes only the job's own branch\") and any push that is not a fast-forward. docs/enforcement.md:64-68 and D72 (docs/decisions.md:1607) state the rule \"pushes only … its own work branch, never non-fast-forward\". The fixtures resync a checkout that is main itself (test_support.rs:559 \"moving main onto the squash commit\"; trailer_stop.rs:131), and the plan's own open question admits the working branch may be main. In that case the helper plain-pushes local main, with commits no pull request carried, straight to origin's main. Only the host's branch rules stop it, and where they do the warning fires on every landing. The plan never says it is widening the push rule. Fix: Skip the push, with a one-line note, when the current branch is the remote's default branch. local_default_branch(git, \"origin\") exists at reconcile.rs:370. Before pushing, check fast-forward through Ancestry, either by extending check_push with a working-branch case or by mirroring its NotFastForward check. Name the rule change (Athena now pushes the working branch too) in the CHANGELOG entry and in docs/enforcement.md, or raise it as an open question. Add a test that a checkout on the default branch is not pushed. The tests/drain.rs push tests must then use a non-default branch, since that Fixture checks out main.",
+      "location": "Step 5 (Athena::push_working_branch); Decision 6",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Omitted reader: the history walk used before the cutover would report the job of every earlier landing as landed twice.",
+      "evidence": "check_history_with_exempt (crates/athena-gate/src/history.rs:203-259) walks every commit reachable from the tip (rev_list_reverse) and records each landed job in state.landed. invariant.rs:738-746 refuses \"job {} has already landed\" when a later commit in the walk adds the same job's closing records. Under the new resync, the job's landed commit (still on the branch) and the host's squash (the merge's second parent) both add job A's closing records, and both are reachable from every later head. A repository with no cutover yet still lands through land --pr: records.cutover returns None when no cutover_job is set (landing.rs:329-331). So the CI history check on each later pull request head would fail. The plan's realistic-branch test uses only check_pr_head and classify_commit, the view after the cutover. Fix: Add this reader to the dependents list. Add a test that runs check_history on a pre-cutover fixture (no C0) after one append-only resync and a second landing. Then either make the walk tolerate the shape, which reaches into the gate and needs the user's agreement, or show from the code that pull-request landing before the cutover is unsupported and state it.",
+      "location": "Dependents list; Risks (append-only growth)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "This landing and history plan has no commit-shape table.",
+      "evidence": "The plan changes the shape of the branch every later pull request is cut from: merge commits, landed commits that stay on the branch, and squashes reachable through a second parent. The realistic-branch test in step 9 lists shapes in prose. Nowhere does the plan tabulate each shape against what each reader concludes: classify_pre_merge, check_pr_head, the history check before and after the cutover, pr_commits_excluding, record_bases and close_carried_prs. The shapes are job landing, declared intervention, records-only commit, resync merge, hand edit, an earlier landed commit, and the squash reached through the second parent. The omission in the previous finding is the kind such a table catches. Fix: Add the table, one row per commit shape and one column per reader, with the expected result in each cell. Point each cell at the test that shows it.",
+      "location": "Demonstrations (Criterion 4 and the realistic-branch test); whole plan",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Append-only changes which earlier pull requests are recorded as bases and closed, and the dependents list does not mention it.",
+      "evidence": "record_bases counts an open link as a base when its head is an ancestor of the landing commit. The doc at landing.rs:376-377 says that \"a stack replayed under new hashes\" is not reachable, so those pull requests stay open. Once heads are no longer rewritten after a merge, an earlier open pull request whose head sits below a later landing stays an ancestor of it. close_carried_prs will then close that pull request when the later one merges. Fix: Add this reader to the dependents list, update the doc comment at landing.rs:376-377, and add a test or a stated reason that the new closing behavior is intended.",
+      "location": "Dependents list: record_bases / close_carried_prs (pr.rs:190-210, gh/landing.rs:363-466)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In a real drain the push runs twice per landing, and a refused push warns twice.",
+      "evidence": "after_merge pushes, and then Steps::push_after_landing calls the same helper again for PrLander. The plan accepts the repeated ls-remote and the duplicate warning instead of choosing one owner for the push. Fix: Have one owner per path. For example, after_merge could put whether it pushed in the PrReport or in its warnings, and RealSteps would skip the hook when the landing already pushed. Or keep the design but print the warning only from the hook in drain mode.",
+      "location": "Decision 4; Risks (double push)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The exclusion depends on landing records, so a landing whose record write failed (warning path, landing.rs:321-325) is listed again in the next intent until reconciliation writes the record.",
+      "evidence": "The exclusion uses existing(LANDING_DIR) only. Intents (records.rs:180-186) also hold head_sha and expected_base, and reconcile repairs from them. Fix: Note the case in Risks, or also exclude the heads of intents whose expected base and host commit match a commit on main, as reconcile already does.",
+      "location": "Step 4 (gh/records.rs exclusion)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the snapshot with Read and Grep only and ran nothing. The core of the plan holds up against the code. resync_tip at land.rs:218 replaces the replay with merge_tree(landed, head, merged) plus commit_tree with parents [head, merged]. The signatures it relies on exist (athena-git lib.rs:612, :673, :759; attrs.rs:139 fingerprint takes a treeish). classify_pre_merge judges a commit against its first parent (gate lib.rs:245-300, invariant.rs:320-347), so a merge whose tree equals head's tree is RecordsOnly. Excluding by landing record in records.rs fits commits() at records.rs:128. The demonstrations name real seams: RecordingLander at tests/drain.rs:2289, Stub, after_merge at landing.rs:959, and a bare origin. Three things need fixing before code is written. (1) push_working_branch pushes whatever branch is checked out, including the default branch. It goes around the existing push guard (check_push, pr.rs:300, \"Athena pushes only the job's own branch\") and the documented push rule, and the plan names neither. (2) The dependents list leaves out the history walk used before the cutover (history.rs:235-259, invariant.rs:738-746). Under append-only, each job's landed commit and the host's squash of it both stay reachable from every later head, so that walk would report \"job … has already landed\". (3) A landing and history plan must carry a commit-shape table, and this one has none; such a table would have caught (2). The double push in a drain and the change to which earlier pull requests get closed are smaller issues."
+}

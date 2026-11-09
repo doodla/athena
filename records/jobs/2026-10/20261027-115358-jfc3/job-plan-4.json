@@ -1,0 +1,491 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-115358-jfc3",
+  "round": 4,
+  "at": "2026-11-09T03:10:25.167076438Z",
+  "invocation_seq": 9,
+  "approach": "Root cause: after a squash the host's commit is not a descendant of the job's landed commit. `resync_tip` (land.rs:218) repairs that with `git.replay`, which rebuilds every later commit under new ids. The branch then leaves its remote copy's history, so a plain push is refused, and the drain never pushes. No parser or matching rule changes, so the refusal corpus is not involved.\n\nChange: (1) `resync_tip` builds a merge commit with parents [head, merged]. The tree comes from `git.merge_tree(landed, head, merged)`, the commit from `git.commit_tree`, and the branch moves with the existing `reset_keep`. A conflict, or any difference in governed content from head, is an error and nothing moves. (2) `Athena::push_working_branch` makes a guarded plain push of the current branch. It skips the default branch, and it checks fast-forward with the existing `check_push` (pr.rs:300), with the current branch as the allowed branch. `after_merge` calls it after the resync, which covers `athena land --pr` and the drain's `PrLander`. (3) Each push has one owner. A defaulted `Lander::pushes_working_branch` is true for `PrLander`. `RealSteps::push_after_landing`, called by `Drain::land` after each `Landed` result, pushes only for a lander that does not push itself. (4) Landing intents and records skip commits named by an earlier landing record. (5) The gate stays unchanged. A gate test pins one known limit: the history walk before the cutover refuses a head that holds a landed job and its squash.",
+  "decisions": [
+    {
+      "choice": "Do not change the gate; resync_tip itself refuses any merge whose governed fingerprint differs from head's (`fingerprint(git,&tree,head) != fingerprint(git,head,head)`), naming the first path of `git.diff_tree(head,&tree)`. The branch is left unchanged.",
+      "reason": "land_pr pushes the landed commit as the PR head (landing.rs:892-905) and main must be up to date before merging (System facts), so the squash tree equals the landed tree. merge_tree(landed,head,merged) then returns head's tree, and classify_pre_merge (invariant.rs:339-347) gives RecordsOnly by rule 4 with no edit. resync_tip never creates a merge whose governed content differs from the first parent's, so it cannot create a revert that passes as records only. A hand-made revert merge stays GovernedChange, and a test shows it.",
+      "rejected": [
+        {
+          "option": "Add a first rule to classify_pre_merge that accepts a merge taking paths verbatim from any parent",
+          "why": "A second parent that is an ancestor of the first would let a merge revert governed content and still pass as RecordsOnly."
+        },
+        {
+          "option": "Tighten the gate to a one-sided merge",
+          "why": "More gate code outside the request, for a case the host's up-to-date rule rules out. A refusal that leaves the branch unchanged is smaller."
+        },
+        {
+          "option": "Keep replay when main carries other governed content",
+          "why": "The replay is the rewrite the request removes; that path would keep the divergence."
+        }
+      ]
+    },
+    {
+      "choice": "Build the merge tree with merge_tree(base=landed, ours=head, theirs=merged), commit with commit_tree(parents [head, merged], sign=signs_commits), and move the branch with reset_keep.",
+      "reason": "A plain `git merge` uses the real merge base. It conflicts whenever a later job edits lines the landed job added. With the landed commit as base, only the host's changes beyond the landed job come in. merge_tree (lib.rs:673), commit_tree (lib.rs:612) and reset_keep (lib.rs:759) exist, keep local edits and follow signing.",
+      "rejected": [
+        {
+          "option": "git merge in the work tree",
+          "why": "Conflicts on later edits of landed lines, can leave a half-done merge, bypasses signing and keep-edits."
+        },
+        {
+          "option": "Keep replay and force-push or push_if_remote_at",
+          "why": "Out of scope; treats the symptom."
+        }
+      ]
+    },
+    {
+      "choice": "Exclude already-landed commits from landing intents and records using landing records, in gh/records.rs. For each landing record whose host_commit exists locally and is an ancestor of the expected base, pass its head_sha as `^head_sha` to a new `land::pr_commits_excluding`. `pr_commits` calls it with no exclusions.",
+      "reason": "Under append-only, old landing commits stay in expected_base..head. throughput.rs:391-402 takes the newest landing record that holds a job's JobLanding commit as the job's landing time, so listing a landed job again moves its time and the new intent names old jobs. Messages are never read (land.rs:245-246), so a message marker is out. A landing whose record write failed (landing.rs:319-325) is listed again until reconciliation writes the record; this is stated in risks.",
+      "rejected": [
+        {
+          "option": "A marker line in the merge message",
+          "why": "Free text deciding what is judged."
+        },
+        {
+          "option": "Exclude commits reachable from the first parent of any merge whose second parent is on the base",
+          "why": "Anyone could hide a branch's history by making such a merge."
+        },
+        {
+          "option": "Also exclude heads of intents (critic finding 9)",
+          "why": "Intents lack the host commit that proves the head reached main; reconcile writes the record from the intent, which closes the gap. Noted as a risk."
+        }
+      ]
+    },
+    {
+      "choice": "One owner per push path (answers critic finding 8). `after_merge` owns the push for `athena land --pr` and for `PrLander`. A defaulted `Lander::pushes_working_branch(&self) -> bool {false}`, true for `PrLander`, lets `RealSteps::push_after_landing` skip the hook. The hook pushes only for a lander that does not push itself. `Drain::land` calls the defaulted `Steps::push_after_landing` after each Landed result.",
+      "reason": "One push and at most one warning per landing. A drain test can drive RealSteps with a fake Lander that never reaches after_merge, and the PrLander path is shown by the after_merge test (athena land --pr needs the real gh and cannot be run in a test). Lander and Steps impls that do not override keep working: defaults.",
+      "rejected": [
+        {
+          "option": "Run the helper in both places and accept the second ls-remote and a repeated warning",
+          "why": "The critic's finding 8: two owners."
+        },
+        {
+          "option": "Put the push only in commands::land and RealSteps::land",
+          "why": "commands::land needs the real gh, so no test could show it."
+        },
+        {
+          "option": "A Landing::Landed field recording that the lander pushed",
+          "why": "Landed { changed } is built in many tests; every one would change."
+        },
+        {
+          "option": "A required Steps method",
+          "why": "Every Steps double would change."
+        }
+      ]
+    },
+    {
+      "choice": "The push helper is guarded (answers critic finding 4). It stays silent with no current branch or no origin. It skips with one line (`not pushing <branch> to origin: it is the default branch; changes reach it through pull requests`) when the current branch is `reconcile::local_default_branch(git,\"origin\")` (reconcile.rs:370), or, when origin/HEAD is not set, `main` or `master`. It then calls `check_push` with allowed_branch = the current branch, so a remote head that is not an ancestor of the local head is a warning. Last it pushes with GitRemote::push (plain). The CHANGELOG names the widened rule: Athena now also pushes the working branch.",
+      "reason": "check_push (pr.rs:300) permits only the job's own branch and fast-forwards. The working branch is a second case, so the helper passes the current branch as the allowed branch and keeps the fast-forward test. The default branch is never pushed by Athena.",
+      "rejected": [
+        {
+          "option": "Push whatever is checked out",
+          "why": "Would push local main straight to origin's main in fixtures and setups where the checkout is main."
+        },
+        {
+          "option": "Extend check_push with a working-branch field",
+          "why": "Touches pr.rs and its callers (early.rs:277, landing.rs:560) for no gain."
+        }
+      ]
+    },
+    {
+      "choice": "Before-the-cutover history walk (answers critic finding 5): no gate change. A gate test in athena-gate landing_tests.rs pins the shape. A branch holding job A's landed commit L and the host's squash S (as the merge's second parent) is refused by `check_history_with_exempt` with `job .. has already landed` (invariant.rs:738-746, history.rs:235-261). The CHANGELOG names the limit and a follow-up in the gate. The cutover-shown path (this repository's, athena.toml:153) judges only merge_base..tip with classify_pre_merge (history.rs:142-167) and is unaffected.",
+      "reason": "The request requires the branch to descend from both its remote head and the merged main, so L and S are both reachable by construction. Making the walk tolerate it means a new gate rule (a squash that copies an earlier landing) and the user's agreement. Landing before the cutover is not unsupported: land_pr works without cutover_job (landing.rs:329). So the limit is stated, tested and put to the user.",
+      "rejected": [
+        {
+          "option": "Tolerate the shape in history.rs/invariant.rs now",
+          "why": "Widens a governance rule outside the request without the user's agreement."
+        },
+        {
+          "option": "Declare pre-cutover landing unsupported",
+          "why": "The code supports it."
+        }
+      ]
+    },
+    {
+      "choice": "Commit-shape table (critic finding 6). Columns: A=classify_pre_merge/classify_commit/pr_commits; B=check_pr_head (base=origin/main); C=check_history after the cutover (own commits merge_base..tip via classify_pre_merge, attribution on the part on main); D=check_history before the cutover (walk of every reachable commit); E=pr_commits_excluding in landing records; F=record_bases/close_carried_prs.\n| Shape | A | B | C | D | E | F |\n| job landing B on top of the merge | JobLanding | passes if verified | own commit, ok | first landing of B, ok | kept | its link is the landing; bases = open links whose head is an ancestor |\n| earlier landed job commit L_A (stays on the branch) | JobLanding | ok (landing_problem is stateless) | own commit, ok | ok if first seen; refused with S (row S) | excluded by ^head_sha once A's landing record has a host commit on the base | an open earlier link at L_A stays an ancestor, so it is a base and is closed when carried (intended) |\n| host squash S, second parent of the merge | not in base..head (on main) | not listed | on main: attribution via A's landing record | REFUSED 'already landed' with L_A: known limit, pinned by gate test | n/a | merged_commit, the closing target |\n| resync merge M [head, S] | RecordsOnly (tree equals first parent's) | ok | own commit, RecordsOnly ok | multi-parent: parent_fps contains fp (invariant.rs:128-130), ok | kept; adds no job | n/a |\n| records-only commit | RecordsOnly | ok | ok | unchanged | kept | n/a |\n| owner-path commit | RecordsOnly where the rules exclude it | ok | ok | unchanged | kept | n/a |\n| declared intervention before the last landing | DeclaredIntervention | ok only before a JobLanding in the range | ok | unchanged | kept | n/a |\n| declared intervention after the last landing | DeclaredIntervention | offence (pr_check.rs:99-105), same as before | ok | unchanged | kept | n/a |\n| retry-after-block landing | JobLanding (adds outcome-landed) | as a job landing | ok | chain rules unchanged | kept | as a job landing |\n| hand edit of governed content | GovernedChange error | offence | violation (history.rs:153-166) | violation | n/a | n/a |\nTests: land.rs realistic-branch test (A, B, C, E, F rows), the hand-made revert merge test, gh/tests.rs landing_records_leave_out_landed_commits (E), land.rs record_bases test (F), gate landing_tests.rs pin test (D, row S).",
+      "reason": "One row per shape, one column per reader, each cell tied to a test, so omitted readers show up.",
+      "rejected": [
+        {
+          "option": "Describe the shapes in prose only",
+          "why": "That is how the walk reader was missed."
+        }
+      ]
+    },
+    {
+      "choice": "Move the two fixtures that resync a checkout that is main itself (test_support.rs:559, trailer_stop.rs:131) to reset_keep.",
+      "reason": "Attribution walks main's first-parent line from C0 (attribution.rs:386-409). A merge on a branch named main would put C0 off that line. Nothing followed the landed commit there, so the old replay result equals reset_keep.",
+      "rejected": [
+        {
+          "option": "Leave them calling resync_onto_merge",
+          "why": "athena check --attribution on the fixture would report the cutover commit off main's first-parent line."
+        }
+      ]
+    },
+    {
+      "choice": "Leave Git::replay, athena-git/src/lib.rs and gh/mod.rs untouched.",
+      "reason": "replay stays public with its own tests (lib.rs:1659-1724), so no dead-code warning. gh/mod.rs only declares modules.",
+      "rejected": [
+        {
+          "option": "Delete replay",
+          "why": "Wider than the request."
+        }
+      ]
+    },
+    {
+      "choice": "Keep gh/records.rs, gh/after_merge_tests.rs, crates/athena-cli/tests/drain.rs and athena-gate/src/landing_tests.rs in scope although the reading does not list them (answers scope findings 1-3, and the new gate test). Ask the user.",
+      "reason": "records.rs is the only place landing records choose a pull request's commits. after_merge_tests.rs:103 asserts the old text `rebuilt on the merged commit`, a one-line needle change. tests/drain.rs holds the only drain tests that run RealSteps with a fake Lander and a real repository. landing_tests.rs holds the gate fixtures (stage_landing, owner_repo) that the pre-cutover pin test needs.",
+      "rejected": [
+        {
+          "option": "Only the nine listed files",
+          "why": "Landed jobs would be listed in every later record, an existing test would fail on the new message, and the drain push could not be shown."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "resync_tip builds the merge commit and refuses a governed difference; add pr_commits_excluding; add Athena::push_working_branch (guarded plain push); update the resync_tip, resync_onto_merge and pr_commits docs and messages; rewrite the two resync tests; add the criterion 1, 3, 4 tests, the realistic-branch test, the record_bases test and the push helper tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "purpose": "after_merge calls push_working_branch after the resync, inside the same guard; update its doc comment, the inline comment and the close_carried_prs comment (lines 376-377).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/records.rs",
+      "action": "modify",
+      "purpose": "GitLandingRecords::commits excludes heads of landings whose host commit is already on the base (outside the reading's list: finding 1).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Tests: after_merge pushes the working branch (not for a non-landed report; warns for a missing origin; skips main); landing records leave out landed commits. Adds a small NoPages PagesHost double.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/after_merge_tests.rs",
+      "action": "modify",
+      "purpose": "One-line needle change at line 103 to the new message (outside the reading's list: finding 2).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add the defaulted Steps::push_after_landing and Lander::pushes_working_branch (true for PrLander); call the hook in Drain::land after a Landed result; override it in RealSteps; update the Lander/PrLander docs; add the Stub push and the unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "RealSteps drain tests with a bare origin on a non-default branch and a fake Lander: push after each landing, no second push for a self-pushing lander, refused push is a warning (outside the reading's list: finding 3).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "purpose": "One test that pins the known limit: a head holding job A's landed commit and its squash is refused by the pre-cutover history walk with `already landed`. The gate rules are not changed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "CutoverFixture::build moves the checkout to C0 with reset_keep; update the three comments that cite resync_onto_merge (lines 26, 46, 616).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/trailer_stop.rs",
+      "action": "modify",
+      "purpose": "land_post_c0_job moves to the merged commit with reset_keep.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry (Changed and Fixed): append-only resync, guarded push after each landing, landing records leave out landed commits, widened push rule, closing of carried earlier pull requests, root cause, the pre-cutover limit, the range-growth note and the D167 pointer.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "land.rs: rewrite `resync_tip`. Keep the two no-op checks. Call `git.merge_tree(landed, head, merged)`; `None` is an error saying the host's commit conflicts with the branch's later work and nothing moved. Then require `fingerprint(git,&tree,head)? == fingerprint(git,head,head)?`; otherwise error naming the first path of `git.diff_tree(head,&tree)`, nothing moved. Then `git.commit_tree(&tree, &[head, merged], message, sign)` with a plain subject such as `Merge the host's commit <short> into the branch` and no trailers. Remove the replay call and rewrite the doc comment (append-only; merge commit; no-op cases; errors).",
+    "land.rs: update `Athena::resync_onto_merge` docs and messages. Error context: `could not merge the host's commit {merged} into the branch; the branch is unchanged (it still holds {head})`. Success line: `the branch merged the host's commit {short}; it held {short} before`. Keep the lock, reset_keep and the unchanged-on-error text.",
+    "land.rs: add `pub fn pr_commits_excluding(git, remote_base, head, landed_heads: &[String]) -> Result<Vec<PrCommit>>`. It lists `rev-list --reverse base..head` plus `^<sha>` for each landed head that exists (`commit_exists`), then classifies as before with the same empty-range error. `pr_commits` calls it with an empty slice. Update the docs.",
+    "gh/records.rs: in `GitLandingRecords::commits`, read `self.existing(LANDING_DIR)?`, collect `head_sha` of each `HistoryRecord::Landing` whose `host_commit` exists locally and is an ancestor of `expected_base`, and call `pr_commits_excluding`. If the host commit is missing locally, keep that landing's commits.",
+    "land.rs: add `impl Athena { pub fn push_working_branch(&self, ui: &dyn Ui) -> bool }`. In order: `current_branch()` None -> silent false; `git.run([\"remote\",\"get-url\",\"origin\"])` error -> silent false; default branch (`reconcile::local_default_branch(&self.git,\"origin\")`, else `main`/`master`) -> print the one-line skip note, false; read `head()`; build `GitRemote{git:&self.git,name:\"origin\"}`; `remote_head(branch)`: if it equals head, true silently; else `check_push(&self.git, &PushRequest{allowed_branch:branch, branch, local_head:&head, remote_head})` and on refusal print `warning: could not push <branch> to origin: <refusal>; the landing stands`, false; else `remote.push(branch,&head)`; success prints `pushed <branch> to origin at <short>`, error prints the same warning. No force, no push_if_remote_at.",
+    "gh/landing.rs: in `after_merge`, after `self.resync_onto_merge(landed, merged, ui)?` call `self.push_working_branch(ui);` inside the same `if let` guard. Update the doc comment, the inline comment and the close_carried_prs comment at lines 376-377 (heads are no longer rewritten, so an earlier open pull request below the landing stays an ancestor and is closed when carried).",
+    "drain.rs: add `fn push_after_landing(&self) {}` to `Steps` (default, with a doc comment like `config_after_landing`, line 583). In `Lander` add `fn pushes_working_branch(&self) -> bool { false }` with a doc comment; `PrLander` returns true because `land_pr` pushes in `after_merge`. In `Drain::land` call `self.steps.push_after_landing()` right after the block that records the landing (before `config_after_landing`, line 1812). In `RealSteps` implement it as: return if `self.lander.pushes_working_branch()`, else `self.athena.push_working_branch(self.ui);`. Update the Lander/PrLander docs. In the tests module add `push_after_landing` to the `Stub` impl pushing \"push\" onto `calls`, plus the unit tests (two landed jobs give land, push, land, push; a rejected job gives no push; PrLander.pushes_working_branch() is true).",
+    "tests/drain.rs: add a keyed variant of `queue_steward_request`, a `ProbeLander` (RecordingLander pattern) that records the bare origin's branch and the local head at each ask, an `OwnPushLander` overriding `pushes_working_branch` to true, and a line-collecting Ui if none exists. Each new test starts with `git checkout -b work` in the fixture, because the Fixture checks out main, which the helper never pushes. Add `the_real_steps_push_the_working_branch_after_each_landing`, `a_lander_that_pushes_itself_is_not_pushed_for_again` and `a_refused_push_is_a_warning_and_the_job_stays_landed` (the origin first receives a sibling commit made with `git commit-tree` on the base commit and a plain push; no force flag appears in the test). If the scenario script cannot work two queued requests, the two-landing test lands one job and the Stub test carries the two-landing order.",
+    "land.rs tests: rewrite the two resync tests for the merge shape (main does not move in the first; the moved-main variant becomes the governed-difference error). Add after_a_squash_the_branch_is_merged_with_it_and_a_plain_push_succeeds (bare origin via a small helper, previous remote head, both-way is_ancestor, push_branch ok, replay contrast refused), resync_tip_adds_a_merge_commit_and_rewrites_nothing, the conflict, governed-difference and no-op tests, the hand-made revert merge refused by classify_commit, the realistic-branch test (intervention commit, records-only commit, job A landing, squash, resync, job B landing; check_pr_head and classify_commit over merged..tip show no offence; pr_commits_excluding leaves the merge and job B), open_earlier_pull_request_stays_a_base_after_the_resync (a stored open PrLink at job A's landed commit; record_bases names it for job B's commit), and the push_working_branch tests (bare origin pushes once and is silent the second time; missing-path origin warns and returns false; divergent origin warns; no origin and detached HEAD are silent; main and an origin/HEAD-named default branch are skipped with the note).",
+    "gh/tests.rs: add a `NoPages` PagesHost double and the tests after_a_merge_the_working_branch_is_pushed (branch `work`, bare origin, a `pushed` line after the `merged` line, bare branch equals head), a not-landed report pushes nothing, a missing origin warns and after_merge returns Ok, a main checkout is not pushed; and landing_records_leave_out_landed_commits on the landing-world fixture near lines 3782-4051. In after_merge_tests.rs change the needle on line 103 to `merged the host's commit`.",
+    "athena-gate landing_tests.rs: add `a_landed_commit_and_its_squash_on_one_branch_are_refused_by_the_walk_before_the_cutover`. With owner_repo(), stage_landing(...HONEST) and commit(...), make L (the landing on the base). Detach to the base, stage the same landing and commit the squash S. Make the merge M with `git.commit_tree(&tree_of(L), &[L, S], ...)` and move the branch to M. Assert `history_of(&git)` holds an Invariant violation whose detail contains `already landed`. Add a comment that this is the known limit (CHANGELOG) and the gate follow-up.",
+    "test_support.rs: in CutoverFixture::build replace the `resync_onto_merge` call with `reset_keep(&c0)` and a comment that the checkout is main itself; fix the comments at lines 26, 46 and 616. trailer_stop.rs: in `land_post_c0_job` use `reset_keep(&merged)` with the same comment.",
+    "CHANGELOG.md: add the Unreleased entry (Changed and Fixed) with the content listed under criterion 7.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, and separately `cargo test -p athena-core`, `-p athena-cli`, `-p athena-gate`, `-p athena-git`. Search the diff for `--force`, `push_if_remote_at` and `replay(` in land.rs (none expected). Fix any test that assumed the rewritten shape."
+  ],
+  "risks": [
+    {
+      "risk": "Append-only growth: squashed landing commits never become reachable from main, so every later head's own-commit range grows by each landing, and the CI history check and check_pr_head classify all of them each run.",
+      "mitigation": "Each old landing commit is a valid job landing and each resync merge classifies as records only, so the post-cutover checks pass; landing intents and records stay short through the record-based exclusion. A follow-up can apply the exclusion in history.rs and pr_check.rs. The CHANGELOG states the growth; per-job branches (D167) are the long-term answer."
+    },
+    {
+      "risk": "The history walk before the cutover (no cutover_job, or a pending cutover) refuses a head that holds a landed job's commit and its squash.",
+      "mitigation": "Inherent to a branch that descends from both. Pinned by the gate test, stated in the CHANGELOG, and put to the user as an open question. The cutover-shown path used by this repository is unaffected and tested by the realistic-branch test."
+    },
+    {
+      "risk": "resync_tip is stricter than the replay: governed content the host's commit carries and the branch lacks, or a file changed on both sides, is an error where the replay carried on.",
+      "mitigation": "The error names the first differing path and the branch is unchanged, as for a conflict; the maintainer merges by hand. The host requires main to be up to date, so the normal case gives a tree equal to head's. Tested as case (d) of criterion 4."
+    },
+    {
+      "risk": "The push is refused, unreachable or skipped (default branch). The first landing after this change may be refused once if the remote copy was force-pushed by hand earlier.",
+      "mitigation": "A warning line gives the reason; the landing and the local resync stand. Once the maintainer reconciles the remote, the next landing pushes the whole append-only history with a plain push."
+    },
+    {
+      "risk": "A landing whose record write failed (landing.rs:319-325) is listed again in the next intent until reconciliation writes the record (critic finding 9).",
+      "mitigation": "Reconciliation runs at the next `athena land` or `athena status` and writes the record from the intent, after which the exclusion applies. The listed commit is a valid job landing, so nothing is refused; only the next record is longer."
+    },
+    {
+      "risk": "The Lander capability makes the RealSteps hook inactive for PrLander, so the drain's production push comes from after_merge and the hook runs only for other landers.",
+      "mitigation": "The after_merge test shows the PrLander path and a unit test pins that PrLander reports true; the tests/drain.rs tests show the hook and the skip. A lander that forgets to override pushes through the hook, which is safe because both use the same guarded helper."
+    },
+    {
+      "risk": "Existing tests assume the rewritten shape (text needle, linear branch, main == C0).",
+      "mitigation": "The dependents list names each: the after_merge needle, the two land.rs resync tests and the two fixtures. The full suite and the per-crate runs in criterion 6 cover the rest."
+    },
+    {
+      "risk": "The tests/drain.rs fake-agent fixture may not support two queued requests with one scenario script, and the Fixture checks out main.",
+      "mitigation": "Each new test switches to the branch `work` first. If two requests cannot be queued, the tests/drain.rs test lands one job and the Stub test shows the two-landing order; the producer reports this rather than weakening an assertion."
+    },
+    {
+      "risk": "A slow ls-remote or push inside the drain's landing lock.",
+      "mitigation": "One ls-remote and at most one push per landing, with the same network exposure as the landing's own pushes; it holds no records or job state and a failure is only a warning."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "resync_onto_merge / resync_tip behavior (merge instead of replay)",
+      "dependent": "crates/athena-core/src/gh/landing.rs Athena::after_merge (line 959), called by Athena::land_pr (line 952); reached by `athena land --pr` (crates/athena-cli/src/commands.rs:284) and the drain's PrLander (crates/athena-cli/src/drain.rs:3256)",
+      "kind": "code",
+      "test": "cargo test -p athena-core after_merge (updated first test in after_merge_tests.rs and the new push tests in gh/tests.rs)",
+      "reason": null
+    },
+    {
+      "name": "resync_tip result shape (replayed linear commits)",
+      "dependent": "crates/athena-core/src/land.rs tests after_a_squash_the_branch_is_rebuilt_on_it_and_the_next_pull_request_is_clean (line 534) and a_squash_the_later_work_cannot_be_carried_over_is_an_error_that_moves_nothing (line 635)",
+      "kind": "code",
+      "test": "Rewritten for the merge shape; the moved-main setup becomes the governed-difference error case. cargo test -p athena-core resync",
+      "reason": null
+    },
+    {
+      "name": "resync_onto_merge on a checkout that is main itself",
+      "dependent": "crates/athena-cli/tests/trailer_stop.rs:131 (land_post_c0_job) and crates/athena-core/src/test_support.rs:559 (CutoverFixture::build)",
+      "kind": "code",
+      "test": "Both move to reset_keep. cargo test -p athena-cli --test trailer_stop --test cutover_fixture --test history_pr_head (they run athena check --history and --attribution on the fixture)",
+      "reason": null
+    },
+    {
+      "name": "resync output line text",
+      "dependent": "crates/athena-core/src/gh/after_merge_tests.rs:103 asserts `rebuilt on the merged commit`",
+      "kind": "code",
+      "test": "The needle changes to `merged the host's commit`; the ordering checks against the Pages and code-health lines stay. cargo test -p athena-core after_merge",
+      "reason": null
+    },
+    {
+      "name": "classify_pre_merge on resync merge commits (rule not edited)",
+      "dependent": "crates/athena-gate/src/invariant.rs:320 classify_pre_merge, used by land::classify_commit/pr_commits, pr_check::check_pr_head (pr_check.rs:47) and the post-cutover history check (history.rs:142-167, CI runs `athena check --history`)",
+      "kind": "rule",
+      "test": "New land.rs realistic-branch test and the hand-made revert merge test; cargo test -p athena-core pr_check; cargo test -p athena-cli --test history_pr_head",
+      "reason": null
+    },
+    {
+      "name": "History walk before the cutover (new reader, critic finding 5)",
+      "dependent": "crates/athena-gate/src/history.rs:203-261 check_history_with_exempt, reached from check_history when no cutover_job is set or the cutover is pending (history.rs:47-62); invariant.rs:738-746 refuses a second landing of a job seen earlier in the walk",
+      "kind": "rule",
+      "test": "New gate test in landing_tests.rs pins that a head holding job A's landed commit and its squash (second parent of the merge) is refused with `already landed`. The gate is not changed. This repository has the cutover shown (athena.toml:153), which takes the post-cutover path. cargo test -p athena-gate",
+      "reason": null
+    },
+    {
+      "name": "record_bases / close_carried_prs (critic finding 7)",
+      "dependent": "crates/athena-core/src/pr.rs:190-210 record_bases; crates/athena-core/src/gh/landing.rs:363-466 close_carried_prs (candidates are the link's base_jobs; closing needs the head to be an ancestor of the merged commit or of the PR head)",
+      "kind": "code",
+      "test": "New land.rs test: an open earlier link at job A's landed commit stays an ancestor of job B's landing commit after the resync, so it is a base and is closed when carried. This is the existing intent (its commits are in the merge), not a new rule. The comment at landing.rs:376-377 is updated. cargo test -p athena-core open_earlier_pull_request; cargo test -p athena-core the_bases_are_the_other_open_links_whose_head_is_carried_by_the_commit",
+      "reason": null
+    },
+    {
+      "name": "PR commit range for landing intents and records",
+      "dependent": "crates/athena-core/src/gh/records.rs GitLandingRecords::commits (line 128), called by intent (178) and landing (221); crates/athena-core/src/status/throughput.rs:391-402 landing_record_time",
+      "kind": "code",
+      "test": "New gh/tests.rs landing_records_leave_out_landed_commits. Existing landing tests at gh/tests.rs 3782-4051 rerun (with no earlier landing the exclusion list is empty). cargo test -p athena-core gh::tests; cargo test -p athena-core throughput",
+      "reason": null
+    },
+    {
+      "name": "pr_commits signature",
+      "dependent": "crates/athena-core/src/land.rs pr_commits callers: records.rs, pr_check.rs, tests",
+      "kind": "code",
+      "test": null,
+      "reason": "pr_commits keeps its signature and calls pr_commits_excluding with an empty exclusion list, so every caller sees the same range as before."
+    },
+    {
+      "name": "Steps and Lander traits gain defaulted methods (push_after_landing, pushes_working_branch)",
+      "dependent": "crates/athena-cli/src/drain.rs Drain::land (line 1785), Steps trait (578), RealSteps (4166), Lander trait (3243), PrLander (3253); every Steps impl: Stub (4730), Capped (4809), tests at 4901, 6088, 6983; every Lander impl: RecordingLander (tests/drain.rs:2291), ConfigLander (3371), focus.rs NoLander (163); crates/athena-cli/tests/drain.rs RealSteps users, job_plan.rs:177",
+      "kind": "code",
+      "test": "cargo test -p athena-cli (all drain suites); new tests the_drain_pushes_the_working_branch_after_each_landing, the_real_steps_push_the_working_branch_after_each_landing, a_lander_that_pushes_itself_is_not_pushed_for_again, a_refused_push_is_a_warning_and_the_job_stays_landed",
+      "reason": "Both methods have default bodies, so no existing impl changes. Fixtures that use RealSteps with RecordingLander have no `origin`, so the helper skips silently and their assertions are unchanged."
+    },
+    {
+      "name": "Push rule: Athena pushes only the job's own branch, never non-fast-forward",
+      "dependent": "crates/athena-core/src/pr.rs:300 check_push (callers early.rs:277, landing.rs:560, unchanged); docs/enforcement.md:64-68 and D72 (docs/decisions.md:1607)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core push_working_branch (default branch skipped, divergent origin refused); cargo test -p athena-core pr::",
+      "reason": "check_push is reused with allowed_branch = the working branch, so the fast-forward rule holds and the default branch is skipped before it. The text in enforcement.md already predates the pushes land --pr makes; it is named as a follow-up, not edited (not in the request's files). The CHANGELOG names the widened rule."
+    },
+    {
+      "name": "landing order and lock (serial and parallel paths)",
+      "dependent": "Ordered landing queue and repository lock: `[parallel] max_concurrency`, drain_concurrent (drain.rs:2895) into Drain::land (landing lock taken at drain.rs:1786); the repository lock taken by resync_onto_merge (land.rs:312)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test drain (concurrent drain tests stay green)",
+      "reason": "The hook runs inside the same serialized landing step, after resync_onto_merge released the repository lock. The helper reads head once and pushes that explicit commit, so a concurrent go commit cannot change what is pushed. It reads and writes no records or job state."
+    },
+    {
+      "name": "attribution on main's first-parent line",
+      "dependent": "crates/athena-gate/src/attribution.rs:386-409 and history.rs MAIN_REFS (line 78)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test trailer_stop --test cutover_fixture",
+      "reason": "The host's main only receives squashes, so its first-parent line is unchanged; the merge lives only on the working branch. A working branch named main would carry the merge, which is why the two fixtures use reset_keep and why the push helper never pushes the default branch."
+    },
+    {
+      "name": "rebase_job_branch / plan_rebase",
+      "dependent": "crates/athena-core/src/gh/landing.rs plan_rebase / rebase_job_branch (lines 665, 761) and their tests",
+      "kind": "code",
+      "test": "cargo test -p athena-core rebase",
+      "reason": "Called only from tests; their tests build their own branches and do not use resync_tip."
+    },
+    {
+      "name": "Git::replay loses its only production caller",
+      "dependent": "crates/athena-git/src/lib.rs Git::replay (line 828) and its tests (lines 1659-1724)",
+      "kind": "code",
+      "test": "cargo test -p athena-git",
+      "reason": "It stays public and untouched, so no dead-code warning; its own tests are unchanged."
+    },
+    {
+      "name": "Remote trait",
+      "dependent": "crates/athena-core/src/gh/remote.rs Remote trait and its fakes (gh/tests.rs:1223, test_support.rs:368, athena-cli/tests/external_calls.rs:442)",
+      "kind": "code",
+      "test": null,
+      "reason": "The trait is not changed; push_working_branch uses GitRemote (remote_head, push) and no fake is involved."
+    },
+    {
+      "name": "documented resync behavior (replay)",
+      "dependent": "docs/design/native-pr-landing.md section 5.2a, docs/decisions.md D88, docs/decision-links.toml",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not edited, outside the request's file list; they describe the replay until a follow-up. No decision-link or governs rule reads these paths for this change."
+    },
+    {
+      "name": "file and function size limits",
+      "dependent": "crates/athena-core/src/code_health.rs structural limits applied after each landing to land.rs, drain.rs and records.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "The additions are small helpers (about 80 production lines in land.rs, 15 in drain.rs, 15 in records.rs) plus tests; a breach only queues a structural request after landing."
+    },
+    {
+      "name": "pull-request range grows by every landing",
+      "dependent": ".github/workflows/ci.yml:606 (athena check --history on pull requests) and check_pr_head walk origin/main..head",
+      "kind": "host_setting",
+      "test": "The land.rs realistic-branch test (check_pr_head over merged..tip).",
+      "reason": "Each old landing commit is a valid job landing and each resync merge classifies as records only, so the post-cutover checks pass and walk more commits. Excluding landed heads there is a follow-up."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A land.rs unit test on real git with a real bare repository. Build the landing scenario on the branch (job A landed, later job B, a hand edit). Run `git init --bare` in a tempdir, add it as `origin` and push the branch plainly, so the remote holds the previous head. Build the host squash as the existing resync test does (squash tree equal to the landed tree, parent = base). Call resync_tip and move the branch with reset_keep. Contrast in the same test: `git.replay(squash, landed, head, false)` gives a commit that is not a descendant of the previous remote head, and push_branch of it errors.",
+      "command": "cargo test -p athena-core after_a_squash_the_branch_is_merged_with_it_and_a_plain_push_succeeds",
+      "observes": "is_ancestor(previous remote head, tip) and is_ancestor(squash, tip) are both true; git.push_branch(\"origin\", branch, &tip) succeeds; the bare repository's branch equals tip; the replay contrast is refused.",
+      "fails_without": "With the replay-based resync_tip the tip has one parent and is not a descendant of the previous remote head, so the is_ancestor(previous remote head, tip) assertion fails and the plain push is refused.",
+      "seam": "Entry point athena_core::land::resync_tip (exists, land.rs:218) with its two no-op guards (merged already an ancestor of head; landed not on head). Fixture: the land.rs test helpers `repo()` (line 470) and `commit_message` (518), which exist, plus a bare repository made in the test with git init --bare and attached with `git remote add origin`; step 9 adds a small bare-repo helper. Nothing is faked; real git."
+    },
+    {
+      "criterion": 2,
+      "method": "Three layers, one push per landing. (a) drain.rs unit test over the public `drain` entry point with the in-crate Stub: two Landed jobs give calls `[.., land job-a, push, .., land job-b, push]`; a rejected job gives no `push`. (b) tests/drain.rs drives `drain::drain` through RealSteps with a fake Lander on the existing Fixture. The test first runs `git checkout -b work` in the fixture (the Fixture checks out main, which the helper never pushes), adds a bare origin, pushes `work` once, queues two steward requests with distinct keys, and uses a lander that records at each ask the origin's `work` sha and the local head. It asserts: at the second ask the origin's `work` holds the head recorded at the first ask; after the drain the origin's `work` is an ancestor of the local head and holds the second landing's head; report.landed == 2. (c) A test with a lander that overrides `pushes_working_branch` to true: the origin's branch stays at its earlier sha, so the hook does not push twice; plus a unit test that `PrLander.pushes_working_branch()` is true. (d) A refused-push test: the origin first receives a sibling commit made with `git commit-tree` on the base commit and a plain push to the empty bare repo, so origin's `work` is not an ancestor of the local head. The drain shows report.landed == 1, landing text `landed`, the origin's `work` unchanged, and a captured Ui line starting `warning: could not push`. (e) Core tests of Athena::push_working_branch: a bare origin is pushed once and the second call is silent; an origin at a missing path warns and returns false; no origin and a detached HEAD are silent; a checkout on `main` is not pushed and prints the default-branch line; a checkout on a branch that origin/HEAD names as default is not pushed.",
+      "command": "cargo test -p athena-cli the_drain_pushes_the_working_branch_after_each_landing && cargo test -p athena-cli --test drain the_real_steps_push_the_working_branch_after_each_landing && cargo test -p athena-cli --test drain a_lander_that_pushes_itself_is_not_pushed_for_again && cargo test -p athena-cli --test drain a_refused_push_is_a_warning_and_the_job_stays_landed && cargo test -p athena-core push_working_branch",
+      "observes": "(a) call order with one push per landing, none for a rejected job. (b) the origin's branch follows the local head after each landing. (c) no second push for a self-pushing lander. (d) a refused plain push is a warning and the job stays landed. (e) bare origin equals head after one push; the warning text for a missing origin; the default branch is never pushed.",
+      "fails_without": "Without the Drain::land call, Stub.calls has no `push` and the order assertion fails. Without the RealSteps override, the bare origin's branch stays at the earlier head and the ancestor assertions fail. Without the warning branch, test (d) finds no `warning: could not push` line. If the push were forced, the divergent origin in (d) would be overwritten and its tip would change. Without the default-branch skip, the main-checkout test finds main pushed.",
+      "seam": "Entry points drain::drain -> Drain::land (exists, drain.rs:1785; step 7 adds the hook call) -> RealSteps::push_after_landing (step 7) -> Athena::push_working_branch (step 5). Doubles: the in-crate Stub (exists, drain.rs:4684; step 7 adds a push_after_landing that only records \"push\"). In tests/drain.rs the Lander fake follows the RecordingLander pattern (exists, line 2291) with a probe that reads the bare origin's branch through git and holds no push logic. The bare origin and the sibling commit are made in the tests with git commands through the fixture's `fx.git`. RealSteps, Fixture, queue_steward_request, rated_scenario and limits exist in tests/drain.rs; step 8 adds the keyed queue helper and a line-collecting Ui if none exists. Core tests use `set_up()` from code_health::tests (exists)."
+    },
+    {
+      "criterion": 3,
+      "method": "A unit test on real git: after resync_tip on the criterion 1 scenario, assert git.parents(tip) == [head, merged], every commit of the old branch is an ancestor of tip, the merge message carries no `Athena-` trailer, and tree_of(tip) equals tree_of(head). Then review the diff for forced pushes and replay calls.",
+      "command": "cargo test -p athena-core resync_tip_adds_a_merge_commit_and_rewrites_nothing",
+      "observes": "Parents [head, merged]; all old commits are ancestors. The diff of land.rs, gh/landing.rs and drain.rs (`git diff -- crates/athena-core/src/land.rs crates/athena-core/src/gh/landing.rs crates/athena-cli/src/drain.rs`) shows resync_tip calling merge_tree and commit_tree, no `replay(` call, no `--force`, no `push_if_remote_at`, and only GitRemote::push for the working branch.",
+      "fails_without": "With replay the tip has a single parent and the old commits are not ancestors, so the parents and ancestry assertions fail.",
+      "seam": "Entry point resync_tip (exists, land.rs:218). Same real-git fixtures as criterion 1 (repo(), commit_message exist). The diff review needs no seam."
+    },
+    {
+      "criterion": 4,
+      "method": "land.rs unit tests on real repositories: (a) merged already an ancestor of head (a second run, and an older main commit as `merged`) returns None; (b) landed not on head returns None; (c) job B edits the line job A landed and the squash differs there: resync_tip errors with text containing `conflict` and head is unchanged; (d) the host's tree carries a governed file the branch lacks (main moved while the up-to-date rule was off): resync_tip errors naming the path and head is unchanged; (e) Athena::resync_onto_merge on case (c) returns an error saying the branch is unchanged and athena.head() is the same; (f) a hand-made merge of head with an older main commit that takes the older version of a governed file goes through land::classify_commit and is refused as GovernedChange.",
+      "command": "cargo test -p athena-core resync",
+      "observes": "None for (a) and (b); errors for (c) and (d) with head the same sha before and after; the unchanged-branch text for (e); the GovernedChange refusal for (f).",
+      "fails_without": "A resync that moved the branch on conflict or on a governed difference, or that created a merge in the no-op cases, would change head or return Some/Ok, so the assertions fail. If the gate were loosened, (f) would see the revert accepted.",
+      "seam": "Entry points resync_tip (exists, land.rs:218), Athena::resync_onto_merge (exists, land.rs:311) with `set_up()` from code_health::tests, and land::classify_commit (exists, land.rs:284). Real temporary repositories, no doubles. The governed-fingerprint check is added to resync_tip in step 1."
+    },
+    {
+      "criterion": 5,
+      "method": "gh/tests.rs tests through Athena::after_merge, which land_pr calls at landing.rs:952 for both `athena land --pr` and PrLander. `after_a_merge_the_working_branch_is_pushed`: set_up() Athena on a branch named `work`, a bare `origin` with the branch pushed, a landed commit made with the `land` helper, the host squash built as the existing after_merge test does, then after_merge with a Landed report. Further tests: a report that is not Landed pushes nothing and logs nothing; an origin at a missing path gives a `warning:` line and after_merge still returns Ok; a checkout on `main` is not pushed. `landing_records_leave_out_landed_commits` on the landing-world fixture near gh/tests.rs:3782-4051: a landing is recorded for job A, the host's commit is on the base, a resync merge follows, then job B lands; the second intent and record list only the merge (RecordsOnly) and job B's commit. A land.rs realistic-branch test (intervention commit, records-only commit, job A landing, squash, resync, job B landing) checks that pr_check::check_pr_head(git, merged, tip) has no offence, every commit of merged..tip classifies, and pr_commits_excluding leaves the merge and job B. A land.rs test shows record_bases still names an open earlier link whose head is job A's landed commit after the resync (the replay contrast: not an ancestor), and the close_carried_prs comment at landing.rs:376-377 is updated.",
+      "command": "cargo test -p athena-core after_a_merge_the_working_branch_is_pushed && cargo test -p athena-core after_merge && cargo test -p athena-core landing_records_leave_out_landed_commits && cargo test -p athena-core realistic_branch && cargo test -p athena-core open_earlier_pull_request",
+      "observes": "The bare repository's branch equals athena.head() after after_merge, and the earlier remote head is its ancestor; the Lines log shows a `pushed` line after the `merged` line. A not-landed report leaves the bare branch where it was. A missing origin gives a warning and Ok. The main checkout is untouched. The second landing lists only job B's commits. The realistic branch has no offence. The earlier link is a base.",
+      "fails_without": "Without the push call in after_merge, the bare branch stays at the earlier head and the equality fails. Without the record-based exclusion, the second landing intent also names job A. Without the merge, the earlier link's head is not an ancestor.",
+      "seam": "Entry points Athena::after_merge (pub(crate), exists, landing.rs:959), GitLandingRecords (exists, gh/records.rs), land::pr_commits_excluding (step 3), pr::record_bases (exists, pr.rs:190). Fixtures: set_up()/land() (exist), a bare origin built in the test, a `NoPages` PagesHost double added in step 10 (answers no runs, holds no landing logic), and the existing `Lines` Ui collector (gh/tests.rs:3505). `athena land --pr` itself needs the real gh (commands.rs:284-316) and is not run; it reaches the same land_pr -> after_merge path."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs, then each affected crate separately: athena-core (calls classify_pre_merge and resync), athena-cli, athena-gate (new pin test), athena-git (keeps replay).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked && cargo test -p athena-core && cargo test -p athena-cli && cargo test -p athena-gate && cargo test -p athena-git",
+      "observes": "fmt and clippy report nothing; all tests pass, including the gate pin test that documents the pre-cutover limit.",
+      "fails_without": "If the two checkout fixtures still called the merge-making resync, the attribution and history suites that use them would fail on a cutover commit off main's first-parent line. If the after_merge needle were not updated it would fail on the new message. If Drain::land did not call the hook, the drain tests fail. Unused imports from the removed replay call would fail clippy -D warnings.",
+      "seam": "Entry points are the cargo commands over the workspace (exist). Fixtures are the repository's own suites with temporary git repositories, bare remotes and the in-crate Stub; the fixture edits are in steps 8 to 11."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the CHANGELOG diff produced by step 12.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new bullet under Unreleased says: the post-landing resync merges the host's commit into the working branch instead of rewriting it; `athena land --pr` and `athena drain` push the working branch after each landing with a plain push (a refusal is a warning and the landing stands; the default branch is never pushed; the push rule now covers the working branch as well as the job's own branch); landing records leave out commits already landed; an open earlier pull request below a later landing is now carried and closed; the root cause (the replay rewrote commit ids, so branch and remote copy diverged); the known limit that the history check before the cutover refuses a head holding a landed job and its squash, with the follow-up; and that the pull-request range grows with each landing, with a pointer to per-job branches (D167).",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Read the doc-comment diff and search the changed files for the old wording (`rebuilt`, `replayed`, `rebuild`).",
+      "command": "git diff -- crates/athena-core/src/land.rs crates/athena-core/src/gh/landing.rs crates/athena-core/src/test_support.rs",
+      "observes": "The resync_tip, resync_onto_merge, pr_commits and after_merge doc comments, the after_merge inline comment, the close_carried_prs comment (landing.rs:376-377) and the three test_support.rs comments (lines 26, 46 and 616) describe the merge commit and the push; no comment still says the branch is rebuilt or replayed. docs/design/native-pr-landing.md section 5.2a, D88 and docs/enforcement.md (which says Athena does not push) are named as follow-ups, not edited.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: May this job go beyond the nine listed deliverables to crates/athena-core/src/gh/records.rs, crates/athena-core/src/gh/after_merge_tests.rs, crates/athena-cli/tests/drain.rs and crates/athena-gate/src/landing_tests.rs (a test only; no gate rule changes)? gh/mod.rs and athena-git/src/lib.rs, which are listed, need no change.",
+    "User: The history check before the cutover (no cutover_job, or the cutover pending) will refuse a head that holds a landed job's commit and its squash, because a branch that descends from both is what the request requires. Is it acceptable to ship with that limit stated in the CHANGELOG and pinned by a gate test, with a gate follow-up, or must this job also change the history walk?",
+    "User: When the host's squash carries governed content the branch lacks (main moved while the up-to-date rule was off), resync now stops with an error and leaves the branch unchanged for a hand merge, where the replay carried on. Is that acceptable?",
+    "User: Athena now pushes the working branch as well as a job's own branch, and never the default branch. Should a follow-up update docs/enforcement.md (lines 64-68, which say Athena does not push), docs/design/native-pr-landing.md section 5.2a, and add a decision-log entry superseding D88's replay tradeoff? The plan leaves them out as outside the request's files.",
+    "User: Under append-only the pull-request range (origin/main..head) grows by every landing. Is that acceptable until per-job branches (D167) land, or should a follow-up exclude landed heads in history.rs and pr_check.rs?",
+    "Host: Do the remote's branch rules on the working branch's copy allow merge commits and non-linear history? The code cannot show them; a refusal appears as a warning and the landing stands."
+  ],
+  "producer_section_sha256": "873456265d3c72485c93d6b125de6d783d79ae8c051c212008a53f40c2c87024"
+}
