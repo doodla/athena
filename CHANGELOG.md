@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The firstmate page's Glossary gains `wake`, `endpoint`, `captain call`, `heartbeat` and `durable record`, the
+  terms the transition cards use without defining. Each entry says the source does not define the term and
+  states only what its cited claims show (c2, c3, c9, c17, c19, c23, c24). `ship` now opens with what a ship does
+  (a task that changes a project, where a scout produces a report) and cites c33, c37 and c39 for it. A test in
+  `xtask/src/site.rs` fails when a card uses one of the five terms as a whole word with no glossary entry, and
+  pins the `ship` definition to the start of its entry. Changed in `intro.json` and `xtask/src/site.rs`.
 - Every study is validated against its own pin, so a second study can be checked at all. The kept test in
   `crates/athena-cap-study/src/rules.rs` no longer hard-codes firstmate. It checks the conventions of every
   `studies/<id>/` (a 40-hex pin, a study id equal to the directory name, a quote on every file source, every
