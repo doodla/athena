@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261109-161505-bp5e",
+  "round": 2,
+  "at": "2026-11-09T17:02:26.933681578Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-agent/src/fake.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-agent/src/fake.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/common/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/common/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/lifecycle.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/lifecycle.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Refusing only at admission turns a retryable verifier rejection into a Failed job that restarts from the base, with no repair round for the producer",
+      "evidence": "`qualifies_for_tree_retry` (reading/retry.rs:335-346) needs state Rejected and a candidate with no violations. The plan says an admission-refused job restarts from the base, where today the verifier's rejection could keep the tree. The producer loop already checks the work tree against refusals the candidate stage would apply and sends the producer back before them. Examples: `gate` (\"the same message the gate at the candidate would close the job with\", producer.rs:425-431) and `outside` (allowed paths, producer.rs:420-424, with its own send-back slot at :519). Both introspections in the request propose that the producer get a repair round. The reading allows using an existing repair path, and this one exists for admission-type refusals. Decision 2 rejects only changing `unchanged_planned_files`, not adding a check beside `outside`/`gate` in the loop, where `ctx.reading` and `changed` are both in scope (producer.rs:413-414). Fix: In the producer loop, beside `outside` and `gate`, compute `crate::reading::changelog_unproduced(ctx.reading, changed.iter().map(String::as_str))`. Add it to `problems`, with a message naming CHANGELOG.md, and include it in the break condition, so the producer gets the shared send-back before admission. Keep the admission rule as the backstop. Add a run-level test in which the producer omits CHANGELOG.md on the first pass, is sent back with a message naming it, adds it, and reaches the verifier. List producer.rs and the run_pin_tests send-back tests in Files and Dependents, and drop the 'verifier will judge it' known limitation.",
+      "location": "Decisions 2 and 3; crates/athena-core/src/run/producer.rs:410-500",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The Scenario change as written leaves CHANGELOG.md in `unchanged_planned_files`, writes identical content across jobs, and turns idle-producer scenarios into changelog-only candidates",
+      "evidence": "The untouched filter at common/mod.rs:611 checks `self.edits`, not `t.edits`, so the claim that the existing default 'skips it, since it is edited' is false as written. The fixed text `# Changelog\\n\\n- Entry.\\n` produces no diff for a second job once the first has landed (e.g. lifecycle.rs:647, 2545 second scenarios), so that job is refused. Scenarios with `edits = Vec::new()` (lifecycle.rs:1451, 1657) test 'the producer made no change' and would now produce a candidate. Fix: Build the full edit list (self.edits plus the CHANGELOG.md edit) before computing `unchanged_planned_files` and filter against it. Append a line to the current CHANGELOG.md text read from `spec.workdir`, as step 6 does for fake.rs, rather than writing fixed content. Add the edit only when `self.edits` is non-empty, so idle-producer tests keep their meaning without `changelog: false`.",
+      "location": "Step 7 (crates/athena-cli/tests/common/mod.rs:605-617)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Producer scripts that do not go through `Scenario` are not named",
+      "evidence": "lifecycle.rs:2968 builds its own `turn.edits`. drain.rs (Role::Producer at 3118, 4522) and job_plan.rs have producer handling outside `Scenario::script`. The plan relies on step 8's 'fix each failure' and names only lifecycle.rs. Fix: Name these sites in Dependents with how each is handled (adds a CHANGELOG.md edit, or reaches no admission), so the widening is bounded before the producer starts.",
+      "location": "Files / Dependents (CLI tests)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In a repository without CHANGELOG.md, every change job must now create it; this is not stated",
+      "evidence": "Reading validation explicitly tolerates `modify CHANGELOG.md` when the file does not exist at the base (checks.rs:270), so `ensure_changelog` adds it to readings for such repositories. The new rule then requires the candidate to create the file. Fix: State this in Risks and the CHANGELOG entry, and add a predicate or admission test showing that creating CHANGELOG.md (status added) satisfies the rule.",
+      "location": "Risks; crates/athena-core/src/reading/checks.rs:268-270",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The merge-resume caller is covered only by an argument, not a test that includes CHANGELOG.md",
+      "evidence": "The entry says the CHANGELOG.md diff 'persists through the merge' and cites existing resume tests, which use the study capability and so never apply the rule. Fix: Either move this to `reason`, or add a short note that no change-capability resume test exists and why the argument suffices.",
+      "location": "Dependents, first entry (run/mod.rs:773)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The core of the plan is sound and grounded in code I read. The rule belongs in `admit_without_secrets`, the one place that sees both the reading and the candidate's changes. Both `admit` callers (candidate.rs:154, run/mod.rs:773) close the job before the verifier. The check sits in reading.rs beside `ensure_changelog` and shares `CHANGELOG_PATH`. The rule is skipped when CHANGELOG.md is not Governed (classified as owner-maintained or private), which avoids a fail-closed rule in adopting repositories. The demonstrations name real seams and would fail without the rule. The dependents list matches what my searches found. Widening scope to the shared test doubles is justified by criterion 4, which answers Athena's three minor findings. One design problem remains, and it should change the plan. Today, a producer that skips the changelog with a stated reason is rejected by the verifier and can get a tree retry. Under the plan it fails at admission and `athena retry` restarts from the base, so the fix loses the producer's work in exactly the class it targets. The producer loop (run/producer.rs ~420-500) already checks the work tree against candidate-stage refusals (the decision gate, files outside allowed paths) and sends the producer back before them. That is the repair round both introspections proposed, and it is the existing path the reading allowed. There are also smaller fixture problems in the CLI `Scenario` change."
+}

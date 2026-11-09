@@ -1,0 +1,312 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261109-161505-bp5e",
+  "round": 1,
+  "at": "2026-11-09T16:53:29.842019429Z",
+  "invocation_seq": 2,
+  "approach": "Root cause: `ensure_changelog` (reading.rs:297) adds CHANGELOG.md and the `changelog` default to every change reading, but that default is only a rule the producer must remember. The one code check on deliverables, `unchanged_planned_files` (run/mod.rs:1579), accepts any non-blank reason for an unchanged file. It also sends the producer back only once (`PRODUCER_SEND_BACKS = 1`, run/mod.rs:1549), after which the candidate goes to the verifier. Admission (admission.rs:687) never compares `input.changes` with the reading's deliverables. So jobs fsaz and rkv5 were failed only by the final verdict. Fix, in three layers. (1) reading.rs gets one predicate, `changelog_unproduced(reading, changed_paths)`, beside `ensure_changelog`: true when the reading is a change reading, lists CHANGELOG.md with action modify, has defaults_applied id `changelog`, and no changed path is CHANGELOG.md. (2) `admit_without_secrets` raises a `changelog` PolicyViolation naming CHANGELOG.md from that predicate; both admit call sites (run/mod.rs:773 and run/candidate.rs:154) stop the candidate before the verifier. (3) In the producer loop, a new helper `unchanged_with_changelog` (run/mod.rs) adds CHANGELOG.md to the unchanged list even when the report gives a reason, so the producer gets its repair round first. The fake producer and the CLI test scenario now edit CHANGELOG.md, because the admission rule would refuse every change-reading test that omits it. A CHANGELOG entry names the cause and the rule. No config, workflow or prompt file changes.",
+  "decisions": [
+    {
+      "choice": "Put the rule in core admission (`admit_without_secrets`), with the predicate in reading.rs next to `ensure_changelog`.",
+      "reason": "admission is the first code to see both the candidate's change list and the reading. Both admit call sites (run/mod.rs:773, run/candidate.rs:154) run it before the verifier, and `admit_without_secrets` is the existing test seam that needs no gitleaks. The predicate sits beside the code that creates the default, so the default and its check cannot drift.",
+      "rejected": [
+        {
+          "option": "Check in `Change::admit` (crates/athena-cap-change/src/lib.rs:103)",
+          "why": "`Capability::admit` receives only a `ChangeList` and `JobConfig` (capability.rs:121). It cannot see the reading's deliverables or defaults."
+        },
+        {
+          "option": "A prompt or brief sentence telling the producer to edit CHANGELOG.md",
+          "why": "That is the current prose-only rule that failed twice; the user default `mechanism` requires code."
+        },
+        {
+          "option": "Leave it to the verifier or final verdict",
+          "why": "That is the failure being fixed: it costs a full verifier run and gives no repair round."
+        }
+      ]
+    },
+    {
+      "choice": "Add a producer-loop repair round: `unchanged_with_changelog` flags CHANGELOG.md when the predicate holds, even if `unchanged_planned_files` was given a reason.",
+      "reason": "The introspections ask for the missing file to be reported to the producer with a repair round. The existing send-back machinery (producer.rs:410-580) already does this for unchanged planned files. The only gap is that a stated reason excuses the file, and doc-only jobs state one. Admission stays as the backstop after the single send-back.",
+      "rejected": [
+        {
+          "option": "Admission only",
+          "why": "The job would close as failed with no repair round, and only `athena retry` could fix it."
+        },
+        {
+          "option": "Stop accepting reasons for every planned file",
+          "why": "Too broad: `unchanged_planned_files` explanations are legitimate for other files and are covered by run_pin_tests.rs:1187-1275."
+        },
+        {
+          "option": "Change `unchanged_planned_files`'s signature",
+          "why": "Its ~8 test call sites in run_pin_tests.rs and producer.rs:418 would all change for no gain; a new wrapper leaves them alone."
+        }
+      ]
+    },
+    {
+      "choice": "Match the path exactly: `CHANGELOG.md` after trimming a leading `./`. A deleted CHANGELOG.md still counts as touched, as acceptance criterion 1 words it.",
+      "reason": "The deliverable is the root file. `docs/CHANGELOG.md` is not it. The predicate takes plain path strings, so admission (`Changed.path`) and the producer loop (`snapshot.change_list()` paths) share it.",
+      "rejected": [
+        {
+          "option": "Count only added or modified status",
+          "why": "Criterion 1 says 'no change in input.changes has path CHANGELOG.md'. The producer loop passes only paths, so a status rule would need a second code path."
+        }
+      ]
+    },
+    {
+      "choice": "Update the test doubles in `athena-agent/src/fake.rs` and the CLI `Scenario` so the fake change producer edits CHANGELOG.md when its brief lists it.",
+      "reason": "Both currently report CHANGELOG.md as 'unchanged' with a reason (fake.rs:311-318, common/mod.rs:605-615). That is exactly the escape this change closes. Fixing the shared doubles keeps the fix in one place per double instead of editing ~60 scenario sites.",
+      "rejected": [
+        {
+          "option": "Skip the rule when `is_fake()`",
+          "why": "It would put a test flag in production logic and hide the rule from every nested run."
+        },
+        {
+          "option": "Edit each test's `edits` list",
+          "why": "About 60 sites across lifecycle.rs, retry.rs, introspection.rs and others; the central double does it once."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `pub(crate) fn changelog_unproduced(reading, changed)` beside `ensure_changelog`, with a doc comment naming the root cause, plus a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "`admit_without_secrets` raises a `changelog` violation from the predicate; add helper `admit_files_with(reading, files)` and the new admission tests (including the `ensure_changelog` design-reading test).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Add `unchanged_with_changelog` (wraps `unchanged_planned_files` and flags CHANGELOG.md regardless of a stated reason) and the send-back notice constant.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Call `unchanged_with_changelog` at line ~418 and append the notice to the next brief when CHANGELOG.md was flagged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Give the `Docs` test capability an `id` field and add the two run-level changelog tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "The fake change producer edits CHANGELOG.md when its brief lists it, adds it to `files`, and no longer reports it as unchanged; update its unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "purpose": "`Scenario` gets a `changelog: bool` field (default true); its producer adds a CHANGELOG.md edit when the brief lists it and the scenario's edits omit it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Set `changelog: false` or update expected file lists in tests that pin exact candidate paths (e.g. lines ~3060-3081). Further CLI test files (retry.rs and others) change only where `cargo test --locked` shows a failure.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "New item under [Unreleased] / Changed naming the cause, the `changelog` admission rule, the producer-loop repair round, and the intended higher refusal rate (an estimate).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "reading.rs: next to `ensure_changelog` (line ~297), add `pub(crate) fn changelog_unproduced<'a>(reading: &Reading, changed: impl IntoIterator<Item = &'a str>) -> bool`. It is true when capability is `change`, the deliverables hold CHANGELOG_PATH with action Modify, `defaults_applied` has id `changelog`, and no changed path equals CHANGELOG_PATH after trimming a leading `./`. The doc comment names the root cause: the default was a rule the producer must remember, and no code compared the diff with the deliverables, so jobs 20261108-183842-fsaz and 20261028-000831-rkv5 failed only at the final verdict. Add unit tests beside the `ensure_changelog` tests (reading.rs ~2153-2210): true for an `ensure_changelog` change reading with docs-only changes; false when `CHANGELOG.md` or `./CHANGELOG.md` changed; false for a study reading; false for a change reading without the default.",
+    "admission.rs: in `admit_without_secrets`, after the governance loop and before `Ok(violations)`, call `crate::reading::changelog_unproduced(input.reading, input.changes.iter().map(|c| c.path.as_str()))`. When true, push `violation(\"changelog\", Some(\"CHANGELOG.md\"), \"CHANGELOG.md is a deliverable of this change reading (the changelog default applies) but the candidate does not change it; add the entry\".into())`. Put the root-cause doc comment on a small named function (`changelog_violation`) that the call uses.",
+    "admission.rs tests: refactor `admit_files` (line 1550) into `admit_files_with(reading: &Reading, files)`; `admit_files` calls it with `&reading()`. Add the tests: (a) docs-only candidate with a change reading plus the default gives one violation; (b) the same plus CHANGELOG.md gives none; (c) a study reading, or a reading without the default, gives none; (d) a design reading (class docs, capability change, deliverable docs/design/x.md) built by `crate::reading::ensure_changelog` and a docs-only candidate is refused; (e) a reading with out_of_scope `the changelog` and the default is still asked for it.",
+    "run/mod.rs: add `pub(crate) fn unchanged_with_changelog(reading: &Reading, report: &ProducerOutput, planned: &[String], changed: &[String]) -> Vec<String>`. It starts from `unchanged_planned_files(report, planned, changed)` and, when `changed` is non-empty and `changelog_unproduced` holds, ensures `CHANGELOG.md` is in the list (once, in planned order), regardless of any reason in the report. Add `const CHANGELOG_SEND_BACK: &str`, a paragraph stating that the changelog default applies and that a reason does not excuse CHANGELOG.md. Add a unit test next to the other `unchanged_planned_files` tests in run_pin_tests.rs or run/tests.rs: an explained-unchanged CHANGELOG.md is still flagged for a change reading with the default, and not for a study reading.",
+    "run/producer.rs: at line ~418 call `unchanged_with_changelog(ctx.reading, &raw, &planned, &changed)` in place of `unchanged_planned_files(&raw, &planned, &changed)`. When the result contains CHANGELOG.md and CHANGELOG.md is not in `changed`, append `CHANGELOG_SEND_BACK` to `next_brief` before `append_mirror_drift` (line ~580). Nothing else in the loop changes; the `PRODUCER_SEND_BACKS` limit still applies.",
+    "run/tests.rs: add an `id: &'static str` field to the test capability `Docs` (struct at line 90; literals at lines 201 and 5846), used by `id()` and the card; existing literals pass `\"study\"`. Add a helper that swaps in `Docs { id: \"change\", .. }` as at line 5846. Add the two tests from criterion 3's demonstration, with a recording script that wraps `base_script` and returns reader capability `change`.",
+    "athena-cli/tests/common/mod.rs: add `pub changelog: bool` to `Scenario` (default true in `Default`, line 486). In the producer branch (lines 575-620), when `self.changelog`, `listed_paths(&spec.user_prompt)` contains `CHANGELOG.md` and `self.edits` has no CHANGELOG.md, add an edit with `Some(\"# Changelog\\n\\n- Entry.\\n\")` to `t.edits` and add it to the report's `files`. Note that the existing 'unchanged_planned_files' default at lines 608-615 then skips it, since it is edited.",
+    "athena-agent/src/fake.rs: in the `Role::Producer` arm (lines 298-336), when the brief's `## Expected deliverables` lists CHANGELOG.md, push an edit appending a line to the existing CHANGELOG.md text (read from `spec.workdir`, empty if absent), add it to `files`, and drop it from the `unchanged` list. Update the unit tests at lines ~430-520 that read the producer output.",
+    "Run `cargo test -p athena-agent`, then `cargo test -p athena-core`, then `cargo test -p athena-cli` and fix each failure. Where a test pins an exact candidate or changed-file list for a job that reaches admission, update the expected list; where a job ends before admission (timeout and kept-candidate tests, lifecycle.rs:3040-3090), set `changelog: false`. Run `cargo test -p athena-core --test refusal_corpus` unchanged. Then run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`.",
+    "CHANGELOG.md: add a first item under `## [Unreleased]` / `### Changed` in the file's style. It names the root cause, jobs 20261108-183842-fsaz and 20261028-000831-rkv5, the `changelog` rule in `admit_without_secrets`, the shared `changelog_unproduced` predicate in reading.rs, and the producer-loop repair round (`unchanged_with_changelog`). It states that the higher refusal rate is intended and that the expected share, about 5% of change jobs, is an estimate. It lists the callers it relies on (`candidate_stage`, the resume-merge admit, `producer_loop`) and the updated fixtures (`Scenario` and the fake producer)."
+  ],
+  "risks": [
+    {
+      "risk": "Many existing change-reading tests have a producer that edits only README.md or FAKE-CHANGE.md and would now be refused at admission.",
+      "mitigation": "The fix is in the two shared doubles (fake.rs and `Scenario::script`), not per test. The core run tests use the `study` capability, so they are unaffected. Fixture failures are fixed by running `cargo test -p athena-agent`, `cargo test -p athena-core` and `cargo test -p athena-cli --test lifecycle --test retry --test drain --test introspection --test steward --test job_plan --test history_pr_head --test trailer_stop --test code_health_hooks` and then the full suite. The tests that pin exact candidate files are lifecycle.rs:3060-3062 and the 'Still to do - CHANGELOG.md' timeout note, which does not reach admission."
+    },
+    {
+      "risk": "A retry-style reading may say in `out_of_scope` that the changelog stays untouched, while `ensure_changelog` still adds the deliverable. The rule would then refuse a candidate that follows the reading's own text.",
+      "mitigation": "`ensure_changelog` already lists CHANGELOG.md as a deliverable in that case, and `check_scope_limit` already requires scope limits to allow it. Changing how the deliverable is added is out of scope. The new tests include a reading with out_of_scope `the changelog` and the default, and pin that the rule still asks for the file, so the behavior is explicit and not accidental."
+    },
+    {
+      "risk": "The send-back text for an unchanged planned file says it may be 'explained with a reason'. For CHANGELOG.md that is false, and a producer might explain again and then be refused at admission.",
+      "mitigation": "The producer loop appends a fixed notice (the constant in run/mod.rs) stating that the changelog default applies and a reason does not excuse CHANGELOG.md. The run test asserts the notice is in the second producer brief."
+    },
+    {
+      "risk": "More candidates are refused: those that skipped the changelog today fail later at the verifier. Expected about 5% of change jobs (an estimate, not measured).",
+      "mitigation": "This is the intended effect. The producer loop sends the candidate back first, and a refused job is retryable with the finding in its brief."
+    },
+    {
+      "risk": "Admission-time refusal ends the job with no second repair round if the producer ignores the single send-back.",
+      "mitigation": "This matches the existing single-send-back rule (`PRODUCER_SEND_BACKS = 1`). It is cheaper than a full verifier run, and the outcome reason names CHANGELOG.md so `athena retry` can fix it."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "admission violations (`admit` / `admit_without_secrets`)",
+      "dependent": "crates/athena-core/src/run/mod.rs:773 (resume-merge candidate) and crates/athena-core/src/run/candidate.rs:154 (`candidate_stage`): the two callers of `admit`",
+      "kind": "code",
+      "test": "New run tests `a_change_job_that_skips_the_changelog_is_sent_back_then_refused_before_the_verifier` and `a_change_job_repaired_on_the_send_back_reaches_the_verifier` cover `candidate_stage`. The merge-resume path at mod.rs:773 uses the same `admit` over the changes against the new base, so a CHANGELOG.md diff persists; `cargo test -p athena-core` runs its existing resume tests.",
+      "reason": null
+    },
+    {
+      "name": "admission violation list for the shared `reading()` fixture",
+      "dependent": "crates/athena-core/src/admission.rs:1550 `admit_files` and its ~15 tests (config, governance, size)",
+      "kind": "code",
+      "test": null,
+      "reason": "`reading()` (admission.rs:928) has `defaults_applied: vec![]` and no CHANGELOG.md deliverable, so the predicate is false and the existing tests see no new violation. `admit_files` keeps its signature and calls the new helper."
+    },
+    {
+      "name": "`unchanged_planned_files` and the producer send-back lists",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:1187-1275 and crates/athena-core/src/run/producer.rs:418 (`unchanged_planned_files`)",
+      "kind": "code",
+      "test": "run_pin_tests.rs tests around lines 1204-1275 and 1495-1540 (send-back text containing `unchanged_planned_files`).",
+      "reason": "The function and its signature are unchanged; the new wrapper `unchanged_with_changelog` only appends CHANGELOG.md. The existing pin tests call the old function directly."
+    },
+    {
+      "name": "CLI scenario producer: files edited and `unchanged_planned_files` for a change reading",
+      "dependent": "crates/athena-cli/tests/common/mod.rs `Scenario::script` (lines 562-620) and the tests that use it (lifecycle.rs, retry.rs, introspection.rs, drain.rs, steward.rs, job_plan.rs, history_pr_head.rs, trailer_stop.rs, code_health_hooks.rs)",
+      "kind": "code",
+      "test": "`cargo test --locked` (athena-cli integration tests). Tests that pin exact candidate paths, such as lifecycle.rs:3060-3062, get `changelog: false` when the job ends before admission, or an updated expected list when it is admitted.",
+      "reason": null
+    },
+    {
+      "name": "fake producer output (`files`, `unchanged_planned_files`, edits)",
+      "dependent": "crates/athena-agent/src/fake.rs:298-336 (fake producer for nested runs) and its unit tests at fake.rs:430-520",
+      "kind": "code",
+      "test": "fake.rs unit tests updated to expect a CHANGELOG.md edit when the brief lists it; `cargo test -p athena-agent`.",
+      "reason": null
+    },
+    {
+      "name": "cutover fixture's change readings and scripted producer",
+      "dependent": "crates/athena-core/src/test_support.rs `CutoverFixture` (used with the CLI `cutover_fixture`, common/mod.rs:236)",
+      "kind": "code",
+      "test": "Tests that build `cutover_fixture()` pass because the CLI `Scenario` producer edits CHANGELOG.md for those readings (`cargo test --locked`).",
+      "reason": null
+    },
+    {
+      "name": "`ensure_changelog` default and deliverable",
+      "dependent": "crates/athena-core/src/reading.rs:297 `ensure_changelog` and its tests (reading.rs:2153-2210, 6031)",
+      "kind": "code",
+      "test": "Existing `a_change_reading_gains_the_changelog_deliverable_and_default` and `ensure_changelog_adds_nothing_twice`, plus a new predicate test.",
+      "reason": "Behavior is unchanged (out of scope to change); the new predicate only reads what it adds."
+    },
+    {
+      "name": "scope limits that name CHANGELOG.md",
+      "dependent": "crates/athena-core/src/reading/checks.rs:236, 679-700 (`check_scope_limit`, the CHANGELOG.md allowance) and run/tests.rs:3211-3265 scope tests",
+      "kind": "code",
+      "test": null,
+      "reason": "A scope limit already must allow CHANGELOG.md, so the new requirement does not conflict. The run/tests.rs scope tests use the `study` capability, for which `ensure_changelog` adds nothing and the predicate is false."
+    },
+    {
+      "name": "capability admission rules",
+      "dependent": "crates/athena-cap-change/src/lib.rs:103 `Change::admit` and crates/athena-cap-study/src/lib.rs:114 `Study::admit`",
+      "kind": "code",
+      "test": null,
+      "reason": "They are a separate step (`ctx.capability.admit`, run/candidate.rs:164) over a `ChangeList`; the core rule runs before them and does not alter their inputs."
+    },
+    {
+      "name": "outcome reason `admission refused the change: ...` consumed by retry briefs",
+      "dependent": "crates/athena-cli/tests/lifecycle.rs:824 and crates/athena-core/src/reading/retry.rs (retry seeding from a failed job's findings)",
+      "kind": "code",
+      "test": "lifecycle.rs:824 test, plus disk.rs tests at 1317-1478 that already assert the format.",
+      "reason": "The new violation uses the same reason format and path as existing violations, so the retry brief and `is_environment_reason` (disk.rs:1317) treat it as a work failure, not an environment stop."
+    },
+    {
+      "name": "reading acceptance gate and its replay of accepted readings",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and the reading replay (`replay_cases`, reading.rs)",
+      "kind": "rule",
+      "test": "`cargo test -p athena-core --test refusal_corpus` is run unchanged as a regression check.",
+      "reason": "The new rule refuses candidates, not readings. The gate (`refusing_check`) and the replay do not read it, so no corpus case is added and the 'newly refused readings' share is unaffected."
+    },
+    {
+      "name": "CHANGELOG.md content",
+      "dependent": "crates/athena-core/src/reading.rs:4129, 4851, 5296, 5639, 8418 (tests that `include_str!` CHANGELOG.md and search for phrases)",
+      "kind": "code",
+      "test": "`cargo test -p athena-core` runs those tests.",
+      "reason": "The plan adds one item and removes none, so the phrases those tests look for remain."
+    },
+    {
+      "name": "always-loaded prompt sets",
+      "dependent": "docs/system-facts.md prompt-set budgets (`system_facts_budgets_match_computed`, crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt or brief asset is edited; the send-back sentence is a Rust constant in run/mod.rs, not a prompt asset, so the budget lines do not move."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff. The rule must call `changelog_unproduced` from `admit_without_secrets` and push `violation(\"changelog\", Some(\"CHANGELOG.md\"), ...)`. Its doc comment, and the predicate's, must state the root cause (the default was a rule the producer must remember and no code compared the diff with the deliverables).",
+      "command": "git diff -- crates/athena-core/src/admission.rs crates/athena-core/src/reading.rs",
+      "observes": "A rule in admission.rs that emits a PolicyViolation naming CHANGELOG.md when the reading lists it, `defaults_applied` has id `changelog`, and no change has that path; the doc comment names the cause.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "New tests in admission.rs, using a new helper `admit_files_with(reading, files)`. It is the existing `admit_files` (admission.rs:1550) taking the reading as an argument; `admit_files` calls it with `reading()`. Tests: (a) a `change` reading carrying the `changelog` default and CHANGELOG.md deliverable, with candidate files `docs/a.md` only, yields exactly one violation with rule `changelog`, path `CHANGELOG.md` and detail containing `CHANGELOG.md`; (b) the same candidate plus a `CHANGELOG.md` change yields none; (c) a study-capability reading with the default, and a change reading without the default, yield none. Also a predicate unit test in reading.rs.",
+      "command": "cargo test -p athena-core admission",
+      "observes": "Test (a) passes and (b) and (c) yield empty `changelog` violations. With the `changelog_unproduced` call removed from `admit_without_secrets`, (a) fails because no violation is returned.",
+      "fails_without": "Removing the new rule call makes test (a) fail on its one-violation assertion.",
+      "seam": "Production entry point `admit_without_secrets(&AdmissionInput)`, the function `admit` calls first. Fixture: the temp git repo and `Reading` value built in the test, injected through `AdmissionInput.reading`, `.changes` and `.candidate`. `admit` itself is not called because its secret scan needs the pinned gitleaks binary; the existing admission tests use the same seam (admission.rs:1576). The helper is added by plan step 4; the seam exists."
+    },
+    {
+      "criterion": 3,
+      "method": "Two tests. Admission level (admission.rs): build a docs-only design reading (class_of_work `docs`, capability `change`, deliverable `docs/design/x.md` modify) and run it through `crate::reading::ensure_changelog`, the path both failed jobs took. Check the reading now lists CHANGELOG.md and the `changelog` default, then run `admit_files_with` with candidate `docs/design/x.md` alone and assert a `changelog` violation. Run level (run/tests.rs): `a_change_job_that_skips_the_changelog_is_sent_back_then_refused_before_the_verifier` and `a_change_job_repaired_on_the_send_back_reaches_the_verifier`. In the first, the script reader returns capability `change` with deliverable README.md, and the producer edits README.md only, giving a reason for CHANGELOG.md in `unchanged_planned_files`. The second is the same, except the producer's second attempt edits CHANGELOG.md.",
+      "command": "cargo test -p athena-core",
+      "observes": "Admission: violation with `CHANGELOG.md`. Run level, first test: the UI shows `producer   sent back:` naming CHANGELOG.md; the outcome is `OutcomeState::Failed` with a reason containing `admission refused the change` and `CHANGELOG.md`; the recorded invocations hold no Verifier role. Second test: the job reaches the verifier and lands.",
+      "fails_without": "Without the admission rule, the first run test reaches the verifier and lands; without the producer-loop helper it gets no 'sent back' line naming CHANGELOG.md.",
+      "seam": "Production entry points `Athena::ask` and `Athena::go` (as `finished_job`, run/tests.rs:1829, uses them), reaching `producer_loop` and then `candidate_stage` or the resume-merge admit. Fixture: `athena_with(...)` (run/tests.rs:187) with a scripted `FakeAgentDriver`, then `athena.capabilities = vec![Box::new(Docs { id: \"change\", .. })]`, the replacement pattern already at run/tests.rs:5846. Step 7 adds an `id: &'static str` field to the test capability `Docs` (struct literals at tests.rs:201 and 5846) and the two tests. The seam is otherwise existing code; the field is added by step 7."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the whole workspace suite after the fixture updates in `athena-agent/src/fake.rs` and the CLI `Scenario` (common/mod.rs). Tests that pin the exact candidate files, or the 'Still to do - CHANGELOG.md' note (lifecycle.rs:3060-3081, the timeout path that never reaches admission), either use the scenario's `changelog: false` or have their expected lists updated. Also run `cargo test -p athena-core --test refusal_corpus` as a regression check: the rule reads candidate paths, not request text, so no corpus case is added, but the gate must still behave as before.",
+      "command": "cargo test --locked",
+      "observes": "All existing tests pass, including `athena-cli` lifecycle, retry, drain and introspection tests that run a change reading to a verdict, and the `run_pin_tests.rs` `unchanged_planned_files` tests (unchanged signature).",
+      "fails_without": "If the doubles were not updated, every change-reading test whose producer edits only README.md or FAKE-CHANGE.md would fail with `admission refused the change: CHANGELOG.md ...`.",
+      "seam": "Production entry points are the same `Athena::ask`/`go` runs, driven by the existing CLI `Scenario::script` (crates/athena-cli/tests/common/mod.rs:562) and the `FakeAgentDriver` default producer (athena-agent/src/fake.rs:298). Step 8 changes the first and step 9 the second; both exist today."
+    },
+    {
+      "criterion": 5,
+      "method": "Run `cargo fmt --all --check`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`, the three checks Athena runs.",
+      "command": "cargo fmt --all --check",
+      "observes": "All three exit 0.",
+      "fails_without": "A format, lint or test failure anywhere makes the matching command exit non-zero.",
+      "seam": "Cargo commands on the finished workspace; no test seam is involved."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff. A new first item under `## [Unreleased]` / `### Changed` must name the cause (the default was a rule the producer must remember and no code compared the diff with the deliverables, with jobs 20261108-183842-fsaz and 20261028-000831-rkv5 as the failures), the `changelog` admission rule in `admit_without_secrets`, `changelog_unproduced`, and the producer-loop repair round. It must state that the higher refusal rate is intended, with an expected share marked as an estimate.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "An entry naming the cause and the new admission rule.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "149673c47c68bad476e4ca17c0d74423b866e49e465cf3b94c9848ab26bd82d2"
+}

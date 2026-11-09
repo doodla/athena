@@ -255,6 +255,13 @@ impl Athena {
     /// the unmet criteria. Drift left at the limit does not stop the job here: the repo test `mirrors`, run by
     /// the configured test check, fails on it at verification.
     ///
+    /// A change reading that asks for `CHANGELOG.md` (the `changelog` default) while the work tree does not change
+    /// it is sent back the same way, with a send-back of its own after the shared one, and a reason in
+    /// `unchanged_planned_files` does not excuse it. The root cause: the default was a rule the producer must
+    /// remember, and no code compared the diff with the deliverables, so a skipped changelog was found only at
+    /// the final verdict. A changelog still missing at the limit ends the job at admission, which applies the
+    /// same rule (`crate::admission::changelog_required`), before the verifier runs.
+    ///
     /// The work tree is formatted by `Athena::format_stage` (see the `format` module). The format step belongs
     /// at the end of producer_loop, before the change list is taken: it is the last producer-stage act of every
     /// pass, right after the producer returned and its report was parsed. "After the producer" means after each
@@ -412,10 +419,25 @@ impl Athena {
             // report. A run with no change at all fails below as an idle producer, so it is not listed here.
             let changes = snapshot.change_list()?;
             let changed: Vec<String> = changes.iter().map(|c| c.path.clone()).collect();
+            // The change reading asks for CHANGELOG.md (the changelog default) and the work tree does not change
+            // it. The same function decides at admission, so the producer is sent back for the file before
+            // admission would refuse the candidate.
+            let changelog_missing = !changes.is_empty()
+                && crate::admission::changelog_required(
+                    &self.git,
+                    &ctx.prediction,
+                    ctx.reading,
+                    &changed,
+                )?;
             let unchanged = if changed.is_empty() {
                 Vec::new()
             } else {
-                unchanged_planned_files(&raw, &planned, &changed)
+                let mut unchanged = unchanged_planned_files(&raw, &planned, &changed);
+                // The file is named once, by its own problem below.
+                if changelog_missing {
+                    unchanged.retain(|p| p != "CHANGELOG.md");
+                }
+                unchanged
             };
             // Changed files, deleted ones included, outside the job's allowed paths. Empty for a job with no
             // limit, so every branch below that reads it behaves as before.
@@ -448,6 +470,7 @@ impl Athena {
                 && held.is_none()
                 && gate.is_none()
                 && outside.is_empty()
+                && !changelog_missing
                 && mirror_drift.is_empty()
             {
                 break Some(report);
@@ -498,6 +521,13 @@ impl Athena {
                     outside.join(", ")
                 ));
             }
+            // Like files outside the allowed paths, a missing changelog is not part of what the verifier is told
+            // the report lacked: the job ends at admission, before the verifier, when it remains.
+            if changelog_missing {
+                problems.push(
+                    "CHANGELOG.md (the changelog default applies) is not changed".to_string(),
+                );
+            }
             // Keep the redacted report that failed the check: the attempt's invocation record carries it
             // in `detail`, so each attempt's report stays with the job's records.
             let kept = {
@@ -515,8 +545,10 @@ impl Athena {
                     AnyRecord::Invocation(Box::new(attempt.clone())).canonical_path()
                 )
             };
-            // The shared send-back is used first; a change outside the allowed paths gets one more after it.
-            let scope_slot_free = !outside.is_empty() && scope_send_backs < SCOPE_SEND_BACKS;
+            // The shared send-back is used first; a change outside the allowed paths, or a missing changelog,
+            // gets one more after it.
+            let scope_slot_free =
+                (!outside.is_empty() || changelog_missing) && scope_send_backs < SCOPE_SEND_BACKS;
             if send_backs >= PRODUCER_SEND_BACKS && !scope_slot_free {
                 // The work may be finished even though the report is not: the verifier judges it. A run
                 // that changed nothing still fails, below, after the loop.
@@ -550,6 +582,12 @@ impl Athena {
                         "producer   files still outside the allowed paths after the send-back; the job ends before the verifier",
                     );
                 }
+                if changelog_missing {
+                    // The job ends at admission, before the verifier runs.
+                    ctx.ui.line(
+                        "producer   CHANGELOG.md still not changed after the send-back; the job ends at admission",
+                    );
+                }
                 break Some(report);
             }
             if send_backs < PRODUCER_SEND_BACKS {
@@ -577,7 +615,10 @@ impl Athena {
                 }
                 (None, None, None) => send_back_text(brief, &unmet, &unchanged),
             };
-            attempt_brief = append_mirror_drift(next_brief, &mirror_drift);
+            attempt_brief = append_missing_changelog(
+                append_mirror_drift(next_brief, &mirror_drift),
+                changelog_missing,
+            );
         };
         Ok(Flow::Go(Reported {
             report,

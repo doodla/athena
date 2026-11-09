@@ -318,6 +318,30 @@ pub(crate) fn ensure_changelog(reading: &mut Reading) {
     }
 }
 
+/// Whether a change reading asks for `CHANGELOG.md` (a modify deliverable plus the `changelog` default that
+/// [`ensure_changelog`] adds) and `changed`, the paths the candidate touches, does not include it.
+///
+/// Root cause of the failure class this answers: the `changelog` default was a rule the producer had to
+/// remember, and no code compared the diff's file list with the reading's deliverables before the verdict.
+/// For a docs-only design change the changelog feels optional, so it was skipped, and jobs 20261108-183842-fsaz
+/// and 20261028-000831-rkv5 were failed only by the final verdict. Admission and the producer loop both call
+/// this predicate (through `admission::changelog_required`), so the two cannot disagree. Any status counts as
+/// touching the file; only the root `CHANGELOG.md` counts, with a leading `./` ignored.
+pub(crate) fn changelog_unproduced<'a>(
+    reading: &Reading,
+    changed: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    reading.capability.as_deref() == Some("change")
+        && reading
+            .deliverables
+            .iter()
+            .any(|d| d.path == CHANGELOG_PATH && d.action == DeliverableAction::Modify)
+        && reading.defaults_applied.iter().any(|d| d.id == "changelog")
+        && !changed
+            .into_iter()
+            .any(|p| p.trim_start_matches("./") == CHANGELOG_PATH)
+}
+
 /// Refuses a reading whose own forecast median wall time is beyond the producer or verifier deadline.
 ///
 /// Root cause: reading validation never compared the reading's scope with the producer and verifier deadlines
@@ -2207,6 +2231,41 @@ mod tests {
         let before = declined.clone();
         ensure_changelog(&mut declined);
         assert_eq!(declined, before);
+    }
+
+    #[test]
+    fn changelog_unproduced_asks_for_the_root_changelog_on_a_change_reading() {
+        let mut reading = change_reading();
+        ensure_changelog(&mut reading);
+        // A docs-only candidate skipped the changelog.
+        assert!(changelog_unproduced(&reading, ["docs/a.md"]));
+        assert!(changelog_unproduced(&reading, []));
+        // Touching the root file, in any form, satisfies it.
+        assert!(!changelog_unproduced(
+            &reading,
+            ["docs/a.md", "CHANGELOG.md"]
+        ));
+        assert!(!changelog_unproduced(&reading, ["./CHANGELOG.md"]));
+        // Another file of that name is not the deliverable.
+        assert!(changelog_unproduced(&reading, ["docs/CHANGELOG.md"]));
+
+        let mut study = reading.clone();
+        study.capability = Some("study".into());
+        assert!(!changelog_unproduced(&study, ["docs/a.md"]));
+
+        // Without the default the rule is not asked for.
+        let mut plain = reading.clone();
+        plain.defaults_applied.retain(|d| d.id != "changelog");
+        assert!(!changelog_unproduced(&plain, ["docs/a.md"]));
+
+        // Only a modify deliverable asks for an edit.
+        let mut created = reading.clone();
+        for d in &mut created.deliverables {
+            if d.path == "CHANGELOG.md" {
+                d.action = DeliverableAction::Create;
+            }
+        }
+        assert!(!changelog_unproduced(&created, ["docs/a.md"]));
     }
 
     fn correction(job: &JobRecords, text: &str, kind: CorrectionKind) -> Correction {

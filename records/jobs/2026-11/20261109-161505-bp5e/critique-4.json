@@ -1,0 +1,83 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261109-161505-bp5e",
+  "round": 4,
+  "at": "2026-11-09T17:10:00.457099206Z",
+  "invocation_seq": 10,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/producer.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/producer.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/send_back.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/send_back.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run_pin_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run_pin_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-agent/src/fake.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-agent/src/fake.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/common/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/common/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/lifecycle.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/lifecycle.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/retry.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/retry.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "A send-back for a missing changelog only would tell the producer that unresolved items go to the verifier. In fact the job then ends at admission.",
+      "evidence": "The intro in send_back_text_scoped (send_back.rs:161-172) says 'This is the only send-back: if your changes are still in place afterwards, they go to the verifier ...'. The scope and gate cases add their own leading sentence for this (send_back.rs:137-152), and append_mirror_drift adds one too (send_back.rs:219-235). Step 4 adds only a closing section saying 'add an entry. A reason ... does not excuse it.' When the producer explained CHANGELOG.md with a reason (the main failure case), `unmet` and `unchanged` are both empty. The intro then talks about criteria and planned files that are not listed, and it promises a verifier pass that will not happen. Fix: Have append_missing_changelog do what append_mirror_drift does: put a leading sentence after '## Sent back\\n\\n' saying that the missing CHANGELOG.md is a reason for this send-back even when no other items are listed. The closing section should also say that if CHANGELOG.md is still unchanged, the job ends at admission before the verifier runs. Pin both in the run_pin_tests unit tests.",
+      "location": "Step 4 / send_back.rs append_missing_changelog",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test helper the plan builds on cannot write files in subdirectories and always marks changes as Modified.",
+      "evidence": "admit_files (admission.rs:1562-1571) calls std::fs::write(dir.path().join(path), ..) without create_dir_all and sets status: ChangeStatus::Modified for every file. Test (a) uses docs/a.md, the criterion-3 admission test uses docs/design/x.md, and test (f) says the CHANGELOG.md change has status added. Fix: In admit_files_with, create parent directories for both base_extra files and candidate files. Set ChangeStatus::Added when the path is absent from the base, so that test (f) exercises the status it claims to.",
+      "location": "Step 3 / admission.rs admit_files_with (tests a and f)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The refusal message does not tell a host repository how to opt out.",
+      "evidence": "Risks says that a repository that does not keep a changelog can mark CHANGELOG.md athena-readonly or athena-exclude. The violation detail in step 2 says only 'add the entry'. Where CHANGELOG.md is absent, every change job must now create it (reading/checks.rs:268-270 accepts a modify of an absent CHANGELOG.md). Fix: Optionally add one clause to the violation detail, or to the CHANGELOG entry, naming the .gitattributes opt-out.",
+      "location": "Step 2 violation detail text",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's main claims against the snapshot by reading the code, and they hold. `ensure_changelog` and `CHANGELOG_PATH` are at reading.rs:293-319, and `ensure_changelog` runs on every reading built at reading.rs:859. `admit_without_secrets` (admission.rs:687) builds `paths` and calls `classify` with `unwrap_or(PathClass::Governed)`. Both callers of `admit` (candidate.rs:154, run/mod.rs:773) use `ctx.prediction` as the base, which is the same value the producer loop already gives `unreconciled_in_snapshot` (producer.rs:428), so the producer-loop check will not error on an unknown commit. The send-back counting gives three producer passes when the changelog is never added: `PRODUCER_SEND_BACKS` = 1 and `SCOPE_SEND_BACKS` = 1 (mod.rs:1549, 1601), and `scope_slot_free` is at producer.rs:519. The two shared test doubles do what the plan says: today they report CHANGELOG.md as unchanged with a reason (fake.rs:311-319, common/mod.rs:605-615). All core run tests use a `study` capability (run/tests.rs:103, run_pin_tests.rs:32, scope_guard.rs:978), so the rule cannot fire there by accident. The shared admission `reading()` fixture has no `changelog` default (admission.rs:948-965). The fix sits where the fault starts: admission is the first code that sees the reading and the change list together, and the producer-loop repair round matches what both introspections proposed. Each criterion has a demonstration with a real seam: `admit_without_secrets`, `Athena::ask`/`go` with a `Docs` capability set to `change`, and the doubles. Each demonstration would fail without the new behavior. The dependents list covers every reader I found: gate_counts, retry seeding, disk reasons, the CLI producer scripts and the path-pinning tests. The plan widens scope beyond the listed deliverables, but it justifies each extra file (Athena's findings 1-7). No step calls an external service and no athena.toml field is added. The remaining findings are minor: the wording of the send-back text and details of the test helper."
+}

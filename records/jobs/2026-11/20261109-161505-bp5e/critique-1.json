@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261109-161505-bp5e",
+  "round": 1,
+  "at": "2026-11-09T16:55:41.691318671Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/producer.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/producer.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-agent/src/fake.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-agent/src/fake.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/common/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/common/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/lifecycle.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/lifecycle.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list omits the retry readers that skip any candidate with admission violations. Moving this failure from a verifier rejection to an admission refusal stops `athena retry` from keeping the producer's work.",
+      "evidence": "`qualifies_for_tree_retry` returns false when `!candidate.violations.is_empty()` (retry.rs:343). It also requires state Rejected and a verification. Its doc comment (retry.rs:322-325) says a rejection whose blocking findings cite only non-code files ('Markdown, a CHANGELOG') qualifies: today that retry keeps the candidate tree and only adds the missing entry. Under this plan the same candidate is closed Failed at admission, with a `changelog` violation and no verification. The retry therefore restarts from the base and the producer's work is redone. The resume seed (mod.rs:548) and the stale seed (mod.rs:588) also drop candidates that have violations. The plan's risks say 'the outcome reason names CHANGELOG.md so `athena retry` can fix it', and its retry dependent covers only the reason format (lifecycle.rs:824, disk.rs). No test covers the retry path. Fix: Add `qualifies_for_tree_retry` and the seeds at run/mod.rs:548 and :588 to the dependents list. Then pick one: (a) let a failed candidate whose only violations are `changelog` qualify for a tree retry, and add a retry.rs unit test plus a CLI retry test showing the kept tree is reused and gains CHANGELOG.md; or (b) state in Risks and in the CHANGELOG entry that such a retry now restarts from the base, and add a test that pins this. Option (a) suits the root-cause intent better.",
+      "location": "Dependents (outcome reason entry) and Risks 4–5; crates/athena-core/src/reading/retry.rs:330-346 (`qualifies_for_tree_retry`), crates/athena-core/src/run/mod.rs:548 and :588 (resume and stale seeds)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After the single send-back, the producer loop still prints 'the verifier will judge it' for a missing CHANGELOG.md, but admission now ends the job first.",
+      "evidence": "When `send_backs >= PRODUCER_SEND_BACKS`, the leftover `unchanged` entries are moved into `report_gaps`, and the UI says 'report still incomplete after the send-back: ...; the verifier will judge it'. With the new rule, candidate_stage refuses the candidate before any verifier runs. Fix: In step 5, when CHANGELOG.md is still flagged at the limit, print a line saying the job ends at admission, as the `outside` branch already does (producer.rs:547-551). Assert that line in the first run test.",
+      "location": "Step 5; crates/athena-core/src/run/producer.rs:523-529",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The gate counters gain a new `changelog` gate, and the dependents list does not mention it.",
+      "evidence": "`gates_of` adds every `candidate.violations[].rule` of a Failed or Rejected job to the gate counts. A `changelog` violation will therefore appear as its own gate in status output. It needs no code change, but it is a reader of the changed output. Fix: List gate_counts.rs as a dependent. Either add a gate_counts test with a `changelog` violation, or state why the existing tests cover it.",
+      "location": "Dependents; crates/athena-core/src/gate_counts.rs:83-87",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In a repository where CHANGELOG.md is marked `athena-readonly` or `athena-exclude`, no change job could ever pass admission.",
+      "evidence": "admission.rs:692-711 refuses edits to Readonly and Excluded paths, and `ensure_changelog` (reading.rs:297) adds CHANGELOG.md whatever the path's class. In such a repository, editing CHANGELOG.md raises `owner-maintained` or `owner-private`, and not editing it now raises `changelog`. This repository's .gitattributes does not mark it, so the case only affects adopting repositories. Fix: Skip the rule when the base classifies CHANGELOG.md as other than Governed (`classify` is already called in `admit_without_secrets`). Add one test for this, or name the case in Risks as a known limitation.",
+      "location": "Step 1 (`changelog_unproduced`) and Step 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's claims against the snapshot with Read and Grep; I ran no commands. The cited code exists and the line references are accurate: `ensure_changelog` at reading.rs:297; `admit` and `admit_without_secrets` at admission.rs:668/687; the only two `admit` callers, at run/mod.rs:773 and run/candidate.rs:154; `unchanged_planned_files` at run/mod.rs:1579 and its call at producer.rs:418; `PRODUCER_SEND_BACKS = 1`; the `Docs` test capability with literals at run/tests.rs:201 and 5846; and the fake producer and CLI `Scenario`, both of which explain CHANGELOG.md away with a reason (fake.rs:311-318, common/mod.rs:605-615). The approach is sound. The rule compares exact paths, not text, and sits where both the reading and the candidate's changes are first seen, beside the code that creates the default. Overriding the stated reason in the producer loop gives the repair round the introspections asked for. The demonstrations name real seams (`admit_without_secrets`, the existing admission test seam, and `Athena::ask`/`go` with a scripted `FakeAgentDriver`), and each would fail without the rule. One major gap remains. Today, a candidate rejected only for a missing CHANGELOG entry qualifies for a tree retry that keeps the producer's work. Once the rule refuses it at admission, `qualifies_for_tree_retry` (retry.rs:343) and the resume and stale seeds (run/mod.rs:548, :588) skip it because it has violations, so a retry restarts from the base. The dependents list omits these readers and no test covers them, and the plan's claim that `athena retry` can fix the job is unchecked. The minor findings are: a misleading 'verifier will judge it' message after the send-back, the unlisted gate_counts reader, and repositories where CHANGELOG.md is owner-maintained or private. This is not a landing or history plan and calls no external service, so those rules do not apply. Athena's own findings about files outside the deliverables are not repeated here. Verdict: revise."
+}

@@ -1,0 +1,188 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261109-161505-bp5e",
+  "base_commit": "f7cbf74c71839a1f7412a6f2924e3e61d5d0e9e7",
+  "base_fingerprint": "sha256:9d05c26e1aed42f09f59bb754b6f7b9bcda054eb3a6fad4772f68cdd43e34d55",
+  "previous_job": "20261109-161516-a834",
+  "candidate_commit": "35923ac70b155b69efe71104e05aaffeebc46a4d",
+  "candidate_tree": "3cb24078dc16e5cb97632403689e4c6ffa4668ee",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 406744
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26219
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 30242
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 158068
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 44064
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 80453
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 370538
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 113254
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31082
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23434
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 308372
+    }
+  ],
+  "fingerprint": "sha256:b72740d0934bd80d60d6030cd16da63abafdfdade17b2f7ab90b1c1d6cde26a8",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: `ensure_changelog` adds CHANGELOG.md and the `changelog` default to every change reading, but the default was a rule the producer must remember. No code compared the diff's file list with the deliverables, and a reason in `unchanged_planned_files` excused the file. Jobs 20261108-183842-fsaz and 20261028-000831-rkv5 were therefore failed only by the final verdict.\n\nFix, in three parts that share one predicate:\n- `reading::changelog_unproduced` is true for a change reading that lists CHANGELOG.md (modify) with the `changelog` default while no changed path is the root CHANGELOG.md.\n- `admission::changelog_required` wraps it and also skips the rule when the base marks CHANGELOG.md readonly or excluded. `admit_without_secrets` then raises a `changelog` violation naming CHANGELOG.md, so the job ends before the verifier.\n- The producer loop calls the same function after each report and sends the producer back, even when it gave a reason. It uses the extra `SCOPE_SEND_BACKS` slot and the base `ctx.prediction`.\n\nThe shared fake change producer and the CLI `Scenario` now edit CHANGELOG.md when the brief lists it. Four CLI tests needed updated expectations. CHANGELOG.md has the entry.\n\nNot run: the replay of accepted readings, which Athena runs. The 5% higher refusal rate is the reading's estimate, not something I measured.",
+    "files": [
+      "CHANGELOG.md",
+      "crates/athena-core/src/admission.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/producer.rs",
+      "crates/athena-core/src/run/send_back.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "crates/athena-agent/src/fake.rs",
+      "crates/athena-cli/tests/common/mod.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "crates/athena-cli/tests/retry.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --lib admission",
+        "result": "pass",
+        "note": "35 tests pass, including the 7 new changelog tests."
+      },
+      {
+        "command": "cargo test -p athena-core --lib changelog_unproduced",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p athena-agent fake",
+        "result": "pass",
+        "note": "6 pass, including the new changelog-edit test."
+      },
+      {
+        "command": "cargo test -p athena-core --lib a_change_job",
+        "result": "pass",
+        "note": "Three run-level tests: sent back then verified, never added then refused with three producer passes and no verifier, added at once."
+      },
+      {
+        "command": "cargo test -p athena-cli --no-fail-fast",
+        "result": "pass",
+        "note": "First run had 4 failures (drain, two lifecycle, retry). The `Scenario` double and the expected paths were fixed, and the rerun passed."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Run after fmt and the last lifecycle.rs edit."
+      },
+      {
+        "command": "cargo test --locked --no-fail-fast",
+        "result": "pass",
+        "note": "Whole workspace, run once at the end. It includes xtask policy, the mirrors test and the refusal corpus; no `N failed` or FAILED lines in the log."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "crates/athena-core/src/admission.rs contains a rule that emits a PolicyViolation naming CHANGELOG.md when the reading's deliverables list it, defaults_applied has id `changelog`, and no change in input.changes has path CHANGELOG.md; its doc comment names the root cause (the default was a rule the producer must remember, with no code comparing the diff to the deliverables).",
+        "status": "met",
+        "evidence": "Read the diff. `admit_without_secrets` pushes `violation(\"changelog\", Some(\"CHANGELOG.md\"), ...)` when `changelog_required(git, input.base, input.reading, &paths)?` holds. `changelog_required` calls `reading::changelog_unproduced`, which checks capability change, a CHANGELOG.md Modify deliverable, a `changelog` default and no changed path equal to CHANGELOG.md. The doc comments of `changelog_required`, the rule's comment and `changelog_unproduced` name the root cause."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core admission`: new tests show a candidate that changes only docs/ files with a change reading carrying the changelog default yields a violation naming CHANGELOG.md; the same candidate plus a CHANGELOG.md change yields none; a non-change reading or a reading without the default yields none. The first test fails when the new rule is removed.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core --lib admission`: 35 passed. New tests: a_docs_only_candidate_for_a_reading_with_the_changelog_default_is_refused (exactly one `changelog` violation, path and detail naming CHANGELOG.md), a_candidate_that_also_changes_the_changelog_is_admitted, a_study_reading_or_a_reading_without_the_default_needs_no_changelog, a_changelog_the_owner_keeps_is_not_demanded, the_changelog_is_demanded_even_when_the_reading_leaves_it_out_of_scope, a_changelog_added_where_the_base_has_none_satisfies_the_rule. I did not run the suite with the rule removed; the first test asserts `len() == 1`, so removing the push makes it fail."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core` : a test with a docs-only design reading built through ensure_changelog (the path both failed jobs took) is refused by admit before verification, showing the check is for the class and not one job.",
+        "status": "met",
+        "evidence": "admission::tests::a_docs_only_design_reading_built_by_ensure_changelog_is_refused_before_verification builds a class `docs` reading, runs `crate::reading::ensure_changelog`, then asserts one `changelog` violation. It passes. It runs through `admit_without_secrets`, the function `admit` calls first; the secret scan needs gitleaks. Run-level test a_change_job_that_never_adds_the_changelog_is_refused_before_the_verifier shows the full path: Failed at admission, three producer passes, no verifier. `cargo test --locked` over the whole workspace passed."
+      },
+      {
+        "criterion": "Existing tests that run admit or the run pipeline with a change reading still pass (cargo test) after fixtures are updated where they omitted CHANGELOG.md.",
+        "status": "met",
+        "evidence": "Updated the fake change producer (athena-agent fake.rs) and the CLI `Scenario` (tests/common/mod.rs) to edit CHANGELOG.md when the brief lists it. Updated expected paths in lifecycle.rs and retry.rs, plus a lifecycle helper so the branch also holds the changelog in the 'branch already holds' test. `cargo test --locked --no-fail-fast` passed with no failures."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets and cargo test pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked --no-fail-fast`; all three passed."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for this change naming the cause and the new admission rule.",
+        "status": "met",
+        "evidence": "Read the diff of CHANGELOG.md. A new first item under [Unreleased] / Changed names jobs 20261108-183842-fsaz and 20261028-000831-rkv5, the cause (the default was a rule the producer must remember, no code compared the diff with the deliverables), `changelog_unproduced`, `changelog_required`, the `changelog` violation in `admit_without_secrets`, the producer-loop send-back, the Governed-only skip and the test doubles. It also states the consequences: about 5% more refusals (an estimate), a repository without CHANGELOG.md creates it in every change job, retry restarts from the base, and a resumed pre-upgrade candidate is refused."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan: the `append_missing_changelog` unit tests are in send_back.rs, not run_pin_tests.rs.",
+      "Transition consequence, stated in CHANGELOG.md: a candidate admitted before this change without a changelog entry is refused at admission if merge-resumed, and a retry restarts from the base. No code handles it separately.",
+      "The 5% newly-refused share is the reading's estimate. The replay of accepted readings is run by Athena, so I did not measure it."
+    ],
+    "mistakes": [
+      "My first `Scenario` change appended a fixed `- Entry.` line. That made two drain and lifecycle tests land a second job with a CHANGELOG-only diff. I replaced it with a line keyed on the scenario's edits.",
+      "I left `commit_readme_by_hand_once` unused after adding a variant; clippy flagged the dead code and I merged the two helpers."
+    ],
+    "learnings": [
+      "The Bash tool here allows only cargo, git, ls, rm, mv and chmod. It rejects pipes, heredocs and redirects outside the working directory, so test logs go to a file inside the work tree, are read with Grep and then removed.",
+      "`Capability::admit` sees only a ChangeList, so the only place that holds both the reading and the change list before the verifier is `admit_without_secrets`, plus the producer loop.",
+      "`ctx.prediction` is the base commit that exists in the user's repository. The snapshot's own base is in a throwaway repository and must not be passed to `self.git`.",
+      "A `Scenario` that appends a fixed CHANGELOG line makes tests that repeat identical edits across two jobs land twice. Deriving the line from the scenario's edits and skipping it when already present keeps repeated identical edits at no diff, as before."
+    ],
+    "desires": [
+      "A way to run the replay of accepted readings locally to measure the newly-refused share.",
+      "A shell allowlist that permits piping cargo output to Grep-like filters, to avoid log files in the work tree."
+    ]
+  }
+}
