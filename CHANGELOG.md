@@ -9,6 +9,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The always-loaded prompts are rewritten leaner, and the producer budget is rebased. The contract, the five
+  role frames (reader, planner, critic, producer, verifier) and the four capability prompts drop text that
+  repeats the output schema, the brief, the checks, the catalog or the defaults, and keep each role's job, its
+  hard rules, every phrase a test or check reads, and the severity definitions (blocker, major, minor, nit).
+  Explanation and examples move to the new `docs/agent-reference.md`; each of the five frames carries one line
+  that says to read it "if docs/agent-reference.md exists in the working copy". The file exists only in
+  Athena's own repository and is not compiled in, so on other repositories the pointer finds nothing and the
+  frames stand alone; no rule lives only in the doc. A new test
+  (`frames_name_the_reference_doc_as_optional_and_it_exists`) pins the pointer, a list of rule phrases and the
+  severity terms in the frames. Estimated tokens (bytes / 3, rounded up), before then after, with the budget
+  before then after: contract 326 then 310 (350, 350); reader 1997 then 1895 (2000, 2000); producer, the largest
+  capability set, 1257 then 1018 (1300, 1200); verifier, the largest capability set, 1298 then 1153 (1300, 1300);
+  planner, measured against the producer budget, 1217 then 1079 (1300, 1200); critic, measured against the
+  verifier budget, 974 then 955 (1300, 1300).
+  `BudgetSet::Producer` falls from 1300 to 1200: the smallest multiple of 50 that leaves its largest set (the
+  planner) at or below 90% of it, as `docs/design/context-engineer.md` section 8 asks. `BudgetSet::Verifier`
+  stays at 1300, which already leaves its largest set (the study verifier) under 90%; no budget rises.
+  The contract and reader budgets stay because `run_pin_tests.rs` and `live.rs` pin those figures; their extra
+  headroom (40 and 105 tokens) is left unused. The frame bound in `athena-context` tests drops from 900 to 800
+  tokens and the contract test now bounds its size instead of pinning one byte count.
+  The six budget lines in `docs/system-facts.md` are updated because a test fails when they differ from the
+  computed sizes; the file is not otherwise changed. The budget and size figures in
+  `docs/design/context-engineer.md` are historical, and no test reads them.
 - `crates/athena-context/src/briefs.rs` is split so it is under the code-health limits (it had 2544 production
   lines and `reader_brief` had 217). The boundary scan moves to `briefs/boundary.rs`, the reader's brief and its
   types to `briefs/reader.rs`, the planner and critic briefs to `briefs/planner.rs`, and the findings and plan

@@ -173,7 +173,11 @@ impl BudgetSet {
         match self {
             BudgetSet::Contract => 350,
             BudgetSet::Reader => 2_000,
-            BudgetSet::Producer => 1_300,
+            // Producer and verifier budgets are set so the largest set measured against each (the producer
+            // set or the planner for `Producer`, the verifier set or the critic for `Verifier`) uses at most
+            // 90% of it, as docs/design/context-engineer.md section 8 asks. A budget never rises to fit a
+            // set; a set that outgrows it pays for the addition with a removal.
+            BudgetSet::Producer => 1_200,
             BudgetSet::Verifier => 1_300,
             BudgetSet::Steward => 600,
             BudgetSet::Audience => 600,
@@ -365,8 +369,9 @@ mod tests {
 
     #[test]
     fn the_contract_keeps_one_rule_per_line_as_measured() {
-        // The measured 294 tokens were for 977 bytes with one rule per line (design §12, E8).
-        assert_eq!(CONTRACT.text.len(), 977);
+        // The measured 294 tokens were for 977 bytes with one rule per line (design §12, E8); a rewrite may
+        // only shorten the text, never lengthen it past that measurement.
+        assert!(CONTRACT.text.len() <= 977);
         assert_eq!(
             CONTRACT
                 .text
@@ -399,11 +404,9 @@ mod tests {
         ] {
             let composed = compose(&[CONTRACT.into(), frame.into()]);
             assert!(check_budget(set, &composed).is_ok(), "{}", frame.id);
-            // The planner frame gained the required dependents rule and the critic frame its "what else does
-            // this break" question; both then gained the commit-shape rule (bound raised from 700 to 800 for
-            // it); the planner frame then gained the caller-and-test search line (bound raised from 800 to
-            // 900 for it); each stays inside the 1300-token budget checked above.
-            assert!(estimate_tokens(frame.text) < 900, "{} is short", frame.id);
+            // Each frame stays inside the producer and verifier budgets checked above; this bound keeps a
+            // frame from growing toward them.
+            assert!(estimate_tokens(frame.text) < 800, "{} is short", frame.id);
         }
     }
 
@@ -540,6 +543,97 @@ mod tests {
         ] {
             assert!(text.contains(wording), "verifier frame lacks: {wording}");
         }
+    }
+
+    /// Rules the frames must state themselves, as (role set, phrase). The reference doc is optional depth that
+    /// exists only in Athena's own repository, so none of these may live only there.
+    const FRAME_ANCHORS: &[(&str, &str)] = &[
+        (
+            "reader",
+            "Never put the request's stated goal in out_of_scope",
+        ),
+        (
+            "reader",
+            "Check whether the outcome needs a change to athena.toml",
+        ),
+        ("reader", ".github/workflows/"),
+        (
+            "reader",
+            "Write at least one as an outcome the named audience can check",
+        ),
+        (
+            "planner",
+            "dependents (required; Athena refuses a plan without it)",
+        ),
+        ("planner", "refusal_corpus"),
+        ("planner", "seam, fake or fixture"),
+        (
+            "planner",
+            "Never put the logic under test inside the double",
+        ),
+        ("planner", "commit-shape table"),
+        ("planner", "must name the state it needs"),
+        ("critic", "major finding when a demonstration names no seam"),
+        ("critic", "In round one, raise a major finding"),
+        ("critic", "blocker ("),
+        ("critic", "major ("),
+        ("critic", "minor ("),
+        ("critic", "nit ("),
+        ("producer", "governance file"),
+        (
+            "producer",
+            "stop and report it in open_issues; do not edit it",
+        ),
+        ("producer", "Never mark a requirement row Covered"),
+        ("producer", "criteria_check"),
+        ("verifier", "list them in commands exactly as run"),
+        ("verifier", "say how in request_reading_mismatch"),
+        ("verifier", "as a whole simple command"),
+        ("verifier", "blocker ("),
+        ("verifier", "major ("),
+        ("verifier", "minor ("),
+        ("verifier", "nit ("),
+    ];
+
+    #[test]
+    fn frames_name_the_reference_doc_as_optional_and_it_exists() {
+        const POINTER: &str = "if docs/agent-reference.md exists in the working copy";
+        let sets: [(&str, PromptAsset); 5] = [
+            ("reader", READER_FRAME),
+            ("planner", PLANNER_FRAME),
+            ("critic", CRITIC_FRAME),
+            ("producer", PRODUCER_FRAME),
+            ("verifier", VERIFIER_FRAME),
+        ];
+        for (name, frame) in sets {
+            let composed = compose(&[CONTRACT.into(), frame.into()]);
+            assert_eq!(
+                composed.text.matches(POINTER).count(),
+                1,
+                "the {name} set names the optional reference doc once, conditionally"
+            );
+        }
+        for (name, phrase) in FRAME_ANCHORS {
+            let (_, frame) = sets
+                .iter()
+                .find(|(set, _)| set == name)
+                .expect("an anchor names a known set");
+            assert!(frame.text.contains(phrase), "{name} frame lacks: {phrase}");
+        }
+        // Capability sections are read in studies and changes alike; the doc is not part of either.
+        for section in [
+            include_str!("../../athena-cap-change/prompts/producer.md"),
+            include_str!("../../athena-cap-change/prompts/verifier.md"),
+            include_str!("../../athena-cap-study/prompts/producer.md"),
+            include_str!("../../athena-cap-study/prompts/verifier.md"),
+        ] {
+            assert!(!section.contains("agent-reference"));
+        }
+        // This covers Athena's own tree only: the doc is read at run time from the agent's working copy and
+        // is not compiled in, so other repositories rely on the frames alone.
+        let doc =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/agent-reference.md");
+        assert!(doc.is_file(), "{} is missing", doc.display());
     }
 
     #[test]
