@@ -151,6 +151,13 @@
 //!   [`Report::restart`] holds what is left of the budget and job limit; [`follow_restart`] hands those to the
 //!   new binary (`athena drain` again, see [`reexec_args`]), which carries on with the queue. A stop asked for
 //!   meanwhile wins, and a run with no budget or no job limit left ends as such instead of restarting.
+//!   The closing summary covers the whole run, not the last pass: [`run_pass`] writes the run's tallies so
+//!   far (landed, spend, job lines, notes, rebases, improvement turns, the rating; see [`Carried`]) to
+//!   `drain.carry` in the state directory ([`carry_file`]) before the re-exec, and the continuing process
+//!   takes the file and adds it to its own [`Report`] ([`Carried::apply`]). The budget and job limit handed
+//!   on are still only what is left, so the carry never counts spend twice against them; the report's
+//!   budget is the whole run's. [`guarded`] removes a carry when the start is not the drain's own exec, so a
+//!   fresh drain starts at zero. The plan, the queue and the waiting proposals stay those of the last pass.
 //! - **A landed config the running build cannot read is not a failure.** Right after a landing the drain asks
 //!   [`Steps::config_after_landing`]. The config was readable when the run started, so if it is not now, the
 //!   landing added something only a newer build understands (a new key, for instance). The job stays
@@ -490,6 +497,12 @@ impl Restart {
     }
 }
 
+/// The file, in the state directory, that carries a run's tallies across the re-exec of a rebuild
+/// ([`run_pass`]). It sits beside the pid file and the stop file.
+pub fn carry_file(state_root: &Path) -> PathBuf {
+    state_root.join("drain.carry")
+}
+
 /// The arguments the new binary is run with to carry on: `athena drain` with the remaining budget and job
 /// limit, and the same rating threshold.
 pub fn reexec_args(limits: &Limits, json: bool) -> Vec<String> {
@@ -732,7 +745,7 @@ pub enum Rebased {
 
 /// How many rebases moved a branch in a drain, and how many of them needed the checks run again. Kept in
 /// memory for the run and printed in the drain summary; no record is written.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebaseTally {
     pub total: u32,
     pub rechecked: u32,
@@ -1086,7 +1099,7 @@ impl Stop {
 }
 
 /// One job the loop started, and what became of it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobLine {
     /// The queued request this job works on.
     pub item: String,
@@ -1103,7 +1116,7 @@ pub struct JobLine {
 }
 
 /// A rating and where it came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RatingLine {
     pub value: u8,
     /// True only for a rating this run took after at least one landing. False means the rating is the last one
@@ -1163,7 +1176,7 @@ pub struct Report {
 }
 
 /// An improvement request that the drain handed to a worker in its guaranteed turn.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImprovementTaken {
     pub job: String,
     pub title: String,
@@ -3200,6 +3213,114 @@ pub fn follow_restart(
     restart(left.limits())
 }
 
+/// The tallies of the passes of one run that ended in a rebuild, handed on to the pass that continues it
+/// through [`carry_file`]. The jobs started are the job lines: one per job the loop started.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Carried {
+    pub spent_usd: f64,
+    pub landed: u32,
+    pub outcome_changed: bool,
+    pub jobs: Vec<JobLine>,
+    pub notes: Vec<String>,
+    pub rebases: RebaseTally,
+    pub improvement_turns: Vec<ImprovementTaken>,
+    pub rating: Option<RatingLine>,
+    pub held_back: Option<String>,
+}
+
+impl Carried {
+    /// What `report` (already covering the run so far) hands on.
+    pub fn from_report(report: &Report) -> Carried {
+        Carried {
+            spent_usd: report.spent_usd,
+            landed: report.landed,
+            outcome_changed: report.outcome_changed,
+            jobs: report.jobs.clone(),
+            notes: report.notes.clone(),
+            rebases: report.rebases.clone(),
+            improvement_turns: report.improvement_turns.clone(),
+            rating: report.rating,
+            held_back: report.held_back.clone(),
+        }
+    }
+
+    /// The jobs the earlier passes started.
+    pub fn started(&self) -> u32 {
+        self.jobs.len() as u32
+    }
+
+    /// `report`, a pass that continued the run, with the earlier passes' tallies added, so it covers the whole
+    /// run. The budget is the whole run's (what this pass was given plus what the earlier passes spent). The
+    /// stop, the restart and everything that describes the queue and the plan as they now stand are the
+    /// pass's own.
+    pub fn apply(self, mut report: Report) -> Report {
+        let own_rating_counts = report.rating.is_some_and(|r| r.after_landing);
+        if !own_rating_counts && self.rating.is_some_and(|r| r.after_landing) {
+            report.rating = self.rating;
+        }
+        if report.held_back.is_none() {
+            report.held_back = self.held_back;
+        }
+        report.landed += self.landed;
+        report.page_unchanged = report.landed == 0;
+        report.outcome_changed |= self.outcome_changed;
+        report.budget_usd += self.spent_usd;
+        report.spent_usd += self.spent_usd;
+        report.rebases.total += self.rebases.total;
+        report.rebases.rechecked += self.rebases.rechecked;
+        report.jobs.splice(0..0, self.jobs);
+        report.notes.splice(0..0, self.notes);
+        report
+            .improvement_turns
+            .splice(0..0, self.improvement_turns);
+        report
+    }
+}
+
+/// Writes `carried` as the carry file. The new file is complete when it appears.
+pub fn store_carry(state_root: &Path, carried: &Carried) -> std::io::Result<()> {
+    std::fs::create_dir_all(state_root)?;
+    let file = carry_file(state_root);
+    let temp = state_root.join(format!("drain.carry.{}.tmp", std::process::id()));
+    std::fs::write(&temp, serde_json::to_vec_pretty(carried)?)?;
+    std::fs::rename(&temp, file)
+}
+
+/// Reads and removes the carry file. A missing file, or one that cannot be read as a carry, is no carry.
+pub fn take_carry(state_root: &Path) -> Option<Carried> {
+    let file = carry_file(state_root);
+    let text = std::fs::read_to_string(&file).ok();
+    let _ = std::fs::remove_file(&file);
+    serde_json::from_str(&text?).ok()
+}
+
+/// Runs one pass of a drain (`pass`) as part of a whole run, and follows a rebuild. A drain that carries on
+/// after its own re-exec finds the earlier passes' tallies in [`carry_file`]: they are taken here and added to
+/// the pass's report ([`Carried::apply`]), so the closing summary covers the whole run. A report that ends in
+/// [`Stop::Rebuilt`] first writes the run's tallies so far to the carry file, then [`follow_restart`] hands
+/// the remaining budget and job limit (unchanged by the carry) to `restart`, which replaces this process. If it
+/// returns, the exec failed and the file is removed. [`guarded`] removes a carry that no continuing drain owns.
+pub fn run_pass(
+    state_root: &Path,
+    ui: &dyn Ui,
+    pass: impl FnOnce() -> anyhow::Result<Report>,
+    restart: &dyn Fn(Limits) -> anyhow::Result<Report>,
+) -> anyhow::Result<Report> {
+    let carried = take_carry(state_root);
+    let mut report = pass()?;
+    if let Some(carried) = carried {
+        report = carried.apply(report);
+    }
+    if report.restart.is_some() {
+        store_carry(state_root, &Carried::from_report(&report)).map_err(|e| {
+            anyhow::anyhow!("cannot write {}: {e}", carry_file(state_root).display())
+        })?;
+    }
+    let out = follow_restart(report, ui, restart);
+    let _ = std::fs::remove_file(carry_file(state_root));
+    out
+}
+
 /// The coordinated plan of the open requests, as `athena plan` prints it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PlanReport {
@@ -3715,8 +3836,9 @@ impl Drop for PidGuard {
 /// Runs a drain (`run`) as the one drain of this state directory. It refuses, and runs nothing, when `stale`
 /// says the running build is older than the landed code (a drain on an old build lacks fixes that have
 /// landed). It then takes the pid file (a second live drain is refused) and, unless this is a drain carrying on
-/// after its own rebuild, removes a stop file left by an earlier run. The pid file is removed when `run` ends,
-/// however it ends.
+/// after its own rebuild, removes a stop file left by an earlier run and any carry file ([`carry_file`]): a
+/// carry belongs only to the drain that replaced its own image, so a fresh drain starts its tallies at zero.
+/// The pid file is removed when `run` ends, however it ends.
 pub fn guarded<T>(
     state_root: &Path,
     procs: &dyn Procs,
@@ -3733,6 +3855,8 @@ pub fn guarded<T>(
         // A stop asked for before this run started belongs to an earlier run. After an exec into the rebuilt
         // binary the stop belongs to this run, so it stays.
         let _ = std::fs::remove_file(stop_file(state_root));
+        // Likewise the tallies of an earlier run: only the drain that exec'd into this one owns a carry.
+        let _ = std::fs::remove_file(carry_file(state_root));
     }
     let result = run();
     drop(guard);
