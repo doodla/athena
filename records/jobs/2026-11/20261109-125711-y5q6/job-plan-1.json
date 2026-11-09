@@ -1,0 +1,233 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261109-125711-y5q6",
+  "round": 1,
+  "at": "2026-11-09T13:12:38.395634774Z",
+  "invocation_seq": 2,
+  "approach": "Add one bullet to `## Reading the request` in crates/athena-context/prompts/reader.md. It makes the reader say whether an \"Athena should know, understand or act on X\" request means docs or agent behavior, name the roles and prompts that change, list the rules that bound them, and make any blocking rule that is not owner-only a deliverable. Net growth is at most about 210 bytes (71 tokens of headroom), so the rule is worded tightly and, if needed, a few filler words elsewhere in reader.md are trimmed without dropping any rule. Add one unit test in athena-context/src/lib.rs that composes the contract and READER_FRAME and asserts the rule's phrases, placed inside the 'Reading the request' section, plus a FRAME_ANCHORS entry. Update the reader budget line in docs/system-facts.md, which `system_facts_budgets_match_computed` requires. Record the change in CHANGELOG.md (Unreleased, Changed, marked prose-only) and in a new docs/decisions.md entry D170. No code check, refusal rule, governance file or budget changes.",
+  "decisions": [
+    {
+      "choice": "Fix in the reader prompt reader.md as one bullet under 'Reading the request'.",
+      "reason": "Both introspections propose a reader default, and the misreadings came from the reader never being asked to choose docs versus agent behavior or to list bounding rules. The class is prevented where readings are made. crates/athena-core/src/reading.rs composes READER_FRAME (line 231) from this file, and the file is the only place the reader's rules live.",
+      "rejected": [
+        {
+          "option": "Put the rule in defaults.toml",
+          "why": "It is a governance file, outside the deliverables, and defaults are counted in the reader budget too."
+        },
+        {
+          "option": "Fix the steward prompt or code, or README, as in the earlier candidates",
+          "why": "Those are instances (jobs 20261109-080220-zkhy and 20261109-080749-p0fs), and the request marks them out of scope."
+        },
+        {
+          "option": "Add a code check that refuses readings",
+          "why": "Out of scope. Prose cannot be judged reliably by a matcher, and a new refusal rule would need refusal_corpus cases."
+        }
+      ]
+    },
+    {
+      "choice": "Test the composed prompt (contract + READER_FRAME) for four phrases, and require them to sit between '## Reading the request' and '## Forecasts'. Also add one FRAME_ANCHORS entry.",
+      "reason": "The test then checks the text the reader receives (compose of CONTRACT and READER_FRAME, as `components_are_recorded_with_hashes_and_estimates` does at lib.rs:668) and fails on the pre-change file. The anchor entry guards against a later trim dropping the rule, which is the D168 failure.",
+      "rejected": [
+        {
+          "option": "Assert only that reader.md contains one phrase",
+          "why": "A phrase anywhere in the file, for instance under Forecasts, would not prove the reader is asked at reading time."
+        }
+      ]
+    },
+    {
+      "choice": "Update the `- budget reader:` line in docs/system-facts.md to the computed size, and do not raise the 2000 budget.",
+      "reason": "`system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs:125) compares that line with the computed size, and the file says to update the line, never the budget. The line is 1929 of 2000 today (docs/system-facts.md:22).",
+      "rejected": [
+        {
+          "option": "Trim reader.md by exactly the bytes added so the size stays 1929",
+          "why": "It would drop rules for a cosmetic gain, which is the D168 failure."
+        },
+        {
+          "option": "Raise the reader budget",
+          "why": "Budgets never rise to fit a set, and the request rules it out."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/prompts/reader.md",
+      "action": "modify",
+      "purpose": "Add one bullet to 'Reading the request': when a request says Athena or its agents should know, understand or act on something, state docs or agent behavior, name the roles and prompts that change, list the bounding rules (ladder rungs, budgets, role limits, admission rules), and list any blocking rule that is not owner-only as a deliverable. At most about 213 net bytes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add a unit test asserting the composed reader prompt holds the rule inside the 'Reading the request' section, and add a FRAME_ANCHORS entry for it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Under [Unreleased] 'Changed', record the root cause and the reader-prompt fix, marked prose-only, with no change to jobs 20261109-080749-p0fs or 20261109-080220-zkhy. Include the before-and-after reader size.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D170 (next id after D169, shaped `## D170 · <title>`, with a Provenance bullet), without touching earlier lines.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Update line 22 to the computed reader size of 2000. This is not in the brief's deliverables, but `system_facts_budgets_match_computed` fails without it.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Draft the bullet in reader.md under '## Reading the request' on its own line, at about 210 bytes or less. Proposed wording to adapt: \"- When a request says Athena or its agents should know, understand or act on something, state whether it means docs or agent behavior, name the roles and prompts that change, list the rules bounding them (ladder rungs, budgets, role limits, admission), and list any not owner-only as deliverables.\" Use words such as 'docs or agent behavior', 'roles and prompts', 'ladder rungs' and 'not owner-only' that the test will assert.",
+    "Add to crates/athena-context/src/lib.rs tests: `the_reader_must_say_docs_or_agent_behavior_and_list_bounding_rules`. Compose `compose(&[CONTRACT.into(), READER_FRAME.into()]).text`. Find the byte positions of '## Reading the request' and '## Forecasts'. Assert each of the four phrases occurs between them. Add `(\"reader\", \"docs or agent behavior\")` to FRAME_ANCHORS.",
+    "Run `cargo test -p athena-context` and `cargo test -p athena-cli --test budgets`. Take the computed reader size from the failure of `system_facts_budgets_match_computed`, update docs/system-facts.md line 22 (budget stays 2000), then rerun. If the reader set exceeds 2000, trim filler words as in the risks.",
+    "Append D170 to docs/decisions.md after D169: Case (the two jobs and introspections), Decision (the reader bullet, the test, system-facts line, the root cause, prose-only, jobs 20261109-080749-p0fs and 20261109-080220-zkhy untouched), Alternatives (defaults.toml, steward or README fix, code check, raising the budget), Tradeoff (the reader set has little headroom left; model behavior unmeasured), Reversal cost, and a Provenance bullet.",
+    "Add the [Unreleased] 'Changed' bullet to CHANGELOG.md: root cause named, fix in the reader prompt, prose-only, not in the two earlier jobs, reader size before then after, D170.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any mirror, policy or boundary finding."
+  ],
+  "risks": [
+    {
+      "risk": "The rule takes more than the 71 tokens of headroom, so `check_budget` fails.",
+      "mitigation": "Draft it at about 210 bytes or less. If it is over, shorten its own words first, then trim only filler words that no FRAME_ANCHORS entry or test reads. Rerun `cargo test -p athena-cli --test budgets`."
+    },
+    {
+      "risk": "A trim drops a rule no test reads (the D168 failure).",
+      "mitigation": "Trim only the new bullet's wording where possible. List any removed passage in D170 in the form D168 uses, and keep every FRAME_ANCHORS and test-read phrase verbatim."
+    },
+    {
+      "risk": "The new bullet is glued to its neighbor, or the decisions.md edit alters an earlier line, and the mirror checks flag it.",
+      "mitigation": "Put the bullet on its own line with a `- ` start. Append D170 only at the end of the file, with a `- **Provenance:**` bullet."
+    },
+    {
+      "risk": "The docs/system-facts.md line is missed or hand-computed wrongly.",
+      "mitigation": "Read the computed size from the failure message of `system_facts_budgets_match_computed` and write that number. Update the CHANGELOG before/after figures from the same value."
+    },
+    {
+      "risk": "The prose does not change what the model does.",
+      "mitigation": "State it in D170 as not measured. The test checks the text the reader receives, not the model's behavior."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "reader.md text",
+      "dependent": "crates/athena-core/src/reading.rs: reading system prompt composes READER_FRAME (line 231)",
+      "kind": "code",
+      "test": null,
+      "reason": "It only embeds the text. Reading checks parse the reader's output, not the prompt, and no refusal rule changes. This is a prose-only change."
+    },
+    {
+      "name": "reader set size (1929 of 2000)",
+      "dependent": "crates/athena-cli/tests/budgets.rs `computed_rows`, `system_facts_budgets_match_computed`, `system_facts_drift_is_rejected`",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test budgets",
+      "reason": null
+    },
+    {
+      "name": "reader budget line",
+      "dependent": "docs/system-facts.md line 22 `- budget reader: 1929 of 2000` (included by crates/athena-context/src/briefs.rs:1375 into the planner and critic briefs)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets (system_facts_budgets_match_computed)",
+      "reason": null
+    },
+    {
+      "name": "reader token count shown in the reader and planner briefs",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:1624 asserts the brief's reader line `{n} of 2000 tokens used`; crates/athena-context/src/briefs.rs headroom rows (`headroom_rows`, lib.rs:262)",
+      "kind": "code",
+      "test": "cargo test -p athena-core run_pin; cargo test -p athena-context",
+      "reason": "Both compute the count from the live READER_FRAME, not a literal, so they follow the new size."
+    },
+    {
+      "name": "existing phrases of reader.md",
+      "dependent": "crates/athena-context/src/lib.rs existing tests `reader_checks_for_governance_files...` (lib.rs:457), `FRAME_ANCHORS` list (lib.rs:563), and briefs.rs:3643 reader defaults test",
+      "kind": "code",
+      "test": "cargo test -p athena-context",
+      "reason": "The change adds a bullet. The existing phrases they read stay verbatim, so any trimmed filler must not touch them."
+    },
+    {
+      "name": "prompt bullet structure and the append-only decision log",
+      "dependent": "crates/athena-core/src/mirrors.rs `prompt structure` and `decision entries` entries; crates/athena-cli/tests/mirrors.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-core mirrors; cargo test -p athena-cli --test mirrors",
+      "reason": null
+    },
+    {
+      "name": "decision reconciliation and ontology scans",
+      "dependent": "docs/decision-links.toml `[[governs]]` (D08 only, line 212) and docs/ontology.toml (scans BRIEF.md and term sources, not reader.md)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The governs table lists only snapshot.rs and candidate.rs, which this change does not touch. The ontology terms' sources do not include prompts/reader.md, so no uncovered line appears."
+    },
+    {
+      "name": "banned-words and email-like text scan of tracked files",
+      "dependent": "xtask policy test (boundary words, personal-data allow-list) in xtask/tests/policy.rs",
+      "kind": "rule",
+      "test": "cargo test -p xtask",
+      "reason": null
+    },
+    {
+      "name": "refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No refusal or matching rule is added or changed, so there are no input forms to map to corpus cases."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of reader.md. Confirm one new bullet under '## Reading the request' that starts its own line.",
+      "command": "git diff -- crates/athena-context/prompts/reader.md",
+      "observes": "The bullet says the reading must state docs or agent behavior, name the roles and prompts that change, list the bounding rules (ladder rungs, budgets, role limits, admission rules), and put any blocking rule that is not owner-only in deliverables. Any trimmed words are filler and no rule is lost.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Run the new unit test in crates/athena-context/src/lib.rs's tests module. It is named `the_reader_must_say_docs_or_agent_behavior_and_list_bounding_rules`. Production entry points: `compose(&[CONTRACT.into(), READER_FRAME.into()])`. Preconditions: none. It asserts the composed text holds the four phrases, between the 'Reading the request' and 'Forecasts' headings.",
+      "command": "cargo test -p athena-context",
+      "observes": "The test passes with the change. Against the base reader.md the phrases are absent and the test fails. The adjacent FRAME_ANCHORS test (`frames_name_the_reference_doc...` neighbours) also passes with the new anchor.",
+      "fails_without": "The pre-change reader.md has no rule about docs versus agent behavior, so the phrase assertions fail.",
+      "seam": "`READER_FRAME` and `compose` exist today (lib.rs:38, lib.rs:142). The real include_str! prompt is composed with no double. Plan step 2 adds the test."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the budgets test. `computed_rows` composes contract, READER_FRAME, defaults and catalog and `check_budget` enforces the 2000 limit. `system_facts_budgets_match_computed` compares the facts line.",
+      "command": "cargo test -p athena-cli --test budgets",
+      "observes": "The reader set is at most 2000 tokens and the updated line in docs/system-facts.md equals the computed size. If the first edit overshoots, the test names the computed value and the producer trims and reruns.",
+      "fails_without": "Without the system-facts update the drift test fails, and a rule over 71 tokens fails `check_budget`.",
+      "seam": "`computed_rows` in budgets.rs exists today. No double and no new seam."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff. Check the [Unreleased] 'Changed' bullet, and that the diff touches no README.md, steward file or the earlier jobs' candidates.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md",
+      "observes": "The bullet names the root cause (\"Athena knows X\" is ambiguous between documentation for readers and behavior built into the agents, and nothing made the reader ask which or list the bounding rules). It says the fix is in the reader prompt, not in jobs 20261109-080749-p0fs or 20261109-080220-zkhy. It is marked prose-only. D170 is appended after D169 with a Provenance bullet.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run the whole workspace tests, which include the athena-core mirrors tests and the xtask policy test, then `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`. The mirror registry checks the finished diff of reader.md (new bullet starts its own line) and of docs/decisions.md (append-only, `## D170 · title`, Provenance bullet).",
+      "command": "cargo test --locked",
+      "observes": "All pass. The boundary scan finds no banned words or email-like text in the added text.",
+      "fails_without": "A glued bullet, an edit to an earlier decision line, or a missing Provenance bullet would fail the mirror tests.",
+      "seam": "The mirror registry (`check_all` in crates/athena-core/src/mirrors.rs:1117) and the git-diff-based tests exist today and need no new fixture."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the changed-file list. Confirm that defaults.toml, athena.toml, .github/workflows/ and every parser or check source file are unchanged, and that the CHANGELOG bullet says prose-only.",
+      "command": "git diff --stat",
+      "observes": "The changed files are reader.md, athena-context/src/lib.rs, CHANGELOG.md, docs/decisions.md and docs/system-facts.md only. No reading check changed, so no past reading is newly refused (0 expected).",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "1e1b7f00f33ba0141ae0a90f81286ca34a707c4be35ede29fd9e41f3c4b8d5b2"
+}
