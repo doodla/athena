@@ -1,0 +1,128 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-184453-x7fn",
+  "n": 1,
+  "at": "2026-11-09T06:18:33.788511901Z",
+  "invocation_seq": 1,
+  "base_commit": "a354468491d7cae01acbbb6e72d787566c81ba5f",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Build plan groups from priority order so drain follows plan order",
+  "summary": "Plan::build_with makes groups that can put a lower-priority item in an earlier group than a higher-priority one, so drain, which works groups in sequence, dispatches out of plan order. Rebuild groups from the final order: taking items in plan order, each joins the earliest group after all its dependencies' groups where it is path-disjoint with the members. Audience: operators who run `athena plan` and `athena drain` and expect them to agree.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests for both behaviors; fmt, clippy -D warnings and cargo test required."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix group construction rather than reordering in batches_for."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the dispatch order and group/order agreement."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/plan.rs (Plan::build_with wave loop at ~L704-742 picks ready items of the best effective priority, then greedily groups by disjoint(); build_capped re-runs build_with on demoted copies; build_improving reorders `order` and regroups at ~L928-943) and crates/athena-cli/src/drain.rs (batches_for at ~L2916 only filters plan.groups in group order; drain_concurrent/run_serial work batch by batch). The entry point is the plan build used by Drain::prepare and `athena plan`. No record or data file is added, so no records validation allow-list or AnyRecord round-trip is affected. The property is measured directly: the order in which drain dispatches items, via the existing drain test harness, with max_concurrency 1.",
+    "Root cause is in group construction, not in batches_for: groups must be derived from plan.order so flattening groups equals the order. The new rule: each item, in plan order, joins the earliest group that is after the groups of all its dependencies and where it is disjoint() with all members; otherwise it starts a new group. A group must never be placed before a group holding an earlier-ordered item that it cannot join, so flattened groups == order.",
+    "Existing group tests in plan.rs (e.g. disjoint_independent_items_share_a_group_and_dependents_come_after, the ~L1747 test expecting [[b,a,c],[d]]) may need updating if the new grouping changes their expected output; update them only where the new rule justifies it.",
+    "The improvement-turn regrouping in build_improving is kept consistent with the new rule; it is not redesigned.",
+    "This change does not newly refuse any reading, so no refusal-rate criterion applies."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test (in crates/athena-cli/src/drain.rs tests, via `cargo test`) plans a normal item and an urgent item with disjoint touched paths and no dependency, and shows drain with max_concurrency 1 dispatches the urgent item first.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test in plan.rs (`cargo test -p athena-core`) shows a dependency's group comes before its dependent's group whatever their priorities, including a normal-priority dependency of an urgent item and a case where the dependent has a higher priority than its dependency.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new plan.rs test shows that for a mixed plan the flattened Plan::groups equals Plan::order, and no later group holds an item of higher priority than an earlier group unless a dependency explains it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "crates/athena-core/src/plan.rs builds groups from the ordered items (earliest group after all dependencies, plan order), and its doc comments describing groups and drain order match the new behavior; crates/athena-cli/src/drain.rs docs are updated where they describe group order.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry describing that drain now dispatches in plan order when groups are involved (git diff shows the added lines).",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    }
+  ],
+  "out_of_scope": [
+    "Changing priority, tier-cap, or effective-priority rules",
+    "Changing how the Steward improvement-turn promotion works",
+    "Changing the parallel scheduling or landing check logic beyond group construction",
+    "athena.toml, defaults.toml and workflow files"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6810699588477366,
+      "p_user_intervenes": 0.07198515769944341,
+      "cost_usd": {
+        "p10": 0.5623139354736411,
+        "p50": 1.4780460000000002,
+        "p90": 4.859847671110248
+      },
+      "wall_time_s": {
+        "p10": 569.6055806988737,
+        "p50": 2110.0096338949816,
+        "p90": 4328.8799221537365
+      }
+    }
+  },
+  "departures": "Hard change touching plan grouping with existing tests that may need adjustment; slightly lower pass probability and higher cost than the reference.",
+  "hard_reason": "This changes the run pipeline: how the plan orders and groups work, and therefore what the drain dispatches first.",
+  "producer_effort": "high"
+}
