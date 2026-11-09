@@ -4824,3 +4824,40 @@ should replace those estimates with its figures.
   `docs/design/agent-and-build-slots.md` section 6.1, `crates/athena-core/src/land.rs`, the throughput review record,
   and `landings/` in the evidence snapshot. Measured: `status --snapshot` output and the landing-file count. Not
   measured: the first-landing stage of the newest 20 jobs.
+
+## D168 · The prompts are trimmed with a rule list: each removed passage is listed with its new home
+
+- **Case:** Job 20261109-035221-jj8g trimmed the always-loaded prompts and passed fmt, clippy and the tests, but was
+  rejected because it dropped rules no check reads: the verifier's "If the request cites a document, read it and
+  compare the change with it", "Judge user-facing output as its audience would", "personal data" in the harms
+  list, "Change nothing", and the reader's `producer_model` guidance. Root cause: the trim was judged by size and
+  by the phrases tests read, and nothing compared the rules of the old prompt with the new one.
+- **Decision:** This job restores those rules in `crates/athena-context/prompts/verifier.md` and `reader.md`, adds
+  each to the phrase list `FRAME_ANCHORS` in `crates/athena-context/src/lib.rs`, restores the planner's revision
+  rule in shorter words, and keeps the contract size test as an exact `assert_eq!` on the new length (929 bytes).
+  `docs/agent-reference.md` now says each rule is stated in the role's prompt or in the brief. Passages still
+  removed, by file:
+  - `contract.md`: "outside your role", "or job" wording shortened in rules 1 and 2; same rules, fewer words.
+  - `reader.md`: `defaults_applied` line, the four `p_*` glosses, and "an unlikely listed one costs almost
+    nothing": restate the reading schema and the brief's reference forecast.
+  - `planner.md`: `decisions`, `steps`, `risks`, `open_questions` lines and the `fails_without` gloss: restate the
+    plan schema; explanation is in `docs/agent-reference.md`.
+  - `critic.md`: "you change nothing" and "Athena's own findings are in the brief": the first restates "Read, Grep
+    and Glob only", the second restates the brief.
+  - `producer.md`: the working-directory description, "You may run the brief's other checks", the Bash command
+    limits, "Read the brief's Words you must not write", "Do not commit", and the report contents: each restates
+    the brief or contract rule 5 (no git state changes) or the output schema.
+  - `verifier.md`: "Athena already ran the checks", "Check a content criterion by reading the change", "Scope is the
+    brief's expected deliverables list" (kept as the scope finding in the harm bullet), "Bash runs only the brief's
+    commands": restate the brief and the capability section.
+  - `athena-cap-change` producer and verifier, `athena-cap-study` producer and verifier: wording shortened; the
+    rustfmt and clippy detail restates the brief's checks, "'cargo test passes' is met by citing the record"
+    restates the sentence before it.
+- **Alternatives:** Raise the verifier budget to keep the old wording: budgets never rise to fit a set. Loosen the
+  contract size test to an upper bound: a silent change that shortens the text would pass.
+- **Tradeoff:** The verifier set is now 1233 of 1300 tokens and the planner 1105 of 1200, so a later addition to
+  either pays with a removal. The list above is written by hand; no code compares old and new rules.
+- **Reversal cost:** Low. Prompt text and one test list; nothing recorded depends on them.
+- **Provenance:** Read: the base and candidate prompt files, `crates/athena-context/src/lib.rs`, the rejected job's
+  findings. Measured: `cargo test -p athena-context` and `cargo test -p athena-cli --test budgets` on the final
+  text. Not measured: whether the trimmed prompts change agent behavior.
