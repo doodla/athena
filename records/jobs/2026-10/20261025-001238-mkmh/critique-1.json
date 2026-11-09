@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261025-001238-mkmh",
+  "round": 1,
+  "at": "2026-11-09T15:50:13.200256291Z",
+  "invocation_seq": 4,
+  "agent_verdict": "reject",
+  "final_verdict": "reject",
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "No mechanism can delete records/ from main. The gate and admission both refuse it, so criterion 1 cannot be met.",
+      "evidence": "Read content.rs:46-61: `if class == PathClass::Records && d.status != 'A'` pushes Rule::AppendOnly ('<path> was deleted'). attrs.rs:55 makes every path starting with records/ a Records path. commits.rs:202 runs `gate(..., Scope::Commit)` on every commit Athena builds, and lib.rs:370 runs content::check in that scope, so the commit is refused ('the gate refused Athena's own commit'). admission.rs:695 refuses any job change under records/ ('only Athena writes'). I found no code path that 'removes the tree' at landing. records-history.md §4 says the removal does not trip the append-only rule, but that holds only for check_history's legacy split, not for the per-commit gate or admission. Fix: Do not plan the deletion as a landing side effect. A prerequisite code job must add a narrow rule to the gate and admission: after the cutover is Shown, a commit that only removes records/ (all of it, as of C0) is allowed. It needs tests for that rule and for a partial removal being refused. Then re-plan job 8 on top of it.",
+      "location": "Plan Approach, Decision 1, Step 5 ('Athena's landing removes the tree once the Host supplies the file list'); crates/athena-gate/src/content.rs:46-61; crates/athena-core/src/commits.rs:179-213; crates/athena-core/src/admission.rs:695",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan expects the required suites to go red and sends the producer anyway.",
+      "evidence": "Grep found that crates/athena-gate/src/lib.rs:443 asserts `!config.history.exempt.is_empty()`, and that history.rs:384,396,514,524,592,663,840 index `builtin.history.exempt[0]`. These panic with exempt = []. legacy.rs:481 reads `builtin_config().history.exempt`. The plan states these fail, and that `legacy_exempt_record(&[])` errors. Fix: Make the test-helper change (seven full ids in a gate testutil constant and in athena_core::test_support) part of the prerequisite code job, and make this job depend on it. Do not dispatch a producer run that is known to fail verification.",
+      "location": "Demonstrations for criteria 5 and 6; Open question 1",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out the readers that refuse the records/ deletion.",
+      "evidence": "There is no entry for content.rs:46 (append-only check on deleted records), admission.rs:695 (records refusal), commits.rs:202 (Athena's commit gate) or the pre-commit hook scope (lib.rs:351-353). Each is a reader of 'records/ removed from main' and each blocks it. Fix: Add these as dependents with the test that covers each, or with the prerequisite job that changes them.",
+      "location": "Dependents list",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The producer cannot check the preconditions in Step 1.",
+      "evidence": "The system facts say the producer snapshot has no git, no records/ and no other branches. So it cannot tell whether brde or 2hax landed, when vesh landed, or whether legacy-exempt.json exists on athena/records. Fix: Have Athena check these before dispatch, using the Host answers. In D171, state the dates Athena supplied rather than ones the producer would 'read from the records'.",
+      "location": "Step 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The reading assumes this job \"touches no code\" and that emptying exempt and deleting records/ need no code change. Both are wrong. The per-commit gate refuses any deleted file under records/ (content.rs:46-61, run on every Athena commit through commits.rs:202 with Scope::Commit). Admission refuses any job change under records/ (admission.rs:695). Gate tests rely on the repo's exempt list being non-empty (lib.rs:443, history.rs:384-840, legacy.rs:481). With crates/ out of scope, criteria 1, 5 and 6 cannot be met. The request needs a prerequisite code job, or a reading that lets code change.",
+  "summary": "I'm rejecting this plan because the request can't be done without changing code, and the reading forbids any code change. The plan says Athena's landing will delete records/, but no code does that. The gate's append-only check refuses any deleted file under records/ (content.rs:46-61). That check runs on every commit Athena makes (commits.rs:202, Scope::Commit), and admission refuses any job change under records/ (admission.rs:695). The design note that the removal \"does not trip the append-only rule\" covers only the full-history check, not the per-commit gate. The plan also admits that criteria 5 and 6 fail, and I confirmed it: lib.rs:443 and history.rs:384-840 rely on a non-empty exempt list. The planner did surface these conflicts as open questions instead of patching code, which follows the reading. The fix is a prerequisite code job that allows a post-cutover removal of records/ and moves the seven legacy commit ids into test-only helpers. After that, this job can be re-planned as config and docs edits plus a deletion the code allows. The rest checked out: the cited files and line numbers exist, D171 is the next free number, and leaving ci.yml unchanged is justified."
+}
