@@ -284,7 +284,7 @@ pub const READING_RULES_HEADING: &str = "# Reading rules";
 /// Each rule a reading must pass, one short line each. A line gives the check that enforces it; a reading
 /// that breaks a checked rule is refused and read again once, with the refusal as a correction. A line
 /// ending `(prose only)` has no check and causes no refusal.
-pub const READING_RULES: [&str; 11] = [
+pub const READING_RULES: [&str; 12] = [
     "Previous result: a retry or follow-up names each earlier job, says how its result is addressed, lists deliverables and out_of_scope, and lists or excludes the files it changed (`check_prior_result_and_scope`).",
     "Criteria evidence: each criterion rests on a command, Grep or file the verifier can check, never the producer's report (`check_criteria_evidence`).",
     "Governance files: list one as a deliverable and name it in a criterion when the request names it or a deliverable implies it, or name it in out_of_scope (`check_governance_coverage`).",
@@ -296,6 +296,7 @@ pub const READING_RULES: [&str; 11] = [
     "Valid reading: class, capability and producer model from the closed lists; a decline gives a reason; a capability needs a criterion; forecasts are valid (`build_reading`).",
     "Test placement: put each test in a crate that can import the code under test; xtask has no library target, so test it in `xtask/tests/` or unit tests in `xtask/src/` (prose only).",
     "Enabled roles: brief content targets only the roles listed under Enabled roles; a role not listed gets no new content (prose only).",
+    "Reader question: settle it from the repository or defaults; else `question` is `User:` + the decision + alternatives `(a)`, `(b)` + `Default: (a)` (`check_reader_question`).",
 ];
 
 /// What the reader writes before it gives behavior criteria for a code or tests change, and when a request

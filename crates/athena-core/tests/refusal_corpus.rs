@@ -87,7 +87,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 52] = [
+const INPUT_FORMS: [&str; 69] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -140,6 +140,23 @@ const INPUT_FORMS: [&str; 52] = [
     "scope-limit-consumer-not-a-deliverable",
     "scope-limit-proposal-apply",
     "scope-limit-bare-form",
+    "reader-question-valid-letters",
+    "reader-question-valid-numbered",
+    "reader-question-bold-user-prefix",
+    "reader-question-lowercase-user-prefix",
+    "reader-question-absent",
+    "reader-question-plural-marker-beside-labels",
+    "reader-question-free-form",
+    "reader-question-host-prefix",
+    "reader-question-username-prefix",
+    "reader-question-no-alternatives",
+    "reader-question-one-alternative",
+    "reader-question-duplicate-alternatives",
+    "reader-question-unlabelled-or",
+    "reader-question-no-default",
+    "reader-question-default-names-no-alternative",
+    "reader-question-says-code-answers",
+    "reader-question-parenthesised-word-not-a-label",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -296,7 +313,132 @@ fn cases() -> Vec<Case> {
     out.extend(delivery_cases());
     out.extend(defined_terms_cases());
     out.extend(scope_limit_cases());
+    out.extend(question_cases());
     out
+}
+
+/// Reader questions: the accepted form and each way a question falls short of a precise decision for the
+/// customer. The texts are rebuilt shapes, not recorded questions; the form is the one the reader brief
+/// teaches.
+fn question_cases() -> Vec<Case> {
+    const SOURCE: &str =
+        "this job, 20261109-083730-kznz; the question text is rebuilt, not a recorded question";
+    let refuse = Expected::Refuse("check_reader_question");
+    let table: [(&'static str, &'static str, Option<&str>, Expected); 17] = [
+        (
+            "reader-question-valid-letters-accepted",
+            "reader-question-valid-letters",
+            Some("User: Which greeting: (a) hello or (b) hi? Default: (a)."),
+            Expected::Accept,
+        ),
+        (
+            "reader-question-valid-numbered-accepted",
+            "reader-question-valid-numbered",
+            Some("User: Which greeting: (1) hello or (2) hi? Default: (2)."),
+            Expected::Accept,
+        ),
+        (
+            "reader-question-bold-user-prefix-accepted",
+            "reader-question-bold-user-prefix",
+            Some("**User:** Which greeting: (a) hello or (b) hi? Default: (b)."),
+            Expected::Accept,
+        ),
+        (
+            "reader-question-lowercase-user-prefix-accepted",
+            "reader-question-lowercase-user-prefix",
+            Some("user: Which greeting: (a) hello or (b) hi? default: (a)"),
+            Expected::Accept,
+        ),
+        (
+            "reader-question-absent-accepted",
+            "reader-question-absent",
+            None,
+            Expected::Accept,
+        ),
+        (
+            "reader-question-plural-marker-beside-labels-accepted",
+            "reader-question-plural-marker-beside-labels",
+            Some("User: Which file(s): (a) A or (b) B? Default: (a)."),
+            Expected::Accept,
+        ),
+        (
+            "reader-question-free-form-refused",
+            "reader-question-free-form",
+            Some("which file?"),
+            refuse.clone(),
+        ),
+        (
+            "reader-question-host-prefix-refused",
+            "reader-question-host-prefix",
+            Some("Host: Which greeting: (a) hello or (b) hi? Default: (a)."),
+            refuse.clone(),
+        ),
+        (
+            "reader-question-username-prefix-refused",
+            "reader-question-username-prefix",
+            Some("Username: Which greeting: (a) hello or (b) hi? Default: (a)."),
+            refuse.clone(),
+        ),
+        (
+            "reader-question-no-alternatives-refused",
+            "reader-question-no-alternatives",
+            Some("User: Which greeting should the guide use? Default: hello."),
+            refuse.clone(),
+        ),
+        (
+            "reader-question-one-alternative-refused",
+            "reader-question-one-alternative",
+            Some("User: Use this greeting: (a) hello? Default: (a)."),
+            refuse.clone(),
+        ),
+        (
+            "reader-question-duplicate-alternatives-refused",
+            "reader-question-duplicate-alternatives",
+            Some("User: Which greeting: (a) hello or (b) hello? Default: (a)."),
+            refuse.clone(),
+        ),
+        (
+            "reader-question-unlabelled-or-refused",
+            "reader-question-unlabelled-or",
+            Some("User: hello or hi? Default: hello."),
+            refuse.clone(),
+        ),
+        (
+            "reader-question-no-default-refused",
+            "reader-question-no-default",
+            Some("User: Which greeting: (a) hello or (b) hi?"),
+            refuse.clone(),
+        ),
+        (
+            "reader-question-default-names-no-alternative-refused",
+            "reader-question-default-names-no-alternative",
+            Some("User: Which greeting: (a) hello or (b) hi? Default: (c)."),
+            refuse.clone(),
+        ),
+        (
+            "reader-question-says-code-answers-refused",
+            "reader-question-says-code-answers",
+            Some(
+                "User: Found by reading the code, which greeting: (a) hello or (b) hi? Default: (a).",
+            ),
+            refuse.clone(),
+        ),
+        (
+            "reader-question-parenthesised-word-not-a-label-refused",
+            "reader-question-parenthesised-word-not-a-label",
+            Some("User: Which file(s)? Default: (s)."),
+            refuse,
+        ),
+    ];
+    table
+        .into_iter()
+        .map(|(id, form, question, expected)| {
+            let forms: &'static [&'static str] = Box::leak(Box::new([form]));
+            let mut c = case(id, SOURCE, forms, "Update the guide.", 0, expected);
+            c.reading.question = question.map(String::from);
+            c
+        })
+        .collect()
 }
 
 /// A change reading in the production shape for a request whose bullets are `criteria` after the `head` lines,
@@ -2678,6 +2820,7 @@ fn reading_source() -> &'static str {
             include_str!("../src/reading/terms.rs"),
             include_str!("../src/reading/surveys.rs"),
             include_str!("../src/reading/replay.rs"),
+            include_str!("../src/reading/questions.rs"),
             include_str!("../src/reading.rs"),
         ]
         .join("\n")
@@ -2957,6 +3100,81 @@ fn history_fixture_refusal_is_declared_intended() {
     assert!(changelog.contains("check_history_fixture"));
     assert!(changelog.contains("higher refusal rate is intended"));
     assert!(changelog.contains("expected 4% of newly refused readings"));
+}
+
+#[test]
+fn reader_question_check_is_wired_into_the_gate() {
+    assert!(reading_source().contains("pub fn check_reader_question("));
+    let names = acceptance_check_names(reading_source());
+    assert_eq!(
+        names
+            .iter()
+            .filter(|n| n.as_str() == "check_reader_question")
+            .count(),
+        1,
+        "{names:?}"
+    );
+    // The call site is the first step of the gate, so a malformed question costs no second defect.
+    assert_eq!(
+        names.first().map(String::as_str),
+        Some("check_reader_question")
+    );
+}
+
+#[test]
+fn reader_question_refusal_is_declared_intended() {
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: "The change refuses more readings: expected 3% of newly refused readings".into(),
+            kind: CriterionKind::Behavior,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(3));
+    let collapse = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let doc = collapse(
+        &include_str!("../src/reading/questions.rs")
+            .split("pub fn check_reader_question(")
+            .next()
+            .unwrap()
+            .lines()
+            .rev()
+            .take_while(|l| l.starts_with("///"))
+            .map(|l| l.trim_start_matches('/').trim())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    for needle in [
+        "This check refuses more readings; the higher refusal rate is intended",
+        "questions the repository or defaults could settle cost the customer time",
+        "expected 3% of newly refused readings",
+        "estimate",
+    ] {
+        assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+    }
+    let changelog = collapse(include_str!("../../../CHANGELOG.md"));
+    assert!(changelog.contains("check_reader_question"));
+    assert!(changelog.contains("higher refusal rate is intended"));
+    assert!(changelog.contains("expected 3% of newly refused readings"));
+}
+
+#[test]
+fn reader_question_rule_is_recorded_in_the_docs() {
+    let collapse = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let design = collapse(include_str!("../../../docs/design/job-planning.md"));
+    for needle in [
+        "check_reader_question",
+        "same addressee rule as the planner's open questions",
+        "alternatives",
+        "Default:",
+    ] {
+        assert!(design.contains(needle), "job-planning.md lacks {needle:?}");
+    }
+    let changelog = collapse(include_str!("../../../CHANGELOG.md"));
+    assert!(changelog.contains("check_reader_question"));
 }
 
 #[test]

@@ -65,6 +65,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The reader's `question` now has to be a precise decision for the customer, so his time goes only to what the
+  repository and the defaults cannot settle. `reading::check_reader_question` is the first `step!` in
+  `refusing_check`, so it runs in `check_reading_acceptance` straight after `build_reading` and in the replay
+  and `athena check-reading`. Root cause: the question was free text that no check read, so questions the
+  repository or defaults could settle reached the customer with no alternatives and no default. A question is
+  accepted only when it begins `User:` (the planner's open-questions prefix rule, shared through
+  `admission::is_user_addressed`; `Host:` does not count), does not say the code answers it, offers at least
+  two distinct alternatives labelled `(a)`, `(b)` or `(1)`, `(2)`, and ends with `Default: (a)`, the
+  alternative the job runs on if unanswered. A reading with no question is unaffected. The refusal lists each
+  gap and says to settle the point from the repository or defaults and leave `question` null, or to write
+  `User:` + the decision + the alternatives + the default. The reader brief has a twelfth line in
+  `READING_RULES` that teaches the form (the brief is outside the reader token budget; no prompt file
+  changed). This refuses more readings and the higher refusal rate is intended, because questions the
+  repository or defaults could settle cost the customer time: expected 3% of newly refused readings (an
+  estimate, not a measurement). `has_addressee` and `says_code_answers` in `admission.rs` are now
+  `pub(crate)`; the planner's open-questions behavior is unchanged. The reading tests that reach the gate with
+  a question now use a `User:` question with alternatives and a default, and the corpus has 17 new cases.
 - Design note `docs/design/per-job-main-landing.md` (proposed, nothing built) for throughput review
   `20261109-014617-5cg0`: one job, one commit, one pull request cut from current main. It first checks the review's
   premise: the 1842.1-minute landing stage is mostly a measurement effect (the newest landing record that lists a

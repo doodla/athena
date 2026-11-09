@@ -548,15 +548,27 @@ fn open_questions_findings(questions: &[String]) -> Vec<Finding> {
 
 /// True when the question begins with `User:` or `Host:`, ignoring leading whitespace, `*`, `_` and
 /// backticks, and letter case. `Username:` and `Users:` do not match.
-fn has_addressee(question: &str) -> bool {
-    let lowered = question
-        .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | '`'))
-        .to_lowercase();
+pub(crate) fn has_addressee(question: &str) -> bool {
+    let lowered = normalised(question);
     lowered.starts_with("user:") || lowered.starts_with("host:")
 }
 
+/// True when the question begins with `User:` under the same normalisation as [`has_addressee`]. The reader's
+/// question is for the customer alone, so a `Host:` prefix does not count.
+pub(crate) fn is_user_addressed(question: &str) -> bool {
+    normalised(question).starts_with("user:")
+}
+
+/// The question lowercased, without leading whitespace, `*`, `_` and backticks: the one normalisation both
+/// addressee checks share.
+fn normalised(question: &str) -> String {
+    question
+        .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | '`'))
+        .to_lowercase()
+}
+
 /// True when the question's own text says that reading the code answers it.
-fn says_code_answers(question: &str) -> bool {
+pub(crate) fn says_code_answers(question: &str) -> bool {
     const PHRASES: [&str; 8] = [
         "by reading",
         "reading the code",

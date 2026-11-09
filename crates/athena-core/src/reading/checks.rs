@@ -472,7 +472,8 @@ pub fn check_reading_references(
     )
 }
 
-/// Every check a built reading must pass before it is accepted: the previous result and change scope of a
+/// Every check a built reading must pass before it is accepted: the question the reader puts to the customer
+/// ([`check_reader_question`]), then the previous result and change scope of a
 /// retried or followed-up job ([`check_prior_result_and_scope`]), then the evidence each criterion rests on
 /// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
 /// rests on ([`check_code_survey`]), then the realistic-branch fixture a commit classification, history or
@@ -529,6 +530,7 @@ pub fn refusing_check(
             }
         };
     }
+    step!(check_reader_question(reading));
     step!(check_prior_result_and_scope(
         reading,
         &continued_jobs(request, attempt, referenced)

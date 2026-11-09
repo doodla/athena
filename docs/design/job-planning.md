@@ -101,6 +101,21 @@ rule refuses more plans: expected 5% of newly refused plans (the reading's estim
 the higher refusal rate is intended, because those plans spent critic rounds on questions code could answer.
 Cases are in the `plan_side` table of `crates/athena-core/tests/refusal_corpus.rs`.
 
+The reader's `question` follows the same addressee rule as the planner's open questions, with more required
+of it, because it goes to the customer and the customer's time is the scarce part. The rule is
+`reading::check_reader_question`, the first step of `refusing_check`, so it runs in the gate after
+`build_reading` and in the replay of stored readings. A question is accepted only when it begins `User:` (the
+same prefix normalisation; `Host:` does not count, since a host fact is for the repository or the defaults),
+does not say the code answers it, offers at least two distinct alternatives labelled `(a)`, `(b)` (or `(1)`,
+`(2)`), and ends with `Default: (a)`, naming the alternative the job runs on if the customer does not answer.
+A reading with no question is not checked. Anything the repository or the defaults can settle is settled there
+and recorded as an assumption, and `question` stays null. Root cause: the question was free text that no
+check read, so a question the repository could settle reached the customer with no alternatives and no
+default. The refusal text lists each gap, quotes the question and gives the repair, and the reader brief
+teaches the form in its reading rules. The rule refuses more readings: expected 3% of newly refused readings
+(an estimate, not a measurement), and the higher refusal rate is intended. Cases are in `question_cases` of
+`crates/athena-core/tests/refusal_corpus.rs`.
+
 A major finding sends the plan back to the
 planner with no critic call and without using a round, up to two times per round (the revisions that follow
 are the planner's, the critic sees only the plan that passes). A plan that still breaks a rule after the
