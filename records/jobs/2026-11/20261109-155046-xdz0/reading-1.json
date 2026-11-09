@@ -1,0 +1,199 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261109-155046-xdz0",
+  "n": 1,
+  "at": "2026-11-09T16:47:02.834937101Z",
+  "invocation_seq": 8,
+  "base_commit": "7ae615fc4113097979be5c2a65f3632a46f473bd",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Allow post-cutover records/ removal in code, then drop records/ and",
+  "summary": "Retry of 20261025-001238-mkmh as one job: a narrow code change so the per-commit gate and admission allow a post-cutover whole-tree removal of records/, test helpers no longer depend on a non-empty exempt list, then delete records/, set [history] exempt = [], and add decision and changelog entries. Prior no-code scope is dropped because the critic showed gate and admission refuse the deletion.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Criteria require cargo test, clippy and fmt to pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Behavior criteria run the gate, admission and history tests and the checks."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix the gate and admission refusals instead of bypassing them."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the history and attribution checks on main."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261025-001238-mkmh failed at planning with no candidate and no changed files, so there is no work to keep or drop. Its findings are addressed as follows. Blocker (nothing can delete records/): fixed by adding a narrow allow rule in crates/athena-gate/src/content.rs and crates/athena-core/src/admission.rs. Major (suites go red with exempt empty): fixed by moving the seven legacy shas into test-only helpers. Major (missing dependents): content.rs, admission.rs, commits.rs and the pre-commit scope are now deliverables or checked readers. Minor (producer cannot check preconditions): not addressed here; the producer does not check them. Athena checks the dependency jobs and the 14-day wait before dispatch.",
+    "Dependencies 20261025-001236-brde and 20261025-001234-2hax failed unverified and are not retried here. Job 20261025-001232-vesh landed and its work is kept. The cutover_job value in athena.toml stays.",
+    "Code survey: read crates/athena-gate/src/content.rs (append-only check on deleted Records paths, Rule::AppendOnly), crates/athena-git/src/attrs.rs (every records/ path is PathClass::Records), crates/athena-core/src/commits.rs (Athena's own commits run the gate with Scope::Commit), crates/athena-core/src/admission.rs (refuses job changes under records/), crates/athena-gate/src/lib.rs (asserts exempt is non-empty in a test), crates/athena-gate/src/history.rs (check_history; tests index exempt[0]), crates/athena-gate/src/legacy.rs (legacy_exempt_record, reads the config exempt list), crates/athena-data/src/config.rs and crates/athena-core/src/test_support.rs (test config helpers). The history and attribution checks are entered via athena check --history and --attribution. The legacy split in check_history judges pre-C0 commits by the legacy rule; the new rule must not change that. The property is measured by running these checks directly on fixtures, not via a stand-in.",
+    "Environment: the athena/records branch holds the legacy-exempt record, which the history check reads locally. No network, push or CI access is needed. The ci.yml workflow is not changed.",
+    "The rule is narrow: after the cutover is Shown, a commit whose only records/ effect is removing the whole tree is allowed. Any partial removal, any modification, or any addition of records/ files is still refused. This adds an allow case, not a new refusal, so 0% of past readings are newly refused.",
+    "Consumers: athena.toml [history] exempt is read by crates/athena-data/src/config.rs, crates/athena-gate/src/history.rs, crates/athena-gate/src/legacy.rs and crates/athena-gate/src/invariant.rs. After the change the legacy-exempt record on athena/records carries the list.",
+    "The goal is to get main clean of records/ with the checks still passing; the audience is the maintainer, who runs athena check on main. Done is checked by the commands in the criteria.",
+    "Decision number: the next free number in docs/decisions.md, expected D171, to be confirmed by reading that file."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "git diff shows the records/ directory deleted and no files left under records/ (ls records fails).",
+      "kind": "content"
+    },
+    {
+      "text": "athena.toml [history] has exempt = [] and still has cutover_job = \"20261025-001232-vesh\"; Grep for the seven old legacy commit shas in athena.toml returns nothing.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-gate/src/content.rs and crates/athena-core/src/admission.rs diffs add a rule that allows only a whole-tree removal of records/ after the cutover, and keep refusing partial deletions, modifications and additions under records/.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md has a new decision entry (next free number) saying records/ was removed from main, exempt was emptied because the legacy-exempt record on athena/records carries the list, the gate and admission got a narrow post-cutover allow rule, and the 14-day wait was met. CHANGELOG.md has a matching entry.",
+      "kind": "content"
+    },
+    {
+      "text": "The gate and core tests that used builtin or repo config exempt (crates/athena-gate/src/lib.rs, history.rs, legacy.rs, crates/athena-core/src/test_support.rs) get the seven full legacy shas from a test-only helper, and no test indexes exempt[0] of the repo config.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-gate removal`: tests show a commit that only deletes all of records/ after the cutover passes the gate, a partial deletion is still refused with AppendOnly, and a modification under records/ is still refused. Run `cargo test -p athena-core admission`: the same cases hold in admission.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-gate history` and `cargo test -p athena-cli --test cutover_fixture`: on a realistic-branch fixture with a legacy exempt commit (02837e0 shape), a pre-C0 legacy commit, an intervention commit, a records-only commit, a retry-after-block landing, the job landing and the records-removal commit, the history check and the commit-classification and attribution rules classify each as intended, and removal does not change the verdict on pre-C0 commits.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo run -- check --attribution` and `cargo run -- check --history` on the result: both pass with no records/ in the tree and exempt empty.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check`: all pass with records/ absent. The change adds no refusal rule; expected 0% of newly refused readings.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "records/",
+      "action": "delete",
+      "p": 0.9
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-gate/src/content.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/commits.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-gate/src/legacy.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Moving readers of records/ to the athena/records branch (20261025-001236-brde)",
+    "Ending commit-message trailers (20261025-001234-2hax)",
+    "Changing the cutover, importer, or the legacy rule itself",
+    "Rewriting any commit history or the athena/records branch contents",
+    "Changing .github/workflows/ci.yml",
+    "Splitting into two separate jobs: this reading does both steps in one change"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 1.0,
+        "p50": 2.6,
+        "p90": 7.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2800.0,
+        "p90": 6000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6815415821501014,
+      "p_user_intervenes": 0.07289377289377288,
+      "cost_usd": {
+        "p10": 0.564917538646614,
+        "p50": 1.490862948785461,
+        "p90": 4.9587831816380445
+      },
+      "wall_time_s": {
+        "p10": 570.1305914545239,
+        "p50": 2112.801337854,
+        "p90": 4332.353759989288
+      }
+    }
+  },
+  "departures": "Higher than reference: this is a code change across the gate, admission and test helpers, with a records tree deletion and fixture tests.",
+  "hard_reason": "Changes the per-commit gate append-only rule, the admission rule on records/, and the history check's fixtures, so a mistake could refuse or wrongly admit work.",
+  "producer_effort": "high"
+}
