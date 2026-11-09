@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- `crates/athena-context/src/briefs.rs` is split so it is under the code-health limits (it had 2544 production
+  lines and `reader_brief` had 217). The boundary scan moves to `briefs/boundary.rs`, the reader's brief and its
+  types to `briefs/reader.rs`, the planner and critic briefs to `briefs/planner.rs`, and the findings and plan
+  rendering to `briefs/plan.rs`. `briefs.rs` re-exports every public item, so `athena_context::briefs::` paths
+  are unchanged. `reader_brief` is now a list of calls to one helper per section. The brief text is
+  byte-identical; `briefs.rs` has 1411 production lines and its longest function is 100 lines.
+
 ### Fixed
 
 - A request's title in `athena plan` and `athena status` skips leading `Priority:` lines and blank lines, so a
