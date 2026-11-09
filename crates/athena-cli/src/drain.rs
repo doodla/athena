@@ -576,6 +576,11 @@ pub trait Steps {
     /// do not hold the disk. The default removes nothing, as for steps that have no state directory.
     fn reclaim_interrupted(&self) {}
     fn land(&self, job: &str) -> Landing;
+    /// Pushes the working branch to `origin` with a plain push, asked once right after each
+    /// [`Landing::Landed`] (the landing lock is held). A refused or failed push is shown as a warning by the
+    /// implementation and changes nothing: the job stays landed. The default pushes nothing, as for steps
+    /// with no repository.
+    fn push_after_landing(&self) {}
     /// Why the configuration at the branch head cannot be read, asked only right after a [`Landing::Landed`].
     /// The configuration was readable when the run started, so a landing that makes it unreadable has brought
     /// in something this build does not understand (a key or section from a newer Athena). The default is
@@ -1800,6 +1805,10 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     }
                     st.landings.push(changed);
                 }
+                // The landing resync added a merge commit to the working branch and nothing else, so the
+                // branch still descends from its remote copy and a plain push is accepted. A refusal is a
+                // warning shown by the step; the job stays landed.
+                self.steps.push_after_landing();
                 // Root cause of a landed job being recorded as failed: a landing never checked that the
                 // running build can read the config it lands. A job can add a config field with the code
                 // that reads it, and the build that keeps running is the older one. Every `Steps::land`
@@ -3242,17 +3251,28 @@ pub fn plan(steps: &dyn Steps, read_budget_usd: f64, ui: &dyn Ui) -> anyhow::Res
 /// How a verified job is landed.
 pub trait Lander {
     fn land(&self, athena: &Athena, job: &str, ui: &dyn Ui) -> Landing;
+    /// Whether [`Lander::land`] already pushes the working branch after a landing. The drain pushes the
+    /// branch after each landing for a lander that does not, so each landing is pushed once. The default is
+    /// that it does not.
+    fn pushes_working_branch(&self) -> bool {
+        false
+    }
 }
 
 /// Lands through the pull-request path of `athena land --pr`: push the job's branch, open the pull request,
 /// wait for every check run to finish and be green, merge only when `[landing] merge_via_rest` is on. The wait
 /// and the merge are one call: checks that turn green during the poll are merged in that same call, in the
 /// drain's locked step. Only a merged, verified pull request is a landing; one whose checks are still
-/// unfinished when the poll ends is [`Landing::Waiting`].
+/// unfinished when the poll ends is [`Landing::Waiting`]. After the merge, `land_pr` merges the host's commit
+/// into the working branch and pushes the branch with a plain push, so the drain does not push it again.
 #[derive(Debug)]
 pub struct PrLander;
 
 impl Lander for PrLander {
+    fn pushes_working_branch(&self) -> bool {
+        true
+    }
+
     fn land(&self, athena: &Athena, job: &str, ui: &dyn Ui) -> Landing {
         let report = athena.land_pr(
             job,
@@ -4485,6 +4505,13 @@ impl Steps for RealSteps<'_> {
         landing
     }
 
+    fn push_after_landing(&self) {
+        // A lander that pushes the branch itself (the pull-request path) has pushed already.
+        if !self.lander.pushes_working_branch() {
+            self.athena.push_working_branch(self.ui);
+        }
+    }
+
     fn config_after_landing(&self) -> Option<String> {
         // Any read error here is taken as "the landed config is newer than this build": the config was
         // readable before the landing (`caps` parsed it at the start), so the landing is what changed it.
@@ -4733,6 +4760,9 @@ mod tests {
                 changed: vec!["studies/s/claims.json".into()],
             }
         }
+        fn push_after_landing(&self) {
+            self.calls.borrow_mut().push("push".into());
+        }
         fn check_page(&self) -> Check {
             Check::pass("stub")
         }
@@ -4972,6 +5002,42 @@ mod tests {
         );
         assert!((report.spent_usd - 2.7).abs() < 1e-9);
         assert_eq!(report.queued.len(), 1, "the item stays queued");
+    }
+
+    #[test]
+    fn the_drain_pushes_the_working_branch_after_each_landing() {
+        for (outcome, pushes) in [
+            (OutcomeState::Landed, true),
+            (OutcomeState::Rejected, false),
+        ] {
+            let stub = Stub {
+                calls: RefCell::new(Vec::new()),
+                read_cost: 0.1,
+                run_cost: 0.1,
+                outcome,
+            };
+            let report = drain(&stub, limits(5.0), &Quiet).unwrap();
+            let calls = stub.calls.borrow().clone();
+            let lands = calls.iter().filter(|c| c.starts_with("land ")).count();
+            let pushed = calls.iter().filter(|c| *c == "push").count();
+            assert_eq!(
+                pushed, lands,
+                "one push per landing: {calls:?} ({:?})",
+                report.stop
+            );
+            assert_eq!(lands > 0, pushes, "{calls:?}");
+            // Each push comes straight after its landing, before anything else is asked.
+            for (at, call) in calls.iter().enumerate() {
+                if call.starts_with("land ") {
+                    assert_eq!(calls.get(at + 1).map(String::as_str), Some("push"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_pull_request_lander_pushes_the_working_branch_itself() {
+        assert!(PrLander.pushes_working_branch());
     }
 
     #[test]

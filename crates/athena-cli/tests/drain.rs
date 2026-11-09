@@ -26,6 +26,7 @@ use athena_data::records::{
     AcceptedBy, AnyRecord, OutcomeState, Reference, Role, WorkDecisionState, WorkItem, WorkItemKind,
 };
 use athena_data::roles::Ladder;
+use athena_git::Git;
 use common::*;
 use serde_json::json;
 use std::cell::{Cell, RefCell};
@@ -2379,6 +2380,167 @@ fn the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page() {
             .lock()
             .unwrap()
             .contains(&athena_data::records::Role::Audience)
+    );
+}
+
+/// Collects every line shown.
+#[derive(Default)]
+struct Said(std::sync::Mutex<Vec<String>>);
+
+impl athena_core::Ui for Said {
+    fn line(&self, text: &str) {
+        self.0.lock().unwrap().push(text.to_string());
+    }
+}
+
+/// A land step that records, at each ask, the branch `work` of the bare repository `origin` and the local
+/// head. It pushes nothing itself, unless `pushes_itself` says it does.
+struct ProbeLander {
+    origin: Git,
+    asked: std::sync::Mutex<Vec<(Option<String>, String)>>,
+    pushes_itself: bool,
+}
+
+impl Lander for ProbeLander {
+    fn land(&self, athena: &Athena, _: &str, _: &dyn athena_core::Ui) -> Landing {
+        self.asked.lock().unwrap().push((
+            self.origin.rev_parse("refs/heads/work").unwrap(),
+            athena.head().unwrap(),
+        ));
+        Landing::Landed {
+            changed: Vec::new(),
+        }
+    }
+    fn pushes_working_branch(&self) -> bool {
+        self.pushes_itself
+    }
+}
+
+/// A fixture on the branch `work` with a bare `origin` that holds `work` as it is now. The Fixture checks
+/// out `main`, which the drain's push never touches, so these tests work on `work`.
+fn fixture_with_origin() -> (Fixture, tempfile::TempDir, Git) {
+    let fx = Fixture::new();
+    fx.git.run(["checkout", "-q", "-b", "work"]).unwrap();
+    let origin = tempfile::tempdir().unwrap();
+    let path = origin.path().to_str().unwrap();
+    fx.git.run(["init", "--bare", "-q", path]).unwrap();
+    fx.git.run(["remote", "add", "origin", path]).unwrap();
+    let bare = Git::at(origin.path());
+    (fx, origin, bare)
+}
+
+fn probe(bare: &Git, pushes_itself: bool) -> ProbeLander {
+    ProbeLander {
+        origin: Git::at(bare.dir()),
+        asked: Default::default(),
+        pushes_itself,
+    }
+}
+
+#[test]
+fn the_real_steps_push_the_working_branch_after_each_landing() {
+    let (fx, _origin, bare) = fixture_with_origin();
+    let before = fx.head();
+    fx.git.push_branch("origin", "work", &before).unwrap();
+    let athena = fx.athena(rated_scenario().script());
+    queue_steward_request(&athena, "Add a greeting to the README.");
+    let lander = probe(&bare, false);
+    let said = Said::default();
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &said,
+        page: &StubPage,
+        lander: &lander,
+    };
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    assert_eq!(report.landed, 1, "{}", display::drain(&report));
+
+    // At the ask the remote copy still held the earlier head; after the landing it holds the head the
+    // landing was asked at, with a plain push.
+    let asked = lander.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].0.as_deref(), Some(before.as_str()));
+    let pushed = bare.rev_parse("refs/heads/work").unwrap().unwrap();
+    assert_eq!(pushed, asked[0].1);
+    assert_ne!(pushed, before);
+    assert!(fx.git.is_ancestor(&before, &pushed).unwrap());
+    assert!(fx.git.is_ancestor(&pushed, &fx.head()).unwrap());
+    let lines = said.0.lock().unwrap().clone();
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.starts_with("pushed work to origin"))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_lander_that_pushes_itself_is_not_pushed_for_again() {
+    let (fx, _origin, bare) = fixture_with_origin();
+    let before = fx.head();
+    fx.git.push_branch("origin", "work", &before).unwrap();
+    let athena = fx.athena(rated_scenario().script());
+    queue_steward_request(&athena, "Add a greeting to the README.");
+    let lander = probe(&bare, true);
+    let said = Said::default();
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &said,
+        page: &StubPage,
+        lander: &lander,
+    };
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    assert_eq!(report.landed, 1, "{}", display::drain(&report));
+    assert_eq!(
+        bare.rev_parse("refs/heads/work").unwrap().as_deref(),
+        Some(before.as_str())
+    );
+    let lines = said.0.lock().unwrap().clone();
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.starts_with("pushed ") || l.contains("could not push")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_refused_push_is_a_warning_and_the_job_stays_landed() {
+    let (fx, _origin, bare) = fixture_with_origin();
+    // The remote copy holds a sibling commit that the branch does not contain.
+    let tree = fx.git.tree_of("HEAD").unwrap();
+    let base = fx.head();
+    let sibling = fx
+        .git
+        .commit_tree(&tree, &[&base], "A commit made elsewhere\n", false)
+        .unwrap();
+    fx.git.push_branch("origin", "work", &sibling).unwrap();
+    let athena = fx.athena(rated_scenario().script());
+    queue_steward_request(&athena, "Add a greeting to the README.");
+    let lander = probe(&bare, false);
+    let said = Said::default();
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &said,
+        page: &StubPage,
+        lander: &lander,
+    };
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    assert_eq!(report.landed, 1, "{}", display::drain(&report));
+    assert_eq!(report.jobs[0].landing, "landed");
+    // The remote copy was not overwritten.
+    assert_eq!(
+        bare.rev_parse("refs/heads/work").unwrap().as_deref(),
+        Some(sibling.as_str())
+    );
+    let lines = said.0.lock().unwrap().clone();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("warning: could not push work to origin")),
+        "{lines:?}"
     );
 }
 

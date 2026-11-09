@@ -2,7 +2,7 @@
 //! landing records, the records-history cutover, and the reconcile hooks over them.
 
 use super::MergeMethod;
-use crate::land::pr_commits;
+use crate::land::pr_commits_excluding;
 use crate::reconcile::{ReconcileRecords, RecordsSnapshot};
 use crate::records_import::{MANIFEST_PATH, import_at_cutover};
 use anyhow::{Context, Result, bail};
@@ -124,18 +124,30 @@ impl<'a> GitLandingRecords<'a> {
     }
 
     /// The pull request's commits, each with its kind and, for a job landing, the job and the verification
-    /// record that covers it, all read from the commit's content (§5.3).
+    /// record that covers it, all read from the commit's content (§5.3). Commits of a pull request that an
+    /// earlier landing record already holds, with its host commit on the base, are left out: the working
+    /// branch keeps them after the host's squash, so they stay in `expected_base..head`.
     pub(super) fn commits(&self, expected_base: &str, head: &str) -> Result<Vec<LandingCommit>> {
-        let commits: Vec<LandingCommit> = pr_commits(self.git, expected_base, head)?
-            .into_iter()
-            .map(|c| LandingCommit {
-                sha: c.sha,
-                tree: c.tree,
-                kind: c.kind,
-                job: c.job,
-                verification: c.verification,
-            })
-            .collect();
+        let mut landed_heads = Vec::new();
+        for record in self.existing(LANDING_DIR)? {
+            if let HistoryRecord::Landing(found) = record
+                && self.git.commit_exists(&found.host_commit)?
+                && self.git.is_ancestor(&found.host_commit, expected_base)?
+            {
+                landed_heads.push(found.head_sha);
+            }
+        }
+        let commits: Vec<LandingCommit> =
+            pr_commits_excluding(self.git, expected_base, head, &landed_heads)?
+                .into_iter()
+                .map(|c| LandingCommit {
+                    sha: c.sha,
+                    tree: c.tree,
+                    kind: c.kind,
+                    job: c.job,
+                    verification: c.verification,
+                })
+                .collect();
         for commit in &commits {
             commit.validate()?;
         }

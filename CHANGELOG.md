@@ -16,8 +16,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   are unchanged. `reader_brief` is now a list of calls to one helper per section. The brief text is
   byte-identical; `briefs.rs` has 1411 production lines and its longest function is 100 lines.
 
+- The working branch's history is append-only after a landing. `resync_tip` (`land.rs`) no longer rewrites the
+  branch's commits under new ids (`Git::replay`); it adds one merge commit whose parents are the branch's tip and
+  the commit the host made. The merge takes the landed commit as its merge base, so only what the host's commit
+  holds beyond the landed job comes in, and later edits of lines the job landed do not conflict. It must leave
+  the governed content as it was on the branch, so the merge classifies as records only. A conflict, or governed
+  content the branch does not hold, is now an error that names the cause and leaves the branch unchanged; the
+  replay used to carry on there. Local edits are still kept (`reset --keep`). `Git::replay` stays in
+  `athena-git`, unused by the landing.
+- `athena land --pr` and `athena drain` push the working branch to `origin` after each landing, with a plain push
+  (`Athena::push_working_branch`). The pull-request path pushes from `after_merge`; the drain pushes through
+  `Steps::push_after_landing` for a lander that does not (`Lander::pushes_working_branch`), so each landing is
+  pushed once. Athena never forces this push and never pushes the default branch (the one `origin/HEAD` names, or
+  `main` or `master`). A remote copy that holds a commit the branch does not contain, or a push the remote
+  refuses, is shown as a `warning:` line and the landing stands. This widens the push rule: Athena used to push
+  only a job's own branch (`check_push`, which the new push reuses with the working branch as the allowed branch);
+  `docs/enforcement.md` and the replay text in `docs/design/native-pr-landing.md` section 5.2a and D88 still
+  describe the old behavior and need a follow-up.
+- Landing intents and landing records leave out the commits of a pull request that an earlier landing record
+  already holds (its host commit is on the base). The working branch keeps those commits, so without this each
+  later landing would list the earlier jobs again and move their landing times. The range
+  `origin/main..head` that `athena check --history` and the pull-request checks walk now grows by every landing,
+  because squashed commits never reach main; each commit in it is still a valid job landing or a records-only
+  merge. Per-job branches (D167, `docs/design/per-job-main-landing.md`) are the long-term answer.
+
 ### Fixed
 
+- The working branch and its remote copy no longer diverge after a landing. Root cause: after the host squashed a
+  pull request, the resync replayed the branch's later commits onto the host's commit, so every one of them got a
+  new id and the branch left its remote copy's history; a plain push was refused (2026-10-27: ahead 2, behind 46
+  during a drain), the landing script had to force-push, and `athena drain` did not push at all. The resync now
+  only adds a merge commit, and the push follows each landing.
 - A request's title in `athena plan` and `athena status` skips leading `Priority:` lines and blank lines, so a
   request that starts with `Priority: urgent` is titled by its next line. Root cause: the shared title in
   `JobRecords::title` (`store.rs`) took the request's first line; it now calls `plan::title_line`. A request
