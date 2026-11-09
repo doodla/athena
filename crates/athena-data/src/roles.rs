@@ -117,21 +117,25 @@ impl RoleDefinition {
 pub const STEWARD: &str = "steward";
 
 /// The steward's prompt. It stays fixed so that a change to it is a new recorded version.
-pub const STEWARD_PROMPT: &str = "You are Athena's steward. You only read: Athena's code, its records, \
-its git log, and GitHub runs, pull requests and deploys. Report a work item for each repeated failure and \
-for each source you could not read. Cite sources and evidence by reference; copy no data. Name the rung of \
-the requirements ladder each item concerns; Athena queues a request for a rung at or below your limit and \
-only a proposal above it. For a proposal above your limit, also write a brief for the owner, who decides it. \
-The brief has five fields: question (one yes/no line), if_yes (what happens if the owner says yes), if_no \
-(what happens if the owner says no), cost (what yes costs), and recommendation (yes or no, with a one-line \
-reason). Keep each field short (at most 20 words) and plain, with no jargon. Leave the brief null for any other item.";
+///
+/// Prose-only: nothing checks that a brief is about an environment or a token. Code routes by the brief's
+/// presence (`athena_core::steward::decide`, `athena_core::work_decisions::open_proposals`).
+pub const STEWARD_PROMPT: &str = "You are Athena's steward. You only read: Athena's code, records, git log, \
+and GitHub runs, pull requests and deploys. Step back across repeated failures and blind spots, and decide \
+yourself what to change: report a work item for each, citing sources and evidence by reference and copying \
+no data. Name the rung each item concerns; Athena queues your request at or below your limit and records an \
+item above it, without asking the owner. Write a brief only when the fix needs an environment change or a \
+token or credential Athena lacks; otherwise leave it null. The brief has five fields: question (one yes/no \
+line), if_yes (what the owner must do, then what happens), if_no, cost, and recommendation (yes or no, with \
+a one-line reason). Keep each field short and plain, with no jargon.";
 
 /// The one steward definition: it runs every five finished tasks, and may change the lowest two rungs.
-/// Version 2 is the first that calls a model.
+/// Version 2 is the first that calls a model. Version 3 steps back and decides for itself, and briefs the
+/// owner only for an environment change or a token.
 pub fn steward(at: jiff::Timestamp) -> RoleDefinition {
     RoleDefinition {
         name: STEWARD.into(),
-        version: 2,
+        version: 3,
         at,
         goal: "Keep Athena's work steered: read what Athena has done, notice repeated failures and blind spots, and queue work for them."
             .into(),
@@ -260,6 +264,24 @@ mod tests {
     }
 
     #[test]
+    fn the_steward_prompt_tells_it_to_step_back_decide_itself_and_brief_only_for_env_or_token() {
+        // Prose-only: this pins the wording; no code checks what a brief is about.
+        for term in [
+            "Step back across repeated failures and blind spots",
+            "decide yourself",
+            "queues your request",
+            "without asking the owner",
+            "Write a brief only when the fix needs an environment change or a token or credential",
+            "if_yes (what the owner must do",
+            "otherwise leave it null",
+        ] {
+            assert!(STEWARD_PROMPT.contains(term), "{term}");
+        }
+        assert!(!STEWARD_PROMPT.contains("For a proposal above your limit, also write a brief"));
+        assert!(!STEWARD_PROMPT.contains("above your limit"));
+    }
+
+    #[test]
     fn the_ladder_is_ordered_highest_first() {
         assert_eq!(Ladder::ALL.len(), 5);
         assert!(Ladder::ALL.windows(2).all(|w| w[0] < w[1]));
@@ -303,7 +325,8 @@ mod tests {
         let role = steward(at());
         assert_eq!(role.validate(), Ok(()));
         assert_eq!(role.cadence_tasks, 5);
-        assert_eq!(role.path(), "records/roles/steward-2.json");
+        assert_eq!(role.version, 3);
+        assert_eq!(role.path(), "records/roles/steward-3.json");
         assert!(!role.may_change(Ladder::DesignDecisions));
         assert!(role.may_change(Ladder::DefaultsConventions));
         assert!(role.may_change(Ladder::Implementation));

@@ -1,26 +1,28 @@
 //! The owner decision briefs page: `decisions.html`, built beside `index.html` by `cargo run -p xtask -- site`.
 //!
 //! The page lists only the proposals that wait for the owner: work items of kind proposal that no work
-//! decision names and whose rung is above the raising role's recorded limit (or whose role has no recorded
-//! definition). They are read from the records branch `athena/records`. A proposal the role may change itself
-//! is not listed. With none left, the page says "Nothing waiting for you". Work decisions are read from both
+//! decision names and that carry a brief, whatever their rung. The steward writes a brief only when the fix
+//! needs an environment change or a token Athena lacks. They are read from the records branch
+//! `athena/records`. A proposal without a brief is the steward's own to decide and is not listed. With none
+//! left, the page says "Nothing waiting for you". Work decisions are read from both
 //! places: the records branch and the tree of main (the checkout's HEAD). Approve-work and reject-work record
 //! their decisions under `records/work-decisions/` on main, which the records branch does not hold, so
 //! reading the branch alone left every proposal looking undecided. Each proposal becomes a short brief: its
 //! title, rung, source, evidence, a recommendation, and a link to the record on GitHub at the branch tip. The
 //! style is the owner's (`docs/conventions/owner-style.md`): plain words, nothing invented.
 //!
-//! The words of a card are written by the steward, not by this page: when it raises a proposal above its
-//! limit it stores five plain-language fields in the work item (question, if_yes, if_no, cost, recommendation).
+//! The words of a card are written by the steward, not by this page: when it raises an environment or token
+//! need it stores five plain-language fields in the work item (question, if_yes, if_no, cost, recommendation).
 //! The page shows them first, as stored, and puts the rung, source, evidence and record link in a collapsed
-//! section. A proposal without them shows its title and "No brief written yet". The page only escapes and lays
+//! section. The page lists only briefed proposals, so [`Brief::new`]'s no-brief card ("No brief written yet")
+//! is a fallback for a direct caller and is never reached from the page. The page only escapes and lays
 //! out stored text; it never rewrites a title.
 //!
 //! Records are read with `athena_data::records::check_record_file`, so they are the same records every other
 //! reader sees and no new file format exists. A brief shows only what the proposal's fields hold: there is no
-//! cost, risk or approval wording. The recommendation comes from the raising role's recorded limit: a proposal
-//! at or below it is something the role may change itself; one above it, or from a role with no recorded
-//! definition, is for the owner to decide.
+//! cost, risk or approval wording. The derived recommendation line (shown only when a card has no owner brief)
+//! comes from the raising role's recorded limit: a proposal at or below it is something the role may change
+//! itself; one above it, or from a role with no recorded definition, is for the owner to decide.
 //!
 //! A brief of more than [`MAX_WORDS`] words, or without a recommendation line, is refused. The page lists a
 //! refused or unreadable record as not shown; it never stops the rest of the site from being built. A checkout
@@ -89,10 +91,12 @@ fn role_limit(roles: &[RoleDefinition], name: &str) -> Option<Ladder> {
         .map(|r| r.highest_rung)
 }
 
-/// Whether `item` is for the owner to decide: its rung is above the raising role's recorded limit, or the
-/// role has no recorded definition. A proposal the role may change itself is not listed.
-fn needs_owner(item: &WorkItem, roles: &[RoleDefinition]) -> bool {
-    role_limit(roles, &item.role).is_none_or(|limit| !may_change(limit, item.rung))
+/// Whether `item` is for the owner to decide: it carries a brief, which the steward writes only for an
+/// environment change or a token Athena lacks. The rung does not matter. An item without a brief is the
+/// steward's own to decide, so the page does not list it. This is the rule `work_decisions::open_proposals`
+/// applies to the owner's side.
+fn needs_owner(item: &WorkItem) -> bool {
+    item.brief.is_some()
 }
 
 /// The recommendation line, from the raising role's recorded limit.
@@ -367,7 +371,7 @@ pub fn render(records: &Records) -> String {
             let mut count = 0;
             let mut refused = snapshot.unreadable.clone();
             for found in &snapshot.proposals {
-                if !needs_owner(&found.item, &snapshot.roles) {
+                if !needs_owner(&found.item) {
                     continue;
                 }
                 match Brief::new(&found.item, &found.path, &snapshot.tip, &snapshot.roles) {
@@ -497,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn a_proposal_without_a_brief_shows_its_title_and_says_none_is_written() {
+    fn the_no_brief_card_is_a_fallback_for_a_direct_caller_and_the_page_never_lists_it() {
         let proposal = item(
             "20261015-003903-khz6",
             "steward",
@@ -509,7 +513,8 @@ mod tests {
         assert!(html.contains("<h3>Retry a failed check once</h3>"));
         assert!(html.contains("No brief written yet"));
         assert!(html.find("No brief written yet").unwrap() < html.find("<details>").unwrap());
-        // The whole page renders, and the card is not listed as refused.
+        // The page lists only briefed proposals, so it never reaches that card: an open proposal with no
+        // brief is the steward's own to decide, and the owner is not asked about it.
         let snapshot = Snapshot {
             tip: TIP.into(),
             proposals: vec![Found {
@@ -520,8 +525,15 @@ mod tests {
             unreadable: Vec::new(),
         };
         let page = render(&Records::Read(snapshot));
-        assert!(page.contains("1 waiting") && page.contains("No brief written yet"));
+        assert!(page.contains("Nothing waiting for you"), "{page}");
+        assert!(!page.contains("No brief written yet") && !page.contains("<article"));
         assert!(!page.contains("Not shown"));
+    }
+
+    /// `item` with the steward's brief, as an environment or token need would carry.
+    fn briefed(mut item: WorkItem) -> WorkItem {
+        item.brief = Some(owner_brief());
+        item
     }
 
     fn path_of(item: &WorkItem) -> String {
@@ -694,6 +706,7 @@ mod tests {
     fn the_page_links_every_record_to_github_at_the_tip_and_lists_only_open_proposals() {
         let (dir, git) = init_repo();
         let (first, second) = two_fixtures();
+        let (first, second) = (briefed(first), briefed(second));
         let mut third = first.clone();
         third.id = RecordId::parse("20261017-080000-qrst").unwrap();
         third.title = "Already decided".into();
@@ -779,6 +792,7 @@ mod tests {
     fn decided_on_main(approve: bool, reject: bool) -> (tempfile::TempDir, WorkItem, WorkItem) {
         let (dir, git) = init_repo();
         let (first, second) = two_fixtures();
+        let (first, second) = (briefed(first), briefed(second));
         let changes: Vec<Change> = [&first, &second]
             .iter()
             .map(|i| put(path_of(i), AnyRecord::WorkItem(Box::new((*i).clone()))))
@@ -831,9 +845,15 @@ mod tests {
         assert!(!html.contains(first.id.as_str()));
     }
 
-    /// A proposal by the steward (limit: defaults-conventions) on `rung`, titled `title`.
+    /// A briefed proposal by the steward (limit: defaults-conventions) on `rung`, titled `title`.
     fn steward_item(id: &str, title: &str, rung: Ladder) -> WorkItem {
-        item(id, "steward", title, rung, Reference::path("a.md"))
+        briefed(item(id, "steward", title, rung, Reference::path("a.md")))
+    }
+
+    /// `steward_item` without the brief: the steward's own to decide.
+    fn unbriefed(mut item: WorkItem) -> WorkItem {
+        item.brief = None;
+        item
     }
 
     /// A temp repository whose records branch holds `items` and the steward role. An approval is written
@@ -872,11 +892,11 @@ mod tests {
             "Rejected one",
             Ladder::DesignDecisions,
         );
-        let within = steward_item(
+        let within = unbriefed(steward_item(
             "20261015-003903-cccc",
             "Within limit",
             Ladder::DefaultsConventions,
-        );
+        ));
         let html = page_with(&[&approved, &rejected, &within], &[&approved], &[&rejected]);
         assert!(html.contains("Nothing waiting for you"), "{html}");
         assert!(!html.contains("<article"), "{html}");
@@ -903,11 +923,11 @@ mod tests {
             "Above limit",
             Ladder::DesignDecisions,
         );
-        let below = steward_item(
+        let below = unbriefed(steward_item(
             "20261015-003904-dddd",
             "Below limit",
             Ladder::Implementation,
-        );
+        ));
         let html = page_with(
             &[&approved, &rejected, &above, &below],
             &[&approved],
@@ -923,15 +943,56 @@ mod tests {
     }
 
     #[test]
+    fn the_page_lists_exactly_the_briefed_open_proposals() {
+        // The rung does not decide it: a brief does.
+        let in_limit_briefed = steward_item(
+            "20261015-003901-aaaa",
+            "Briefed within limit",
+            Ladder::Implementation,
+        );
+        let above_briefed = steward_item(
+            "20261015-003902-bbbb",
+            "Briefed above limit",
+            Ladder::DesignDecisions,
+        );
+        let above_plain = unbriefed(steward_item(
+            "20261015-003903-cccc",
+            "Plain above limit",
+            Ladder::DesignDecisions,
+        ));
+        let in_limit_plain = unbriefed(steward_item(
+            "20261015-003904-dddd",
+            "Plain within limit",
+            Ladder::Implementation,
+        ));
+        let html = page_with(
+            &[
+                &in_limit_briefed,
+                &above_briefed,
+                &above_plain,
+                &in_limit_plain,
+            ],
+            &[],
+            &[],
+        );
+        assert_eq!(html.matches("<article").count(), 2, "{html}");
+        assert!(html.contains("<h2>2 waiting</h2>"), "{html}");
+        assert!(html.contains("Briefed within limit"));
+        assert!(html.contains("Briefed above limit"));
+        assert!(!html.contains("Plain above limit"));
+        assert!(!html.contains("Plain within limit"));
+    }
+
+    #[test]
     fn a_proposal_from_a_role_with_no_recorded_definition_is_still_listed() {
         let (dir, git) = init_repo();
-        let ghost = item(
+        let ghost = briefed(item(
             "20261015-003903-cccc",
             "ghost",
             "Unknown limit",
             Ladder::Implementation,
             Reference::path("a.md"),
-        );
+        ));
         RecordsWriter::new(&git)
             .append(
                 "records",

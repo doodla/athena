@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The steward decides for itself and asks the owner only for an environment change or a token or credential
+  Athena lacks (such as a missing `GH_TOKEN`). The steward role is version 3 (`records/roles/steward-3.json`):
+  its prompt tells it to step back across repeated failures and blind spots, to decide and queue a request
+  itself, and to write the five-field brief only for an environment or token need, with the owner's action in
+  `if_yes`. The routing is enforced by code, by the brief's presence: `decide()` records a change with a brief
+  as a proposal at any rung and never applies it; a change without one is applied inside the limit and only
+  recorded above it. `open_proposals` lists a proposal that has a brief, or one with none that the raising
+  role may change itself (the drain approves those); `in_limit` is false for a briefed item; the decisions
+  page lists only briefed proposals. A new `blind_spot_needing_owner` gives a missing-token source a brief
+  (key `blind-spot:github:owner-action`). The prompt and the output-schema descriptions are prose-only. A new
+  test composes the real `STEWARD_PROMPT` with the contract and asserts at most 600 estimated tokens. An
+  unbriefed item above the limit is recorded but no longer reaches the owner, so such an item is found only in
+  the records or by its id. Docs: `docs/design/roles-and-ladder.md`, D169.
 - The change producer prompt gains one sentence, and `docs/conventions/study-claim-support.md` explains it:
   when a job's files are under `studies/`, the producer opens each claim id a new or reworded statement cites,
   checks the claim text supports the sentence (including who acts), and lists each statement with its claim

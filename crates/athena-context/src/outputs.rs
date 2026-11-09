@@ -317,12 +317,13 @@ pub struct StewardItemOutput {
     pub evidence: Vec<StewardRefOutput>,
     /// What to ask Athena to do, when the rung is at or below your limit.
     pub request: Option<String>,
-    /// The owner's brief. Required for a proposal above your limit; null for any other item.
+    /// The owner's brief. Write it only when the fix needs an environment change or a token or credential
+    /// Athena lacks, and put what the owner must do in if_yes; null for every other item, whatever its rung.
     #[serde(default)]
     pub brief: Option<StewardBriefOutput>,
 }
 
-/// The five short plain-language fields that let the owner decide a proposal. Each is one line.
+/// The five short plain-language fields that let the owner act on an environment or token need. Each is one line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StewardBriefOutput {
@@ -942,6 +943,19 @@ mod tests {
                 .iter()
                 .any(|f| f == "criteria_check")
         );
+    }
+
+    #[test]
+    fn the_steward_schema_says_a_brief_is_for_an_environment_or_token_need_not_a_rung() {
+        // Prose-only: the description is what the model reads; code routes by the brief's presence.
+        let schema = steward_schema();
+        let brief = &schema["properties"]["items"]["items"]["properties"]["brief"];
+        let text = brief.to_string();
+        for word in ["environment", "token", "credential", "if_yes"] {
+            assert!(text.contains(word), "{word} in {text}");
+        }
+        assert!(!text.contains("above your limit"));
+        assert!(!schema.to_string().contains("above your limit"));
     }
 
     #[test]
