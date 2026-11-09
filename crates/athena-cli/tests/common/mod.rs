@@ -605,16 +605,45 @@ impl Scenario {
                     // A report that lists no `unchanged_planned_files` explains every file the brief or the
                     // plan lists and the scenario's edits do not touch (a change reading also lists
                     // CHANGELOG.md); a test that wants the gap itself sets the field.
+                    //
+                    // A producer that changes anything also adds a line to CHANGELOG.md when the brief lists
+                    // it (a change reading always does), as admission refuses a change reading's candidate
+                    // that leaves the changelog untouched. The line names the scenario's edits, and is appended
+                    // to the text the work tree holds unless it is already there: a second job with other edits
+                    // after a landing still has a diff, and one repeating the same edits has none, as before.
+                    // A scenario whose producer makes no change stays idle.
+                    let listed = listed_paths(&spec.user_prompt);
+                    let mut edits = self.edits.clone();
+                    if !edits.is_empty()
+                        && listed.iter().any(|p| p == "CHANGELOG.md")
+                        && !edits.iter().any(|(edited, _)| edited == "CHANGELOG.md")
+                    {
+                        let mut text = std::fs::read_to_string(spec.workdir.join("CHANGELOG.md"))
+                            .unwrap_or_default();
+                        let key = format!("{edits:?}")
+                            .bytes()
+                            .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+                                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+                            });
+                        let line = format!("- Entry {key:016x}.\n");
+                        if !text.contains(&line) {
+                            if !text.is_empty() && !text.ends_with('\n') {
+                                text.push('\n');
+                            }
+                            text.push_str(&line);
+                        }
+                        edits.push(("CHANGELOG.md".to_string(), Some(text)));
+                    }
                     if report.get("unchanged_planned_files").is_none() {
-                        let untouched: Vec<Value> = listed_paths(&spec.user_prompt)
+                        let untouched: Vec<Value> = listed
                             .into_iter()
-                            .filter(|path| !self.edits.iter().any(|(edited, _)| edited == path))
+                            .filter(|path| !edits.iter().any(|(edited, _)| edited == path))
                             .map(|path| json!({ "path": path, "reason": "the scenario's producer does not edit it" }))
                             .collect();
                         report["unchanged_planned_files"] = Value::Array(untouched);
                     }
                     let mut t = FakeTurn::output(report);
-                    t.edits = self.edits.clone();
+                    t.edits = edits;
                     t.commands_run = self.producer_commands.clone();
                     t
                 }

@@ -79,8 +79,8 @@ use verification::Checked;
 pub use checks::demo_seam::{Guard as DemoRunnerGuard, install as install_demo_runner};
 pub use close::{build_text, closing_subject};
 pub(crate) use send_back::{
-    append_mirror_drift, left_to_athena, send_back_text, send_back_text_full,
-    send_back_text_scoped, send_back_text_with_replay, unmet_criteria,
+    append_mirror_drift, append_missing_changelog, left_to_athena, send_back_text,
+    send_back_text_full, send_back_text_scoped, send_back_text_with_replay, unmet_criteria,
 };
 
 /// How `go` ended.
@@ -1595,9 +1595,10 @@ pub(crate) fn unchanged_planned_files(
         .collect()
 }
 
-/// How many extra times a candidate with files outside the job's allowed paths goes back to the producer,
-/// counted apart from [`PRODUCER_SEND_BACKS`]: a send-back for unmet criteria does not use it up, so a
-/// change made outside the list after that send-back is still sent back before the verifier runs.
+/// How many extra times a candidate with files outside the job's allowed paths, or without the `CHANGELOG.md`
+/// its reading asks for, goes back to the producer, counted apart from [`PRODUCER_SEND_BACKS`]: a send-back for
+/// unmet criteria does not use it up, so a change made outside the list (or a missing changelog) after that
+/// send-back is still sent back before the verifier runs.
 const SCOPE_SEND_BACKS: u32 = 1;
 
 /// The changed paths outside the job's allowed paths, each once, in the order of `changed`. `allowed` is the

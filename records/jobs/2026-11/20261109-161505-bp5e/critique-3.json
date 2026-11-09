@@ -1,0 +1,83 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261109-161505-bp5e",
+  "round": 3,
+  "at": "2026-11-09T17:06:39.170901563Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/producer.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/producer.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/send_back.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/send_back.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run_pin_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run_pin_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-agent/src/fake.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-agent/src/fake.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/common/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/common/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/lifecycle.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/lifecycle.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/retry.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/retry.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The producer-loop check passes the snapshot's own base commit to `classify` on the user's repository. That commit does not exist there.",
+      "evidence": "I read snapshot.rs. The snapshot \"gets a throwaway repository of its own, which shares no objects, refs, configuration, or hooks with the user's\" (lines 3-6). `snapshot.base` is set by `snapshot.commit_all(\"base\")` inside that isolated repository (line 90), so it is a different commit id from the user's base `p`. Step 5 calls `changelog_required(&self.git, snapshot.base().unwrap_or(\"\"), ..)`, and step 6 explicitly settles on \"use `self.git` with `snapshot.base()`\". `changelog_required` then calls `classify(git, base, ..)` on the user's repository with a commit that is not there (or with \"\" when the base is None). That returns an error, and the `?` turns it into a failure of every change job whose candidate lacks CHANGELOG.md. The existing work-tree check next to it passes the right pair: `self.unreconciled_in_snapshot(&ctx.prediction, &snapshot, &changes)` (producer.rs:428), and `producer_snapshot` builds the snapshot from `p = ctx.prediction.clone()` (producer.rs:127, 146). The run-level tests in criterion 3 would probably catch this, but only after the producer has written it the wrong way. Fix: In step 5, call `crate::admission::changelog_required(&self.git, &ctx.prediction, ctx.reading, &changed)?`. This is the same base and repository that `candidate_stage` and `unreconciled_in_snapshot` use. Drop the `snapshot.base().unwrap_or(\"\")` fallback and rewrite step 6 to say that the snapshot base belongs to the isolated repository and must not be passed to `self.git`.",
+      "location": "Plan step 5 and step 6; crates/athena-core/src/run/producer.rs:146; crates/athena-git/src/snapshot.rs:1-6, 88-90",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A merge-resume of a candidate built before this change, without CHANGELOG.md, is now refused at mod.rs:773. The plan's dependents entry does not mention this.",
+      "evidence": "I read mod.rs:751-814. The merge-resume path rebuilds `changed` against the new base and runs `admit` with `ctx.reading`. A job admitted before the upgrade whose candidate skipped CHANGELOG.md is now Failed at admission, with no producer pass left to repair it. The dependents entry only argues that a candidate's own CHANGELOG.md edit survives the merge. Fix: Name this transition case in Risks and in the CHANGELOG entry: a resumed pre-upgrade candidate without a changelog entry is refused, and a retry restarts it from the base. Alternatively, say why it cannot happen.",
+      "location": "Dependents: admission violations at crates/athena-core/src/run/mod.rs:773",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Filtering CHANGELOG.md out of `unchanged` matters only when the producer gave no reason. A stated reason already removes it in `unchanged_planned_files`.",
+      "evidence": "`unchanged_planned_files(&raw, &planned, &changed)` already leaves out files that have a non-blank reason. That is the root-cause path the plan describes, so the filter only prevents a duplicate mention when there is no reason. Fix: No change needed. Optionally state this in the step so the producer does not expect the filter to matter in the main case.",
+      "location": "Plan decision 2 / step 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Verdict: revise, because of one major finding. The plan fixes the cause where it starts. One predicate (`changelog_unproduced`, next to `ensure_changelog`) and one wrapper that checks how the base classifies CHANGELOG.md (`changelog_required`) drive both a new admission rule in `admit_without_secrets` and a send-back in `producer_loop`. This matches the request, the accepted reading and the repair round both introspections proposed. I checked the code it cites, and it matches: `admit_without_secrets` at admission.rs:687 with `paths` at line 690 and the `unwrap_or(PathClass::Governed)` at line 694; `CHANGELOG_PATH` and `ensure_changelog` at reading.rs:293 and 297; the producer loop's `outside`, `gate`, break condition and `scope_slot_free` at producer.rs:410-580; and `PRODUCER_SEND_BACKS = 1` and `SCOPE_SEND_BACKS = 1`, so the claim of three producer invocations holds. The demonstrations name real seams, `admit_without_secrets` and `Athena::ask`/`go`, and would fail without the change. The dependents list is thorough. The major finding: step 6 tells the producer to pair `self.git` with `snapshot.base()`. That commit exists only in the snapshot's isolated repository, which shares no objects with the user's (snapshot.rs:3-6, 90). `classify` would then return an error on the user's repository and fail the run. The right base is `&ctx.prediction`, which is what the neighbouring `unreconciled_in_snapshot` call uses. The minor finding: a pre-upgrade candidate without a changelog entry that is resumed through merge-resume is now refused at admission, and the plan does not say so. The scope widening Athena flagged is justified in the plan, and I do not repeat it."
+}

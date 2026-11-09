@@ -9,6 +9,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- A change whose candidate leaves out `CHANGELOG.md` is refused at admission, and the producer is sent back for
+  it first. The root cause of jobs 20261108-183842-fsaz and 20261028-000831-rkv5, which were failed only by the
+  final verdict: `ensure_changelog` adds `CHANGELOG.md` and the `changelog` default to every change reading, but
+  the default was a rule the producer must remember, and no code compared the diff's file list with the
+  deliverables. A stated reason in `unchanged_planned_files` excused the file, and a docs-only design job gave
+  one. Now `reading::changelog_unproduced` is true for a change reading that lists `CHANGELOG.md` (modify) with
+  the `changelog` default while no changed path is the root `CHANGELOG.md`. `admission::changelog_required` adds
+  one check: the base must classify `CHANGELOG.md` as an ordinary governed file, because a repository that marks
+  it `athena-readonly` or `athena-exclude` already refuses any edit to it. Admission (`admit_without_secrets`)
+  raises a `changelog` violation naming `CHANGELOG.md`, so the job ends before the verifier. The producer loop
+  runs the same function after each report: a missing entry is sent back, with a reason in
+  `unchanged_planned_files` no longer excusing it, using the extra send-back slot that files outside the allowed
+  paths already have (`SCOPE_SEND_BACKS`). The shared fake change producer and the CLI test scenario now edit
+  `CHANGELOG.md` when their brief lists it. Consequences: about 5% of change jobs are refused that were not
+  before (an estimate, not measured), which is intended because those jobs failed later at the verifier; a
+  repository with no `CHANGELOG.md` has each change job create it; a job refused at admission has no
+  verification, so a retry restarts from the base; and a candidate admitted before this change without a
+  changelog entry, if merge-resumed, is refused at admission.
 - The firstmate page's Glossary gains `wake`, `endpoint`, `captain call`, `heartbeat` and `durable record`, the
   terms the transition cards use without defining. Each entry says the source does not define the term and
   states only what its cited claims show (c2, c3, c9, c17, c19, c23, c24). `ship` now opens with what a ship does

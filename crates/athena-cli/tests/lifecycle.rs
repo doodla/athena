@@ -2223,7 +2223,12 @@ fn commit_long_readme(fx: &Fixture) {
 
 /// A hook for `Scenario::during_verification` that, once, commits `readme` as the README with an
 /// intervention record on the branch while the verifier works, so the job goes stale instead of landing.
-fn commit_readme_by_hand_once(root: &Path, readme: String) -> Arc<dyn Fn() + Send + Sync> {
+/// With `changelog` given, it also commits that text as CHANGELOG.md.
+fn commit_readme_by_hand_once(
+    root: &Path,
+    readme: String,
+    changelog: Option<String>,
+) -> Arc<dyn Fn() + Send + Sync> {
     let root = root.to_path_buf();
     let once = Arc::new(std::sync::atomic::AtomicBool::new(false));
     Arc::new(move || {
@@ -2253,6 +2258,9 @@ fn commit_readme_by_hand_once(root: &Path, readme: String) -> Arc<dyn Fn() + Sen
                 ),
             ],
         );
+        if let Some(changelog) = &changelog {
+            write(&root, &[("CHANGELOG.md", changelog)]);
+        }
         let git = athena_git::Git::at(&root);
         git.run(["add", "-A"]).unwrap();
         git.run([
@@ -2279,10 +2287,30 @@ struct StaleRun {
 /// `branch_readme` while the verifier works: the job goes stale. The one check, `show`, prints the README,
 /// so a check run records the README it ran on.
 fn stale_job(fx: &Fixture, producer_readme: String, branch_readme: String) -> StaleRun {
+    stale_job_holding(fx, producer_readme, branch_readme, None)
+}
+
+/// [`stale_job`] where, with `changelog` given, the producer writes that CHANGELOG.md and the branch gains
+/// it too, so the branch can hold every one of the candidate's changes.
+fn stale_job_holding(
+    fx: &Fixture,
+    producer_readme: String,
+    branch_readme: String,
+    changelog: Option<&str>,
+) -> StaleRun {
     commit_long_readme(fx);
     let mut scenario = Scenario::default();
     scenario.edits = vec![("README.md".into(), Some(producer_readme))];
-    scenario.during_verification = Some(commit_readme_by_hand_once(fx.root(), branch_readme));
+    if let Some(changelog) = changelog {
+        scenario
+            .edits
+            .push(("CHANGELOG.md".into(), Some(changelog.into())));
+    }
+    scenario.during_verification = Some(commit_readme_by_hand_once(
+        fx.root(),
+        branch_readme,
+        changelog.map(String::from),
+    ));
     let invocations = scenario.invocations.clone();
     let seen_by_verifier = scenario.seen_by_verifier.clone();
     let seen_by_producer = scenario.seen_by_producer.clone();
@@ -2392,7 +2420,7 @@ fn a_stale_job_whose_candidate_merges_cleanly_lands_on_retry_with_no_producer_ca
             .iter()
             .map(|c| c.path.as_str())
             .collect::<Vec<_>>(),
-        ["README.md"]
+        ["CHANGELOG.md", "README.md"]
     );
 
     // The checks ran on the merged tree (the recorded output is that README), not reused from anywhere;
@@ -2587,8 +2615,9 @@ fn a_stale_candidate_that_still_holds_conflict_markers_is_closed_before_the_veri
 fn a_stale_job_whose_changes_the_branch_already_holds_fails_instead_of_landing_nothing() {
     // The branch gained exactly the README the producer wrote: the merge is clean and empty.
     let fx = Fixture::with_config(&show_check_config());
+    // A change reading also asks for a CHANGELOG.md entry, so the branch gains that file as well.
     let same = long_readme_with_first_line(PRODUCER_FIRST_LINE);
-    let run = stale_job(&fx, same.clone(), same);
+    let run = stale_job_holding(&fx, same.clone(), same, Some("- Entry.\n"));
     let seen_before = run.seen_by_verifier.lock().unwrap().len();
     let (retry, _) = run
         .athena

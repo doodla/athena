@@ -191,6 +191,9 @@ pub const SPEED_WORDS: [&str; 6] = [
 /// The file the deterministic producer writes.
 pub const FAKE_DELIVERABLE: &str = "FAKE-CHANGE.md";
 
+/// The changelog the deterministic producer also edits when its brief lists it as a deliverable.
+const FAKE_CHANGELOG: &str = "CHANGELOG.md";
+
 /// The deterministic turn for each role.
 pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
     match spec.role {
@@ -308,18 +311,28 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 .map(|rest| rest.split_once("] ").map_or(rest, |(_, text)| text))
                 .map(|text| json!({ "criterion": text, "status": "met", "evidence": "fake producer: nothing was checked" }))
                 .collect();
-            // The fake changes one file. Every other expected deliverable (a change reading also lists
-            // CHANGELOG.md) is reported as unchanged with a reason, as a real producer must.
-            let unchanged: Vec<Value> = section(&spec.user_prompt, "## Expected deliverables")
+            // The fake changes its own file and, when the brief lists it (a change reading always does), the
+            // changelog: admission refuses a change reading's candidate that leaves it untouched. Every other
+            // expected deliverable is reported as unchanged with a reason, as a real producer must.
+            let listed = section(&spec.user_prompt, "## Expected deliverables");
+            let expected: Vec<&str> = listed
                 .lines()
                 .filter_map(|l| l.strip_prefix("- "))
                 .map(|rest| rest.split_once(" (").map_or(rest, |(path, _)| path))
-                .filter(|path| *path != FAKE_DELIVERABLE)
+                .collect();
+            let edits_changelog = expected.contains(&FAKE_CHANGELOG);
+            let unchanged: Vec<Value> = expected
+                .iter()
+                .filter(|path| **path != FAKE_DELIVERABLE && **path != FAKE_CHANGELOG)
                 .map(|path| json!({ "path": path, "reason": "fake producer: it changes only its own file" }))
                 .collect();
+            let mut files = vec![FAKE_DELIVERABLE];
+            if edits_changelog {
+                files.push(FAKE_CHANGELOG);
+            }
             let mut turn = FakeTurn::output(json!({
                 "summary": format!("Wrote the request to {FAKE_DELIVERABLE} (fake producer, no model call)."),
-                "files": [FAKE_DELIVERABLE],
+                "files": files,
                 "checks_run": [],
                 "criteria_check": criteria_check,
                 "open_issues": [],
@@ -332,6 +345,16 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 FAKE_DELIVERABLE.to_string(),
                 Some(format!("# Fake change\n\n{request}\n")),
             ));
+            if edits_changelog {
+                // One line appended to the text the work tree holds, so a second job still has a diff.
+                let mut text =
+                    std::fs::read_to_string(spec.workdir.join(FAKE_CHANGELOG)).unwrap_or_default();
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str("- A fake change.\n");
+                turn.edits.push((FAKE_CHANGELOG.to_string(), Some(text)));
+            }
             turn
         }
         Role::Verifier => {
@@ -533,6 +556,28 @@ mod tests {
             .unwrap();
         assert_eq!(steward.structured.unwrap()["items"], json!([]));
         assert_eq!(steward.cost_usd, Some(0.0), "no model call, no cost");
+    }
+
+    #[test]
+    fn the_fake_producer_edits_the_changelog_when_its_brief_lists_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CHANGELOG.md"), "# Changelog\n").unwrap();
+        let driver = FakeAgentDriver::deterministic();
+        let brief = "## Request (verbatim)\n\n> add a note\n\n## Expected deliverables\n\n- FAKE-CHANGE.md (create)\n- CHANGELOG.md (modify)\n- docs/other.md (modify)\n\n## Next";
+        let produced = driver
+            .invoke(&spec(Role::Producer, brief, dir.path().into()), &mut NoSink)
+            .unwrap();
+        let report = produced.structured.unwrap();
+        assert_eq!(report["files"], json!([FAKE_DELIVERABLE, "CHANGELOG.md"]));
+        let unchanged: Vec<&str> = report["unchanged_planned_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(unchanged, ["docs/other.md"]);
+        let changelog = std::fs::read_to_string(dir.path().join("CHANGELOG.md")).unwrap();
+        assert!(changelog.starts_with("# Changelog\n- "), "{changelog}");
     }
 
     #[test]
