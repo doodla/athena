@@ -8,6 +8,12 @@ Source: throughput review `20261108-183648-5eya` (record
 `records/throughput-reviews/2026-11/20261108-183648-5eya.json`). It looked at 414 landings and named landing and
 rebuild as the biggest wait. Its proposal text is the origin of the figures below.
 
+Later note: `docs/design/per-job-main-landing.md` re-checks this note's premise against
+`docs/design/agent-and-build-slots.md` section 6.1 and the records. The landing-stage figure is mostly repeated
+landing listings of the same commit, not real waiting, so the 1530.0-minute prediction below is not to be scored as
+saved wait. An implementing change cites throughput review `20261109-014617-5cg0`, not `20261108-183648-5eya`; the
+citation duty in section 10 is replaced by section 7 of that note.
+
 Labels used below: **measured** (a figure from the review record or `THROUGHPUT.md`, not re-measured here),
 **prediction** (the review's expected saving), **estimate** (reasoned here, not measured), **existing** (built; file
 named), **new** (not built).
@@ -187,7 +193,9 @@ Each is one focused change with its own tests.
 
 ## 10. Citation duty
 
-A change that implements this design must cite throughput review `20261108-183648-5eya` in its request text. The
+Replaced by `docs/design/per-job-main-landing.md` section 7: an implementing change cites throughput review
+`20261109-014617-5cg0`. The earlier rule read: a change that implements this design must cite throughput review
+`20261108-183648-5eya` in its request text. The
 next throughput review then sets the minutes it measured after that change landed against the 1530.0-minute
 prediction, by the rule in section 5.
 
