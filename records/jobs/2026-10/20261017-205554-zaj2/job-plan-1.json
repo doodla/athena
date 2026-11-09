@@ -1,0 +1,390 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261017-205554-zaj2",
+  "round": 1,
+  "at": "2026-11-09T07:26:43.701361054Z",
+  "invocation_seq": 3,
+  "approach": "Add a `hidden: &[String]` argument (directory paths such as `studies/a`) to `Snapshot::create`. The internal materialize step drops every path at or under a hidden directory, next to `records/` and `athena-exclude` paths. The public `materialize` keeps its 4-argument signature and delegates with an empty list, so its one outside caller (run/mod.rs:2414) is untouched. `Snapshot` stores the list. `change_list()` and `history_text` drop paths under it, so a hidden directory is absent from both sides of every diff the agent sees and is never reported as deleted. `build_candidate` applies the change entries to the full base tree, so `studies/a` lands byte-identical. A new helper `Athena::hidden_study_dirs(ctx)` in run/pin.rs reads the pinned URL from the job record (`ctx.job.job.pin.url`, already set when the context is built at mod.rs:1272-1283) and returns every `studies/<d>` at the base commit whose `pin.json` `repository_url` differs from it or is unreadable. A change job has no pin, so it gets an empty list. This needs no new `RunContext` field. `producer_snapshot` and `verifier_snapshot` use it. The reader, which runs before the capability is known, hides other studies only when the request names exactly one configured study system. Every other caller passes `&[]`. Then add `[capabilities.study.systems.hermes-agent]` to athena.toml and leave firstmate's lines untouched. PRECONDITION: this base has no systems schema (config.rs:401 `CapabilityConfig`; no `systems` hit in config.rs). Step 1 stops the producer if it is still missing.",
+  "decisions": [
+    {
+      "choice": "Choose the studies to hide by the pinned repository URL: keep `studies/<d>` only if its pin.json `repository_url` equals the URL of the system the job pinned (`PinnedRepo.url`); hide all others, including ones with no readable pin.json.",
+      "reason": "study_pin (pin.rs:82-110) already joins a study to a repository by pin.json `repository_url`. pin_repo has resolved the job's system to a URL before any snapshot exists. This avoids a study-id-to-system-id naming convention, which does not hold: the existing directory is `firstmate-work-handling`, not `firstmate`. Hiding what cannot be proven to belong to the system is the safe default for S1.",
+      "rejected": [
+        {
+          "option": "Hide by directory name equal to the system id",
+          "why": "firstmate's own study studies/firstmate-work-handling would be hidden from its own job."
+        },
+        {
+          "option": "Read the `system` field of pin.json",
+          "why": "It needs a second mapping from system id to config key, and older pins may lack the field; the URL is already the join key."
+        }
+      ]
+    },
+    {
+      "choice": "Take the hidden list from the job record's pin (`ctx.job.job.pin`) in a helper in pin.rs, with no new `RunContext` field; keep the public `materialize` signature and pass the list only to `Snapshot::create`.",
+      "reason": "This answers findings 3 and 4: it cuts the extra files to the minimum. run/mod.rs gets one changed line (the verifier_snapshot call at 1937). The replay `materialize` call at mod.rs:2414 stays unchanged. checks.rs:663 gets one changed line because `verifier_snapshot` gains a required parameter.",
+      "rejected": [
+        {
+          "option": "Add `hidden: Vec<String>` to RunContext, computed after pin_repo",
+          "why": "It touches the struct, its constructor and the replay call in mod.rs for no gain, since the pin is already on the job record."
+        },
+        {
+          "option": "Keep `verifier_snapshot` unchanged and add a second hiding variant",
+          "why": "The old entry would stay opt-out, so checks.rs:663 or a new caller could leak studies without noticing."
+        }
+      ]
+    },
+    {
+      "choice": "Make the list an explicit required parameter of `Snapshot::create` and `verifier_snapshot`, and update every caller. Callers with no agent reader (baseline checks checks.rs:955, planning.rs:138 and :292, steward.rs:255) pass `&[]`.",
+      "reason": "A forgotten call site cannot compile, so none can silently skip the hiding.",
+      "rejected": [
+        {
+          "option": "Keep `create` and add `create_hiding`",
+          "why": "The old entry stays opt-out."
+        },
+        {
+          "option": "Use the athena-exclude / .gitattributes rules",
+          "why": "Those are per repository and commit, not per job; they would hide studies from change jobs too."
+        }
+      ]
+    },
+    {
+      "choice": "`change_list()` and `history_text` drop paths under a hidden directory instead of refusing the job.",
+      "reason": "The base commit and work tree of the snapshot both lack the hidden directory, so nothing is reported deleted. A stray file the producer writes under the hidden name is dropped, so landing leaves the directory unchanged, as the request asks.",
+      "rejected": [
+        {
+          "option": "Refuse a job whose producer writes under a hidden directory",
+          "why": "A new study whose name collides with a hidden one would stop an otherwise good run; the request asks for unchanged landing, not refusal."
+        }
+      ]
+    },
+    {
+      "choice": "The reader hides other systems' studies only when the request text contains exactly one configured study-system id as a whole word (so `hermes` does not match `hermes-agent`, and `studies/hermes-agent/x` does). It then keeps studies whose pin URL is that system's repo_url. Naming none or several hides nothing.",
+      "reason": "The reader's snapshot is made at reading.rs:551 before its reading chooses a capability; naming one system is the only case where the job is known to be a study of system b. This is a file-visibility rule and refuses nothing, so refusal_corpus has no case for it (its cases at refusal_corpus.rs:292 onward test reading checks, listed in INPUT_FORMS at :90). The input forms are covered by unit tests added in reading.rs: id alone, id inside a path, id as prefix of another id, two ids named, no id, and different case.",
+      "rejected": [
+        {
+          "option": "Always hide all studies from the reader",
+          "why": "A change request such as 'fix studies/firstmate-work-handling/claims.json' needs to see them."
+        },
+        {
+          "option": "Hide nothing from the reader",
+          "why": "Criterion 2 requires the reader's snapshot to omit other studies."
+        }
+      ]
+    },
+    {
+      "choice": "Commit-shape outcomes of the rule. Job commit that edits a visible path: lands as before. Job commit that also writes a hidden path: the hidden entry is dropped from the change list and the rest lands. Records-only commit: `records/` is already absent from the snapshot, unchanged. Owner-path (athena-exclude) commit: classify still hides it, unchanged. Intervention commit on the base: it is part of the base tree; a studies/<other> path in it is hidden from a study job's HISTORY.txt and tree, and visible to change jobs. Retry-after-block landing: BaseThenTree seeds from the rejected candidate's full tree, and materialize hides the same directories, so the retry's change list is still against the hidden base.",
+      "reason": "No landing, history-check or attribution classification function changes; only agent snapshot contents and the snapshot's own change list do. Callers of change_list: run/producer.rs and the candidate build (candidate.rs:26-113), tested by the criterion 3 test and the existing run tests.",
+      "rejected": [
+        {
+          "option": "Change landing or history-check code to know about hidden paths",
+          "why": "It is not needed, because the hidden paths never enter the snapshot repository."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "purpose": "Add `hidden: &[String]` to `Snapshot::create` and an internal materialize helper (public `materialize` delegates with `&[]`). Store the list on `Snapshot`; filter `change_list()` and `history_text`; reject empty, absolute or `..` entries; update the 13 test calls and add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/pin.rs",
+      "action": "modify",
+      "purpose": "Select the pinned system's URL and ref in `pin_repo`; add `other_study_dirs(git, commit, keep_url)` and `Athena::hidden_study_dirs(ctx)` (reads the pin from `ctx.job.job`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "`producer_snapshot` passes `hidden_study_dirs(ctx)` to `Snapshot::create`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "`verifier_snapshot` takes `hidden: &[String]` for the base and candidate; update its callers at :313 and :341.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "One line, :1937 (not in the reading's list; required): pass the hidden list to `verifier_snapshot`, whose signature gains a required parameter. No struct or replay change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "Not in the reading's list; required. :663 passes the hidden list to `verifier_snapshot`; :955 passes `&[]` to `Snapshot::create`. Two one-line edits, forced by the new required parameters.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "In `read_once` (:551) compute the hidden list from the request text and the configured study systems, and pass it; add unit tests for the whole-word, exactly-one rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Pass `&[]` at the two `Snapshot::create` calls (:138, :292).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "purpose": "Pass `&[]` at the `Snapshot::create` call (:255).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "purpose": "Not in the reading's list. Test helper only (:1049-1060): it builds its config from athena.toml and drops lines starting repo_url/repo_ref; change it to drop `[capabilities.study.systems.*]` tables, so the new table is not left empty. Step 1 reads the schema; if an empty systems table parses, this file is left untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Fix the `config` helper (:80-107) to drop systems tables; add the Hermes/firstmate pin test, the reader/producer/verifier hiding test with control, and the landing-unchanged test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Fix `repo_with_config` (:295-310) to drop systems tables; add the change-job test that producer and verifier snapshots hold both studies.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "Add `[capabilities.study.systems.hermes-agent]` with repo_url and repo_ref = \"v2026.9.24\"; firstmate lines stay untouched. A governance file, allowed because the reading lists it.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Under [Unreleased], an entry for study snapshot isolation, the hidden-directory landing rule and the Hermes Agent system.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/study-capability-m1.md",
+      "action": "modify",
+      "purpose": "Record that the separation promised at lines 94-95 and 218 is now enforced in code: which snapshots hide which directories, and how a study is tied to a system by its pin.json URL.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Check the base. Read crates/athena-data/src/config.rs for the systems schema (a `systems` map under the study capability with repo_url and repo_ref) and for how a job names its system. If either is missing, stop and report; do not add the schema. If present, note the selector and whether an empty systems table parses (this decides whether scope_guard.rs needs the helper edit in step 7). If there is no selector, match a configured system id as a whole word in the request text, as `study_pin` does for study ids (pin.rs:115-118).",
+    "In crates/athena-git/src/snapshot.rs add `hidden: &[String]` to `Snapshot::create` and to an internal `materialize_hiding`; make the public `materialize` call it with `&[]`. Reject an empty, absolute or `..` entry with `GitError::Refused`. In `materialize_hiding` add `IndexEdit::Remove` for every entry equal to a hidden entry or starting with `<entry>/`, in the same removals list as `records/` and excluded paths. Store the list in a new `Snapshot.hidden` field. The `BaseAndCandidate` and `BaseThenTree` re-materializations pass the same list.",
+    "In the same file make `change_list()` drop entries whose path is at or under a hidden directory, and make `history_text` take the list and treat those paths as hidden. Update the 13 test call sites with `&[]` and add the unit tests, named with `hidden_studies` and `hidden_directory`: a control with `&[]` shows studies/a; hidden shows studies/b only for Base, BaseAndCandidate, None and BaseThenTree; a stray studies/a/new.txt and a missing hidden directory give no 'A' or 'D' entry under it; PlainWithHistory HISTORY.txt omits the hidden paths.",
+    "In crates/athena-core/src/run/pin.rs add `other_study_dirs(git, commit, keep_url)`: `ls_tree_under(commit, \"studies/\")`, group by direct directory, read `pin.json` and compare `repository_url`; return `studies/<d>` for each directory that does not match or cannot be read. Add `Athena::hidden_study_dirs(&self, ctx: &RunContext<'_>) -> Result<Vec<String>>`: empty when `ctx.job.job` has no pin, otherwise `other_study_dirs(&self.git, &ctx.prediction, &pin.url)`. Make `pin_repo` use the url and ref of the system the request names (from step 1). Keep the `study_pin` override and its error messages.",
+    "In producer.rs pass the result of `hidden_study_dirs(ctx)` to `Snapshot::create` in `producer_snapshot`. In verification.rs give `verifier_snapshot` a `hidden: &[String]` parameter used for both base and candidate, and update its callers at :313 and :341. In run/mod.rs:1937 and checks.rs:663 pass `&self.hidden_study_dirs(ctx)?`. Pass `&[]` at checks.rs:955, planning.rs:138 and :292, and steward.rs:255.",
+    "In reading.rs `read_once` compute the list from the request text: when exactly one configured study-system id appears as a whole word, use `other_study_dirs` with that system's repo_url; otherwise `&[]`. Pass it to `Snapshot::create`. Add unit tests for each input form: id alone, id in a path, id as prefix of another id, two ids, none, different case.",
+    "Fix the config helpers in run_pin_tests.rs:80-107 and run/tests.rs:295-310 to also drop the lines of `[capabilities.study.systems.*]` tables (a flag like `in_job_plan`); apply the same edit to scope_guard.rs:1049-1060 only if step 1 showed an empty systems table fails to parse. Then add the tests: the Hermes/firstmate pin test (criterion 1), the reader/producer/verifier hiding test with its control and the change-job test (criterion 2), and the landing-unchanged and no-deleted tests (criterion 3).",
+    "Add to athena.toml, after the study checks and without touching lines 105-106, `[capabilities.study.systems.hermes-agent]` with `repo_url = \"https://github.com/NousResearch/hermes-agent.git\"` and `repo_ref = \"v2026.9.24\"`, and a comment naming the annotated tag and release v0.21.5. Do not put the commit sha in repo_ref; the pinner resolves the tag.",
+    "Add the CHANGELOG.md entry under [Unreleased] and update docs/design/study-capability-m1.md to say the separation is now enforced in code and how.",
+    "Run `cargo fmt --all`, then the three Athena checks: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Also run `cargo test --locked -p athena-core --test refusal_corpus` and fix anything failing."
+  ],
+  "risks": [
+    {
+      "risk": "The systems schema is absent from the base I read, so criterion 1 and the athena.toml entry cannot be shown to hold.",
+      "mitigation": "Step 1 is a stop condition: the producer reads crates/athena-data/src/config.rs for a `systems` map with repo_url and repo_ref and for how a job names its system. If either is missing it stops with a report and lands nothing. The hiding steps do not depend on the schema except the reader rule, which needs the list of configured system ids."
+    },
+    {
+      "risk": "A study directory with no readable pin.json is hidden from every study job, including its own system's job.",
+      "mitigation": "Study rules already require a pin.json per study (cap-study rules). The decision states it, and a test covers a directory with no pin.json being hidden."
+    },
+    {
+      "risk": "The reader hides studies for any request that names one study-system id, even a change request that mentions it (for example, editing another study).",
+      "mitigation": "The match is a whole-word match of exactly one configured system id; naming none or several hides nothing. A change job's producer and verifier see all studies, because their hiding follows the pinned capability. Tested in reading.rs and run/tests.rs."
+    },
+    {
+      "risk": "A producer that writes under a hidden directory name has the file silently left out of the change list.",
+      "mitigation": "The criterion 3 test fixes this behavior: the rest of the job lands and the hidden directory is byte-identical, which is what the request asks."
+    },
+    {
+      "risk": "Records of earlier studies and the evidence snapshot's history may still describe another system's study.",
+      "mitigation": "Out of scope: the request restricts the change to studies/<id>/ in agent snapshots. I did not read the evidence snapshot's full content."
+    },
+    {
+      "risk": "Three test helpers drop `repo_url`/`repo_ref` lines and would leave an empty Hermes table that may fail to parse, breaking every test built from athena.toml.",
+      "mitigation": "Step 7 changes the helpers (run_pin_tests.rs:94, run/tests.rs:307, scope_guard.rs:1058) to drop systems tables; the full `cargo test --locked` run covers them."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Snapshot::create signature (new hidden-directories parameter)",
+      "dependent": "All Snapshot::create callers: crates/athena-core/src/run/producer.rs:146, run/verification.rs:455, reading.rs:551, run/planning.rs:138 and :292, run/checks.rs:955, steward.rs:255, and the 13 calls in crates/athena-git/src/snapshot.rs tests",
+      "kind": "code",
+      "test": "cargo test --locked: the whole workspace compiles and passes. The hidden_studies tests cover producer, verifier and reader; planning, steward and checks.rs:955 pass `&[]` and keep their existing tests.",
+      "reason": null
+    },
+    {
+      "name": "materialize public signature",
+      "dependent": "crates/athena-core/src/run/mod.rs:2414 (replay base and candidate trees, the only outside caller of `athena_git::snapshot::materialize`)",
+      "kind": "code",
+      "test": null,
+      "reason": "The public `materialize` keeps its 4-argument signature and delegates with an empty list, so the replay trees are identical to before and mod.rs:2414 is not edited."
+    },
+    {
+      "name": "verifier_snapshot signature (new hidden parameter)",
+      "dependent": "verifier_snapshot callers: run/mod.rs:1937, run/verification.rs:313 and :341, run/checks.rs:663",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core: the criterion 2 and 3 tests drive the verifier snapshot; the existing verifier-rerun tests in run_pin_tests.rs and run/tests.rs still pass.",
+      "reason": null
+    },
+    {
+      "name": "Change list against a hidden base",
+      "dependent": "crates/athena-core/src/run/candidate.rs:26-113 (build_candidate) and the resume path run/mod.rs:702-740",
+      "kind": "code",
+      "test": "The criterion 3 integration test (landed studies/a is byte-identical).",
+      "reason": "build_candidate edits the full base tree from the user's repository with only the change-list entries, so a hidden path that is never listed keeps its base blob. The resume path diffs two full commits in the user's repository and never sees a snapshot."
+    },
+    {
+      "name": "Producer snapshot seeding",
+      "dependent": "Retry and resume modes of producer_snapshot: BaseThenTree (seed_commit from a rejected candidate or stale conflict), BaseThenDir (kept work tree of a timed out job), Base",
+      "kind": "code",
+      "test": "Existing retry and seed tests in crates/athena-core/src/run/tests.rs and run_pin_tests.rs, plus a BaseThenTree case added to the snapshot.rs hidden tests.",
+      "reason": "BaseThenTree re-materializes the candidate commit with the same hidden list, so the seeded tree and change list still exclude the hidden directories. BaseThenDir copies a kept directory made by an earlier snapshot of the same job, which was already hidden. `[parallel] max_concurrency` runs each job in its own snapshot directory with its own list; no state is shared."
+    },
+    {
+      "name": "Which repo_url and repo_ref a study job pins (selected system)",
+      "dependent": "crates/athena-core/src/run/pin.rs `pin_repo` (called at run/mod.rs:1088) and `study_pin`",
+      "kind": "code",
+      "test": "The criterion 1 test, plus the existing tests in run_pin_tests.rs (override by pin.json, other repository, several studies, bad pin), which must still pass.",
+      "reason": null
+    },
+    {
+      "name": "athena.toml gains a [capabilities.study.systems.hermes-agent] table",
+      "dependent": "Test helpers that drop lines starting `repo_url`/`repo_ref`: crates/athena-core/src/run_pin_tests.rs:94-95, run/tests.rs:307, scope_guard.rs:1058",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core: every test built from these helpers parses its config. Each helper is changed to also drop the lines of `[capabilities.study.systems.*]` tables, so no empty table is left.",
+      "reason": null
+    },
+    {
+      "name": "athena.toml content",
+      "dependent": "Tests that parse athena.toml with include_str!: admission.rs, invocation.rs, routing.rs, introspect.rs, work_decisions.rs, hestia.rs, code_health.rs, reading.rs, cap-change lib.rs, cap-study lib.rs",
+      "kind": "code",
+      "test": "cargo test --locked: each parses the new athena.toml.",
+      "reason": null
+    },
+    {
+      "name": "A change to athena.toml study settings",
+      "dependent": "crates/athena-data/src/config.rs `Config::reading_inputs` and the reading-validity rule (D38, run/pin.rs `reread_after_configuration_change`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "By design a reading made under the old settings is read again before dispatch. Adding the table creates no new rule, and the Hermes entry is unused until a job names it."
+    },
+    {
+      "name": "What a study job's snapshot contains",
+      "dependent": "crates/athena-cap-study/src/rules.rs and src/lib.rs (study rules, build-output admission)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cap-study",
+      "reason": "The rules check the study directory the producer writes, which is the job's own system's directory or a new one; both stay visible."
+    },
+    {
+      "name": "Snapshot description",
+      "dependent": "docs/system-facts.md facts 'Plain copy for readers' and 'Producer snapshot'",
+      "kind": "rule",
+      "test": null,
+      "reason": "The wording stays true: the reader still gets a plain copy and the producer a one-commit snapshot. Prompt budgets are not touched, so `system_facts_budgets_match_computed` is unaffected."
+    },
+    {
+      "name": "History file contents",
+      "dependent": "HISTORY.txt written by history_text for PlainWithHistory snapshots (planner, critic); crates/athena-core/src/run/planning.rs:138 and :292",
+      "kind": "code",
+      "test": "A snapshot.rs unit test with PlainWithHistory and a hidden list; the existing history tests at snapshot.rs:847-919 still pass.",
+      "reason": "Planning passes `&[]`, so its HISTORY.txt is unchanged. history_text drops hidden paths only when a list is given, which the study producer/verifier/reader snapshots do not use (they use Base, BaseAndCandidate and None)."
+    },
+    {
+      "name": "Other places a study's content could be seen",
+      "dependent": "Evidence snapshot written by crates/athena-core/src/snapshot.rs `write` (records/, landings/, history.json)",
+      "kind": "code",
+      "test": null,
+      "reason": "It holds job records and history, not the studies/ tree; the request limits the change to agent snapshots. Earlier records stay visible and are out of scope."
+    },
+    {
+      "name": "athena.toml and CHANGELOG.md edits",
+      "dependent": "Athena's admission of a change to athena.toml (a governance file) and xtask/tests/policy.rs boundary scan over tracked files",
+      "kind": "rule",
+      "test": "cargo test --locked (includes the xtask policy tests); athena.toml is a listed deliverable.",
+      "reason": null
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new test in crates/athena-core/src/run_pin_tests.rs, named with `hermes`, first parses the repository's own `include_str!(\"../../../athena.toml\")` with `athena_data::Config::parse`. It then builds a test repository with that unstripped text and the real `studies/firstmate-work-handling/pin.json` (`include_str!`), through the existing `repo` and `add_studies` helpers. It asks and dispatches two study jobs through `Athena::ask` and `Athena::go`, one whose request names hermes-agent and one that names firstmate, with the pinner field set to `CountingPinner::echoing_full_shas()` in `athena_with`.",
+      "command": "cargo test --locked -p athena-core hermes",
+      "observes": "The parse succeeds and holds the hermes-agent system with repo_url https://github.com/NousResearch/hermes-agent.git and repo_ref v2026.9.24. `pinner.requests()` for the hermes job is [(that URL, \"v2026.9.24\")]. For the firstmate job it is [(\"https://github.com/kunchenguid/firstmate.git\", the sha in studies/firstmate-work-handling/pin.json)] and the job record's pin sha equals it.",
+      "fails_without": "Without the athena.toml entry the parse test finds no hermes-agent system. Without the system selection in pin_repo the hermes job pins firstmate's URL and ref `main`, or stops. Without the pin.json override firstmate would request `main`.",
+      "seam": "Production entry point `Athena::go` calling `pin_repo` (run/pin.rs:22). Fake `CountingPinner` (fake.rs), injected as the `pinner` field in `athena_with` (run_pin_tests.rs). Exists today; the test is added by step 7, the athena.toml entry by step 8."
+    },
+    {
+      "criterion": 2,
+      "method": "(a) crates/athena-git/src/snapshot.rs unit tests create `Base`, `BaseAndCandidate` and `None` snapshots of a repository with studies/a and studies/b, with hidden = [\"studies/a\"] and with `&[]`. (b) A run_pin_tests.rs test uses the existing `repo`, `add_studies` and `athena_with` harness with different pin.json URLs for a and b. A `Tweak` in the `FakeAgentDriver` records, per role (reader, producer, verifier), whether `spec.workdir.join(\"studies/a\")` and `.join(\"studies/b\")` exist. The request names system b. (c) A control job in the same test repository calls the snapshot with an empty hidden list and shows studies/a present. (d) A change-job test in run/tests.rs uses `repo_with_config` and records the same for the producer and verifier.",
+      "command": "cargo test --locked -p athena-core -p athena-git hidden_studies",
+      "observes": "For the study job naming b, the reader, producer and verifier each see studies/b and not studies/a. The control sees studies/a. In the change job the producer and verifier both see studies/a and studies/b. The snapshot-level tests show the same for Base, BaseAndCandidate and None.",
+      "fails_without": "Without the hidden list in materialize, studies/a exists in the reader, producer and verifier work directories and the 'lacks studies/a' assertions fail. If change jobs also hid studies, the 'holds both' assertions fail.",
+      "seam": "Production entry points `Athena::ask` (read_once, reading.rs:551), `Athena::go` (producer_snapshot producer.rs:125, verifier_snapshot verification.rs:447) and `Snapshot::create` (snapshot.rs:59). Fixture: `FakeAgentDriver` with the `Tweak` closure, injected in `athena_with`, and the control with `&[]`. These exist today; the hidden parameter is added by steps 2-6."
+    },
+    {
+      "criterion": 3,
+      "method": "(a) A snapshot.rs unit test builds a repository with studies/a, studies/b and a normal file, creates `Base` and `BaseAndCandidate` snapshots with hidden = [\"studies/a\"], edits studies/b and writes studies/a/new.txt in the work tree, then calls `change_list()`. (b) A run_pin_tests.rs test runs a fake-driver study job naming b through `Athena::go` to landing. The producer's `Tweak` edits README.md and tries to write studies/a/x.json. The test then compares `git.show_file(\"HEAD\", \"studies/a/<file>\")` to the bytes committed before the run, and reads `git diff --name-status <base> HEAD` and the job record's change entries.",
+      "command": "cargo test --locked -p athena-git -p athena-core hidden_directory",
+      "observes": "The change list holds the studies/b edit and no entry under studies/a: no 'D' and no 'A'. After landing, each studies/a file in HEAD equals its pre-run bytes and the landed diff touches only README.md.",
+      "fails_without": "If the hidden directory were removed from the work tree after the base commit instead of before it, change_list would report studies/a files as 'D' and landing would delete them. Without the change_list filter the stray studies/a/x.json would land.",
+      "seam": "Production entry points `Snapshot::change_list` (snapshot.rs:200) and `Athena::build_candidate` (candidate.rs:26) via `Athena::go`. Fixture: `FakeAgentDriver` with a `Tweak` adding the edit, as `t.edits` already does for README.md. Exists today; the hidden support is added by steps 2-6."
+    },
+    {
+      "criterion": 4,
+      "method": "Inspect the diff of athena.toml after the producer's edit. The criterion 1 test parses the same text.",
+      "command": "git diff -- athena.toml",
+      "observes": "The only added lines are the `[capabilities.study.systems.hermes-agent]` table with repo_url \"https://github.com/NousResearch/hermes-agent.git\", repo_ref = \"v2026.9.24\" and a comment. Firstmate's repo_url and repo_ref lines (105-106) do not appear in the diff.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run clippy over the whole workspace, tests included, then run `cargo fmt --all --check` on the same tree.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Clippy exits 0 with no warnings, and the fmt check exits 0 with no diff.",
+      "fails_without": "A new `hidden: &Vec<String>` parameter (clippy::ptr_arg), an unused value, a new function with too many arguments, or an unformatted line in the new code or tests makes one of the two commands exit non-zero. The `-D warnings` flag turns any warning into a failure.",
+      "seam": "Production entry point: the `cargo clippy` and `cargo fmt` tools run over the workspace sources, including the changed `Snapshot::create` signature and every caller. No fake or fixture is used; the gate is Athena's own check list (fmt, clippy, test). Exists today; step 10 runs it."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the CHANGELOG.md diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new entry under `## [Unreleased]` names study snapshot isolation (other studies/<id>/ hidden from the reader, producer and verifier of a study job), the rule that a hidden directory is never counted as deleted and lands unchanged, and the Hermes Agent system pinned at v2026.9.24.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "The change adds no refusal, so the corpus runs unchanged as a guard. The new request-text match (one configured system id as a whole word) only decides which files the reader sees. I read the corpus layout (INPUT_FORMS at refusal_corpus.rs:90, cases() at :292) but not each case id, so I cite no case ids and no result.",
+      "command": "cargo test --locked -p athena-core --test refusal_corpus",
+      "observes": "The corpus test passes with no case added or edited, so 0 readings are newly refused.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Host: Does this job's base commit hold the systems schema (`[capabilities.study.systems.<id>]` with repo_url and repo_ref, and a way for a job to name its system)? The base I read does not: `CapabilityConfig` at crates/athena-data/src/config.rs:401 has no `systems` field and athena.toml has no systems table. The request says Athena was reinstalled from a main that holds it. If the schema is absent the athena.toml entry will not parse, and the producer must stop and report instead of inventing the schema."
+  ],
+  "producer_section_sha256": "ed9d789cb324c5116f5b804fbab3cc1e0c95d62b6581e1498e1dca4028c2d6bb"
+}

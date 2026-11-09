@@ -473,7 +473,8 @@ pub fn check_reading_references(
 }
 
 /// Every check a built reading must pass before it is accepted: the previous result and change scope of a
-/// retried or followed-up job ([`check_prior_result_and_scope`]), then the evidence each criterion rests on
+/// retried or followed-up job ([`check_prior_result_and_scope`]), then whether the request fits one producer
+/// run ([`check_job_size`]), then the evidence each criterion rests on
 /// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
 /// rests on ([`check_code_survey`]), then the realistic-branch fixture a commit classification, history or
 /// attribution rule is tested on ([`check_history_fixture`]), then the governance files the outcome needs
@@ -533,6 +534,7 @@ pub fn refusing_check(
         reading,
         &continued_jobs(request, attempt, referenced)
     ));
+    step!(check_job_size(reading));
     step!(check_criteria_evidence(reading));
     step!(check_code_survey(reading));
     step!(check_history_fixture(reading));
@@ -768,6 +770,126 @@ pub fn check_scope_limit(reading: &Reading) -> Result<()> {
          `Consumers: <files that load it, each also a deliverable>`, or `Consumers: none found`, or \
          `Consumers: ... unchanged`; leave off a consumer that needs no change",
         missing.join("; ")
+    )
+}
+
+/// The most separable groups of deliverables (docs, config, ci, code) one producer run may span.
+const MAX_JOB_GROUPS: usize = 3;
+
+/// The most deliverables, other than `CHANGELOG.md`, one producer run may carry whatever their groups.
+const MAX_JOB_DELIVERABLES: usize = 30;
+
+/// A separable surface of a change: the groups a job is split along.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum JobGroup {
+    Docs,
+    Config,
+    Ci,
+    Code,
+}
+
+impl JobGroup {
+    const ALL: [JobGroup; 4] = [
+        JobGroup::Docs,
+        JobGroup::Config,
+        JobGroup::Ci,
+        JobGroup::Code,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            JobGroup::Docs => "docs",
+            JobGroup::Config => "config",
+            JobGroup::Ci => "ci",
+            JobGroup::Code => "code",
+        }
+    }
+}
+
+/// The groups a normalized deliverable path belongs to. A path under `.github/` is ci; `athena.toml` and
+/// `defaults.toml` are config; a path under `docs/` and a root `.md` file are docs; everything else (crates,
+/// xtask, Cargo files, studies) is code. The root itself (`.` or nothing) stands for every file, so it
+/// counts as every group: a directory deliverable cannot hide size.
+fn job_groups(path: &str) -> Vec<JobGroup> {
+    let path = path.trim_end_matches('/');
+    if path.is_empty() || path == "." {
+        return JobGroup::ALL.to_vec();
+    }
+    let first = path.split('/').next().unwrap_or(path);
+    let group = if CONFIG_FILES.contains(&path) {
+        JobGroup::Config
+    } else if first == ".github" {
+        JobGroup::Ci
+    } else if first == "docs" || (!path.contains('/') && path.ends_with(".md")) {
+        JobGroup::Docs
+    } else {
+        JobGroup::Code
+    };
+    vec![group]
+}
+
+/// Refuses a change reading whose deliverables span too many separable groups, or are too many, for one
+/// producer run, and sends it back to be split by surface and dependency.
+///
+/// Root cause this check removes: nothing before dispatch measured whether a request fits one producer run.
+/// The reading gate checked what a reading said, never how much it asked for, so a request that touched a
+/// decision doc, the tool pins in `athena.toml`, the CI workflow, the check runner's code and its tests passed
+/// every check, was dispatched, and the producer ended with no change and nothing to report. Failure class
+/// multi-surface-job-producer-makes-no-change-and-cannot-report; jobs 20261025-183644-t67q (nine deliverables
+/// over docs, config, CI and code) and 20261017-205554-zaj2 (twelve deliverables over the same four groups).
+/// This check measures the size where it originates, at the reading, and refuses before any producer run is
+/// spent.
+///
+/// Each deliverable other than `CHANGELOG.md` (always written) belongs to one group: docs, config
+/// (`athena.toml`, `defaults.toml`), ci (`.github/`) or code (everything else). It refuses when the
+/// deliverables span more than 3 groups, which is only a reading that spans all four groups, or when there are
+/// more than 30 deliverables. A directory deliverable takes the group of its first path component, and the
+/// root (`.`) counts as every group. The error names the bound crossed, lists the groups found and says to
+/// split the job by surface and dependency: keep one group that depends on nothing left out and name the rest
+/// in `out_of_scope` as separate requests, in dependency order.
+///
+/// Study readings and readings with a question have no change to measure and are skipped, as in
+/// [`check_scope_limit`].
+///
+/// Evidence, an estimate and not a measurement: commit paths stand in for deliverables in the landed-commit
+/// history (HISTORY.txt) of the planning round. 0 of 200 landed commits span all four groups (the most span
+/// 3), and 2 of 200 exceed 30 paths. The count part is a high backstop; the group part is the real measure.
+///
+/// Known misses: a large job inside three groups is not refused by the group part, and the count does not
+/// reach it below 31 deliverables. This is not a full size bound. Its complements are `check_reading_size`
+/// (the forecast-based check of the reader's own wall time, which runs before the gate) and a later producer
+/// no-change guard, which is out of scope here.
+///
+/// This check refuses more readings; the higher refusal rate is intended: expected 6% of newly refused
+/// readings, an estimate and not a measurement; the replay of accepted readings measures it. A stored
+/// Proposed reading that spans all four groups leaves the drain queue until it is read again.
+pub fn check_job_size(reading: &Reading) -> Result<()> {
+    if reading.capability.as_deref() != Some("change") || reading.question.is_some() {
+        return Ok(());
+    }
+    let paths: BTreeSet<String> = reading
+        .deliverables
+        .iter()
+        .map(|d| normalized_path(&d.path))
+        .filter(|p| p != CHANGELOG_PATH)
+        .collect();
+    let groups: BTreeSet<JobGroup> = paths.iter().flat_map(|p| job_groups(p)).collect();
+    let crossed = if groups.len() > MAX_JOB_GROUPS {
+        format!("{} groups, bound {MAX_JOB_GROUPS}", groups.len())
+    } else if paths.len() > MAX_JOB_DELIVERABLES {
+        format!("{} deliverables, bound {MAX_JOB_DELIVERABLES}", paths.len())
+    } else {
+        return Ok(());
+    };
+    let found: Vec<&str> = groups.iter().map(|g| g.label()).collect();
+    bail!(
+        "the reading was refused because the request is too large for one producer run: it lists {} \
+         deliverables besides CHANGELOG.md over the groups {} ({crossed}), and a producer that is given \
+         this much ends with no change. Repair: split the job by surface and dependency. Keep one group of \
+         deliverables that depends on nothing left out, name the others in out_of_scope as separate \
+         requests ordered by dependency, and list the deliverables again",
+        paths.len(),
+        found.join(", ")
     )
 }
 

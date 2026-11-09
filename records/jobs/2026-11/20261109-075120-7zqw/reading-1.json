@@ -1,0 +1,136 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261109-075120-7zqw",
+  "n": 1,
+  "at": "2026-11-09T07:57:20.288955219Z",
+  "invocation_seq": 1,
+  "base_commit": "309ea6b7c5665ec24d0a9fc2c4151c5b7f0ccb51",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Refuse oversized multi-surface readings before dispatch",
+  "summary": "Root cause: no step in the reading gate (`refusing_check`, crates/athena-core/src/reading/checks.rs) measures whether a request fits one producer run. Jobs 20261025-183644-t67q (10 deliverables over docs, config, CI and code) and 20261017-205554-zaj2 (12 deliverables) ended with no change. I add a `check_job_size` step that sends back, to be split, any change reading spanning too many deliverables or separable surfaces. Both earlier attempts are addressed this way: their size problem no longer reaches dispatch, and neither left a candidate to keep or drop.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New unit tests plus a refusal corpus case; fmt, clippy and test are criteria."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is a gate step at the origin, not a patch for either job."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run cargo test on readings shaped like the two failed jobs."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-core/src/reading/checks.rs (`refusing_check` runs the `step!` checks in order, and `check_scope_limit` is the nearest precedent), crates/athena-core/src/reading.rs (the gate tests, `gate_refuser`, the step-order tests) and crates/athena-core/src/reading/surveys.rs. The property is measured directly on `Reading.deliverables` and `Reading.acceptance_criteria`, not through a stand-in. No record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are not involved.",
+    "Goal and audience: the Athena operator and the gate's later readers; a job that is too large is stopped at reading time with a repair, instead of costing a producer run that ends with no change.",
+    "Size bound: count deliverables other than the always-written CHANGELOG.md, and count distinct surfaces (docs, config such as athena.toml, .github/workflows, xtask, tests, and each crates/<crate>). Refuse a change reading above 8 deliverables or 4 surfaces. The exact numbers are a design choice, set so both failing jobs are refused. Study readings and readings with a question are skipped, as in check_scope_limit.",
+    "The 'producer ends with no change and cannot report' half of the proposed prevention is out of this job. Pre-dispatch splitting prevents the class at its origin, and `run/producer.rs` already reports a no-change outcome.",
+    "The retried jobs left no candidate (no recorded changes), so no earlier work is kept or dropped. Their deliverables (docs/decisions.md, athena.toml, ci.yml, xtask, athena-data config, the athena-git snapshot, and others) are not in this job's scope.",
+    "Consumers: none found. No config file is a deliverable, and this job does not change athena.toml, defaults.toml or any workflow.",
+    "Prompt files are untouched because the reader prompt has only 71 tokens of headroom; the refusal error message carries the repair text."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-core/src/reading/checks.rs has `pub fn check_job_size(reading: &Reading) -> Result<()>` and one `step!(check_job_size(reading));` line in `refusing_check`. Its doc comment names the root cause (nothing before dispatch measured whether a request fits one producer run) and cites jobs 20261025-183644-t67q and 20261017-205554-zaj2.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`. A new test builds a change reading shaped like job 20261025-183644-t67q (docs, athena.toml, CI workflow, two crates files, xtask, tests, CHANGELOG) and one shaped like 20261017-205554-zaj2 (12 deliverables). `check_job_size` refuses both, and the error says to split the job by surface and dependency. The test fails when the `step!` line is removed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`. Tests show the bound is general: a focused reading with a few deliverables in one or two surfaces passes. A reading with many deliverables in one crate is refused on count alone, and a study reading and a reading with a question are not refused.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`. The refusal corpus (crates/athena-core/tests/refusal_corpus.rs) has a case in which check_job_size is the refusing check, so the corpus test that every `step!` has a refusing case still passes. The existing gate-order tests still pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The check refuses more readings and the higher refusal rate is intended: expected 6% of newly refused readings, an estimate and not a measurement. CHANGELOG.md has an entry that names the root cause and the new bound.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`: all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Splitting or redoing job 20261025-183644-t67q (nextest adoption, docs/decisions.md, athena.toml, ci.yml, xtask) or job 20261017-205554-zaj2 (study snapshot isolation, Hermes Agent, the systems schema)",
+    "A producer-side no-change guard or changes to run/producer.rs and run/send_back.rs",
+    "Prompt files, athena.toml, defaults.toml and .github/workflows",
+    "Automatic splitting of a request into several jobs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.680327868852459,
+      "p_user_intervenes": 0.07171903881700555,
+      "cost_usd": {
+        "p10": 0.5625529169536688,
+        "p50": 1.4791114,
+        "p90": 4.881338734312381
+      },
+      "wall_time_s": {
+        "p10": 569.7555344196123,
+        "p50": 2110.0096338949816,
+        "p90": 4325.902200008642
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass probability than the reference: the change touches the reading gate, whose order tests and refusal corpus constrain a new step.",
+  "urgent_reason": "Cuts failed producer attempts: oversized jobs are sent back at reading time, not after a run that ends with no change.",
+  "hard_reason": "Adds a new rule to the reading gate that can refuse work (a pre-dispatch size check), so a mistake would wrongly stop jobs.",
+  "producer_effort": "high"
+}
