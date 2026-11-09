@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261017-205554-zaj2",
+  "round": 2,
+  "at": "2026-11-09T07:36:35.818091229Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/scope_guard.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/scope_guard.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The verifier agent now works in the hidden view, but the plan treats only the producer's own cargo runs as broken there. The verifier's grant includes cargo test, clippy and check, so on a Hermes study it can see compile errors and wrongly reject good work.",
+      "evidence": "athena.toml:108 gives the study verifier `cargo = [\"build\", \"check\", \"test\", \"clippy\", ...]`. Under Decision 1 the verifier agent and both reruns use `verifier_snapshot_hiding`. In a Hermes job studies/firstmate-work-handling is gone, so `include_str!` at crates/athena-cli/src/drain.rs:5017 stops `cargo test` and `cargo clippy --all-targets` from compiling, and xtask/tests/site_page.rs:11 and crates/athena-cli/tests/drain.rs:6948 panic. The verifier's verdict feeds `judge` (verification.rs:396-411), so a failing run there can fail the job even though the gate passed on the full tree. Decision 6, the risks and the third open question name only the producer. Fix: Extend Decision 6, the risk and the open question to cover the verifier agent. Also add an entry to `inputs.checks` that is marked 'not a check' and fails nothing, the same pattern as producer-report-gaps at verification.rs:100-112. It should name the hidden directories and say that tests reading them fail in the agent's view, while the recorded checks ran on the full tree. This is code, not prompt text, so the budgets do not move. Add an assertion to the criterion-3 test that the entry is present for a study job.",
+      "location": "Decision 1, Decision 6, Risks, Open questions (third question)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out a reader of the real firstmate study: the athena-cap-study rules tests. A study agent is likely to run exactly these tests to check its own study, and they panic in the hidden view.",
+      "evidence": "crates/athena-cap-study/src/rules.rs:1434-1441: `study_dir()` joins `../../studies/firstmate-work-handling` and `load` calls `expect(\"a study file\")`. Tests such as `the_firstmate_study_passes_every_rule_against_the_pinned_tree` (rules.rs:1510) use it. The list names drain.rs:5017, tests/drain.rs:6948, site_page.rs:11 and site.rs:17, but not rules.rs. The entry 'What a study job's snapshot contains' says only that cap-study rules check the job's own directory. Fix: Add crates/athena-cap-study/src/rules.rs:1435 to that dependents entry, the risks and the open question. Say that `cargo test -p athena-cap-study` fails inside a study agent's hidden snapshot and passes in the gate.",
+      "location": "Dependents: 'Readers of the real studies/firstmate-work-handling directory'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "For criterion 2, no end-to-end run checks that a change job's reader still sees both studies. The only change job run through Athena names a configured system, the one case where the reader hides studies on purpose.",
+      "evidence": "Observes: 'Change job: Producer and Verifier have both. Change job whose request names a configured system: the Reader lacks the other studies'. For a request that names no system, the reader is checked only by asserting that its decision equals the shared selector's result. That restates the implementation; it does not look at the reader's working directory. Fix: Add a run of a plain change job, whose request names no system, through `Athena::ask` and `Athena::go`. Assert that the Reader, Producer and Verifier directories all hold studies/a and studies/b.",
+      "location": "Demonstrations, Criterion 2 (c)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The verifier's inputs are built before the place where the plan swaps the snapshot, so the brief would carry the tool configuration from the old, full-tree snapshot.",
+      "evidence": "`tool_config_from_base` goes into `VerifierInputs` at verification.rs:79 and `candidate_view` is computed from `vsnap` at :61. Both happen before the disk check at :157, where the plan rebuilds `vsnap`, `prepared` and `tool_config_from_base`. Demonstration reverts build their own snapshot in a separate dir (checks.rs:663), so they do not need the swap to come later. Fix: Do the swap right after the destructure of `Checked` (verification.rs:50), before `candidate_view` and `inputs` are built. Or update `inputs.tool_config_from_base` after the swap.",
+      "location": "Step 5 / verification.rs:57-84 versus :157",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The verifier of a study job can still read the other system's study through earlier job records in the evidence snapshot. The plan accepts this, but it should be recorded where the separation is described.",
+      "evidence": "verification.rs:179-212 points the verifier at the evidence snapshot. crates/athena-core/src/snapshot.rs:1-7 shows it holds every file under records/, including the firstmate study job's records. BRIEF S1 asks for no access to other instances' notes. Fix: In the design-doc update and the CHANGELOG entry, state that the separation covers studies/<id>/ in agent snapshots, and that the evidence snapshot's records of other study jobs are a known remaining channel for a follow-up job.",
+      "location": "Risks (last item), docs/design/study-capability-m1.md step",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read snapshot.rs, pin.rs, verification.rs, reading.rs, checks.rs, run_pin_tests.rs, cap-study rules.rs and athena.toml. The design holds up against the code. Snapshot::create/materialize and their callers are as the plan describes. Pinning runs before the producer, and `pin` is recorded in the job (mod.rs:1088, :1239). build_candidate applies the change entries to the full base tree. The test seams exist: Tweak at :152, add_studies at :615, CountingPinner::echoing_full_shas. Keeping the gate on the full tree correctly fixes the blocker from round 1. As the plan's open question says, the base has no systems schema; step 1 stops the producer in that case, which is acceptable. Two major gaps remain. First, the study verifier agent now runs in the hidden view with cargo test, clippy and check in its grant, so compile failures from the include_str! at drain.rs:5017 can produce wrong rejections; the risks, Decision 6 and the open questions cover only the producer. Second, the dependents list omits the cap-study rules tests (rules.rs:1435), which read the real firstmate study and panic in a hidden snapshot. The minor findings are: no end-to-end check that a plain change job's reader sees both studies, the inputs being built before the snapshot swap, and the evidence snapshot as a remaining channel to other studies. Verdict: revise."
+}

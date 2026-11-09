@@ -56,6 +56,7 @@ use std::time::Duration;
 
 mod checks;
 mod outcome;
+mod questions;
 mod replay;
 mod retry;
 mod surveys;
@@ -64,6 +65,7 @@ mod topics;
 
 pub use checks::*;
 pub use outcome::*;
+pub use questions::*;
 pub use replay::*;
 pub use retry::*;
 pub use surveys::*;
@@ -1364,6 +1366,10 @@ fn queue_subject(text: &str) -> String {
 mod tests {
     use super::*;
     use athena_data::records::{ChangeEntry, ChangeStatus, ProducerReport};
+
+    /// A reader question the reader-question rule accepts: `User:`, a decision, two labelled alternatives and
+    /// a default.
+    const VALID_QUESTION: &str = "User: Which greeting: (a) hello or (b) hi? Default: (a).";
 
     #[test]
     fn a_queued_request_is_titled_by_its_request_not_its_priority() {
@@ -4296,7 +4302,7 @@ mod tests {
         declined.decline_reason = Some("no capability fits".into());
         check_prior_result_and_scope(&declined, &[&prior()]).unwrap();
         let mut asking = scoped_reading("Add a greeting.", &[], &[]);
-        asking.question = Some("which file?".into());
+        asking.question = Some(VALID_QUESTION.into());
         check_prior_result_and_scope(&asking, &[&prior()]).unwrap();
     }
 
@@ -4412,6 +4418,152 @@ mod tests {
             })
             .collect();
         reading
+    }
+
+    /// The gate's verdict on an otherwise acceptable reading that asks `question`: `None` when accepted, else
+    /// the error text of the refusal, which must come from `check_reader_question`.
+    fn question_verdict(question: &str) -> Option<String> {
+        let mut reading = governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
+        reading.question = Some(question.into());
+        refusing_check(&reading, "add a greeting", None, &[], None).map(|(name, error)| {
+            assert_eq!(name, "check_reader_question", "{error}");
+            error.to_string()
+        })
+    }
+
+    #[test]
+    fn reader_question_accepts_a_user_decision_with_alternatives_and_a_default() {
+        for question in [
+            VALID_QUESTION,
+            "User: Which greeting: (1) hello or (2) hi? Default: (2).",
+            "**User:** Which greeting: (a) hello or (b) hi? Default: (b).",
+            "  user: Which greeting: (a) hello, (b) hi or (c) hey? default: (c)",
+            "`User:` Which greeting: (a) hello or (b) hi? Default: (A).",
+            "User: Which file(s): (a) README.md or (b) the guide? Default: (a).",
+        ] {
+            assert_eq!(question_verdict(question), None, "{question}");
+        }
+    }
+
+    #[test]
+    fn reader_question_refuses_a_question_missing_any_one_part() {
+        for (question, gap) in [
+            ("which file?", "does not begin with `User:`"),
+            (
+                "Which greeting: (a) hello or (b) hi? Default: (a).",
+                "does not begin with `User:`",
+            ),
+            (
+                "Host: Which greeting: (a) hello or (b) hi? Default: (a).",
+                "does not begin with `User:`",
+            ),
+            (
+                "Username: Which greeting: (a) hello or (b) hi? Default: (a).",
+                "does not begin with `User:`",
+            ),
+            (
+                "User: Which greeting, found by reading the code: (a) hello or (b) hi? Default: (a).",
+                "says the code answers it",
+            ),
+            (
+                "User: Which greeting? Default: (a).",
+                "fewer than two distinct alternatives",
+            ),
+            (
+                "User: Which greeting: (a) hello? Default: (a).",
+                "fewer than two distinct alternatives",
+            ),
+            (
+                "User: Which greeting: (a) hello or (b) hello? Default: (a).",
+                "fewer than two distinct alternatives",
+            ),
+            (
+                "User: Which greeting: hello or hi? Default: hello.",
+                "fewer than two distinct alternatives",
+            ),
+            (
+                "User: Which file(s)? Default: (s).",
+                "fewer than two distinct alternatives",
+            ),
+            (
+                "User: Which greeting: (a) hello or (b) hi?",
+                "names no `Default:`",
+            ),
+            (
+                "User: Which greeting: (a) hello or (b) hi? Default: hello.",
+                "names no `Default:`",
+            ),
+            (
+                "User: Which greeting: (a) hello or (b) hi? Default: (c).",
+                "names no `Default:`",
+            ),
+            (
+                "User: Default: (a). Which greeting: (a) hello or (b) hi?",
+                "names no `Default:`",
+            ),
+        ] {
+            let error = question_verdict(question)
+                .unwrap_or_else(|| panic!("the question was accepted: {question}"));
+            assert!(error.contains(gap), "{question} -> {error}");
+        }
+    }
+
+    #[test]
+    fn reader_question_error_tells_the_reader_what_to_write() {
+        let error = question_verdict("User: Which file?").unwrap();
+        for needle in [
+            "fewer than two distinct alternatives",
+            "names no `Default:`",
+            "Question: \"User: Which file?\"",
+            "if the repository or the defaults can settle it, settle it",
+            "leave `question` null",
+            "`User:` + the decision + the alternatives labelled (a), (b) + `Default: (a)`",
+            "User: Which greeting: (a) hello or (b) hi? Default: (a).",
+        ] {
+            assert!(error.contains(needle), "lacks {needle:?}: {error}");
+        }
+        // Several gaps are listed in one error.
+        let error = question_verdict("which file?").unwrap();
+        for gap in [
+            "does not begin with `User:`",
+            "fewer than two distinct alternatives",
+            "names no `Default:`",
+        ] {
+            assert!(error.contains(gap), "lacks {gap:?}: {error}");
+        }
+        // A question that is accepted gives no error to follow.
+        assert_eq!(question_verdict(VALID_QUESTION), None);
+    }
+
+    #[test]
+    fn a_reading_without_a_question_is_not_checked_by_the_question_rule() {
+        let reading = governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
+        assert_eq!(reading.question, None);
+        check_reader_question(&reading).unwrap();
+        check_reading_acceptance(&reading, "add a greeting", None, &[], None).unwrap();
+    }
+
+    #[test]
+    fn a_free_form_question_from_the_reader_is_refused_after_build_reading() {
+        let mut value = sized_reading(30.0, Some("study"));
+        value["question"] = serde_json::json!("which file?");
+        let reading = build_sized(value, 3000, 2400).unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(reading.question.as_deref(), Some("which file?"));
+        let error = check_reading_acceptance(&reading, "describe the demo", None, &[], None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("not a precise decision for the customer"),
+            "{error}"
+        );
+        // The same question in the accepted form passes the whole gate.
+        let mut value = sized_reading(30.0, Some("study"));
+        value["question"] = serde_json::json!(VALID_QUESTION);
+        let reading = build_sized(value, 3000, 2400).unwrap_or_else(|e| panic!("{e:#}"));
+        assert!(
+            refusing_check(&reading, "describe the demo", None, &[], None)
+                .is_none_or(|(name, _)| name != "check_reader_question")
+        );
     }
 
     /// A request phrasing that names a governance path, and the path the reading must cover.
@@ -5784,7 +5936,7 @@ mod tests {
         let request = "Publish to GitHub Pages from .github/workflows/pages.yml";
         check_reading_acceptance(&declined, request, None, &[], None).unwrap();
         let mut asking = governed_reading(&["src/site.rs"], &[], &[]);
-        asking.question = Some("which file?".into());
+        asking.question = Some(VALID_QUESTION.into());
         check_reading_acceptance(&asking, request, None, &[], None).unwrap();
         let empty = governed_reading(&[], &["x"], &[]);
         check_reading_acceptance(&empty, request, None, &[], None).unwrap();
@@ -5955,7 +6107,9 @@ mod tests {
         }
         // A question and a decline name no change, so each is its own reading.
         let mut asking = governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
-        asking.question = Some(format!("Which {word} do you mean?"));
+        asking.question = Some(format!(
+            "User: Which {word} do you mean: (a) the first or (b) the second? Default: (a)."
+        ));
         check_reading_acceptance(&asking, "add a greeting", None, &[], None).unwrap();
         let mut declined = governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
         declined.capability = None;
@@ -6045,7 +6199,7 @@ mod tests {
         ));
         // A reading that declines or asks names no change, so its paths are not judged.
         let mut asking = reading_with_deliverable("docs/missing.md", DeliverableAction::Modify);
-        asking.question = Some("which file?".into());
+        asking.question = Some(VALID_QUESTION.into());
         check(&asking, Some(&files)).unwrap();
         let mut declined = reading_with_deliverable("docs/missing.md", DeliverableAction::Modify);
         declined.capability = None;
@@ -6176,7 +6330,7 @@ mod tests {
         }
         // (g) a reading that asks or declines names no change
         let mut asking = reading_assuming(&claim);
-        asking.question = Some("which file?".into());
+        asking.question = Some(VALID_QUESTION.into());
         check_refs(&asking, Some(&files)).unwrap();
         let mut declined = reading_assuming(&claim);
         declined.capability = None;
@@ -6980,7 +7134,7 @@ mod tests {
         accept(&declined).unwrap();
         // A question.
         let mut asking = code_reading(none, &[MODIFY_READING]);
-        asking.question = Some("which file?".into());
+        asking.question = Some(VALID_QUESTION.into());
         accept(&asking).unwrap();
         // Content criteria only.
         let mut content = code_reading(none, &[MODIFY_READING]);
@@ -7939,7 +8093,7 @@ mod tests {
         cases.push(("decline", declined));
         let mut asking =
             history_reading(&["crates/athena-core/src/land.rs"], "pr_commits is fixed");
-        asking.question = Some("which file?".into());
+        asking.question = Some(VALID_QUESTION.into());
         cases.push(("question", asking));
         let mut content = code_reading(&[SURVEY], &[MODIFY_READING]);
         content.acceptance_criteria = vec![Criterion {
@@ -8554,7 +8708,7 @@ mod tests {
         }
         // A design reading with a question or a decline.
         let mut asking = design_reading(none, &["the doc names the cause"], &[NEW_DOC]);
-        asking.question = Some("which file?".into());
+        asking.question = Some(VALID_QUESTION.into());
         let mut declined = design_reading(none, &["the doc names the cause"], &[NEW_DOC]);
         declined.capability = None;
         declined.decline_reason = Some("no capability fits".into());

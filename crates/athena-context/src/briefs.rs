@@ -3487,11 +3487,19 @@ mod tests {
             "check_environment_reach",
             "check_defined_terms",
             "check_scope_limit",
+            "check_reader_question",
             "build_reading",
         ] {
             assert!(section.contains(check), "no rule for {check}:\n{section}");
         }
-        assert_eq!(READING_RULES.len(), 11);
+        assert_eq!(READING_RULES.len(), 12);
+        assert!(
+            lines.iter().any(|l| l.contains("Reader question")
+                && l.contains("`User:`")
+                && l.contains("`Default: (a)`")
+                && l.contains("`check_reader_question`")),
+            "no rule line gives the reader question form and its check:\n{section}"
+        );
         assert!(
             lines.iter().any(|l| l.contains("`Consumers:")
                 && l.contains("CHANGELOG.md")
@@ -3529,10 +3537,10 @@ mod tests {
                     && l.contains("`check_design_existing_code`")),
             "no rule line names Existing code: and its check:\n{section}"
         );
-        // The section adds little to the brief: eleven rule lines and the code survey guide paragraph. The
+        // The section adds little to the brief: twelve rule lines and the code survey guide paragraph. The
         // section was about 2540 bytes with eight rules, measured 2718 with the ninth and 3045 with the
-        // eleventh.
-        assert!(section.len() < 3150, "{} bytes", section.len());
+        // eleventh; the twelfth adds about 175 bytes (an estimate, about 3220).
+        assert!(section.len() < 3300, "{} bytes", section.len());
     }
 
     #[test]
