@@ -16,6 +16,13 @@ are not built.
   prompt (`STEWARD_PROMPT`, recorded with the role; version 2 is the first that calls a model) is the system
   prompt of an agent run through the same driver as the other roles. The agent reads and reports work items;
   Athena validates them and queues them. The invocation is recorded (role, usage, cost) like any other.
+- **The steward steps back and decides itself.** Version 3 of the prompt tells it to look across repeated
+  failures and blind spots for the root cause and to write a request for the fix, which Athena queues. It
+  writes a brief for the owner (the five fields) only when Athena needs an environment change or a token or
+  credential, such as a missing `GH_TOKEN`; every other item has a null brief. This is **prose-only**: the
+  rule is in the model prompt and in the "Your limit" and "Your report" text of the steward's brief
+  (`crates/athena-core/src/steward.rs`). No code refuses a brief on another item, and the ladder rule is
+  unchanged: a rung above the role's limit is still only proposed.
 - **Read-only, by the tool policy.** The agent gets Read, Grep, Glob and Bash. Bash allows `git status`,
   `diff`, `log`, `show`, `ls`, and `gh` reads only: `gh run list|view`, `gh pr list|view|status|checks|diff`,
   `gh workflow list|view`, and `gh api` with GET. The `gh` flags are an allow-list in

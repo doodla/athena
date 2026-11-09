@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The steward (role version 3, record `steward-3`) now steps back: it looks across repeated failures and blind
+  spots for the root cause, decides the fix itself and writes a request for it. It writes an owner brief only
+  when Athena needs an environment change or a token or credential (for example a missing `GH_TOKEN`). The
+  prompt in `roles.rs` and the "Your limit" and "Your report" text in `steward.rs` agree. Prose-only (a model
+  prompt); no code refuses a brief, and the cadence and highest rung are unchanged.
 - The change producer prompt gains one sentence, and `docs/conventions/study-claim-support.md` explains it:
   when a job's files are under `studies/`, the producer opens each claim id a new or reworded statement cites,
   checks the claim text supports the sentence (including who acts), and lists each statement with its claim

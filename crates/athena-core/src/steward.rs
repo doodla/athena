@@ -1035,7 +1035,9 @@ pub fn brief(
     text.push_str(&format!(
         "## Your limit\n\nYou may change rungs at or below `{}` yourself: for those, give a `request` that \
          says what to do, and Athena queues it as a job. Above that, Athena queues only a proposal with your \
-         evidence. The top two rungs are never changed by a role.\n\n",
+         evidence. The top two rungs are never changed by a role. Step back and decide the fix yourself; \
+         write a `brief` for the owner only when Athena needs an environment change or a token or \
+         credential, and leave it null for every other item.\n\n",
         role.highest_rung.as_str()
     ));
     text.push_str("## Sources\n\n");
@@ -1080,7 +1082,9 @@ pub fn brief(
     text.push_str(
         "\n## Your report\n\nReturn `items`: at most 20, empty when there is nothing to report. Each cites \
          its source and evidence by reference (a job id that exists, a path in the workspace, or a commit \
-         id); copy no data. A key is stable for the same finding.\n",
+         id); copy no data. A key is stable for the same finding. Look across repeated failures and blind \
+         spots for the root cause, and report that. Give a `brief` only for an environment change or a \
+         token or credential Athena needs.\n",
     );
     text
 }
@@ -2099,6 +2103,14 @@ mod tests {
             text.contains("could not write these sources and has already reported them: git-log")
         );
         assert!(text.contains("`defaults-conventions`"));
+        // A brief is for an environment change or a token only; anything else is decided by the steward.
+        assert!(text.contains(
+            "write a `brief` for the owner only when Athena needs an environment change"
+        ));
+        assert!(
+            text.contains("Give a `brief` only for an environment change or a token or credential")
+        );
+        assert!(text.contains("Look across repeated failures and blind spots for the root cause"));
         let readable: Vec<&str> = names.iter().copied().filter(|n| *n != "git-log").collect();
         let without = brief(
             &role,
