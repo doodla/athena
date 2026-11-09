@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261026-180227-80cr",
+  "round": 1,
+  "at": "2026-11-09T19:17:55.604255945Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The search that builds the follow-up list misses the JobFiles::load readers and direct ls_tree_under reads of records/, so criterion 6 ('every remaining reader') would not be met.",
+      "evidence": "`athena_gate::jobs::JobFiles::load(git, treeish, job)` (crates/athena-gate/src/jobs.rs 50) reads `records/jobs/<id>` from a tree. Production callers: crates/athena-core/src/pr_check.rs 120 and 146 (`landing_problem` and the head-content check), crates/athena-gate/src/jobs.rs 121, 354 and 696, and crates/athena-gate/src/invariant.rs 262, 332, 474, 533, 599, 628-629. crates/athena-gate/src/jobs.rs 93 calls `ls_tree_under(treeish, \"records/interventions\")` directly. None of these files is in the plan's dependents list or step 8. 'the gate readers' covers only reconcile.rs and history.rs. Fix: Widen the step 8 search to include `JobFiles::load(` and `ls_tree_under(` with a records/ path, as well as the three loaders and the Seam B file readers. Name pr_check.rs (`landing_problem` and the head-content check in its check function), athena-gate jobs.rs and invariant.rs by function in §14. Add them to the dependents list as unchanged. Readers that judge a specific commit's tree (the history and invariant checks) should get a one-line note on whether they move at all after the cutover. Update the criterion 6 demonstration so the verifier's search includes these patterns.",
+      "location": "Plan step 8 and Demonstration for criterion 6; Dependents 'Records::load and RecordSet::load themselves'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The worktree branch does not assemble landings the way `Records::load` does, but the plan says it does 'exactly'.",
+      "evidence": "`Records::load` takes landings from `landing_files(git, treeish)` (store.rs 290-296), which merges the treeish's landings/ with the live tip of the local records branch read through `RecordsWriter::tip`. `load_dir(worktree)` reads only `<worktree>/landings` (store.rs 374). A worktree that lags the branch tip would hide recent landings from status and land_pr. Nothing in this slice keeps the worktree current. Fix: Say in the doc comment of `Records::load_current` and in §14 that landings come from the worktree's landings/. Say that the writer slice must keep the worktree at the branch tip, as §13 already requires ('updated to the branch tip before a read'). Alternatively, merge the tip's landing files in as `load` does, and justify the choice.",
+      "location": "Approach ('so it assembles records exactly as load does'); Decision 3; Risks",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say how the forecast reader that remains relates to 'the forecast' that moves.",
+      "evidence": "The design doc §13 row 'Forecasting and the reference forecaster' names scoring.rs `history`/`reference`, which reading.rs calls at 583 and 779 over records from `Records::load`. The plan, following the accepted reading, treats 'the forecast' as status.rs `class_forecasts`. The reading.rs reference forecaster stays on `Records::load`. Fix: In §14 and the CHANGELOG entry, say that the moved forecast is the per-class forecast headline in `athena status` (`class_forecasts`). List reading.rs's reference-forecast inputs (`scoring::reference` and `history` over `Records::load`) by function as a follow-up.",
+      "location": "Decision 4; step 8",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The status-test plan relies on a lone Request record making the job appear in `view.open`, but does not say which state that gives.",
+      "evidence": "`scan_jobs` (status.rs 911-941) puts only jobs in state 'queued' under open work. Other states go to `recent`. Fix: Have the status test assert on `jobs_by_state` or on the id across `open` and `recent`, or confirm that a Request-only job is 'queued' through `state_name`, so the assertion does not depend on which list the job lands in.",
+      "location": "Plan step 6 / Demonstration for criterion 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code in the snapshot, and it is sound apart from one gap. The three call sites are where the plan says: status.rs 988-989, landing.rs 846, and `class_forecasts(&records)` at status.rs 794/1098. `Records::load_dir` and `read_files_under` exist and work as the plan describes, and `paths::repo_state_dir` is at line 43. `Athena.state` (lib.rs 198) and `StateDir::root` (state.rs 79) exist, and `code_health::tests::set_up` is pub(crate). For the land_pr test, `reconcile` never fails and returns early when there is no origin, and the lookup errors ('no job matches', 'has no verification') come before any remote use. So the test seam is real and needs no host fake. The rule of probing the worktree first and falling back only when it is absent matches the request. Moving the records/ loading into a new `RecordSet::load_dir` keeps one copy of the check-and-wrap code, and the existing `load` vs `load_dir` test still guards it. The commit-shape and realistic-branch rules do not apply, because no function that classifies commits changes. The gap is criterion 6. The plan finds the readers to list by searching only for `Records::load`, `RecordSet::load`, `GitRecords::load` and the file readers. That search misses other production readers of records/ from a git tree, so the follow-up list would not name 'every remaining reader'. Two smaller points: the plan overstates that the worktree path assembles records 'exactly' as `load` does (the landings come from a different source), and it should say which forecast it moves."
+}

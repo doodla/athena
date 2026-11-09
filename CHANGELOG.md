@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Records-history step 7b (D111), first slice: readers can now read the current records from the `athena/records`
+  worktree. `athena_data::paths::records_worktree(state_dir)` is the one place that builds the worktree path
+  (`<state>/records-worktree`). `Records::load_current` (`athena-core`, `store.rs`) and `RecordSet::load_current`
+  (`athena-gate`, `records.rs`) read that directory when it exists, even when it is empty, and read `records/` in
+  the treeish as `Records::load` and `RecordSet::load` do only when it is absent. `RecordSet::load_dir` is the
+  new filesystem loader the two share (`Records::load_dir` now takes its `records/` half from it). With a
+  worktree, landings come only from its `landings/`, not merged with the local records branch's tip. Only these
+  readers moved: `athena status`, which includes its per-class forecast headline (`class_forecasts`), and
+  `Athena::land_pr`'s job lookup. Every other reader, including the reference forecaster in `reading.rs`, still
+  reads `records/` at HEAD and is listed by file and function in `docs/design/records-history.md` §14 as a
+  follow-up for later slices. Nothing creates the worktree yet, so production behaviour is unchanged until the
+  writer slice does. Tests with different job ids in the worktree and in `records/` show which source each of
+  the three readers used, with and without the worktree.
 - `xtask/src/site.rs`: `render` was 333 lines, over the 200-line function limit. Each page section (start here,
   states, counters, transitions, rationales, glossary, findings, next steps, claims, and the about/footer/wrapper
   tail) is now a private helper that `render` calls in the same order. The page is byte-for-byte unchanged and

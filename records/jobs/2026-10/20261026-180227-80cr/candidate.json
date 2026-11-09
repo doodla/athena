@@ -1,0 +1,177 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261026-180227-80cr",
+  "base_commit": "3e5d5b333f4e722cda74aab1d0e25d6c89c74122",
+  "base_fingerprint": "sha256:89ca58bd29fb3baddcdac4ca242c1df7c878bc0fd583f0e87a6fed2d7043ebcb",
+  "previous_job": "20261026-144245-t93c",
+  "candidate_commit": "1b084f757c5203a0c7c841a85a3cbec9cae2bd83",
+  "candidate_tree": "b7b32151acfea704f5c99ff71b8a23423f5923fe",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 408516
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 59224
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 187945
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 138261
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 34207
+    },
+    {
+      "path": "crates/athena-data/src/paths.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 4883
+    },
+    {
+      "path": "crates/athena-gate/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6916
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 50860
+    }
+  ],
+  "fingerprint": "sha256:110ab722635bbfeec0514ea8159cc0ac312825bd692fe934d07f3e6c4bb6fb97",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added a single path function, `paths::records_worktree(state_dir)`, which returns `<state>/records-worktree`. Added `RecordSet::load_dir` and `RecordSet::load_current` in athena-gate, and `Records::load_current` in store.rs. Each `load_current` reads the worktree when that directory exists, even if empty, and falls back to the treeish's `records/` only when it is absent. `Records::load_dir` now takes its `records/` half from `RecordSet::load_dir`. With a worktree, landings come only from `<worktree>/landings`; the doc comment says so. Moved exactly three call sites: the two loads in `Athena::status` (the per-class forecast `class_forecasts` reads the same loaded records) and the job lookup in `Athena::land_pr` (gh/landing.rs, which the request calls gh.rs). Added tests with distinct job ids and classes in the worktree and in-tree, each also run after removing the worktree. Added §14 to records-history.md, listing every remaining reader by file and function. Added a CHANGELOG entry. No scan test was added.",
+    "files": [
+      "crates/athena-data/src/paths.rs",
+      "crates/athena-gate/src/records.rs",
+      "crates/athena-core/src/store.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-core/src/gh/landing.rs",
+      "crates/athena-core/src/gh/tests.rs",
+      "docs/design/records-history.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-gate records::",
+        "result": "pass",
+        "note": "4 new tests: absent worktree equals load, existing worktree wins, empty existing worktree does not fall back, load_dir sorts and flags unknown files. First run failed on my wrong sort expectation; fixed and rerun with the full suite."
+      },
+      {
+        "command": "cargo test -p athena-core store::",
+        "result": "pass",
+        "note": "load_current reads the worktree when it exists and the tree when absent; an empty worktree does not fall back"
+      },
+      {
+        "command": "cargo test -p athena-core records_worktree",
+        "result": "pass",
+        "note": "status, forecast and land_pr tests, each with the worktree and again after removing it. The forecast test first failed because the fixture score used rules v1; it now uses athena_score::RULES."
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "22 passed"
+      },
+      {
+        "command": "cargo test -p athena-cli --test mirrors",
+        "result": "pass",
+        "note": "4 passed"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran once. The tool printed no failure exit code. Its output was too large to read, so I did not read the per-test lines."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test, run with `cargo test`, puts job ids that differ between a records worktree and in-tree records/. It shows that Athena::status, the forecast and land_pr's job lookup each see the worktree's job ids and not the in-tree ones.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core records_worktree`: 3 passed. They are status::records_worktree_tests::status_records_worktree_decides_which_jobs_are_listed, ::forecast_records_worktree_decides_which_classes_are_headlined, and gh::tests::land_pr_records_worktree_decides_which_job_is_found. The in-tree job is TREE_JOB and the worktree job is WORKTREE_JOB. With the worktree present: status lists only WORKTREE_JOB; forecasts shows only class-wt; land_pr finds WORKTREE_JOB ('has no verification') and not TREE_JOB ('no job matches'). I did not run the tests against the old code."
+      },
+      {
+        "criterion": "A test run with `cargo test` removes the worktree directory and shows that status, the forecast and land_pr's lookup read the in-tree records/ job ids, as before the change.",
+        "status": "met",
+        "evidence": "The same three tests call remove_worktree (remove_dir_all of paths::records_worktree) and then assert that status lists only TREE_JOB, forecasts shows only class-tree, and land_pr finds TREE_JOB and no longer finds WORKTREE_JOB. They passed. The store.rs unit test also shows load_current with an absent path has the same job ids as Records::load."
+      },
+      {
+        "criterion": "crates/athena-data/src/paths.rs defines the athena/records worktree path in one function beside repo_state_dir. A Grep of crates/ shows no other place builds that path (no repeated 'records-worktree' literal).",
+        "status": "met",
+        "evidence": "`pub fn records_worktree(state_dir: &Path) -> PathBuf` sits right after repo_state_dir. Grep 'records-worktree' over crates/ matches only paths.rs: line 60, the construction, and line 133, its unit test."
+      },
+      {
+        "criterion": "crates/athena-core/src/store.rs has Records::load_current and crates/athena-gate/src/records.rs has RecordSet::load_current. Each reads the worktree when it exists and falls back to the treeish's in-tree records/ only when the worktree is absent.",
+        "status": "met",
+        "evidence": "Both are `if worktree.is_dir() { load_dir(worktree) } else { load(git, treeish) }`. Unit tests in store.rs and the gate's records.rs cover the absent, existing and empty-existing cases; all passed."
+      },
+      {
+        "criterion": "The diff changes only three callers to load_current: status() (and the forecast) in crates/athena-core/src/status.rs, and Athena::land_pr in crates/athena-core/src/gh/landing.rs. A Grep for Records::load and RecordSet::load shows every other non-test caller unchanged. The request names landing.rs's land_pr as gh.rs.",
+        "status": "met",
+        "evidence": "Production hunks: status.rs `Athena::status` (the Records and RecordSet loads, which feed class_forecasts) and landing.rs `Athena::land_pr` (one load). `git status` shows no other production file besides store.rs, records.rs and paths.rs, which add the loaders. Grep of `Records::load(`, `RecordSet::load(` and `GitRecords::load(` shows the other callers unchanged, including status.rs mistakes and trace."
+      },
+      {
+        "criterion": "docs/design/records-history.md has a follow-ups list naming every remaining non-test caller of Records::load, RecordSet::load, GitRecords::load and the file-based readers by file and function, including status.rs mistake_report and trace, review.rs, proposals.rs, work_decisions.rs, run/mod.rs, run/close.rs, land.rs, auditor.rs, evidence_labels.rs, introspect.rs read_records and the athena-gate readers. The list is checkable against a Grep of the callers.",
+        "status": "met",
+        "evidence": "New §14.2 has Groups A–E. I mapped each Grep hit of `Records::load(`, `RecordSet::load(`, `GitRecords::load(`, `JobFiles::load(` and `ls_tree_under(` (records, landings and records-subdirectory paths) to its enclosing function by reading the file's function list. The file readers come from Greps for read_dir and records-path joins. §14.2 names mistakes and trace in Group A; the request's 'mistake_report' is a free function that `mistakes` calls (the Records::load caller is `Athena::mistakes`), so Group A names `mistakes`, not mistake_report. No line numbers appear."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry for the load_current slice of D111 step 7b. The diff adds no scan test.",
+        "status": "met",
+        "evidence": "A new first bullet under [Unreleased] > Changed names D111 step 7b, records_worktree, both load_current loaders, the three moved readers, that no worktree is created yet, and §14. `git status` shows no new files, and the diff adds no scan over callers."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran cargo fmt --all, then clippy with -D warnings (clean), then cargo test --locked once (no failure exit shown), plus the policy and mirrors tests (both pass)."
+      }
+    ],
+    "open_issues": [
+      "The §14.2 list was built by reading Grep hits and function lists, with no scan test (out of scope). A reader that reaches records by another path (not Records::load/RecordSet::load/GitRecords::load/JobFiles::load, ls_tree_under or read_dir) could be missing.",
+      "Until a later slice creates the worktree, status and land_pr read `records/` as before. Once a worktree exists, drain.rs `records()` and other readers on HEAD can disagree with status and land_pr; §14 says so."
+    ],
+    "mistakes": [
+      "First gate test expected the path order brief.md before brief-update-1.md; plain string order puts 'brief-' before 'brief.', so the assertion was wrong. Fixed.",
+      "First forecast fixture used score rules 'v1', which the commit gate refuses. Fixed by using athena_score::RULES.",
+      "I did not run the three new tests against the pre-change source to watch them fail."
+    ],
+    "learnings": [
+      "`check_record_file` accepts `records/jobs/bootstrap/brief.md` and `brief-update-<n>.md` as valid Markdown, which makes small fixtures for loader tests.",
+      "The in-process commit gate refuses a Score whose `rules` is not a known version (it must be `athena_score::RULES`); a fixture with 'v1' is rejected.",
+      "A Job-only record (no Request) shows in status as 'interrupted', so it lands in both open and recent. Compare ids across both lists.",
+      "The `Athena` test fixture (`crate::code_health::tests::set_up()`) has a `StateDir` of a temp directory, so `paths::records_worktree(athena.state.root())` is controllable in tests with no global environment variable.",
+      "`land_pr` with no origin remote resolves the job and checks verification before touching the host, so an always-erroring Runner suffices for a lookup test."
+    ],
+    "desires": [
+      "A shell tool that could read a saved tool-result file, or a pagination option on full `cargo test` output. Both the full-suite output and the long function lists were saved to files I could not open."
+    ]
+  }
+}

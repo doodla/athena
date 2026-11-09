@@ -513,3 +513,110 @@ Nearly all readers go through one of two seams, so the move is two edits plus th
 The study site generator row differs from the request, which listed it as a reader; the code read shows
 otherwise, and the table says what the code does. Until job 7, all rows keep reading `records/` on main, which
 is frozen from the cutover and removed in job 8, after the two-week period.
+
+## 14. Reader move, step 7b: what moved and what is left
+
+Step 7b moves the readers of §13 one slice at a time. Every slice reads the worktree when it exists and
+`records/` in the treeish only when it is absent, so a reader can move before the worktree is created.
+
+### 14.1 The first slice
+
+- The worktree path is built once, by `athena_data::paths::records_worktree(state_dir)`, which returns
+  `<state>/records-worktree` (`crates/athena-data/src/paths.rs`, beside `repo_state_dir`). Readers pass the state
+  directory they already hold (`StateDir::root`); no reader builds the path itself.
+- `Records::load_current(git, treeish, worktree)` (`crates/athena-core/src/store.rs`) and
+  `RecordSet::load_current(git, treeish, worktree)` (`crates/athena-gate/src/records.rs`) read `worktree` when
+  that directory exists and call `Records::load` and `RecordSet::load` on the treeish only when it is absent.
+  `RecordSet::load_dir` is the filesystem loader both use; `Records::load_dir` (the evidence snapshot reader)
+  takes its `records/` half from it, so the snapshot and the worktree read files the same way.
+- Three readers moved: `Athena::status` (`crates/athena-core/src/status.rs`), which loads one `Records` and one
+  `RecordSet` and so also moves its per-class forecast headline (`class_forecasts`); and the job lookup of
+  `Athena::land_pr` (`crates/athena-core/src/gh/landing.rs`).
+- An existing worktree is read as it is, even when it is empty or holds files that fail the record checks. It is
+  not a reason to fall back: a broken worktree must show as missing or invalid records, not hide behind the
+  frozen ones. The writer slice must create the directory only when it is complete.
+- Landings: with a worktree, `Records::load_current` takes landings only from `<worktree>/landings`. It does not
+  merge in the local records branch's tip as `Records::load` does (`landing_files`). The writer slice must keep
+  the worktree at the branch tip before a read (§13, seam B); a worktree that lags shows fewer landings.
+- The forecast that moved is the `athena status` per-class headline. The reference forecaster
+  (`scoring::reference` and `scoring::history`, called from `reading.rs`) is a different reader and has not
+  moved.
+- Nothing creates the worktree yet, so with no worktree every reader behaves as before.
+
+### 14.2 Readers still on `records/` (follow-ups for later slices)
+
+Found by searching `crates/*/src`, `xtask/src` and `crates/athena-cli/src`, outside test code, for `Records::load(`,
+`RecordSet::load(`, `GitRecords::load(`, `JobFiles::load(`, `ls_tree_under(` on `records/`, `landings/` or a
+subdirectory of them, `read_files_under(`, and `read_dir(` or `join("records")` on a records path. Function names,
+no line numbers. Each reader below is a follow-up slice, not part of the first slice.
+
+**Group A: `Records::load` callers (seam A, athena-core).**
+
+- `status.rs`: `Athena::mistakes` and `Athena::trace`.
+- `review.rs`: `Athena::review`.
+- `land.rs`: `dispatched_from`.
+- `run/mod.rs`: `go_job`, `dispatch`, `replay_run`, `loop_replay`.
+- `run/close.rs`: `close_dispatched`, `land_or_block`.
+- `auditor.rs`: `run`.
+- `audience.rs`: `run`.
+- `evidence_labels.rs`: `Athena::derive_labels`.
+- `work_decisions.rs`: `Athena::approve_work`, `approve_in_limit`, `reject_work`.
+- `reading.rs`: `Athena::ask`, `queue`, `set_priority`, `set_focus`, `focus`, `read_queued`, `read_unread`,
+  `retry`, `correct`, and the function `job_records`. The reference forecaster reads the records these
+  functions load.
+- `code_health.rs`: `Athena::code_health_check`.
+- `manage.rs`: `Athena::close_with`, `intervene`, `restart`, and the checks `check_working` and `check_history`
+  (which also call `RecordSet::load`).
+- `disk.rs`: `Athena::reclaim_interrupted` and `measure_build`.
+- `design_surface.rs`: `Athena::record_design_surface`.
+- `hestia.rs`: `Athena::spec_review`, `throughput_review`, `error_review_backfill`, `gate_review`,
+  `try_error_review`, `measure_build_pass`, `hestia_sweep`, `last_sweep`.
+- `scope_guard.rs`: `Athena::try_watch_line`.
+- `watcher.rs`: `Athena::watch_landing`.
+- `steward.rs`: the `records` function of the git-backed source (`Records::load`) and its `workspace` function
+  (`RecordSet::load`, which copies `records/` into the read-only workspace).
+- `crates/athena-cli/src/drain.rs`: `records`, the drain's own load of `Records`.
+
+**Group B: `GitRecords::load` callers.**
+
+- `proposals.rs`: `Athena::propose`, `reject_proposal`, `accept_proposal`, `check_proposal`.
+- `introspect.rs`: `Athena::event_of_job`, `event_of_intervention`, `introspect`.
+
+**Group C: `RecordSet::load` in athena-gate.**
+
+- `reconcile.rs`: `check_tree`, `committed_invocation_violations`, `check_tree_excusing_committed`.
+- `history.rs`: `check_after_cutover`, `check_history_with_exempt`.
+
+These judge a given tip or parent, so after the cutover they take that commit's tree (§4's legacy rule for
+pre-cutover commits). They are not "current" readers; the slice for them decides whether any of them moves.
+
+**Group D: direct tree reads of one job's records or of `records/` subdirectories.**
+
+- `athena-core/src/pr_check.rs`: `check_pr_head` and `landing_problem` (`JobFiles::load` on the landing's tree).
+- `athena-gate/src/jobs.rs`: `JobFiles::load`, `interventions_for` (lists `records/interventions`), and its
+  callers `expected_score`, `provenance`, `check_records`.
+- `athena-gate/src/invariant.rs`: `closing_jobs`, `classify_pre_merge`, `chain_problem`, `landed_at`,
+  `job_problem`.
+- `athena-gate/src/attribution.rs`: `read_records` (lists `INTENT_DIR` and `LANDING_DIR` at a records tip), used
+  by `cutover_commit_at` and `walk_since`.
+- `athena-core/src/gh/records.rs`: `records_under` (lists the records branch tip).
+- `athena-core/src/snapshot.rs`: `write` (copies `records/` and `landings/` into the evidence snapshot).
+- `xtask/src/decisions.rs`: `read_snapshot` (lists `records/work-decisions` at a tip).
+
+The history, invariant and attribution checks judge a specific commit's tree (a landing, a parent, a change),
+and `pr_check` reads a landing's own tree, so they stay on git tree reads after the cutover and are listed
+here only so no reader is missing. The importer (`athena-core/src/records_import.rs`) and the records branch
+writer (`athena-git`, `records_branch.rs`) read trees to write the branch, so they belong to the writer slice
+and are not readers of `records/` in this sense.
+
+**Group E: file readers (seam B).**
+
+- `athena-core/src/introspect.rs`: `read_records` (with `children`, `read_json`, `month_files`), also called by
+  `crates/athena-cli/src/backtest.rs`: `run`.
+- `athena-core/src/labeled.rs`: `read_inputs`.
+- `xtask/src/walltime.rs`: `read_jobs`.
+- `athena-core/src/steward.rs`: the workspace copy of `records/` (`workspace`, above).
+- `athena-core/src/store.rs`: `Records::load_dir` for `landings/` through `read_files_under`, used by the evidence
+  snapshot reader (`snapshot.rs`: `status`) and not a current reader.
+
+No scan test checks this list yet; a later slice may add one.
