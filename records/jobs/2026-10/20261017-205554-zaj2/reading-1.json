@@ -1,0 +1,180 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261017-205554-zaj2",
+  "n": 1,
+  "at": "2026-11-09T07:19:29.320901174Z",
+  "invocation_seq": 1,
+  "base_commit": "1796c67e223e2e7c311af9eb0a8dde3c4e4dbc6f",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Hide other studies from study jobs; configure Hermes Agent as a system",
+  "summary": "For a study job naming system b, snapshots for reader, producer and verifier omit every other studies/<id>/ directory, hidden directories are never counted as deleted and land unchanged, and change jobs are unaffected. Then add [capabilities.study.systems.hermes-agent] to athena.toml pinned at v2026.9.24, keeping firstmate. Audience: the owner enforcing BRIEF.md Part 2 S1 fresh-context separation.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Criteria require cargo test, clippy -D warnings and fmt --check."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Isolation criteria check the snapshot contents and landed bytes by running tests."
+    },
+    {
+      "id": "small",
+      "how": "One focused change: the hiding mechanism plus the one config entry."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-git/src/snapshot.rs (Snapshot::create calls materialize, which drops records/ and athena-exclude paths via classify; the entry point), crates/athena-core/src/run/producer.rs (producer_snapshot), run/verification.rs, reading.rs, run/planning.rs (other Snapshot::create callers), run/pin.rs (pin_repo; study_pin lets studies/<id>/pin.json override repo_ref, otherwise the pinner resolves repo_ref), and crates/athena-data/src/config.rs (repo_url, repo_ref). Resolution and pinning run before dispatch; snapshots are created per role afterwards. The property is measured directly: files present on disk in each snapshot, and the change list / landed tree compared to the base. No new record or data file is added under crates/, so check_record_file and AnyRecord are not touched.",
+    "Assumption: the systems schema ([capabilities.study.systems.<id>] with repo_url and repo_ref, and a way to select the system a study job names) exists in the base commit, as the request states. The copy I read lacks it. If the base lacks it the athena.toml entry will not parse, and the producer must stop and report instead of inventing the schema.",
+    "Design: Snapshot::create gains a list of hidden path prefixes (the other studies/<id>/ directories). The core computes it from the study id the job names and passes it for every role's snapshot of a study job. Change jobs pass an empty list. The hidden prefixes are removed in materialize alongside records/.",
+    "The hidden directories exist at the base. Change-list and landing logic must treat a path hidden from the snapshot as absent from both sides, not as deleted, so landing leaves studies/a byte-identical. This extends the existing handling of records/ and athena-exclude.",
+    "Existing code: crates/athena-git/src/snapshot.rs, crates/athena-core/src/run/pin.rs, crates/athena-core/src/run/producer.rs, docs/design/study-capability-m1.md.",
+    "Consumers: crates/athena-core/src/run/pin.rs, crates/athena-cap-study/src/lib.rs (reads the study section of athena.toml).",
+    "Term ladder: not applicable; no structural terms are used.",
+    "Out of scope as stated: running Hermes, studying it, and the site. firstmate's config and studies/firstmate-work-handling/ stay unchanged."
+  ],
+  "question": "The working copy I read has no [capabilities.study.systems] schema (no \"systems\" in crates/athena-data/src/config.rs; pin.rs reads only [capabilities.study] repo_url/repo_ref). Does the job's base commit hold it?",
+  "acceptance_criteria": [
+    {
+      "text": "Run cargo test: a test that parses the repository's own athena.toml passes, and with a fake pinner Hermes pins at v2026.9.24 from https://github.com/NousResearch/hermes-agent while firstmate still pins the SHA in studies/firstmate-work-handling/pin.json.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: in a test repository with studies/a and studies/b, the reader, producer and verifier snapshots of a study job naming b lack studies/a and hold studies/b, and a change job's snapshots hold both.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test: a hidden study directory is never reported as deleted in a change list, and studies/a is byte-identical after a fake-driver study job naming b runs to landing.",
+      "kind": "behavior"
+    },
+    {
+      "text": "athena.toml (listed as a deliverable) contains [capabilities.study.systems.hermes-agent] with repo_url https://github.com/NousResearch/hermes-agent.git (or the URL without .git, matching firstmate's form) and repo_ref = \"v2026.9.24\", and the firstmate entry is unchanged in the diff.",
+      "kind": "content"
+    },
+    {
+      "text": "Run cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check: both are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry describing study snapshot isolation, the hidden-directory landing rule and the Hermes Agent system; the diff shows it.",
+      "kind": "content"
+    },
+    {
+      "text": "The change refuses no more readings; it only hides paths from study snapshots, so no refusal-rate change is intended (expected 0% of newly refused readings).",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.75
+    },
+    {
+      "path": "crates/athena-core/src/run/pin.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "docs/design/study-capability-m1.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Running Hermes Agent",
+    "Studying Hermes Agent or writing studies/hermes-agent",
+    "The site",
+    "Changing the firstmate configuration or its existing study"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 1.2,
+        "p50": 3.0,
+        "p90": 7.5
+      },
+      "wall_time_s": {
+        "p10": 1200.0,
+        "p50": 3000.0,
+        "p90": 6500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6817248459958932,
+      "p_user_intervenes": 0.07185185185185185,
+      "cost_usd": {
+        "p10": 0.5624334135205641,
+        "p50": 1.4785786040398394,
+        "p90": 4.8578290209413595
+      },
+      "wall_time_s": {
+        "p10": 569.6805526253116,
+        "p50": 2111.7897782190007,
+        "p90": 4327.39080495604
+      }
+    }
+  },
+  "departures": "Higher cost and time than the reference: the change spans several snapshot callers in athena-core plus landing logic, and the schema precondition is uncertain.",
+  "hard_reason": "It changes what the run pipeline's snapshots hide from agents (an isolation guard) and how landing treats hidden paths, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}

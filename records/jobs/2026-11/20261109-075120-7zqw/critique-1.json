@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261109-075120-7zqw",
+  "round": 1,
+  "at": "2026-11-09T08:03:05.718412921Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The bound and the declared 6% share are guesses that the planner could have checked against HISTORY.txt. That history shows many landed single jobs larger than the bound, so the check has clear false positives and may get the job held by the replay.",
+      "evidence": "In HISTORY.txt, these single-job commits landed with more than 8 non-changelog paths: a5c938c 'Refuse scope limits…' (9; this job's own precedent), 97d1e5c (13), d6d2ad1 (15), dd4d76d (12), e0f1a6f (10), 290f311 (11), da17eda (12), f2d168c (21), 17e6d59 (15), 823dd32 (about 26), 9a97e24 (about 47). These landed with more than 4 surfaces under the plan's rule: dd4d76d (agent, cli, core, testkit, docs, xtask), d6d2ad1 (cli, context, core, data, docs) and 4bd944f (cli, core, data, docs, xtask). I count roughly 15 of the first ~55 commits over the count bound (an estimate; commit paths stand in for reading deliverables). The replay holds a candidate whose new refusals exceed the declared share plus REPLAY_DECLARED_MARGIN_POINTS (5), so above 11%. The plan's only calibration is 'largest deliverable list in the corpus is 3', which is a test fixture and not the real distribution. Fix: Before fixing the numbers, measure them. Count non-changelog paths and surfaces per commit in HISTORY.txt with the plan's `job_surface` rule, and report the share each bound would refuse. Then do one of two things. (a) Choose bounds that accept the landed shapes but still refuse both failed jobs (for example, a surface bound of 5 combined with a higher count, or a rule that counts separable surface groups such as docs, config or CI plus code). Add a test that runs real landed shapes, such as a5c938c and 97d1e5c, through `check_job_size` and expects them accepted. (b) If no bound separates the failures from the successes, say so as an open question to the user, because the stated cause is then not well measured by size alone. In either case, make the declared share in the doc comment, changelog and criterion match the measured share, and give the reason that is required above 25%.",
+      "location": "Decision 2 (bounds 8 and 4), Risks bullet 2, Criterion 5 share; crates/athena-core/src/reading/replay.rs:161,297",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A reader can get past the count bound by listing a directory as one deliverable.",
+      "evidence": "The plan counts a directory deliverable such as `crates/athena-cli/tests/` as one deliverable in one surface. A reader refused for 12 files under crates/athena-core/src can list `crates/athena-core/src/` once and pass, with no change in job size. Fix: Count a directory deliverable as more than one file (for example, as the bound itself), or refuse with a request to list the files. Pin this with a case in `job_size_bound_is_general`.",
+      "location": "Decision 5 / Step 1 (`job_surface`, dedupe of paths)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The demonstration for criterion 1 uses the command for a different test to show the doc-comment needles.",
+      "evidence": "Criterion 1 asks that the doc comment name the cause and both jobs. The run command `cargo test -p athena-core job_size_has_one_step_line` does not check those needles; `job_size_doc_and_changelog_name_the_cause` does. Fix: Use the filter `cargo test -p athena-core job_size_` so a single command covers both tests.",
+      "location": "Demonstrations, Criterion 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan follows the accepted reading. It puts the check at the gate (`refusing_check`, checks.rs:518). The functions, fixtures, test anchors and counts it cites are real: `check_scope_limit` at 705, `normalized_path` at 775, `INPUT_FORMS: [&str; 52]` at refusal_corpus.rs:90, the corpus anchor line, and the adjacency tests, none of which pins the second position. The demonstrations run the production gate, use no doubles, and would fail without the `step!` line. The design has one serious gap. The bound (8 deliverables, 4 surfaces) and the declared 6% share are guesses, and the snapshot holds data to check them: HISTORY.txt. There, many single jobs landed with more than 8 non-changelog files or more than 4 surfaces. Examples are a5c938c (the scope-limit gate job itself, 9 files), 97d1e5c (13 files), d6d2ad1 (15 files over 5 surfaces) and dd4d76d (6 surfaces). So the premise that a job this size cannot fit one producer run is contradicted, and the bound has clear false positives. The verification replay holds a candidate above the declared share plus 5 points (replay.rs:161, 297), so above 11%. My rough count of landed commits suggests more than 11% would be refused; that is an estimate, and commit paths are only a stand-in for reading deliverables. The planner should measure this before fixing the numbers."
+}

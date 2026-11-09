@@ -1,0 +1,290 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261109-075120-7zqw",
+  "round": 3,
+  "at": "2026-11-09T08:09:24.244739628Z",
+  "invocation_seq": 6,
+  "approach": "Add `check_job_size(reading)` as one new `step!` in `refusing_check` (crates/athena-core/src/reading/checks.rs), second, right after `check_prior_result_and_scope`. The check has two parts. (1) Group rule: map each deliverable other than CHANGELOG.md to one of four groups: `config` (athena.toml or defaults.toml, via the existing `CONFIG_FILES`), `ci` (`.github/`), `docs` (`docs/` and root `*.md`) and `code` (everything else: crates, xtask, Cargo files, studies). Refuse a reading that spans more than 3 groups, which means all four. Plainly: this part refuses only a reading that spans all four groups. Both failed jobs (20261025-183644-t67q, 20261017-205554-zaj2) span all four. I read HISTORY.txt: no landed commit in the 200 spans all four (the most is 3). (2) Count backstop: refuse above 30 non-changelog deliverables. I recounted: exactly 2 of 200 landed commits exceed it, 9a97e24 (48 paths) and 6e7fd3a (31 paths other than CHANGELOG.md, lines 779-811; a grep for a commit header followed by 31 or more path lines matched two commits). Commit paths stand in for deliverables, so these figures are estimates. The declared share is kept at the accepted criterion 5 text, 'expected 6% of newly refused readings, an estimate and not a measurement'. It is not changed. The doc comment and CHANGELOG name the complements, so the check is not read as a full size bound: the forecast-based `check_reading_size` (reading.rs:330, which trusts the reader's own wall-time median) and a later producer no-change guard (out of scope, a follow-up). Study readings and readings with a question are skipped, as in `check_scope_limit`. No prompt, config or workflow file changes; the refusal text carries the repair.",
+  "decisions": [
+    {
+      "choice": "Measure size as the number of separable surface groups (docs, config, ci, code) with bound 3, plus a count backstop of 30 non-changelog deliverables. Both are named constants `MAX_JOB_GROUPS` and `MAX_JOB_DELIVERABLES`. The doc comment and CHANGELOG state the rule plainly: the group part refuses only a reading that spans all four groups; the backstop refuses above 30 deliverables (2 of 200 landed commits in HISTORY.txt: 9a97e24 with 48 paths and 6e7fd3a with 31); `check_reading_size` and a later producer no-change guard are the complements.",
+      "reason": "HISTORY.txt shows the only measure that separates the two failed jobs from landed work is spanning all four groups. Count alone separates nothing below 31. The groups are the 'separable surfaces' both introspections propose splitting on. Reusing `CONFIG_FILES` (checks.rs:577) keeps one definition of a config file. Answers finding 3: the rule is described as what it is, one conjunction plus a high backstop, and the text names the complements.",
+      "rejected": [
+        {
+          "option": "Refuse above 8 deliverables or 4 surfaces (crate, docs, xtask, .github, root each a surface)",
+          "why": "HISTORY.txt shows many landed commits above 8 paths (97d1e5c 13, d6d2ad1 15, dd4d76d 12, f2d168c 21, 823dd32 about 27) and 5 to 8 surfaces (dd4d76d, 69057b9). It would refuse ordinary landed jobs."
+        },
+        {
+          "option": "Count the reader's criteria or request words",
+          "why": "A proxy; the deliverable list is the real measure."
+        },
+        {
+          "option": "A count-only bound at 12 or 15",
+          "why": "It refuses 14 or more landed commits and still misses a small job crossing four groups (the t67q shape, 9 paths)."
+        },
+        {
+          "option": "Treat xtask or docs as separate groups (up to 5)",
+          "why": "6f1b5f1 and several other landed commits would reach 4 groups. xtask is Rust code, so it is part of `code`."
+        },
+        {
+          "option": "Move the backstop above 31 to spare 6e7fd3a",
+          "why": "Needs 48 to clear both, which makes the backstop nearly inert. 30 is round, refuses 2 of 200 (1%), and fits inside the declared share."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the declared share exactly as the accepted criterion 5 states it: 'expected 6% of newly refused readings, an estimate and not a measurement'. The doc comment, CHANGELOG item and tests all carry 6%, and the test asserts `share == Some(6)`.",
+      "reason": "Answers finding 1. A planner cannot edit an accepted criterion. `replay_declaration_of(reading)` calls `replay_declaration(&reading.acceptance_criteria, ..)` (replay.rs:289-290), so the replay holds the candidate against 6% + 5 points = 11%, and the text of the code and CHANGELOG matches the criterion. 6% covers the evidence: the two known failed jobs are at most 2 of the 50 readings in the replay window (4%), and the backstop adds 1% of landed commits. The '4% plus 5 gives 9%' reasoning is deleted. 6% is below the 25% threshold, so no reason text is needed (replay.rs:165).",
+      "rejected": [
+        {
+          "option": "Declare 4%",
+          "why": "Conflicts with accepted criterion 5 and with the replay, which reads the share from the reading."
+        },
+        {
+          "option": "Declare 0%",
+          "why": "Both failed jobs would be refused if they sit in the replay window."
+        }
+      ]
+    },
+    {
+      "choice": "A directory deliverable gets its group from its first path component (`crates/athena-core/src/` is code). A root directory deliverable (`.`, `./`, empty) counts as all four groups.",
+      "reason": "The group rule does not depend on how many files a path stands for, so a directory cannot hide size. The only way to claim every group in one path is the root, which is made to count as all of them.",
+      "rejected": [
+        {
+          "option": "Count a directory as the bound's worth of files",
+          "why": "It would refuse any reading that lists a directory such as `crates/athena-cli/tests/`, which landed commits touch."
+        }
+      ]
+    },
+    {
+      "choice": "Skip readings whose capability is not `change` or that carry a question, as `check_scope_limit` does (checks.rs:706). Place `step!(check_job_size(reading));` second, after `check_prior_result_and_scope`.",
+      "reason": "A study reading has no change to measure, and a reading with a question has no accepted scope. A reading that must be split makes later repairs moot, so it is refused first. The retry check stays first because it needs the earlier attempt. The adjacency tests pin survey to history_fixture, outcome_state to environment_reach, governance to outcome_state and environment_reach to defined_terms, not this position.",
+      "rejected": [
+        {
+          "option": "Place it after `check_scope_limit`",
+          "why": "The reader would first repair scope-limit text in a reading that is then refused for size, costing a read round."
+        }
+      ]
+    },
+    {
+      "choice": "The producer no-change guard stays out of scope; the refusal text states the repair.",
+      "reason": "The brief puts run/producer.rs and run/send_back.rs out of scope, and the gate acts before dispatch, so no producer run is spent.",
+      "rejected": [
+        {
+          "option": "Guard the producer's no-change outcome",
+          "why": "It acts after the run is spent and is out of scope."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "purpose": "Add `MAX_JOB_GROUPS` (3) and `MAX_JOB_DELIVERABLES` (30) near `DEFAULT_WRITTEN_FILES`, a private `JobGroup` enum with `job_groups(path)`, and `pub fn check_job_size(reading: &Reading) -> Result<()>` after `check_scope_limit`. The doc comment names the root cause, both job ids, the HISTORY.txt measurement (0 of 200 landed commits span all four groups; 2 of 200 exceed 30 paths: 9a97e24 and 6e7fd3a; commit paths stand in for deliverables), the plain statement that the group part refuses only a reading that spans all four groups, the complements `check_reading_size` and a later producer no-change guard, 'This check refuses more readings; the higher refusal rate is intended.' and 'expected 6% of newly refused readings, an estimate and not a measurement'. Add `step!(check_job_size(reading));` after the prior-result step in `refusing_check` and list it in the `check_reading_acceptance` doc order.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add the `job_size_` tests and the `job_size_reading(paths)` helper next to the scope-limit tests (after about line 8435).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add `job_size_cases()` (4 refusing, 2 accepting), wire it into `cases()`, add four tags to `INPUT_FORMS` (length 52 to 56) and the test `job_size_refusal_is_declared_intended` (share 6).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One item at the end of [Unreleased] / Changed: root cause, `reading::check_job_size`, the group rule and backstop, the skip, both job ids, the HISTORY.txt measurement, the complements, the stored-reading effect, and the declared 6% share.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `normalized_path` (checks.rs:775), `CONFIG_FILES` (checks.rs:577), `CHANGELOG_PATH` (reading.rs:293) and `check_scope_limit` (checks.rs:705) and copy their style. Add `const MAX_JOB_GROUPS: usize = 3;` and `const MAX_JOB_DELIVERABLES: usize = 30;` near `DEFAULT_WRITTEN_FILES`. Add a private `enum JobGroup { Config, Ci, Docs, Code }` (with Ord for a BTreeSet) and `fn job_groups(path: &str) -> Vec<JobGroup>`: normalize; `.` or empty gives all four; a `CONFIG_FILES` member gives Config; a path under `.github/` gives Ci; a path under `docs/` or a root file ending `.md` gives Docs; anything else gives Code.",
+    "Add `pub fn check_job_size(reading: &Reading) -> Result<()>` after `check_scope_limit`. Return Ok unless `capability == Some(\"change\")` and `question.is_none()`. Collect the deliverable paths other than CHANGELOG.md, normalized and deduped. Compute the group set and the count. Bail when `groups.len() > MAX_JOB_GROUPS` or `count > MAX_JOB_DELIVERABLES`. The one-line message begins 'the reading was refused because the request is too large for one producer run', names the crossed bound with counts ('4 groups, bound 3' or '31 deliverables, bound 30') and lists the groups found. It says: split the job by surface and dependency; keep one group of deliverables that depends on nothing left out; name the others in `out_of_scope` as separate requests ordered by dependency; list the deliverables again. Write the doc comment as in Files, including the plain statement 'refuses only a reading that spans all four groups', the figures '0 of 200' and '2 of 200' (9a97e24 with 48 paths, 6e7fd3a with 31), the complements, the contrast with `check_reading_size`, the known miss of large three-group jobs, and the 6% share sentence.",
+    "In `refusing_check` add `step!(check_job_size(reading));` directly after the `check_prior_result_and_scope` step. Add [`check_job_size`] after the prior result in the `check_reading_acceptance` doc order.",
+    "In reading.rs tests add `job_size_reading(paths: &[&str]) -> Reading`, a change reading from `governed_reading` with one criterion per governance path so no earlier check refuses (include CHANGELOG.md, as `limited` does at reading.rs:8099).",
+    "In reading.rs tests (after `scope_limit_doc_and_changelog_name_the_cause`) add: `job_size_refuses_the_two_failed_job_shapes`, `job_size_bound_is_general` (refused and accepted forms from demonstration 3, including directory, root and `./` forms and the study and question skips), `job_size_accepts_landed_shapes` (path lists for a5c938c, 97d1e5c, d6d2ad1, dd4d76d, 6f1b5f1, 0cd0111 and eab5d6c copied from HISTORY.txt), `job_size_refuses_the_backstop_landed_shape` (the 31 non-changelog paths of 6e7fd3a, HISTORY.txt lines 780-811, refused by count), `job_size_refusal_needs_the_step_line`, `job_size_has_one_step_line`, `job_size_refusal_reaches_a_stored_reading` (copying reading.rs:8182) and `job_size_doc_and_changelog_name_the_cause` (needles from demonstration 5, with 'expected 6% of newly refused readings').",
+    "In refusal_corpus.rs add `job_size_cases()` after `scope_limit_cases()` with the six case ids from demonstration 4 (four `Expected::Refuse(\"check_job_size\")`, two `Expected::Accept`, all `repo_files = None`). Add `out.extend(job_size_cases());` to `cases()`, add the four tags to `INPUT_FORMS` and change its type to `[&str; 56]`.",
+    "In refusal_corpus.rs add `job_size_refusal_is_declared_intended`, copying `design_existing_code_refusal_is_declared_intended` (line 2771): `replay_declaration` of a criterion containing 'expected 6% of newly refused readings' gives `share == Some(6)`, and `acceptance_check_names(reading_source())` contains `check_job_size`.",
+    "In CHANGELOG.md add one item at the end of the [Unreleased] `### Changed` list. It names the root cause (nothing before dispatch measured whether a request fits one producer run), `reading::check_job_size` as a `step!` in `refusing_check` (do not write the string `reading::check_scope_limit`), the group rule (more than 3 groups of docs, config, ci and code, so only a reading that spans all four groups), the 30-deliverable backstop, the study and question skip, both job ids, the HISTORY.txt measurement (0 of 200 and 2 of 200, an estimate), the complements `check_reading_size` and a later producer no-change guard, the effect on stored Proposed readings, and the sentence 'the higher refusal rate is intended: expected 6% of newly refused readings, an estimate and not a measurement'.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. If any existing reading is refused as too large, shrink that fixture; do not raise a bound."
+  ],
+  "risks": [
+    {
+      "risk": "The group rule is calibrated on two failed jobs and 200 landed commits. It refuses only a reading that spans all four groups. A large job spanning three groups (for example config, ci and code with 25 files) is not refused, and the backstop does not reach it either. The check is not a full size bound.",
+      "mitigation": "The doc comment and CHANGELOG item state this plainly and name the complements: the forecast-based `check_reading_size` and a later producer no-change guard. The two bounds are named constants, so a later change is one line, and the at-the-bound tests move with it."
+    },
+    {
+      "risk": "Commit paths in HISTORY.txt stand in for reading deliverables, so the 0-of-200 (groups) and 2-of-200 (count) figures are estimates, and landed commits are survivors that cannot show three-group jobs fit one run.",
+      "mitigation": "The CHANGELOG item, doc comment and criterion label the figures an estimate and not a measurement. The verification replay over the last 50 accepted readings measures the real share and holds the candidate above the declared 6% plus 5 points."
+    },
+    {
+      "risk": "An existing test reading is refused: it spans four groups or has more than 30 deliverables.",
+      "mitigation": "I searched readings with long deliverable lists in reading.rs, refusal_corpus.rs, steward.rs, run/tests.rs and drain.rs and found none above 3 paths. Criterion 6 runs the whole suite, and a failure names the reading. The fix is to shrink the fixture, never to raise the bound."
+    },
+    {
+      "risk": "A reader retried after the refusal still lists all four groups and is refused again.",
+      "mitigation": "The error tells the reader to keep one dependency-ordered group and name the others in `out_of_scope`, which existing checks accept. `read_for` re-reads once with the refusal text. Automatic splitting stays out of scope."
+    },
+    {
+      "risk": "Path forms are misclassified: `./` prefixes, directory deliverables, root files such as README.md or Cargo.lock, `studies/`, `xtask/shard-timings.txt`.",
+      "mitigation": "`job_groups` normalizes with `normalized_path` (checks.rs:775) first. athena.toml and defaults.toml map to config, a path under `.github/` to ci, `docs/` and any other root `.md` file to docs, and all else to code. `.`, `./` and empty map to all four groups. `job_size_bound_is_general` has a case for each form."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "gate refusal on a built reading (new check_job_size step in refusing_check)",
+      "dependent": "crates/athena-core/src/reading.rs:680 (`Athena::read_for`: `check_reading_acceptance` with repo files; a refusal becomes `ReadError::Refused` and the reader is re-read once with the refusal text)",
+      "kind": "code",
+      "test": "job_size_refuses_the_two_failed_job_shapes asserts the error text the reader receives. Re-read tests that drive the gate through `check_reading_text` closures (reading.rs 6245-6250) keep passing because their readings have 1 to 3 deliverables and fewer than 4 groups.",
+      "reason": null
+    },
+    {
+      "name": "check_reading_text acceptance of stored readings",
+      "dependent": "crates/athena-core/src/steward.rs:421 (`queued_work` drops a Proposed job whose latest stored reading `check_reading_text` no longer accepts) and the steward.rs:2420 test",
+      "kind": "code",
+      "test": "job_size_refusal_reaches_a_stored_reading (copy of reading.rs:8182) shows `check_reading_text` refuses with a reason containing 'one producer run' and accepts once split. A stored Proposed reading spanning four groups would leave the drain queue until re-read; this is intended and recorded in the CHANGELOG. The steward.rs:2420 test uses a small reading and keeps passing.",
+      "reason": null
+    },
+    {
+      "name": "check_reading_text output (accept or refuse: reason)",
+      "dependent": "crates/athena-cli/src/main.rs:678 (`athena check-reading`) and crates/athena-cli/tests/drain.rs:4163, 4183",
+      "kind": "code",
+      "test": null,
+      "reason": "They pass small readings and assert the first output line. The check refuses nothing below the bounds, and the reason stays one line because `check_reading_text` collapses whitespace (replay.rs:54)."
+    },
+    {
+      "name": "replay share for a new refusing check",
+      "dependent": "crates/athena-core/src/reading/replay.rs (`replay_cases`, `replay_declaration`, `replay_declaration_of` at 289-290, REPLAY_DECLARED_MARGIN_POINTS = 5 at line 161, REPLAY_REASON_ABOVE_PERCENT = 25 at line 165) and the verification replay that holds a candidate newly refusing more than the declared share plus 5 points",
+      "kind": "rule",
+      "test": "job_size_refusal_is_declared_intended (refusal_corpus.rs, modelled on line 2771) parses 'expected 6% of newly refused readings' to Some(6), the same text as accepted criterion 5, so the replay holds against 6% + 5 = 11%. The declared share is at most 25%, so no reason text is needed. Evidence: HISTORY.txt, 0 of 200 landed commits refused by groups and 2 of 200 by count (estimates).",
+      "reason": null
+    },
+    {
+      "name": "step! list of refusing_check and INPUT_FORMS",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs: `every_acceptance_check_has_a_refusing_corpus_case`, `corpus_covers_the_listed_input_forms` (INPUT_FORMS, line 90, length 52 to 56), `an_extra_check_with_no_case_is_reported` (anchor line `    step!(check_reading_references(`), `no_check_bypasses_refusing_check`, `corpus_cases_get_the_expected_outcome`, `the_wrapper_agrees_with_refusing_check_on_every_case`",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus. The new step does not touch the anchor line; the new cases give `check_job_size` a refusing case and the four tags are added to the array.",
+      "reason": null
+    },
+    {
+      "name": "order of step! lines in refusing_check",
+      "dependent": "crates/athena-core/src/reading.rs adjacency tests at about 4785, 5268, 7291, 7990 and the step-counting test near 8360",
+      "kind": "rule",
+      "test": null,
+      "reason": "The new line is second, after check_prior_result_and_scope. None of those tests pins a neighbour of that position: they pin governance to outcome_state, outcome_state to environment_reach, environment_reach to defined_terms and code_survey to history_fixture."
+    },
+    {
+      "name": "reader prompt rule lines and token budget",
+      "dependent": "crates/athena-context/src/briefs.rs:3470-3530 (`the_reader_brief_names_each_reading_rule_in_one_short_line`, READING_RULES) and `system_facts_budgets_match_computed` (reader budget 1929 of 2000)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt file is touched, so the budgets in docs/system-facts.md are unchanged. The briefs test checks a subset of the gate checks (`check_outcome_state` is absent), so a new check needs no rule line."
+    },
+    {
+      "name": "CHANGELOG.md [Unreleased] items",
+      "dependent": "crates/athena-core/src/reading.rs:8366 `scope_limit_doc_and_changelog_name_the_cause` (finds its CHANGELOG item with `.find(|i| i.contains(\"reading::check_scope_limit\"))`)",
+      "kind": "code",
+      "test": null,
+      "reason": "The new item names only `reading::check_job_size` and never the string `reading::check_scope_limit`, so the first-match lookup still finds the scope-limit item. The new item goes at the end of the same Changed list."
+    },
+    {
+      "name": "documented order of the gate",
+      "dependent": "crates/athena-core/src/reading/checks.rs `check_reading_acceptance` doc comment (line 475), `environment_reach_has_one_step_line` and `history_fixture_has_one_step_line`",
+      "kind": "code",
+      "test": null,
+      "reason": "The doc is edited in step 3 to name [`check_job_size`] second. No test pins its text apart from those two, which look for their own links; those links stay."
+    },
+    {
+      "name": "existing forecast-based size check",
+      "dependent": "crates/athena-core/src/reading.rs:330 `check_reading_size` (called at reading.rs:748 from `build_reading` before the gate)",
+      "kind": "code",
+      "test": null,
+      "reason": "Untouched. It compares the reader's own p50 wall time with the producer and verifier timeouts. The new check looks at deliverable paths in the gate and can refuse readings that pass the forecast. They do not call each other, and the tests at reading.rs:1660-1692 do not reach `refusing_check`."
+    },
+    {
+      "name": "CONFIG_FILES constant, reused read-only",
+      "dependent": "checks.rs `CONFIG_FILES` (line 577) used by `check_scope_limit`",
+      "kind": "code",
+      "test": null,
+      "reason": "The new check only reads the constant to name the config group. It is not changed, so `check_scope_limit` and its tests are unaffected."
+    },
+    {
+      "name": "configuration and CI",
+      "dependent": "docs/decisions.md, athena.toml, defaults.toml, .github/workflows",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "None is changed. No config key, workflow or check name is added or renamed, and no record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are not involved. The three check commands are unchanged."
+    },
+    {
+      "name": "producer no-change reporting",
+      "dependent": "crates/athena-core/src/run/producer.rs and run/send_back.rs",
+      "kind": "code",
+      "test": null,
+      "reason": "Untouched and out of scope. The new check acts before dispatch and reads no job state or records, only the `Reading` it is given."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Source-text tests in the in-crate tests module of reading.rs, copying `scope_limit_has_one_step_line` and `scope_limit_doc_and_changelog_name_the_cause`. The tests are added in step 5.",
+      "command": "cargo test -p athena-core job_size_",
+      "observes": "`job_size_has_one_step_line` asserts exactly one trimmed line of the `refusing_check` body equals `step!(check_job_size(reading));` and that checks.rs contains `pub fn check_job_size(reading: &Reading) -> Result<()>`. `job_size_doc_and_changelog_name_the_cause` collapses the doc comment above `check_job_size` and asserts it contains 'nothing before dispatch measured whether a request fits one producer run' and both job ids 20261025-183644-t67q and 20261017-205554-zaj2.",
+      "fails_without": "Without the function the tests do not compile. Without the step line, the one-line test fails. A doc without the root-cause sentence or the job ids fails the needle assertions.",
+      "seam": "Source text via `include_str!(\"reading/checks.rs\")` as in the existing scope-limit tests in reading.rs (exists). The tests are added by plan step 5. No double."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests build two change readings with the helper `job_size_reading(paths)` (a wrapper on `governed_reading`, added in step 4). The t67q shape: docs/decisions.md, athena.toml, .github/workflows/ci.yml, crates/athena-core/src/checks.rs, crates/athena-core/src/gh.rs, crates/athena-core/tests/nextest.rs, xtask/src/main.rs, a tests file and CHANGELOG.md. The zaj2 shape: 12 deliverables over docs, athena.toml, ci.yml, xtask, athena-data and athena-git files, plus CHANGELOG.md. Each goes through the production gate with `gate_refuser`; a second test goes through `refusing_check`.",
+      "command": "cargo test -p athena-core job_size_",
+      "observes": "`gate_refuser(&reading) == Some(\"check_job_size\")` for both shapes. `check_job_size(&reading).unwrap_err().to_string()` contains 'one producer run', 'split', 'surface', 'dependency' and 'out_of_scope', and lists the groups found. `job_size_refusal_needs_the_step_line` asserts the gate result is `Some(\"check_job_size\")` through `refusing_check`.",
+      "fails_without": "Without the `step!` line `gate_refuser` returns another refuser or None and `assert_eq!` fails. With the group bound raised to 4 both shapes are accepted and the test fails. Counting config and ci as one group also fails it.",
+      "seam": "Production entry points `athena_core::reading::refusing_check` (checks.rs:518), reached through `gate_refuser` (reading.rs:7049, exists), and `check_job_size` (step 2). Fixtures `governed_reading` (reading.rs:4401) and `limited` (reading.rs:8099) exist. `job_size_reading` is added in step 4. The fixture builds input data only; no double is injected."
+    },
+    {
+      "criterion": 3,
+      "method": "`job_size_bound_is_general`, `job_size_accepts_landed_shapes` and `job_size_refuses_the_backstop_landed_shape` call `check_job_size` and `gate_refuser`. Refused: 31 non-changelog deliverables in one crate (count alone, one group); docs + athena.toml + a workflow + a crate file (groups alone, 4 files); the same list with `crates/athena-core/src/` as a directory deliverable; a root `.` deliverable; the 31 non-changelog paths of landed commit 6e7fd3a copied from HISTORY.txt lines 780-811 (3 groups, refused by count, so the figure in the doc is executed). Accepted: a focused docs + one crate file + CHANGELOG reading; exactly 30 deliverables in one crate; config, ci and code (3 groups); `./docs/a.md` and `docs/a.md` as one group; CHANGELOG.md counted neither as a deliverable nor as the docs group; a study reading with 40 deliverables; a reading with a question and 40 deliverables; path lists from landed commits a5c938c, 97d1e5c, d6d2ad1, dd4d76d, 6f1b5f1, 0cd0111 and eab5d6c.",
+      "command": "cargo test -p athena-core job_size_",
+      "observes": "Refused readings return an error naming the crossed bound ('31 deliverables, bound 30' or '4 groups, bound 3') and listing the groups. Accepted readings return Ok, and `gate_refuser` is None for the in-bound change readings.",
+      "fails_without": "A check that tested only the two job shapes fails the count-alone case. A check that ignored groups fails the 4-file refusal. A check that ignored `capability` or `question` fails the skip cases. A check that counted CHANGELOG.md fails the at-the-bound case. A per-surface bound fails the landed-shape cases (dd4d76d, d6d2ad1).",
+      "seam": "Production entry points `check_job_size` (step 2) and `refusing_check`. Fixtures `governed_reading`, `scoped_reading` (reading.rs:3545) and `limited` exist; `reading.capability = Some(\"study\")` and `reading.question = Some(..)` are set on the fixture as in the existing scope-limit unaffected cases. Landed path lists are inline test data copied from HISTORY.txt. No double."
+    },
+    {
+      "criterion": 4,
+      "method": "Add `job_size_cases()` to refusal_corpus.rs and wire it into `cases()`. Input forms and case ids (each from the existing `case()` and `base_reading()` fixtures with `c.reading.deliverables` replaced, as `history_case` does): the t67q shape (4 groups) -> `job-size-four-groups-t67q` (new; Refuse check_job_size); the zaj2 shape (12 deliverables, 4 groups) -> `job-size-four-groups-zaj2` (new; Refuse); 31 files in one crate -> `job-size-over-count` (new; Refuse); a directory or root deliverable hiding groups -> `job-size-directory-deliverable` (new; Refuse); a landed 9-file one-crate shape from HISTORY.txt a5c938c -> `job-size-within-bounds-landed` (new; Accept); config, ci and code, 3 groups -> `job-size-three-groups-accepted` (new; Accept). A dash-bullet request form is covered by the existing `base_reading()` cases. Crate-relative paths and `./` prefixes are handled by `normalized_path` (checks.rs:775) and have a unit case in step 5. A retry complaint, brand word, environment variable or job-citing request is not read by this rule, which looks only at deliverable paths, so it needs no case. I read the corpus structure (`INPUT_FORMS`, `cases()`, `scope_limit_cases` near line 333) and cite only those names; I cannot run the tests.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "Each new refusing case yields `check_job_size` as the refuser through `refusing_check`; the accepting cases yield Accept. `every_acceptance_check_has_a_refusing_corpus_case` finds `step!(check_job_size` and a refusing case. `INPUT_FORMS` gains four tags (`job-size-four-groups`, `job-size-over-count`, `job-size-directory-deliverable`, `job-size-within-bounds`), length 52 to 56, checked by `corpus_covers_the_listed_input_forms`. The existing gate-order tests in reading.rs still pass: none pins the new second position.",
+      "fails_without": "Without the `step!` line the refusing cases are accepted and `corpus_cases_get_the_expected_outcome` fails. Without the cases, `every_acceptance_check_has_a_refusing_corpus_case` fails with 'no corpus case in which [\"check_job_size\"] refuses'.",
+      "seam": "Production entry point `athena_core::reading::refusing_check`, imported at refusal_corpus.rs:52 (exists). `job_size_cases()` and the four tags are added in step 6. No double."
+    },
+    {
+      "criterion": 5,
+      "method": "A unit test pins the doc comment and the CHANGELOG item; a corpus test pins that the declaration parses to the stated share. Both use the accepted criterion 5 text unchanged: 'expected 6% of newly refused readings, an estimate and not a measurement'.",
+      "command": "cargo test -p athena-core job_size_ && cargo test -p athena-core --test refusal_corpus job_size_refusal_is_declared_intended",
+      "observes": "The doc comment above `check_job_size` and the CHANGELOG.md [Unreleased] item containing `reading::check_job_size` both contain: the root-cause sentence, 'higher refusal rate is intended', 'expected 6% of newly refused readings', 'estimate', 'HISTORY.txt', 'only a reading that spans all four groups', 'more than 3 groups', '30 deliverables', '2 of 200', 'check_reading_size' and 'producer no-change guard'. The corpus test asserts `replay_declaration(&[criterion with that sentence], &[]).share == Some(6)`, modelled on `design_existing_code_refusal_is_declared_intended` (refusal_corpus.rs:2771).",
+      "fails_without": "A CHANGELOG item without the cause, the bound, the complements or the share fails the needle assertions. A doc without 'This check refuses more readings; the higher refusal rate is intended.' fails the pin. A share written as 4% fails `Some(6)`.",
+      "seam": "`include_str!(\"reading/checks.rs\")` and `include_str!(\"../../../CHANGELOG.md\")` as in the scope-limit doc test (exist). `athena_core::reading::replay_declaration` is public and used at refusal_corpus.rs:2773 (exists). Tests are added in steps 5 and 7. No double."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three gate commands Athena runs on the result.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. This covers every existing test that reaches the gate (reading.rs gate tests, run/tests.rs, steward.rs, athena-cli drain.rs, the briefs test that lists reading checks).",
+      "fails_without": "A formatting slip, a clippy lint (an unused constant or helper), or an existing reading now refused as too large fails it.",
+      "seam": "The cargo commands themselves; nothing is injected."
+    }
+  ],
+  "open_questions": [
+    "User: Criterion 3 asks that many deliverables in one crate are refused on count alone. HISTORY.txt shows landed single commits with 13, 21, about 27, 31 (6e7fd3a) and 48 (9a97e24) non-changelog paths. The backstop is set at 30 and refuses 2 of 200 landed commits (9a97e24 and 6e7fd3a). Do you accept 30, or do you want a lower count with more measured false refusals, or a bound above 31 that refuses only 9a97e24?"
+  ],
+  "producer_section_sha256": "5b05975d22b6b1f2c4e16d27eef2ad8575f70c4bf32688cb36982395422ffb7b"
+}

@@ -240,6 +240,31 @@ The tests that call real models are opt-in: `cargo test -p athena-cli --test liv
 --test-threads=1` (a few cents with Haiku). The last step of accepting v0 is closing the bootstrap range:
 see "Closing the bootstrap" in [`docs/records.md`](docs/records.md).
 
+## What can be changed
+
+No part of Athena's design is fixed: its code, rules, roles, prompts and docs can all be changed by a job.
+A change is an ordinary request through the same pipeline as any other (`athena ask`, described under "What
+happens when you ask" above). Where a design choice changes, the decision log records it as a new entry that
+supersedes the old one, because accepted entries are never rewritten
+([`docs/decisions.md`](docs/decisions.md), "How entries change").
+
+Admission refuses a candidate that touches the paths below. The list comes from
+[`crates/athena-core/src/admission.rs`](crates/athena-core/src/admission.rs) (lines 5 and 9) and
+[`.gitattributes`](.gitattributes); [D09 in `docs/decisions.md`](docs/decisions.md) calls these paths
+unchangeable by jobs.
+
+- Anything under `records/`: immutable JSON files (admission.rs line 5; D06 in `docs/decisions.md`).
+- Any path marked `athena-readonly` in `.gitattributes` (admission.rs line 5): `/BRIEF.md`, the requirements,
+  and `/LICENSE`. Agents read them; no job may change them.
+- Any path marked `athena-exclude` in `.gitattributes` (admission.rs line 5): `/CLAUDE.md`, private to the
+  repository owner and never shown to an agent.
+- Any change to how a path is classified (admission.rs line 9). `.gitattributes` holds the classification, so
+  a job cannot edit it or add a new `athena-readonly` or `athena-exclude` path.
+
+Other admission refusals (a submodule, an oversized file, an email address or secret, a configuration file
+that does not parse, a governance file the reading does not list) are conditions on a change, not parts of
+the design a job cannot change; admission.rs line 17 explains the governance-file rule.
+
 ## Picking up the work
 
 Nothing about the state of the work lives in a hand-maintained file. A new context needs this page, then

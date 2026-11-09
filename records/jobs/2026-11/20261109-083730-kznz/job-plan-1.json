@@ -1,0 +1,294 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261109-083730-kznz",
+  "round": 1,
+  "at": "2026-11-09T09:19:16.456094902Z",
+  "invocation_seq": 2,
+  "approach": "Add a reading check `check_reader_question(reading: &Reading) -> Result<()>` in the new `crates/athena-core/src/reading/questions.rs`. It is declared in `reading.rs` (`mod questions; pub use questions::*;`) and run as the first `step!(check_reader_question(reading));` line of `refusing_check` in `reading/checks.rs`. That is where every reading-text rule runs: `read_for` reaches it through `check_reading_acceptance` (reading.rs:680) right after `build_reading`, so it covers the production path. `check_reading_text` (replay, `athena check-reading`, steward queue) and the refusal corpus reach it the same way. A reading with no question passes. A question is accepted only when it (1) begins `User:` (same normalisation as `admission::has_addressee`; `Host:` is not accepted, because the reader's question goes to the customer), (2) does not say the code answers it (reuse `says_code_answers`), (3) holds at least two distinct, non-empty alternatives labelled `(a)`, `(b)` or `(1)`, `(2)`, and (4) ends with `Default: (x)` where `(x)` is one of those labels. If not, the check bails with one message that lists every gap, the question, and the repair: settle it from the repository or defaults and leave `question` null, or rewrite it as `User:` + the decision + labelled alternatives + `Default: (x)`, with an example. `admission.rs` only widens visibility (`pub(crate)`) of `has_addressee` and `says_code_answers` and adds a small `pub(crate)` helper that tests for the `User:` prefix by the same normalisation. Planner open-questions behavior is unchanged. Unit tests, corpus cases (15 new input forms), the existing question tests (updated to the new format), a CHANGELOG entry and a design-doc paragraph complete it. A malformed first question costs one extra reader call, because `read_for` re-reads once with the refusal as a correction (reading.rs:489-514); the prompts stay untouched.",
+  "decisions": [
+    {
+      "choice": "Run the rule as a `step!` in `refusing_check` (checks.rs:518-547), first in the list, not as a bail inside `build_reading`.",
+      "reason": "All reading-text rules live there. `no_check_bypasses_refusing_check` and `every_acceptance_check_has_a_refusing_corpus_case` (refusal_corpus.rs:2730, 2963) enforce it. `check_reading_text` (replay.rs:54; used by steward.rs:421 and `athena check-reading`) goes only through `refusing_check`, so a check in `build_reading` would be invisible to the replay that holds over-refusing jobs. `read_for` runs `build_reading` then `check_reading_acceptance` back to back (reading.rs:659-689), so the production path is the same. First place: the other checks skip a reading with a question or do not care, so the cheap question fix comes before other repairs and saves a reader round.",
+      "rejected": [
+        {
+          "option": "Call the rule from inside `build_reading` (the wording of criterion 1)",
+          "why": "It would skip `check_reading_text`, the replay and the corpus mechanism, and the corpus test would flag a check outside `refusing_check`. `build_reading` is still on the path, since it builds the reading the step checks."
+        },
+        {
+          "option": "Put it last in `refusing_check`",
+          "why": "A reading with a bad question and another defect would be refused for the other defect first, costing an extra reader round."
+        }
+      ]
+    },
+    {
+      "choice": "Require `User:` only; `Host:` is refused for the reader's question. Reuse `has_addressee` normalisation through a `pub(crate)` helper in admission.rs.",
+      "reason": "Criterion 1 says a question that does not begin with `User:` is refused. The reader's question is shown to the customer (display.rs:392) and answered with `athena correct` (reading.rs:1202), so a host fact is not his decision. Sharing the normalisation (leading whitespace, `*`, `_`, backticks, case; `Username:` does not match) keeps one definition.",
+      "rejected": [
+        {
+          "option": "Accept `User:` or `Host:` as the planner does",
+          "why": "Contradicts criterion 1, and a host fact is for the repository or defaults, not the customer."
+        },
+        {
+          "option": "Copy the prefix code into reading/questions.rs",
+          "why": "Two definitions can drift; the brief asks for reuse."
+        }
+      ]
+    },
+    {
+      "choice": "Detect alternatives by explicit labels `(a)`/`(b)` (or `(1)`/`(2)`), at least 2 distinct labels with non-empty, distinct text, and a default as `Default:` followed by one of those labels. The error shows the exact form.",
+      "reason": "The check is deterministic and the finding can state the exact form the reader must write. Labels avoid guessing whether 'X or Y' is a real choice. The example in criterion 2 uses this form.",
+      "rejected": [
+        {
+          "option": "Count the word 'or' or question marks",
+          "why": "A crude heuristic: 'hello or hi' passes with no default named, and 'is this ok or not' counts as two alternatives."
+        },
+        {
+          "option": "Accept `a)`, `1.` or prose 'either X or Y' as well",
+          "why": "More forms mean more false accepts and a longer parser. The finding names the single accepted form, so a retry succeeds; a corpus case pins the unlabelled-'or' form as refused."
+        }
+      ]
+    },
+    {
+      "choice": "Do not touch prompt files or the `question` schema description (outputs.rs:28); the refusal message carries the format.",
+      "reason": "Out of scope: reader headroom is 71 tokens (system-facts budget reader 1929 of 2000). The refusal is fed back to the reader once (reading.rs:489-514).",
+      "rejected": [
+        {
+          "option": "Add the format to the reader frame",
+          "why": "Out of scope; risks the 2000-token budget test `system_facts_budgets_match_computed`."
+        }
+      ]
+    },
+    {
+      "choice": "Add `crates/athena-core/src/reading/checks.rs` to the files although the brief's deliverable list omits it.",
+      "reason": "The `step!` line must be in `refusing_check`, which is defined in checks.rs:518. No other placement satisfies the corpus mechanism. checks.rs is not a governance file.",
+      "rejected": [
+        {
+          "option": "Define `refusing_check`'s step elsewhere",
+          "why": "`refusing_check` is the single gate function; `no_check_bypasses_refusing_check` forbids direct calls."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/questions.rs",
+      "action": "create",
+      "purpose": "`check_reader_question` with its doc comment (root cause, declared 3% estimate, intended higher refusal rate, why), the parser for labelled alternatives and the `Default:` clause, and the error text. Starts with `use super::*;`.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `mod questions;` and `pub use questions::*;` next to the other child modules (lines 57-71). Update the order sentence in the `check_reading_acceptance` doc. Update the gate-reaching question tests (5787, 5958, 6048, 6179, 6983, 7942, 8557) to a shared valid `User:` question. Add the unit tests for accept, refuse, error text, no-question and the `build_sized` path.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "purpose": "Add `step!(check_reader_question(reading));` as the first line of `refusing_check` and mention it first in the `check_reading_acceptance` doc (lines 475-489). Not in the brief's deliverable list; required because `refusing_check` is defined here.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Make `has_addressee` and `says_code_answers` `pub(crate)` and add a `pub(crate)` helper that tests for the `User:` prefix by the same normalisation. `open_questions_findings` behavior is unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add the 15 input-form tags to `INPUT_FORMS`, a `question_cases()` table of 15 cases added to `cases()`, `include_str!(\"../src/reading/questions.rs\")` in `reading_source()`, and the tests `reader_question_check_is_wired_into_the_gate`, `reader_question_refusal_is_declared_intended` and `reader_question_rule_is_recorded_in_the_docs`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Under `## [Unreleased]` / `### Added`, an entry naming `check_reader_question`, the root cause, the required question form, 'the higher refusal rate is intended', 'expected 3% of newly refused readings' and that it is an estimate.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "purpose": "After the open-questions paragraph (line 102), a paragraph recording that the reader's `question` follows the same addressee rule as the planner's open questions (`User:` only), with at least two labelled alternatives and a `Default:`, and that a question the code answers is refused.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "admission.rs: change `has_addressee` and `says_code_answers` to `pub(crate)`. Add `pub(crate) fn is_user_addressed(question: &str) -> bool`, sharing the whitespace/`*`/`_`/backtick/lowercase normalisation with `has_addressee` (factor out one private `fn normalised(question: &str) -> String`). Add no change to `open_questions_findings`.",
+    "Create reading/questions.rs: `use super::*;` and `use crate::admission::{is_user_addressed, says_code_answers};`. Write `pub fn check_reader_question(reading: &Reading) -> Result<()>` with a doc comment directly above it (no attribute between) in one `///` paragraph: the root cause (the reader's `question` was ungated free text, outputs.rs:28, so questions the repository or defaults could settle reached the customer with no alternatives or default); the accepted form; 'This check refuses more readings; the higher refusal rate is intended, because questions the repository or defaults could settle cost the customer time. The declared share, expected 3% of newly refused readings, is an estimate, not a measurement.'; and the limits (labelled alternatives only; the `User:` prefix is a declaration, not proof). Return Ok when `reading.question` is `None`. Otherwise collect gaps in this order: no `User:` prefix; says the code answers it; fewer than 2 distinct non-empty alternatives; no `Default:` clause naming one of the alternatives' labels. Parse as follows. Take the text after the prefix. Split at the last ASCII-case-insensitive `default:`, using `to_ascii_lowercase` offsets. In the head, find `(x)` tokens (one ASCII letter or 1-2 digits in parentheses) and take the text up to the next token, trimmed of whitespace, `,;?.` and a trailing 'or'. In the tail, require a label token that matches an alternative's label. Keep helpers small. Bail with: the refusal intro, the gaps joined with '; ', the quoted question, and the repair: settle it from the repository or the defaults and record the answer as an assumption, leaving `question` null; otherwise rewrite as `User:` + the decision + alternatives labelled `(a)`, `(b)` + `Default: (a)`, with the example `User: Which greeting: (a) hello or (b) hi? Default: (a).`",
+    "reading.rs: add `mod questions;` and `pub use questions::*;` to the module list (lines 57-71).",
+    "reading/checks.rs: insert `step!(check_reader_question(reading));` as the first step line of `refusing_check`, before `check_prior_result_and_scope`. Update the `check_reading_acceptance` doc (lines 475-489) to name it first ('the reader's question, if any ([`check_reader_question`])'). Do not call it directly anywhere else.",
+    "reading.rs tests: add `const VALID_QUESTION: &str = \"User: Which greeting: (a) hello or (b) hi? Default: (a).\"` (or a file-specific question) and use it in the gate-reaching tests at the lines listed in files (5787, 5958 incl. the `{word}` loop, 6048, 6179, 6983, 7942, 8557). Leave tests that call one check directly (4299, 4761, 5023, 7265, 7588, 8155) unchanged.",
+    "reading.rs tests: add `reader_question_accepts_a_user_decision_with_alternatives_and_a_default` (also numbered `(1)`/`(2)`, `**User:**`, `user:`); `reader_question_refuses_a_question_missing_any_one_part` (build each variant by deleting one part from the accepted question and assert `refusing_check` names `check_reader_question` and the error names that gap); `reader_question_error_tells_the_reader_what_to_write`; `a_reading_without_a_question_is_not_checked_by_the_question_rule`; and `a_free_form_question_from_the_reader_is_refused_after_build_reading` (set `v[\"question\"]` of `sized_reading(30.0, Some(\"study\"))`, call `build_sized`, then `check_reading_acceptance`).",
+    "refusal_corpus.rs: add `include_str!(\"../src/reading/questions.rs\")` to `reading_source()` before reading.rs. Add `question_cases()` and extend `cases()`. Each case is made with `case(id, source, forms, \"Update the guide.\", 0, expected)` and `c.reading.question = Some(...)`; `Refuse` cases expect `\"check_reader_question\"`. Add the 15 tags to `INPUT_FORMS` (52 -> 67) and use them in the cases (see the corpus map). Add tests `reader_question_check_is_wired_into_the_gate`, `reader_question_refusal_is_declared_intended` (modeled on `history_fixture_refusal_is_declared_intended`, 2916, with share 3, the doc needles and the changelog needles) and `reader_question_rule_is_recorded_in_the_docs` (`include_str!(\"../../../docs/design/job-planning.md\")` and CHANGELOG, whitespace-collapsed).",
+    "CHANGELOG.md: add the entry at the top of `### Added` under `## [Unreleased]` (line 66). It names `reading::check_reader_question`, the first `step!` in `refusing_check`, the root cause, the accepted question form, 'the higher refusal rate is intended' and 'expected 3% of newly refused readings' as an estimate, and the existing tests changed.",
+    "docs/design/job-planning.md: after the open-questions paragraph (ends line 102) add one paragraph: the reader's `question` follows the same addressee rule as the planner's open questions (`User:` only; same prefix normalisation; code-answers phrases refused), and also needs at least two labelled alternatives and a `Default:` the job runs on if unanswered; it names `check_reader_question` and the corpus cases. Keep the ontology marker phrases untouched.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-core` and `cargo test --locked`; fix any failure by correcting the rule or fixtures, not by weakening an assertion."
+  ],
+  "risks": [
+    {
+      "risk": "The reader does not know the required form before its first question, so every first question is refused once and `read_for` re-reads with the refusal (one extra reader call, reading.rs:489-514).",
+      "mitigation": "The error text carries the form and an example. If the second reading still has a malformed question, the job stops with the existing refusal path. The open question offers a schema-description follow-up."
+    },
+    {
+      "risk": "Label parsing is rigid: `a)`, `1.` lists or prose 'either X or Y' are refused as having no alternatives, and a `Default:` placed before the alternatives is refused.",
+      "mitigation": "Rigidity is deliberate (criterion 1 asks for a checkable form). Corpus cases pin the refused forms, and the refusal text names the one accepted form."
+    },
+    {
+      "risk": "`says_code_answers` matches phrases such as 'in the code' inside a legitimate alternative, so a real decision is refused.",
+      "mitigation": "Same phrase list and limits as the planner rule (admission.rs:559); the repair text says to rewrite the alternative. A corpus case pins one phrase."
+    },
+    {
+      "risk": "Stored readings with free-form questions made before this change are refused by `check_reading_text`, so the steward leaves such a proposed job out of the drain until `athena go` (steward.rs:399).",
+      "mitigation": "This is the existing handling of a reading that fails a check and a re-read from `athena go` fixes it. The 3% declared share is an estimate, not measured; the replay at verification measures the real share."
+    },
+    {
+      "risk": "The step goes in checks.rs, which the brief's deliverable list omits, so Athena may report it as a minor scope finding.",
+      "mitigation": "Reason recorded in decisions: `refusing_check` is defined in checks.rs and the corpus rule forbids any other call site."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusing_check / check_reading_acceptance gain a first step",
+      "dependent": "crates/athena-core/src/reading.rs `read_for` (line 472, `check_reading_acceptance` call at 680) and `ask`/`go`/`correct` readers that call `read_for`",
+      "kind": "code",
+      "test": "New gate tests in reading.rs (`reader_question_*`, `a_free_form_question_from_the_reader_is_refused_after_build_reading`) and `cargo test -p athena-core`. A refusal becomes `ReadError::Refused`, and `read_for` re-reads once with it (reading.rs:489-514); a first-attempt reading with no question is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "check_reading_text outcome for a stored reading with a question",
+      "dependent": "crates/athena-core/src/steward.rs `queued_work` (line 421) via `check_reading_text`",
+      "kind": "code",
+      "test": "cargo test -p athena-core steward (including `a_stored_reading_that_fails_a_reading_check_is_left_for_a_person`)",
+      "reason": "A proposed job whose stored reading has a free-form question is now left out of the drain until a person runs `athena go`, which is the existing rule for any reading that fails a check (steward.rs:399). No steward test stores a reading with a question (grep of `question` in steward.rs found only the work-item field and `question: None`)."
+    },
+    {
+      "name": "check_reading_text / athena check-reading output",
+      "dependent": "crates/athena-cli/src/main.rs `athena check-reading` (line 678) and crates/athena-cli/tests/drain.rs (lines 4139-4183, `check_reading_text`)",
+      "kind": "code",
+      "test": "cargo test --locked (athena-cli drain and check-reading tests)",
+      "reason": "Their fixtures have `question: None` (athena-cli/tests/common/mod.rs:327 `\"question\": null`), so they are accepted as before."
+    },
+    {
+      "name": "Replay hold: newly refused share of accepted readings",
+      "dependent": "crates/athena-core/src/run/tests.rs lines 1813-1820 and 2138 (replay checkers built on `check_reading_text`) and crates/athena-core/src/run/mod.rs lines 311, 2224, 2356 (`replay_declaration_of`, effective share)",
+      "kind": "code",
+      "test": "cargo test -p athena-core run:: and `reader_question_refusal_is_declared_intended`",
+      "reason": "The job's own criterion 3 declares 'expected 3% of newly refused readings', read by `replay_declaration_of`. The 3% is an estimate, not a measurement, and is stated as such. Run-test readings use `question: None` (run/tests.rs:1748)."
+    },
+    {
+      "name": "Corpus coverage rules: every `step!` needs a refusing case; `INPUT_FORMS` array length",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs mechanism tests: `every_acceptance_check_has_a_refusing_corpus_case` (2730), `an_extra_check_with_no_case_is_reported` (2751, anchor `step!(check_reading_references(` unchanged), `corpus_covers_the_listed_input_forms` (2651, `INPUT_FORMS` length), `the_wrapper_agrees_with_refusing_check_on_every_case` (2626), `no_check_bypasses_refusing_check` (2963), `reading_source()` (2670, `include_str!` list)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus (new cases refuse by `check_reader_question`; `INPUT_FORMS` grows from 52 to 67 and its type is updated; `include_str!(\"../src/reading/questions.rs\")` is added to `reading_source()` so the doc-comment tests find the function)",
+      "reason": null
+    },
+    {
+      "name": "Order and count of `step!(check_` lines in refusing_check",
+      "dependent": "crates/athena-core/src/reading.rs tests that split source at `pub fn refusing_check(` and compare `step!(check_...)` order (lines 4771-4790, 5253-5270, 7276-7314, 7975-8013, 8354-8360)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core reading:: (the doc and order tests named above)",
+      "reason": "These tests assert relative positions of other steps and that a given step appears once; a new first line does not change those relative positions."
+    },
+    {
+      "name": "Existing short-question fixtures",
+      "dependent": "crates/athena-core/src/reading.rs tests that set `question` and call a single check directly (4299, 4761, 5023, 7265, 7588, 8155)",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading::",
+      "reason": "They call `check_prior_result_and_scope`, `check_outcome_state`, `check_environment_reach`, `check_defined_terms` and `check_scope_limit` directly; those functions still return Ok for a reading with a question, so they pass without edits. They are left as is, to keep the diff small. Only gate-reaching tests (5787, 5958, 6048, 6179, 6983, 7942, 8557) are edited."
+    },
+    {
+      "name": "Text of Reading.question as stored and displayed",
+      "dependent": "crates/athena-core/src/reading.rs line 2757 (`plan_entry` open_questions test) and crates/athena-core/src/reading/topics.rs:396, crates/athena-cli/src/display.rs:392, crates/athena-context/src/briefs/reader.rs:472",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading:: and cargo test -p athena-data",
+      "reason": "They only copy or print the question. The record shape (athena-data records.rs:462) is unchanged and no data file is added, so `check_record_file`, `AnyRecord` and the round-trip test are unaffected. Stored questions are never rewritten."
+    },
+    {
+      "name": "has_addressee and says_code_answers (visibility widened, one helper added)",
+      "dependent": "crates/athena-core/src/admission.rs `open_questions_findings` (line 524, called from `plan_findings`)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus open_question_cases_get_the_expected_outcome (planner outcomes, including `Username:` and the code-answers phrases, are unchanged)",
+      "reason": null
+    },
+    {
+      "name": "Prompt-set token sizes",
+      "dependent": "Reader prompt budget: docs/system-facts.md `budget reader: 1929 of 2000` and test `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt file, brief or schema description is edited, so the computed sizes and the six system-facts budget lines are unchanged."
+    },
+    {
+      "name": "Marker phrases in job-planning.md",
+      "dependent": "docs/ontology.toml markers into docs/design/job-planning.md (lines 36-41)",
+      "kind": "rule",
+      "test": "cargo test --locked (xtask ontology test)",
+      "reason": "The doc change only adds a paragraph after the open-questions paragraph (line 102); the marker phrases ('a planner and a critic before the producer', 'planning is turned off', 'planning for hard jobs only') are not edited."
+    },
+    {
+      "name": "Governance and host configuration",
+      "dependent": "athena.toml, defaults.toml, workflows, CI",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No key is added or changed (consumers: none found), so no config deliverable exists. The gate commands are the existing fmt, clippy and test checks."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new corpus-file test reads the gate's source and shows the rule is defined and run as a step. Run the unit tests of the same rule as well.",
+      "command": "cargo test -p athena-core --test refusal_corpus reader_question_check_is_wired_into_the_gate",
+      "observes": "The test passes. It asserts that `reading_source()` contains `pub fn check_reader_question(` (defined in questions.rs, which step 7 adds to the `include_str!` list), and that `acceptance_check_names(reading_source())` contains `check_reader_question`. That list is read from the `step!(check_...` lines of `refusing_check`, and the step appears once. `every_acceptance_check_has_a_refusing_corpus_case` passes in the same run.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in reading.rs drive the production gate `check_reading_acceptance` and `refusing_check` with real `Reading` values; corpus cases drive the same gate. One test goes through the real `build_reading` first. Each refused variant differs from the accepted question by exactly one part.",
+      "command": "cargo test -p athena-core",
+      "observes": "All tests pass, including `reader_question_accepts_a_user_decision_with_alternatives_and_a_default` (`User: Which greeting: (a) hello or (b) hi? Default: (a).` accepted; numbered `(1)`/`(2)` and `**User:**` forms accepted) and `reader_question_refuses_a_question_missing_any_one_part` (no `User:` prefix, `Host:`, `Username:`, no alternatives, one alternative, duplicate alternatives, no `Default:`, a default naming no alternative, and 'by reading the code' each refused by `check_reader_question`). `a_reading_without_a_question_is_not_checked_by_the_question_rule` shows a `None` question is accepted. `a_free_form_question_from_the_reader_is_refused_after_build_reading` builds a reading through `build_sized` with `question: \"which file?\"` and shows `check_reading_acceptance` refuses it. `corpus_cases_get_the_expected_outcome` also runs.",
+      "fails_without": "Without the step, the free-form, `Host:`, no-alternative and no-default questions would be accepted and the refusing tests would fail. With a step that refused every question, the accepted-variant test would fail.",
+      "seam": "Production entry points `check_reading_acceptance` and `refusing_check` (checks.rs:490, 518) and `Athena::build_reading` through the existing `build_sized` helper (reading.rs:1623, which uses `make_athena` and never runs an agent). Fixtures: existing `scoped_reading`/`governed_reading` in reading.rs tests and `base_reading` in refusal_corpus.rs, with `.question` set. These exist; no double holds rule logic. The new check function and corpus cases are added by steps 2-9."
+    },
+    {
+      "criterion": 3,
+      "method": "A corpus-file test reads the doc comment of `check_reader_question` and CHANGELOG.md, and reads the declared share the same way the replay does.",
+      "command": "cargo test -p athena-core --test refusal_corpus reader_question_refusal_is_declared_intended",
+      "observes": "The test passes. `replay_declaration` of a criterion 'expected 3% of newly refused readings' gives share 3. The doc comment (collapsed `///` lines above `pub fn check_reader_question(`) contains 'This check refuses more readings; the higher refusal rate is intended', 'expected 3% of newly refused readings', 'estimate', and the cause: questions the repository or defaults could settle cost the customer time. The CHANGELOG contains `check_reader_question`, 'higher refusal rate is intended' and 'expected 3% of newly refused readings'.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "A unit test refuses a free-form question through the gate and asserts what the error text tells the reader.",
+      "command": "cargo test -p athena-core reader_question_error_tells_the_reader_what_to_write",
+      "observes": "The test passes. The error from `check_reading_acceptance` for `User: Which file?` names each gap ('alternatives', 'default'). It quotes the question. It says to settle the question from the repository or the defaults and leave `question` null. It gives the form `User:` + the decision + the alternatives labelled `(a)`, `(b)` + `Default: (a)`, with the example `User: Which greeting: (a) hello or (b) hi? Default: (a).`. A second case with several gaps shows that all of them are listed.",
+      "fails_without": "A refusal that only said 'question refused' would lack the settle-it and required-form phrases the test asserts, so the test would fail.",
+      "seam": "Production entry `check_reading_acceptance` (checks.rs:490) with a `Reading` from the existing `scoped_reading` helper; the refusal text is produced by the new `check_reader_question` (step 2). No double."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the project's fmt and clippy checks and the updated reading tests. The questions in every existing test that reaches the gate (reading.rs lines 5787, 5958, 6048, 6179, 6983, 7942, 8557 as of the base snapshot) are changed to a valid `User:` question.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Clippy exits clean. Also run `cargo fmt --all --check` (no diff) and `cargo test -p athena-core reading::` (the updated tests that set `question` pass, and tests that call a single check directly keep passing). `cargo test --locked` shows the other crates are unaffected.",
+      "fails_without": "Without the test updates, `check_reading_acceptance(&asking, ...).unwrap()` at reading.rs:5788 and the other gate-reaching question tests would fail with the new refusal; the commands show they now pass.",
+      "seam": "Production entry `check_reading_acceptance`/`refusing_check`; existing tests are edited to set a valid question constant (one shared `const VALID_QUESTION` in the reading.rs test module, added in step 8). No double."
+    },
+    {
+      "criterion": 6,
+      "method": "A corpus-file test reads CHANGELOG.md and docs/design/job-planning.md (via `include_str!`) and asserts the recorded text.",
+      "command": "cargo test -p athena-core --test refusal_corpus reader_question_rule_is_recorded_in_the_docs",
+      "observes": "The test passes: CHANGELOG.md (whitespace collapsed) contains `check_reader_question`; docs/design/job-planning.md (collapsed) contains 'reader_question', 'same addressee rule as the planner', 'open questions', 'alternatives' and 'Default:'.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: Should the first reading be right without a retry, by adding the required question form to the `question` field description in crates/athena-context/src/outputs.rs:28 (a schema description, not a prompt file)? (a) leave it for a follow-up job; the refusal message teaches the form and `read_for` re-reads once (cost: one extra reader call whenever the first question is malformed). (b) add it in this job (risk: the schema text may be pinned by outputs tests and counts toward the reader brief size). Default: (a)."
+  ],
+  "producer_section_sha256": "c84e5f0d88498db3e268fe5dac625770da1f36fae7f515838f3885359885503a"
+}

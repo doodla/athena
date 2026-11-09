@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261017-205554-zaj2",
+  "round": 1,
+  "at": "2026-11-09T07:28:36.11229656Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/checks.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/checks.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/scope_guard.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/scope_guard.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "blocker",
+      "summary": "Hiding other studies breaks the repository's own test check inside study-job snapshots",
+      "evidence": "The study capability runs `cargo test --locked` as a check (athena.toml:122-125). Candidate checks run in the verifier snapshot: mod.rs:1936-1943 builds check_env with snapshot: vsnap.dir(). The producer also runs cargo test in its own snapshot. Under the plan, a study job for hermes-agent hides studies/firstmate-work-handling from both snapshots. Then drain.rs:6948 `read_dir(\"../../studies/firstmate-work-handling\").unwrap()` panics, and site_page.rs `read_to_string(root().join(STUDY)...)` with STUDY = \"studies/firstmate-work-handling\" panics. The plan's new criterion 1 test uses include_str! of studies/firstmate-work-handling/pin.json in athena-core, so athena-core's tests would not compile in such a snapshot. Baseline checks (checks.rs:955, given &[]) would pass on the full tree, so the gate would blame the candidate. The feature's main use case, a Hermes study job, would always fail its checks. Fix: Choose how checks coexist with hiding, and add a criterion for it. Options: (a) run the gate checks in a full, non-agent snapshot while only the agents' view hides; also decide what the producer's own cargo test runs against. (b) Move test fixtures out of studies/ (for example, a minimal fixture study under crates/*/tests/fixtures), and have the criterion 1 test read firstmate's pin through the test repository's git instead of include_str!. Then add a demonstration: a study job naming b in a repository whose test reads studies/a still passes its checks, or the plan states and tests the chosen behavior.",
+      "location": "Approach / Steps 2, 5 and 7; crates/athena-cli/tests/drain.rs:6948; xtask/tests/site_page.rs:11,20; plan's criterion 1 test (include_str! of studies/firstmate-work-handling/pin.json)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Dependents list omits the readers of studies/ content that the hidden snapshot affects",
+      "evidence": "Grep for `studies/` in *.rs finds readers of the real study directory: crates/athena-cli/tests/drain.rs:6948, xtask/tests/site_page.rs:11, and xtask/src/site.rs:17 (STUDY_DIR, the site generator). None appear in the dependents list. The only snapshot-content dependents listed are cap-study rules and system-facts wording. Fix: List each of these readers with how it behaves in a hidden study snapshot and the test that shows it, after deciding the fix for the blocker above.",
+      "location": "Dependents",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The reader's request-text heuristic hides studies from change jobs, and the change-job test skips the reader",
+      "evidence": "The reader hides other studies whenever the request text names exactly one configured system id as a whole word. Any change request that mentions a system gets a hiding reader snapshot, including this request (it names hermes-agent) or 'fix the firstmate study claims'. The request says 'change jobs still see all studies', and criterion 2 says 'a change job's snapshots hold both'. Demonstration (d) records only the producer and the verifier for the change job. The reader for a change job is never observed, and the false-positive case is accepted only in Risks. The case-insensitive input form is tested, but the plan does not say what its expected result is. Fix: Add the reader to the change-job test. Use a change request that names a configured system id, so the test shows what the reader sees in that case. Either use a selector that is not free-text matching, if the systems schema provides one (an explicit system/capability line in the request), or state the trade-off as a criterion the user can accept. Say what the expected result of the different-case form is.",
+      "location": "Decision 5; Step 6; Demonstration criterion 2 (d)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Step 1 both stops on a missing selector and invents one",
+      "evidence": "The reading requires the producer to stop if the base lacks 'the systems schema (... and a way to select the system a study job names)'. Step 1 says 'If either is missing, stop and report', then 'If there is no selector, match a configured system id as a whole word in the request text'. That fallback builds the selection mechanism the reading puts out of scope. config.rs in this snapshot has only repo_url/repo_ref at :413-416, so the actual schema and selector are unknown. pin_repo (pin.rs:33-36) reads only the single section's repo_url. Fix: Make the stop unconditional when there is no selector, or move the whole-word selector into the reading as an explicit deliverable with its own criterion. If the schema is present, say that pin_repo already selects the system and only reuse it, rather than changing pin_repo again in Step 4.",
+      "location": "Step 1; Step 4 ('Make pin_repo use the url and ref of the system the request names')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Exact URL string match can hide a system's own study",
+      "evidence": "repo_url and pin.json repository_url are compared byte for byte, as study_pin does (pin.rs:99). A config written without `.git` and a pin with `.git` (or the reverse) would hide the job's own study. The plan rejects the pin.json `system` field because 'older pins may lack it', but the only existing pin has it (studies/firstmate-work-handling/pin.json:4, \"system\": \"firstmate\"). Fix: Normalize URLs (strip a trailing .git and trailing /) before comparing. Alternatively, prefer the pin.json `system` field when present and fall back to the URL. Add a test for the .git/no-.git pair.",
+      "location": "Decision 1; Step 4 (other_study_dirs)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Producer writes under a hidden directory are dropped silently",
+      "evidence": "change_list filters hidden paths, so a stray studies/a/x.json disappears with no record. The job record's changes give no sign that the producer tried to write there. Fix: Write a line to the UI or the closing note when hidden paths were dropped, so the attempt is visible.",
+      "location": "Decision 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The core mechanism checks out against the code. Adding a hidden list to Snapshot::create/materialize and filtering change_list works with build_candidate (candidate.rs:98-100), which applies only the change entries to the full base tree. So a hidden studies/a lands byte-identical and is never reported deleted. ctx.job.job.pin is set before the only RunContext is built (mod.rs:1239, 1272-1283). The design still has a fault the plan does not see: the repository's own tests read studies/firstmate-work-handling from disk. Those tests are drain.rs:6948 and xtask/tests/site_page.rs:11/20, and the plan adds a third one through its own include_str! of studies/firstmate-work-handling/pin.json. Study jobs run `cargo test --locked` as a check (athena.toml:122-125) inside the hidden verifier snapshot (mod.rs:1936-1943), and the producer runs it in its hidden snapshot too. So every study job for a system other than firstmate would fail its own test check, and the new test would not even compile there. The dependents list leaves these readers out. Second, the reader rule (hide when the request text names exactly one configured system id) is a text heuristic that hides studies from change requests that mention a system. This very request is one. The change-job demonstration checks only the producer and the verifier, so 'a change job's snapshots hold both' goes unshown for the reader. Third, step 1 says to stop if the system selector is missing, but then gives a fallback that invents the selector. That contradicts the reading's stop condition."
+}
