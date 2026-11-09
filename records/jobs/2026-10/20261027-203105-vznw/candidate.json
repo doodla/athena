@@ -1,0 +1,120 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261027-203105-vznw",
+  "base_commit": "9c24d2944da42f9488af439e858169583d41bdfa",
+  "base_fingerprint": "sha256:110ab722635bbfeec0514ea8159cc0ac312825bd692fe934d07f3e6c4bb6fb97",
+  "previous_job": "20261026-180227-80cr",
+  "candidate_commit": "0939850e33791a23d9ee9ac394cfec1a2de77f4a",
+  "candidate_tree": "4e4f12699838a114079299dd7700def4922c1222",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 409605
+    },
+    {
+      "path": "crates/athena-cli/src/commands.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21342
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 315788
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 348284
+    }
+  ],
+  "fingerprint": "sha256:0ac8790d9c50a32196c9a76324e59c857bd389dc6fffea65f63d60b5546a4225",
+  "violations": [],
+  "producer_report": {
+    "summary": "The drain's closing summary now covers the whole run across rebuild re-execs. A new `drain::run_pass` wraps one pass. Before the re-exec it writes the run's tallies so far to `drain.carry` in the state directory: landed, spend, job lines (which are the jobs started), notes, rebases, improvement turns, the rating and held_back. The continuing process takes that file and adds it to its own Report. The restart limits are computed inside `drain()` before the merge, so the remaining budget and job limit are unchanged and spend is not double-counted. The report's `budget_usd` becomes the whole run's, so the summary reads `spent X of Y` with X no larger than Y. `guarded` removes a carry when the start is not the drain's own exec, so a fresh drain starts at zero. An unreadable carry is ignored, and a failed exec clears the file. Plan, queue and waiting lists stay those of the last pass. The `drain` command in commands.rs now calls `run_pass` in place of the bare `follow_restart`. I added four tests in tests/drain.rs, updated the module docs, and added a CHANGELOG entry. The new tests pass. fmt, clippy -D warnings and `cargo test --locked` passed in my runs, but I did not run `cargo test -p xtask --test policy` on its own. I ran the full suite once, and that suite includes the policy test.",
+    "files": [
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/src/commands.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test drain -- a_rebuild_between a_fresh_drain the_restart_limits a_failed_exec",
+        "result": "pass",
+        "note": "4 passed"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked --quiet",
+        "result": "pass",
+        "note": "Every result line ok, 0 failed. The whole suite includes tests/drain.rs (194 passed), the policy scan and the mirrors test. I read only the quiet output and did not inspect those two individually."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A drain test in crates/athena-cli/tests/drain.rs (or unit tests in drain.rs) runs a first pass that lands one job and ends Stop::Rebuilt, then a continuing pass that lands a second job, and asserts the final report has landed == 2, spent_usd equal to the sum of both passes' spend, and both jobs in jobs. Check by running `cargo test -p athena-cli drain`.",
+        "status": "met",
+        "evidence": "The test `a_rebuild_between_two_landings_reports_the_whole_run` in tests/drain.rs passed. It runs `whole_run`, which wraps `run_pass` around `drain::drain` over the rebuilding Stub, with the exec stood in for by a closure that runs the next pass. The first pass ends Stop::Rebuilt. It asserts `rebuilds == 1`, landed == 2, jobs items [a, b], and spent_usd ≈ 1.6 (0.8 per pass). It also asserts `drain.carry` exists while the restart closure runs and is gone afterwards. I ran `cargo test -p athena-cli --test drain -- a_rebuild_between a_fresh_drain the_restart_limits a_failed_exec`: 4 passed."
+      },
+      {
+        "criterion": "The rendered closing summary (display::drain) for that continued run shows both landings and the whole-run spend, not just the last pass. The test asserts on the printed text.",
+        "status": "met",
+        "evidence": "The same test asserts the `display::drain(&report)` text contains `landed      2\\n`, does not contain `landed      1\\n`, contains `(item a)` and `(item b)`, and contains `spent       $1.60 of $9.00\\n`. It also checks the JSON value (landed 2, two jobs). It passed."
+      },
+      {
+        "criterion": "A fresh drain with no carry from a rebuild still reports only its own tallies (landed 0 starts at 0), and a stale carry is not applied to it. A test covers it; run `cargo test -p athena-cli drain`.",
+        "status": "met",
+        "evidence": "The test `a_fresh_drain_and_a_stale_carry_start_at_zero` drives `drain::guarded` with `RealProcs` in a tempdir. (a) With no carry the report has landed 1, one job line, and spend below 1.0. (b) A stale carry from `store_carry` with a fresh start is dropped: landed 1, one job line, budget 9.0, file gone. (c) When the pid file names this process, the carry is applied: landed 4, items [x, y, z, a], spent 7.8, file gone. (d) The file contents `not json` count as no carry: landed 1, file removed. `a_failed_exec_leaves_no_carry_behind` also passed. Both ran and passed."
+      },
+      {
+        "criterion": "Jobs started, per-item outcomes (JobLine entries) and spend are all carried, and the remaining budget and job limit passed to the continuing pass are unchanged, so spend is not double-counted against the budget. A test asserts budget_usd and max_jobs in the restart.",
+        "status": "met",
+        "evidence": "The test `the_restart_limits_are_unchanged_and_spend_is_carried_once_across_two_rebuilds` runs three passes over items a, b, c with two rebuilds. It records every `Limits` passed to the restart closure. The first is budget 8.2, max_jobs 9, target 4; the second is budget 7.4, max_jobs 8. These match the existing single-pass values. The final report has landed 3, jobs [a, b, c] (jobs started = 3), spent ≈ 2.4 (counted once), budget 9.0 and outcome_changed true. It passed."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check` (clean), `cargo clippy --all-targets --locked -- -D warnings` (finished with no warnings), and `cargo test --locked --quiet` once (every test result line ok, 0 failed)."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry describing that the drain summary now covers the whole run across rebuild re-execs.",
+        "status": "met",
+        "evidence": "A new first bullet under `## [Unreleased]` / `### Fixed` in CHANGELOG.md describes the 2026-10-27 `landed 1` bug, the `drain.carry` transport via `drain::run_pass`, and that a fresh drain starts at zero. It also says the remaining budget and job limit are unchanged. See `git diff -- CHANGELOG.md`."
+      },
+      {
+        "criterion": "The module docs of crates/athena-cli/src/drain.rs (the self-rebuild bullet) are updated to say tallies are carried across the re-exec and how.",
+        "status": "met",
+        "evidence": "The 'Athena rebuilds itself after landing its own code' bullet in the module docs now says `run_pass` writes the tallies to `drain.carry` ([`carry_file`]) before the re-exec. It says the continuing process takes the file and adds it to its Report ([`Carried::apply`]), and that the budget and job limit handed on are still only what is left. It says `guarded` removes a carry when the start is not the drain's own exec, so a fresh drain starts at zero. It also says the plan, queue and waiting lists stay those of the last pass. See `git diff -- crates/athena-cli/src/drain.rs`."
+      }
+    ],
+    "open_issues": [
+      "The real exec is not exercised in tests: they stand in for it with a closure that calls `run_pass` again. The carry still goes through the real file. The only new behaviour at the exec boundary is a file write and read.",
+      "The per-pass 'rebases: x of y' note is carried as written, so a continued run's notes list can show each pass's note next to the summed `rebases` tally. Improvement turns keep the dispatch number each pass counted."
+    ],
+    "mistakes": [
+      "I did not run the new tests against the pre-change source to show they fail without it. The assertions would fail by construction if the merge were absent."
+    ],
+    "learnings": [
+      "`PidGuard::acquire` returns `carried_over == true` exactly when the pid file names this process, which is what an exec produces. That makes it a precise signal for whether a carry is owned.",
+      "`Restart` is computed inside `drain()` from the pass's own State, so merging tallies after `drain()` returns leaves the remaining budget and job limit untouched.",
+      "The Stub in tests/drain.rs pays 0.8 per item (read 0.1, run 0.5, rate 0.2), and `unrelated` items touch crates/, which triggers a rebuild."
+    ],
+    "desires": [
+      "A way to read a saved tool-output file: the harness persisted a large cargo test log outside the working directory, and the policy hook blocked reading it, so I had to rerun the suite in quiet mode."
+    ]
+  }
+}

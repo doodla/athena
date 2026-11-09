@@ -1,0 +1,244 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-203105-vznw",
+  "round": 1,
+  "at": "2026-11-09T20:42:45.472202158Z",
+  "invocation_seq": 2,
+  "approach": "Add a small `Carried` value in drain.rs holding the tallies a pass hands on: spend, landed, outcome_changed, job lines (whose count is the jobs started), notes, rebase tally, improvement turns, the rating and held_back. Add one wrapper, `drain::run_pass(state_root, ui, pass, restart)`, that does five things. (1) It takes the carry file `drain.carry` from the state directory (read, then remove). (2) It runs the pass. (3) It merges the carry into the pass's `Report`: landed, spend and notes are summed, job lines are concatenated, `outcome_changed` is OR-ed, and `budget_usd` becomes the remaining budget plus the carried spend, so the summary reads \"spent X of <whole-run budget>\". (4) When the merged report has a `restart`, it writes the merged tallies to the carry file. (5) It calls the unchanged `follow_restart`, and clears the file if the re-exec returns. `Restart`, `Limits`, `reexec_args` and the remaining budget and job limit are computed inside `drain()` before the merge, so they are untouched and spend is not double-counted. `guarded` already knows whether this process is the drain continuing after its own exec (`PidGuard::acquire` returns `carried_over`), so it removes any carry file when `carried_over` is false. A fresh drain therefore never applies a stale carry. `commands.rs::drain` calls `run_pass` in place of the bare `follow_restart`. No CLI flag is needed, so `main.rs` stays unchanged. Tests drive the real `drain::drain` loop with the existing rebuilding Stub through `run_pass`, with the restart closure standing in for the exec by calling `run_pass` again, and assert on the report and on `display::drain` text.",
+  "decisions": [
+    {
+      "choice": "Carry the tallies in a JSON file `drain.carry` in the state directory (next to `drain.pid` and `drain.stop`), written before the re-exec and taken by the continuing process.",
+      "reason": "`reexec` (main.rs:713) runs `athena drain --budget --rating-threshold --job-limit [--json]`. The CLI definitions are not in the listed files, and the state directory already carries drain-owned files across the exec (the stop file is kept for the continuing drain, drain.rs:3732-3736). A file lets a test round-trip the real serialized form.",
+      "rejected": [
+        {
+          "option": "A hidden CLI flag carrying the tallies",
+          "why": "It needs a change to the clap definitions in main.rs, shows up in `--help`, and puts a large JSON payload in argv. A stale or hand-typed value would also be trusted."
+        },
+        {
+          "option": "An environment variable",
+          "why": "`reexec` builds the Command in main.rs and does not pass env. A variable set in the old process would leak into any child it spawns, and the env is never cleared for a fresh drain."
+        }
+      ]
+    },
+    {
+      "choice": "Merge the carry in a new wrapper `run_pass` (after `drain_concurrent`/`drain` returns), not inside `drain()` or `State`.",
+      "reason": "`drain()` computes `Restart` from its own `State` (drain.rs:3115-3131): remaining budget is limits minus this pass's spend, remaining jobs is limits minus this pass's started. Merging afterwards leaves those exactly as they are, so spend is never counted twice against the budget and the existing tests (tests/drain.rs:1951-1953, 2051-2069) stay valid. The wrapper is also the one entry point commands.rs and the tests call.",
+      "rejected": [
+        {
+          "option": "Seed `State` (spent, jobs, landed) from the carry at the start of the pass",
+          "why": "`st.budget.spent()` and `st.started` feed the budget and job-limit checks (drain.rs:1548-1551) and the Restart computation, so seeding would double-count against the already-reduced limits."
+        },
+        {
+          "option": "Add a carry field to `Restart` and thread it through `follow_restart` and `reexec_args`",
+          "why": "`Restart` is `Copy` and `follow_restart`/`reexec_args` have tests (tests/drain.rs:1958, 2022, 2058-2069) that would break. The file is the only transport that crosses the exec anyway."
+        }
+      ]
+    },
+    {
+      "choice": "`guarded` removes the carry file when `carried_over` is false; the continuing process alone reads it.",
+      "reason": "`carried_over` is true only when the pid file names this very pid with a matching start marker (drain.rs:3670-3672), which is what an exec produces. Any other start (a fresh `athena drain`, drain-restart's spawn at drain.rs:4006, a start after a failed exec) is a new run and starts at zero. `guarded`'s signature is unchanged, so its existing tests (drain.rs:5374, 5419) are unaffected.",
+      "rejected": [
+        {
+          "option": "Have `run_pass` decide freshness by file age or a run id inside the file",
+          "why": "A timestamp is a heuristic that can be wrong either way. `carried_over` is already the exact fact."
+        }
+      ]
+    },
+    {
+      "choice": "The final report's `budget_usd` is the remaining budget plus the carried spend (the whole run's budget), and `rating` and `held_back` are carried when the last pass has no rating taken after a landing.",
+      "reason": "Without the budget sum the summary would print `spent $1.60 of $8.20`. Without the rating carry a second pass that lands nothing prints 'an earlier rating, not taken after a landing in this run' for a run that landed twice. Plan groups, group sizes, unplanned, refused, queued and waiting stay pass-local: they describe the queue now (the continuing pass's plan covers what is left).",
+      "rejected": [
+        {
+          "option": "Leave `budget_usd` as the last pass's limit",
+          "why": "The summary line `spent X of Y` (display.rs:731-736) would show spend above the budget."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `carry_file(state_root)`, the serializable `Carried` (from_report, apply, started), `store_carry`, `take_carry`, `clear_carry`, and `run_pass`. Add `Deserialize` to the derives of `JobLine`, `RatingLine`, `ImprovementTaken` and `RebaseTally`. Make `guarded` remove `drain.carry` when the start is not `carried_over`. Update the module-doc self-rebuild bullet (criterion 7).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/commands.rs",
+      "action": "modify",
+      "purpose": "In `drain`, replace the direct `drain::follow_restart(report, &Terminal, &|left| reexec(...))` call with `drain::run_pass(athena.state.root(), &Terminal, || drain_concurrent(...), &|left| reexec(&drain::reexec_args(&left, json)))`. Everything else (guarded, config read, limits, printing) is unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the tests of criteria 1-4: the two-landing rebuild test with the printed-summary assertions, the three-pass cumulative restart-limits test, and the fresh/stale/continuing/corrupt carry test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under [Unreleased] saying the drain summary now covers the whole run across rebuild re-execs (criterion 6).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In drain.rs (near `Restart`, ~line 475) add `pub fn carry_file(state_root: &Path) -> PathBuf` returning `state_root.join(\"drain.carry\")`, and add `Deserialize` to the derives of `JobLine` (1089), `RatingLine` (1106), `ImprovementTaken` (1166) and `RebaseTally` (735).",
+    "Add `#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)] pub struct Carried { spent_usd, landed, outcome_changed, jobs: Vec<JobLine>, notes, rebases: RebaseTally, improvement_turns, rating: Option<RatingLine>, held_back: Option<String> }` with `Carried::from_report(&Report)`, `Carried::started(&self) -> u32` (jobs.len()), and `Carried::apply(self, Report) -> Report` that sums landed and spend, puts the carried job lines, notes and improvement turns first, adds the rebase totals, ORs outcome_changed, recomputes `page_unchanged = landed == 0`, sets `budget_usd = report.budget_usd + carried.spent_usd`, and uses the report's rating if it is `after_landing`, else the carried rating if it is `after_landing`, else the report's rating (`held_back` the same way: the pass's own, else the carried one). `restart`, `stop`, `target_rating`, `queued`, `waiting`, the plan fields, `refused` and `rebuild_output` stay the pass's own.",
+    "Add `store_carry(state_root, &Carried) -> std::io::Result<()>` (write a temp file, rename it onto `drain.carry`), `take_carry(state_root) -> Option<Carried>` (read, remove the file, parse; missing or unparseable gives `None`) and `clear_carry(state_root)`. Add `pub fn run_pass(state_root: &Path, ui: &dyn Ui, pass: impl FnOnce() -> anyhow::Result<Report>, restart: &dyn Fn(Limits) -> anyhow::Result<Report>) -> anyhow::Result<Report>`: `let carried = take_carry(state_root)`; `let mut report = pass()?`; apply the carry when there is one; if `report.restart.is_some()` call `store_carry(state_root, &Carried::from_report(&report))` (an error is returned, and no exec is attempted); then `let out = follow_restart(report, ui, restart)`; after `follow_restart` returns, call `clear_carry` and return `out`. `follow_restart` and `reexec_args` stay as they are.",
+    "In `guarded` (drain.rs:3732) inside the `if !carried_over` block, also `let _ = std::fs::remove_file(carry_file(state_root));`, and extend its doc comment to say a carry not owned by a continuing drain is dropped.",
+    "In commands.rs `drain` (lines 337-352) call `drain::run_pass(athena.state.root(), &Terminal, || drain::drain_concurrent(...), &|left| reexec(&drain::reexec_args(&left, json)))` in place of the `let report = drain_concurrent(...)?; follow_restart(report, ...)` pair. Keep the budget, rating threshold, job limit and `max_concurrency` code as it is. main.rs needs no change.",
+    "Update the module docs (drain.rs:145-153) for criterion 7: after the sentence on `Report::restart` and `follow_restart`, say the run's tallies (landed, spend, job lines and the other per-run tallies, the rating) ride in `drain.carry` in the state directory, written by `run_pass` before the exec and taken and merged by the continuing process into its `Report`; the budget and job limit handed on are still only what is left; `guarded` clears a carry when the start is not the drain's own exec; a fresh drain starts at zero.",
+    "In tests/drain.rs add, after the existing rebuild tests (~line 2070): `a_rebuild_between_two_landings_reports_the_whole_run` (criteria 1 and 2), `the_restart_limits_are_unchanged_and_spend_is_carried_once_across_two_rebuilds` (criterion 4, three passes) and `a_fresh_drain_and_a_stale_carry_start_at_zero` (criterion 3, four cases using `tempfile::tempdir`, `drain::guarded`, `RealProcs`, `write_record`, `PidRecord`, `store_carry`, `Carried`). Add any needed items to the file's `use athena_cli::drain::{...}` line.",
+    "Add the CHANGELOG.md entry under `## [Unreleased]` (a `### Fixed` subsection, adding the heading if absent): drain's closing summary now covers the whole run across rebuild re-execs, because the tallies are carried in `drain.carry` and merged by `drain::run_pass`; a fresh drain starts at zero; the summary shows the whole-run budget; no change to the remaining budget and job limit handed to the new binary.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix anything they report, including the function-length limit (keep each new function short)."
+  ],
+  "risks": [
+    {
+      "risk": "The re-exec itself is not exercised in tests; a bug in file transport across a real exec would only show in production.",
+      "mitigation": "The new tests cannot do a real exec. They stand in for it with a closure that calls `run_pass` again, but the carry goes through the real file: serialized by `store_carry`, present while the closure runs, and read back with `take_carry`. The state directory is the same on both sides of an exec (`athena.state.root()`), and `guarded` already relies on the same pid across the exec (drain.rs:3670-3672). `commands.rs` keeps the exec closure byte-for-byte as it is, so the only new behaviour at the exec boundary is a file write and read."
+    },
+    {
+      "risk": "A carry file left behind when the exec fails or the process is killed between the write and the exec.",
+      "mitigation": "`run_pass` writes the file only when the merged report has `restart`, and clears it if the restart closure returns (the exec failed). `guarded` also removes it at every start that is not `carried_over`, so the worst case is one leftover file that the next fresh drain deletes before it runs."
+    },
+    {
+      "risk": "A corrupt or half-written carry file could stop the continuing drain or be applied wrongly.",
+      "mitigation": "`take_carry` returns `None` and removes the file when it cannot be parsed, and a carry write error is returned from `run_pass` before the exec, so the run fails loudly instead of silently under-reporting. A test covers the corrupt-file case."
+    },
+    {
+      "risk": "A partial write seen by the continuing process.",
+      "mitigation": "The file is written to a temp name and renamed, the same way `write_record` does for the pid file (drain.rs:3603-3609), so a reader sees a whole file or none."
+    },
+    {
+      "risk": "Fields that stay pass-local (plan_groups, plan_group_sizes, unplanned, refused, queued, waiting) and the per-pass 'rebases: x of y' note could look inconsistent with the summed `rebases` tally.",
+      "mitigation": "This is the documented behaviour: those fields describe the queue and plan as they now stand, and the module docs and the CHANGELOG entry say so. `improvement_turns[].dispatch` is carried as each pass counted it (counted from 1 within a pass); it is not renumbered."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "the drain command's entry flow",
+      "dependent": "crates/athena-cli/src/commands.rs `drain` (lines 319-361): guarded → drain_concurrent → follow_restart → reexec",
+      "kind": "code",
+      "test": "The new tests in tests/drain.rs call `run_pass`, the function the command now calls. The command itself needs a real exec and a live repository, so its glue is kept to a single `run_pass` call that moves the existing closures unchanged.",
+      "reason": null
+    },
+    {
+      "name": "Report totals as shown in the closing summary",
+      "dependent": "crates/athena-cli/src/display.rs `drain` (700-838) reads Report.landed, spent_usd, budget_usd, jobs, rating, outcome_changed, page_unchanged, notes",
+      "kind": "code",
+      "test": "a_rebuild_between_two_landings_reports_the_whole_run asserts on the rendered text; the existing `display::drain` test at tests/drain.rs:1916-1919 is unchanged because single-pass reports are not altered.",
+      "reason": null
+    },
+    {
+      "name": "JSON shape of Report",
+      "dependent": "crates/athena-cli/src/main.rs `drain` command JSON output (`print_json(&report)`, commands.rs:356) and any consumer of the `--json` summary",
+      "kind": "code",
+      "test": null,
+      "reason": "No Report field is added, removed or renamed, so the JSON keys are the same; only the values now cover the whole run. The new derive is `Deserialize` on `JobLine`, `RatingLine`, `ImprovementTaken` and `RebaseTally`, which does not change serialization."
+    },
+    {
+      "name": "`follow_restart`, `Report::restart`, `Restart`, `reexec_args`",
+      "dependent": "crates/athena-cli/tests/drain.rs follow_restart tests (1939-2070, 8250-8289)",
+      "kind": "code",
+      "test": "The existing tests at tests/drain.rs:1939, 2000, 2026, 2050 and 8249 stay green; criterion 4's test asserts the same restart values through `run_pass`.",
+      "reason": "None of them is changed: `run_pass` merges after `drain()` has computed `Restart`, and calls `follow_restart` as it is."
+    },
+    {
+      "name": "`guarded` start behaviour (pid file, stop file)",
+      "dependent": "crates/athena-cli/src/drain.rs `guarded` unit tests (5374-5416, 5418-5500)",
+      "kind": "code",
+      "test": "The added `!carried_over` branch only removes `drain.carry`; the stop-file and pid-file assertions in those tests are not affected, and criterion 3's test covers the new branch for a fresh start, a continuing start and a corrupt file.",
+      "reason": null
+    },
+    {
+      "name": "drain started by `athena drain-restart`",
+      "dependent": "crates/athena-cli/src/drain.rs `RealLifecycle::spawn` and `drain-restart` (drain.rs:3844-4010, uses `reexec_args`)",
+      "kind": "code",
+      "test": "Criterion 3 case (b), the stale carry under a fresh `guarded`.",
+      "reason": "It starts a new `athena drain` process whose pid file does not name its own pid, so `guarded` sees `carried_over == false`, deletes any carry file, and the drain starts at zero. `reexec_args` is unchanged."
+    },
+    {
+      "name": "state-directory layout",
+      "dependent": "State directory files `drain.pid`, `drain.stop`, `drain.log` (drain.rs:986, 3452, 3457), README.md:181 and main.rs:296, 1618 (README must name `drain.pid`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "`drain.carry` is a new sibling file. `PidGuard::acquire` and `Drop` touch only `drain.pid`, `drain-status` and `drain-stop` read only the pid and stop files, and the README test at main.rs:1605-1624 asserts the README contains certain strings, none of which change."
+    },
+    {
+      "name": "documented rebuild-and-continue behaviour",
+      "dependent": "docs/decisions.md:3652-3672 (the D-entry describing `follow_restart` and `Report::restart`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "It records what the restart carries (budget, job limit, rating threshold); those are unchanged. The carry of tallies is documented in the drain.rs module docs and the CHANGELOG, and no test reads decisions.md for this text."
+    },
+    {
+      "name": "prompt-set budgets",
+      "dependent": "crates/athena-cli/tests/budgets.rs and `system_facts_budgets_match_computed` (docs/system-facts.md prompt budgets)",
+      "kind": "rule",
+      "test": null,
+      "reason": "They are computed from the context files in `athena-context`, not from drain.rs, CHANGELOG.md or the tests; the plan changes none of the files that make up the always-loaded sets."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test in crates/athena-cli/tests/drain.rs. It uses `rebuilding(Ok(()))` (tests/drain.rs:1923: items a and b, a's landing touches crates/ so it rebuilds, `drop_landed` so the new process sees only b), a `tempfile::tempdir()` as state root, and `Quiet`. It calls `drain::run_pass(root, &Quiet, || drain::drain(&stub, limits(9.0), &Quiet), &|left| { assert the carry file exists; drain::run_pass(root, &Quiet, || drain::drain(&stub, left, &Quiet), &|_| panic!(\"no second restart\")) })`. The inner `run_pass` is exactly what the re-exec'd process runs, and the carry crosses through the serialized file on disk.",
+      "command": "cargo test -p athena-cli --test drain a_rebuild_between_two_landings_reports_the_whole_run",
+      "observes": "The returned report has stop QueueEmpty, landed == 2, jobs items [a, b], spent_usd within 1e-9 of 2 × 0.8 (read 0.1 + run 0.5 + rate 0.2 per pass), the file `drain.carry` present while the restart closure runs and absent after the run. `rebuilds(&stub) == 1`.",
+      "fails_without": "If the carry were not merged, the final report would have landed == 1, one job line (item b only) and spent_usd about 0.8, so the landed == 2, jobs.len() == 2 and spent ≈ 1.6 assertions fail. If the carry file were not written before the second pass, the same assertions fail.",
+      "seam": "Production entry `drain::run_pass` (added by plan step 3) around `drain::drain` over the `Stub` that implements `Steps` (exists, tests/drain.rs:41-326, `rebuilding` at 1923). The Stub is injected as the `&dyn Steps` argument. The exec is stood in for by the restart closure calling `run_pass` again. The merge, file write and take are the production code, not in the double."
+    },
+    {
+      "criterion": 2,
+      "method": "The same test as criterion 1 also renders `display::drain(&report)` (display.rs:700) on the merged report and asserts on the printed text.",
+      "command": "cargo test -p athena-cli --test drain a_rebuild_between_two_landings_reports_the_whole_run",
+      "observes": "The text contains the line `landed      2`, a `job         ... (item a)` line and a `job         ... (item b)` line, `spent       $1.60 of $9.00` (via `usd`), and does not contain `landed      1`. A second report from `serde_json::to_value` has landed 2 and two jobs.",
+      "fails_without": "Without the merge, `display::drain` prints `landed      1` and one `job` line, so the assertions that the text contains `landed      2`, both job lines (a and b) and `spent       $1.60 of $9.00` fail.",
+      "seam": "Production `display::drain` (exists) on the report returned by `run_pass`; no double beyond the Stub of criterion 1."
+    },
+    {
+      "criterion": 3,
+      "method": "New test in tests/drain.rs with a tempdir state root. (a) No carry file: `run_pass` over `drain::drain(&stub, ...)` on a one-item passing Stub gives landed 1 and one job line. (b) Stale carry: write a `Carried` with `drain::store_carry`, then call `drain::guarded(root, &RealProcs, \"athena test\", &|| None, || drain::run_pass(...))` with no pid file: the report has landed 1, one job line, spent below 1.0, and the carry file is gone. (c) Continuing: `drain::write_record` a `PidRecord` naming `std::process::id()` with `RealProcs.start_marker(...)` (the same shape as the unit test at drain.rs:5466), store the carry, run the same `guarded` call: landed 4 and the carried job lines come first, then the file is gone. (d) The file holds `not json` in the continuing case: treated as no carry, landed 1, file removed.",
+      "command": "cargo test -p athena-cli --test drain a_fresh_drain_and_a_stale_carry_start_at_zero",
+      "observes": "Exact landed, jobs.len(), spent_usd and file presence for each of the four cases.",
+      "fails_without": "If `guarded` did not remove the carry file for a start that is not `carried_over`, the stale carry (landed 3, spent 7.0, three job lines) would be applied and the report would have landed 4 and spent about 7.8, so the landed == 1 and spent < 1.0 assertions fail. If the continuing case dropped the carry, its landed == 4 assertion fails.",
+      "seam": "Production `drain::guarded` (exists, drain.rs:3720; plan step 4 adds the carry-file removal) and `drain::run_pass`, with `RealProcs` and a real tempdir. Fixtures are the Stub (exists) and a pid record for this process written with the existing `write_record`. The carry file is the only state the double-free test touches."
+    },
+    {
+      "criterion": 4,
+      "method": "New test in tests/drain.rs using a Stub with items a, b, c, `unrelated: [a, b]` (their landings touch crates/, so each triggers a rebuild), `ratings` of three 1s, `outcomes: passing()`, `rebuild: Some(Ok(()))`, `drop_landed: true`, `..Stub::old_build()`. Three nested `run_pass` calls (the same stand-in for the exec) record each `Limits` handed on.",
+      "command": "cargo test -p athena-cli --test drain the_restart_limits_are_unchanged_and_spend_is_carried_once_across_two_rebuilds",
+      "observes": "The first restart is budget 8.2 (within 1e-9), max_jobs 9, target_rating 4. The second is budget 7.4, max_jobs 8. These equal the existing single-pass values (tests/drain.rs:1951-1953), so the carry does not touch them. The final report has landed 3, jobs.len() 3 (jobs started), job items [a, b, c], spent_usd ≈ 2.4 (not 3 × the remaining budget and not double-counted), budget_usd 9.0, and outcome_changed true (only c's landing touches studies/).",
+      "fails_without": "If the carry were folded into the pass (seeding State) the restart budget would drop below 8.2 and 7.4, and the max_jobs sequence would change. If the carry omitted jobs or spend, the final jobs.len() == 3 and spent ≈ 2.4 assertions fail.",
+      "seam": "Production `run_pass` and `drain::drain` over the existing Stub, as in criterion 1; the `Limits` are read from the restart closure's argument."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three checks Athena runs on the result, as separate whole simple commands: `cargo fmt --all --check`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The existing tests that touch the changed paths (tests/drain.rs follow_restart and reexec_args tests at 1939-2070, 8250-8289, and the guarded unit tests at drain.rs:5374 and 5419) still pass.",
+      "fails_without": "A new warning (for example an unused import, a missing `Deserialize` derive, or a function over the lint limits) fails clippy -D warnings. A broken existing drain test fails cargo test.",
+      "seam": "None needed: this is a build and test gate over the whole workspace."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of CHANGELOG.md.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new bullet under `## [Unreleased]` (a `### Fixed` or `### Changed` subsection) saying the drain's closing summary now covers the whole run across rebuild re-execs, carrying landed, spend, job lines and the other tallies in `drain.carry`, and that a fresh drain starts at zero. It names `drain::run_pass`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff of the module docs in drain.rs.",
+      "command": "git diff -- crates/athena-cli/src/drain.rs",
+      "observes": "The 'Athena rebuilds itself after landing its own code' bullet (drain.rs:145-153) now says the tallies (landed, spend, job lines, notes, rebases, improvement turns, rating) ride in the `drain.carry` file in the state directory, written by `run_pass` before the re-exec and taken and merged by the continuing process. The continuing pass still gets only the remaining budget and job limit. `guarded` clears a carry that no continuing drain owns.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "22ae0a3303533fd814809ab4456b62ad7fe2d561382a01bb6c27178d8cff4185"
+}

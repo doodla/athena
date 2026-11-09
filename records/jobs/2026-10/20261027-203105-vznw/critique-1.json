@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-203105-vznw",
+  "round": 1,
+  "at": "2026-11-09T20:44:12.304148421Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "`held_back` is chosen separately from `rating`, so the summary can pair one pass's held-back note with another pass's rating.",
+      "evidence": "display.rs:747 uses `report.held_back.is_some()` to explain a rating taken after a landing (\"target not met: held back by the source check\"), and display.rs:771-775 prints the held-back line. Suppose pass 1 held back a rating that met the target, and pass 2 lands and takes a new rating below target with no hold-back. Step 2 then keeps the carried `held_back` and the pass's own rating, and the summary claims the source check held back a rating that it did not. Fix: Take `held_back` from the same source as the chosen `rating`: the pass's own when its rating is used, the carried one only when the carried rating is used. Add one assertion for this in the criterion 4 test, or a small unit test of `apply`.",
+      "location": "Plan step 2 (`Carried::apply`, held_back rule) and Decision 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Merged `improvement_turns[].dispatch` no longer matches its documented meaning, \"which dispatch of the run it was\".",
+      "evidence": "`ImprovementTaken::dispatch` is documented as \"Which dispatch of the run it was, counted from 1\" (drain.rs:1170). The plan concatenates the turns without renumbering them, so in the merged report two turns can both claim to be dispatch 1 or 2. Fix: Either offset the carried pass's numbers by carrying a dispatched count and adding it, or change the field doc to say the count is per pass after a rebuild. Pick one and state it in the module docs.",
+      "location": "Plan Risks (improvement_turns) / drain.rs:1170-1171",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The new public `Carried` sits next to an existing private `Carry` struct that means something else.",
+      "evidence": "drain.rs:1258-1268 already defines `struct Carry` (what one plan keeps for the next inside a run), and `st.carry` is used at drain.rs:2091, 2329 and 2990. Fix: Rename the new type to something like `RunTally` or `CarriedTally` so the two are not confused.",
+      "location": "Plan step 2 (`Carried` name) / drain.rs:1261",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "tests/drain.rs:8249-8289 is described as a `follow_restart` test, but it does not call `follow_restart`.",
+      "evidence": "Searching for `follow_restart` finds calls only at tests/drain.rs:1958 and 2022. The test at 8250 checks `report.restart` and the printed text through `run_with`. Fix: Describe 8250 as a test of `Report::restart`. Coverage is unaffected, because the plan leaves `Restart` untouched.",
+      "location": "Plan Dependents (follow_restart tests 8250-8289) and criterion 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot using Read and Grep only, and it holds up. Each pass still computes `Restart` from its own State (drain.rs:3115-3131). The plan merges the carry after the pass returns (in `run_pass`), so the budget and job limit handed on stay the same and nothing is counted twice. The carry travels in `drain.carry` in the state directory. Only a process where `PidGuard::acquire` reports `carried_over` keeps it, and that is true only when the pid file names this same pid with the same start marker (drain.rs:3670-3672), which is what an exec leaves. A fresh drain, a `drain-restart` spawn, a recycled pid or a start after a failed exec all delete the file, so they start at zero. Every name the plan cites exists as described: `follow_restart` at 3188, `guarded` at 3720, `write_record` and `PidRecord` are public, the `rebuilding` stub is at tests/drain.rs:1923, `unrelated` routes a landing to crates/ (tests/drain.rs:278-281), and the summary format is at display.rs:731-737. The tests run the real `drain::drain`, `run_pass`, `guarded` and `display::drain`, with only the exec replaced by a closure, and each would fail without the merge or the clearing. The dependents list matches what I found when I searched for readers: commands.rs is the only production caller, plus the doc entry in docs/decisions.md. The soundness concerns are small. `held_back` is carried separately from the rating it explains, and a few details of the plan are cosmetic. None of this blocks the plan."
+}
