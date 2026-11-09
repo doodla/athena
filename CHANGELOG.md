@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- README.md gains a section, "What can be changed", saying that no part of Athena's design is fixed and that a
+  design change is an ordinary request recorded as a new entry in `docs/decisions.md`. It lists the
+  paths admission refuses, from `admission.rs` and `.gitattributes`: `records/` (D06), `athena-readonly`
+  paths (`BRIEF.md`, `LICENSE`), `athena-exclude` paths (`CLAUDE.md`), and any change to path classification
+  (D09). Docs only.
 - The always-loaded prompts are rewritten leaner, and the producer budget is rebased. The contract, the five
   role frames (reader, planner, critic, producer, verifier) and the four capability prompts drop text that
   repeats the output schema, the brief, the checks, the catalog or the defaults, and keep each role's job, its
