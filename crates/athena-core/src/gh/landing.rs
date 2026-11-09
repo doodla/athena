@@ -374,7 +374,9 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
 /// branch as its only parent and so never has the earlier head as an ancestor, while the merge was guarded by
 /// that head. A pull request that is merged or closed, or whose head holds a commit the merge does not carry,
 /// is left alone. The head of a job's early candidate (never on its branch) and a stack replayed under new
-/// hashes are not reachable, so those pull requests stay open.
+/// hashes are not reachable, so those pull requests stay open. The resync after a landing merges the host's
+/// commit into the working branch and keeps its commits, so an earlier open pull request below a later
+/// landing stays an ancestor of the later head and is closed when that head is carried.
 ///
 /// Nothing here fails: every problem is returned as a warning line, and so is every pull request closed.
 fn close_carried_prs(job: &LandPr, link: &PrLink) -> Vec<String> {
@@ -953,9 +955,10 @@ impl Athena {
         Ok(report)
     }
 
-    /// What follows a pull request's merge, in this order: the local branch is moved onto the merged commit,
-    /// the Pages deploy is watched, and the code-health check runs (`crate::code_health`). The merge is done
-    /// and stays done: a failed Pages watch or code-health check is shown, never returned as an error.
+    /// What follows a pull request's merge, in this order: the merged commit is merged into the local branch
+    /// and the branch is pushed to `origin` with a plain push, the Pages deploy is watched, and the
+    /// code-health check runs (`crate::code_health`). The merge is done and stays done: a failed push, Pages
+    /// watch or code-health check is shown, never returned as an error.
     pub(crate) fn after_merge(
         &self,
         report: &PrReport,
@@ -968,9 +971,11 @@ impl Athena {
             return Ok(());
         }
         // A merge the host made without the branch's commits (a squash or a rebase) leaves the local branch
-        // beside main; bring it onto the merged commit so the next pull request opens clean.
+        // beside main; merge the host's commit into the branch so the next pull request opens clean, then
+        // push the branch. The merge only adds commits, so the plain push is accepted.
         if let (Some(landed), Some(merged)) = (landed, &report.link.merged_commit) {
             self.resync_onto_merge(landed, merged, ui)?;
+            self.push_working_branch(ui);
         }
         if let Some(merged) = &report.link.merged_commit
             && let Err(problem) = watch_pages(pages, merged, pages_poll, ui)

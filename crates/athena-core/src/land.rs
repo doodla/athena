@@ -30,7 +30,8 @@
 //! the content verified on the merged tree, and a landing whose fingerprint differs is refused. What makes a
 //! job stale is unchanged.
 
-use crate::gh::verification_id;
+use crate::gh::{GitRemote, Remote, verification_id};
+use crate::pr::{PushRequest, check_push};
 use crate::store::Records;
 use crate::verify::Verified;
 use crate::{Athena, Ui};
@@ -209,9 +210,16 @@ pub fn plan(git: &Git, verified: &Verified, head: &str, dispatched: &Dispatched)
 ///
 /// A squash (or a rebase) merge makes a commit that does not descend from the branch's commits, so the job's
 /// landed commit `landed` stays on the local branch but never reaches the base branch's history, and the next
-/// pull request cut from the branch conflicts with it. The fix is to rebuild: the commits after `landed` (later
-/// landed jobs, records, hand work) are replayed, in order and with their messages, on top of `merged`, the
-/// commit the host made. The result holds everything the branch held. A conflict is an error and nothing moves.
+/// pull request cut from the branch conflicts with it. The fix adds to the branch and rewrites nothing: the
+/// result is a merge commit whose parents are `head` and `merged`, the commit the host made. Every commit the
+/// branch held, and the commit its remote copy holds, stays an ancestor, so a plain push of the new tip is
+/// accepted.
+///
+/// The merge takes `landed` as its merge base, so only what the host's commit holds beyond the landed job
+/// comes in; later edits of the lines the job landed do not conflict. The merge commit must hold the same
+/// governed content as `head` (the host's commit equals the landed job when the branch was up to date at the
+/// merge), so it classifies as records only. A conflict, or a governed difference from `head`, is an error and
+/// nothing moves.
 ///
 /// `None` when `merged` is already part of `head` (a merge commit that was pulled, or an earlier resync), or
 /// when `landed` is not on `head` (there is nothing of the job to replace).
@@ -225,7 +233,32 @@ pub fn resync_tip(
     if git.is_ancestor(merged, head)? || !git.is_ancestor(landed, head)? {
         return Ok(None);
     }
-    Ok(Some(git.replay(merged, landed, head, sign)?))
+    let Some(tree) = git.merge_tree(landed, head, merged)? else {
+        bail!(
+            "the host's commit {merged} conflicts with work on the branch after the landed commit \
+             {landed}; merge it by hand"
+        );
+    };
+    if fingerprint(git, &tree, head)? != fingerprint(git, head, head)? {
+        let first = git
+            .diff_tree(head, &tree)?
+            .into_iter()
+            .next()
+            .map(|e| e.path)
+            .unwrap_or_default();
+        bail!(
+            "the host's commit {merged} changes governed content the branch does not hold (first: \
+             {first}); merge it by hand"
+        );
+    }
+    let short = &merged[..merged.len().min(12)];
+    let message = format!("Merge the host's commit {short} into the branch\n");
+    Ok(Some(git.commit_tree(
+        &tree,
+        &[head, merged],
+        &message,
+        sign,
+    )?))
 }
 
 /// One commit of a pull request, classified by what it contains (§5.3 of
@@ -265,7 +298,30 @@ pub struct PrCommit {
 /// The head is always the landing commit: the candidate that `go` pushes early, when verification starts, is
 /// replaced by the landing commit before the head is judged (`gh::land_pr`), so it never appears here.
 pub fn pr_commits(git: &Git, remote_base: &str, head: &str) -> Result<Vec<PrCommit>> {
-    let listing = git.run(["rev-list", "--reverse", &format!("{remote_base}..{head}")])?;
+    pr_commits_excluding(git, remote_base, head, &[])
+}
+
+/// [`pr_commits`] without the commits reachable from any of `landed_heads`: the heads of pull requests
+/// that already landed. The working branch keeps a landed job's commits after the host squashed them
+/// (the resync adds a merge commit and rewrites nothing), so they stay in `remote_base..head`; a landing
+/// record must not list them a second time. A head this repository does not hold is ignored.
+pub fn pr_commits_excluding(
+    git: &Git,
+    remote_base: &str,
+    head: &str,
+    landed_heads: &[String],
+) -> Result<Vec<PrCommit>> {
+    let mut args = vec![
+        "rev-list".to_string(),
+        "--reverse".to_string(),
+        format!("{remote_base}..{head}"),
+    ];
+    for landed in landed_heads {
+        if git.commit_exists(landed)? {
+            args.push(format!("^{landed}"));
+        }
+    }
+    let listing = git.run(args)?;
     let mut commits = Vec::new();
     for sha in listing.lines().map(str::trim).filter(|l| !l.is_empty()) {
         commits.push(classify_commit(git, remote_base, head, sha)?);
@@ -305,16 +361,18 @@ pub fn classify_commit(git: &Git, remote_base: &str, head: &str, sha: &str) -> R
 }
 
 impl Athena {
-    /// Moves the current branch onto the commit the host made for a merged pull request (see [`resync_tip`]).
-    /// Local edits in the checkout are kept; if one is in the way of the move, the branch stays as it was and
-    /// the error says so.
+    /// Merges the commit the host made for a merged pull request into the current branch (see
+    /// [`resync_tip`]): the branch moves to a new merge commit that has its old tip as first parent, so no
+    /// commit is rewritten and the branch stays a descendant of its remote copy. Local edits in the checkout
+    /// are kept; if one is in the way of the move, the branch stays as it was and the error says so. A
+    /// conflicting merge is an error and the branch is unchanged too.
     pub fn resync_onto_merge(&self, landed: &str, merged: &str, ui: &dyn Ui) -> Result<()> {
         let _lock = self.state.lock_repository()?;
         let head = self.head()?;
         let sign = self.git.signs_commits()?;
         let Some(tip) = resync_tip(&self.git, &head, landed, merged, sign).with_context(|| {
             format!(
-                "could not rebuild the branch on the merged commit {merged}; the branch is unchanged \
+                "could not merge the host's commit {merged} into the branch; the branch is unchanged \
                  (it still holds {head})"
             )
         })?
@@ -324,17 +382,91 @@ impl Athena {
         match self.git.reset_keep(&tip)? {
             Ok(()) => {
                 ui.line(&format!(
-                    "the branch was rebuilt on the merged commit {}; it held {} before",
+                    "the branch merged the host's commit {}; it held {} before",
                     &merged[..merged.len().min(12)],
                     &head[..head.len().min(12)]
                 ));
                 Ok(())
             }
             Err(stderr) => bail!(
-                "could not move the branch onto the merged commit: {}. The branch is unchanged; move \
-                 the local edits aside and run the command again",
+                "could not move the branch onto the merge of the host's commit: {}. The branch is \
+                 unchanged; move the local edits aside and run the command again",
                 stderr.trim()
             ),
+        }
+    }
+
+    /// Pushes the checked-out working branch to `origin` with a plain push, after a landing. It returns whether
+    /// the remote holds the branch's tip afterwards.
+    ///
+    /// It never forces and never pushes the default branch (changes reach that through pull requests): the
+    /// default branch is the one `origin/HEAD` names, or `main` or `master` when that is not set. A branch
+    /// the remote holds at a commit that is not an ancestor of the local tip is not pushed (the same
+    /// fast-forward test as [`crate::pr::check_push`]). A refusal or a failed push is a `warning:` line, not
+    /// an error: the landing stands. With no current branch or no `origin` it does nothing and says nothing.
+    pub fn push_working_branch(&self, ui: &dyn Ui) -> bool {
+        let Ok(Some(branch)) = self.git.current_branch() else {
+            return false;
+        };
+        if self.git.run(["remote", "get-url", "origin"]).is_err() {
+            return false;
+        }
+        let default = crate::reconcile::local_default_branch(&self.git, "origin");
+        let is_default = match &default {
+            Some(name) => *name == branch,
+            None => branch == "main" || branch == "master",
+        };
+        if is_default {
+            ui.line(&format!(
+                "not pushing {branch} to origin: it is the default branch; changes reach it through pull \
+                 requests"
+            ));
+            return false;
+        }
+        let Ok(Some(head)) = self.git.head() else {
+            return false;
+        };
+        let warn = |why: &dyn std::fmt::Display| {
+            ui.line(&format!(
+                "warning: could not push {branch} to origin: {why}; the landing stands"
+            ));
+        };
+        let remote = GitRemote {
+            git: &self.git,
+            name: "origin",
+        };
+        let remote_head = match remote.remote_head(&branch) {
+            Ok(found) => found,
+            Err(problem) => {
+                warn(&format!("{problem:#}"));
+                return false;
+            }
+        };
+        if remote_head.as_deref() == Some(head.as_str()) {
+            return true;
+        }
+        let request = PushRequest {
+            allowed_branch: &branch,
+            branch: &branch,
+            local_head: &head,
+            remote_head: remote_head.as_deref(),
+        };
+        if let Err(refusal) = check_push(&self.git, &request) {
+            warn(&refusal);
+            return false;
+        }
+        match remote.push(&branch, &head) {
+            Ok(()) => {
+                ui.line(&format!(
+                    "pushed {branch} to origin at {}",
+                    &head[..head.len().min(12)]
+                ));
+                true
+            }
+            Err(problem) => {
+                warn(&format!("{problem:#}"));
+                false
+            }
         }
     }
 }
@@ -530,14 +662,17 @@ mod tests {
         git.head().unwrap().unwrap()
     }
 
-    #[test]
-    fn after_a_squash_the_branch_is_rebuilt_on_it_and_the_next_pull_request_is_clean() {
+    /// A branch `work` with job A landed, then job B (which edits A's line again), B's records and a hand
+    /// edit, and the host's squash of job A on top of the starting commit (its tree equals the landed
+    /// tree). Returns the repository with `work` checked out, the starting commit, the landed commit, the
+    /// branch tip and the squash.
+    fn squashed_branch() -> (tempfile::TempDir, Git, String, String, String, String) {
         let (dir, git) = repo();
         let root = dir.path();
         std::fs::write(root.join("a.txt"), "1\n2\n3\n").unwrap();
         git.run(["commit", "-q", "-am", "lines"]).unwrap();
         let start = git.head().unwrap().unwrap();
-        // The branch: job A lands, then job B (which edits A's line again), then B's records, then a hand edit.
+        git.run(["checkout", "-q", "-b", "work"]).unwrap();
         let landed = commit_message(
             &git,
             root,
@@ -560,90 +695,219 @@ mod tests {
             "Records\n\nAthena-Job: jb\n",
         );
         let head = commit_message(&git, root, "notes.txt", "hand\n", "Hand edit\n");
-
-        // The host squashes job A's pull request onto main, which also gained a commit of its own.
-        git.run(["checkout", "-q", "-b", "origin-main", &start])
-            .unwrap();
-        commit_message(&git, root, "other.txt", "o\n", "Other work");
-        let moved = git.head().unwrap().unwrap();
+        // The host squashes job A's pull request onto the starting commit.
         let text = git.squash_text(&landed).unwrap();
-        let squash_tree = git.merge_tree(&start, &moved, &landed).unwrap().unwrap();
         let squash = git
             .commit_tree(
-                &squash_tree,
-                &[&moved],
-                &format!("{}\n\n{}", text.title, text.body),
+                &git.tree_of(&landed).unwrap(),
+                &[&start],
+                &format!("{} (#1)\n\n{}", text.title, text.body),
                 false,
             )
             .unwrap();
-        git.run(["checkout", "-q", "main"]).unwrap();
         assert!(!git.is_ancestor(&squash, &head).unwrap());
+        (dir, git, start, landed, head, squash)
+    }
 
-        // Without the rebuild, a pull request cut from the branch conflicts with the squash.
-        let before = merge_base(&git, &squash, &head);
-        assert_eq!(git.merge_tree(&before, &squash, &head).unwrap(), None);
+    /// A bare repository added to `git` as `origin`.
+    fn add_origin(git: &Git) -> (tempfile::TempDir, Git) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        git.run(["init", "--bare", "-q", path]).unwrap();
+        git.run(["remote", "add", "origin", path]).unwrap();
+        let bare = Git::isolated(dir.path());
+        (dir, bare)
+    }
+
+    #[test]
+    fn after_a_squash_the_branch_is_merged_with_it_and_a_plain_push_succeeds() {
+        let (_dir, git, _start, landed, head, squash) = squashed_branch();
+        let (_origin, bare) = add_origin(&git);
+        // The remote copy holds the branch as it was before the landing resynced.
+        git.push_branch("origin", "work", &head).unwrap();
+        let previous_remote_head = bare.rev_parse("refs/heads/work").unwrap().unwrap();
+        assert_eq!(previous_remote_head, head);
 
         let tip = resync_tip(&git, &head, &landed, &squash, false)
             .unwrap()
             .expect("the branch must move");
+        if let Err(stderr) = git.reset_keep(&tip).unwrap() {
+            panic!("{stderr}");
+        }
+        assert_eq!(git.head().unwrap().unwrap(), tip);
+
+        // The branch descends from its previous remote head and from the host's commit.
+        assert!(git.is_ancestor(&previous_remote_head, &tip).unwrap());
         assert!(git.is_ancestor(&squash, &tip).unwrap());
-        // Later landed jobs, records and hand work are kept, in order, with their messages.
-        let subjects = git
-            .run(["log", "--format=%s", &format!("{squash}..{tip}")])
-            .unwrap();
-        assert_eq!(
-            subjects.lines().collect::<Vec<_>>(),
-            ["Hand edit", "Records", "Job B"]
-        );
-        let show =
-            |path: &str| String::from_utf8(git.show_file(&tip, path).unwrap().unwrap()).unwrap();
-        assert_eq!(show("a.txt"), "B\n2\n3\n");
-        assert_eq!(show("records/b.json"), "{}\n");
-        assert_eq!(show("notes.txt"), "hand\n");
-        assert_eq!(show("other.txt"), "o\n");
-        let job_b = git.message(&format!("{tip}~2")).unwrap();
-        assert!(
-            git.trailers(&job_b)
-                .unwrap()
-                .contains(&("Athena-Job".into(), "jb".into()))
-        );
+        // So a plain push is accepted, and the remote copy follows.
+        git.push_branch("origin", "work", &tip).unwrap();
+        assert_eq!(bare.rev_parse("refs/heads/work").unwrap().unwrap(), tip);
 
-        // Move the branch there; the next job's pull request branch merges with main without a conflict.
-        git.run(["reset", "-q", "--hard", &tip]).unwrap();
-        commit_message(&git, root, "next.txt", "n\n", "Job C\n\nAthena-Job: jc\n");
+        // The rewrite this replaces is refused by the remote: its result left the remote copy's history.
+        let rewritten = git.replay(&squash, &landed, &head, false).unwrap();
+        assert!(!git.is_ancestor(&previous_remote_head, &rewritten).unwrap());
+        assert!(git.push_branch("origin", "work", &rewritten).is_err());
+    }
+
+    #[test]
+    fn resync_tip_adds_a_merge_commit_and_rewrites_nothing() {
+        let (_dir, git, start, landed, head, squash) = squashed_branch();
+        let tip = resync_tip(&git, &head, &landed, &squash, false)
+            .unwrap()
+            .expect("the branch must move");
+        // A merge commit: the old tip first, the host's commit second.
+        assert_eq!(git.parents(&tip).unwrap(), [head.clone(), squash.clone()]);
+        // Every commit the branch held is still an ancestor, unchanged.
+        let held = git.run(["rev-list", &head]).unwrap();
+        for commit in held.lines() {
+            assert!(git.is_ancestor(commit, &tip).unwrap(), "{commit}");
+        }
+        assert!(git.is_ancestor(&start, &tip).unwrap());
+        // The tree is the old tip's, and the message carries no Athena- trailer.
+        assert_eq!(git.tree_of(&tip).unwrap(), git.tree_of(&head).unwrap());
+        let message = git.message(&tip).unwrap();
+        assert!(!message.contains("Athena-"), "{message}");
+        // The gate takes the merge as records only: its tree equals its first parent's.
+        let judged = classify_commit(&git, &start, &tip, &tip).unwrap();
+        assert_eq!(judged.kind, LandingKind::RecordsOnly);
+
+        // The next job's pull request branch merges with the host's commit without a conflict.
+        git.reset_keep(&tip).unwrap().unwrap();
+        commit_message(
+            &git,
+            _dir.path(),
+            "next.txt",
+            "n\n",
+            "Job C\n\nAthena-Job: jc\n",
+        );
         let next = git.head().unwrap().unwrap();
-        let base_of_next = merge_base(&git, &squash, &next);
-        assert_eq!(base_of_next, squash);
-        assert!(
-            git.merge_tree(&base_of_next, &squash, &next)
-                .unwrap()
-                .is_some()
-        );
+        assert_eq!(merge_base(&git, &squash, &next), squash);
+        assert!(git.merge_tree(&squash, &squash, &next).unwrap().is_some());
+    }
 
-        // A second run changes nothing, and a branch that does not hold the job's commit is left alone.
+    #[test]
+    fn commits_of_a_landed_head_are_left_out_of_a_pull_request_range() {
+        let (_dir, git, start, landed, ..) = squashed_branch();
+        // Job A's commit is not a landing (it adds no closing records), so judging it is an error ...
+        let judged = pr_commits(&git, &start, &landed).unwrap_err().to_string();
+        assert!(!judged.contains("adds no commit"), "{judged}");
+        // ... but once the head of its landed pull request is excluded, the range is empty.
+        let empty = pr_commits_excluding(&git, &start, &landed, std::slice::from_ref(&landed))
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("adds no commit"), "{empty}");
+        // A head this repository does not hold is ignored.
+        let missing = "0".repeat(40);
+        let unknown = pr_commits_excluding(&git, &start, &landed, &[missing])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(unknown, judged);
+    }
+
+    #[test]
+    fn resync_tip_leaves_the_no_op_cases_alone() {
+        let (_dir, git, start, landed, head, squash) = squashed_branch();
+        let tip = resync_tip(&git, &head, &landed, &squash, false)
+            .unwrap()
+            .unwrap();
+        // The host's commit is already part of the branch: a second run, and an older commit of the base.
         assert_eq!(
-            resync_tip(&git, &next, &landed, &squash, false).unwrap(),
+            resync_tip(&git, &tip, &landed, &squash, false).unwrap(),
             None
         );
         assert_eq!(
+            resync_tip(&git, &head, &landed, &start, false).unwrap(),
+            None
+        );
+        // The branch does not hold the job's commit.
+        assert_eq!(
             resync_tip(&git, &squash, &landed, &squash, false).unwrap(),
+            None
+        );
+        assert_eq!(
+            resync_tip(&git, &start, &landed, &squash, false).unwrap(),
             None
         );
     }
 
     #[test]
-    fn a_squash_the_later_work_cannot_be_carried_over_is_an_error_that_moves_nothing() {
+    fn a_squash_the_later_work_conflicts_with_is_an_error_that_moves_nothing() {
         let (dir, git) = repo();
         let root = dir.path();
+        let start = git.head().unwrap().unwrap();
+        git.run(["checkout", "-q", "-b", "work"]).unwrap();
         let landed = commit_message(&git, root, "a.txt", "A\n", "Job A\n\nAthena-Job: ja\n");
         let head = commit_message(&git, root, "a.txt", "B\n", "Job B\n\nAthena-Job: jb\n");
         // The host's squash differs from the landed commit in the very line job B changes.
-        git.run(["checkout", "-q", "-b", "side", "HEAD~2"]).unwrap();
-        let squash = commit_message(&git, root, "a.txt", "squash differs\n", "Job A (#1)\n");
-        git.run(["checkout", "-q", "main"]).unwrap();
+        let tree = {
+            git.run(["checkout", "-q", "-b", "side", &start]).unwrap();
+            commit_message(&git, root, "a.txt", "squash differs\n", "Job A (#1)\n");
+            git.tree_of("HEAD").unwrap()
+        };
+        let squash = git
+            .commit_tree(&tree, &[&start], "Job A (#1)\n", false)
+            .unwrap();
+        git.run(["checkout", "-q", "work"]).unwrap();
         let err = resync_tip(&git, &head, &landed, &squash, false).unwrap_err();
         assert!(err.to_string().contains("conflicts"), "{err}");
         assert_eq!(git.head().unwrap().unwrap(), head);
+    }
+
+    #[test]
+    fn a_squash_with_governed_content_the_branch_lacks_is_an_error_that_moves_nothing() {
+        let (dir, git, start, landed, head, _squash) = squashed_branch();
+        // The host's commit also carries a governed file the branch does not hold.
+        git.run(["checkout", "-q", "-b", "side", &start]).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "A\n2\n3\n").unwrap();
+        commit_message(&git, dir.path(), "other.txt", "o\n", "Other work");
+        let squash = git.head().unwrap().unwrap();
+        git.run(["checkout", "-q", "work"]).unwrap();
+        let err = resync_tip(&git, &head, &landed, &squash, false).unwrap_err();
+        assert!(err.to_string().contains("other.txt"), "{err}");
+        assert_eq!(git.head().unwrap().unwrap(), head);
+    }
+
+    #[test]
+    fn a_hand_made_merge_that_takes_older_governed_content_is_not_records_only() {
+        // The merge the resync makes is judged as records only; a merge that reverts governed content to an
+        // older commit's version is not, so the gate still refuses it.
+        let (dir, git) = repo();
+        let start = git.head().unwrap().unwrap();
+        git.run(["checkout", "-q", "-b", "work"]).unwrap();
+        let head = commit_message(&git, dir.path(), "a.txt", "changed\n", "Edit\n");
+        let reverted = git
+            .commit_tree(
+                &git.tree_of(&start).unwrap(),
+                &[&head, &start],
+                "Merge\n",
+                false,
+            )
+            .unwrap();
+        let err = classify_commit(&git, &start, &reverted, &reverted).unwrap_err();
+        assert!(err.to_string().contains(&reverted), "{err}");
+    }
+
+    #[test]
+    fn resync_onto_merge_reports_a_conflict_and_leaves_the_branch_unchanged() {
+        let (dir, _state, athena) = crate::code_health::tests::set_up();
+        let root = dir.path();
+        let git = &athena.git;
+        let start = git.head().unwrap().unwrap();
+        git.run(["checkout", "-q", "-b", "work"]).unwrap();
+        let landed = commit_message(git, root, "a.txt", "A\n", "Job A\n\nAthena-Job: ja\n");
+        let head = commit_message(git, root, "a.txt", "B\n", "Job B\n\nAthena-Job: jb\n");
+        git.run(["checkout", "-q", "-b", "side", &start]).unwrap();
+        commit_message(git, root, "a.txt", "squash differs\n", "Job A (#1)\n");
+        let squash = git.head().unwrap().unwrap();
+        git.run(["checkout", "-q", "work"]).unwrap();
+        let err = athena
+            .resync_onto_merge(&landed, &squash, &crate::Quiet)
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("the branch is unchanged"),
+            "{err:#}"
+        );
+        assert_eq!(athena.head().unwrap(), head);
     }
 
     #[test]

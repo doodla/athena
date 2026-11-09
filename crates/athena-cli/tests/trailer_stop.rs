@@ -127,9 +127,12 @@ fn land_post_c0_job() -> PostC0 {
     .unwrap();
     assert_eq!(report.link.state, athena_core::pr::LinkState::Landed);
     let merged = report.link.merged_commit.clone().unwrap();
-    athena
-        .resync_onto_merge(&landed, &merged, &Lines::default())
-        .unwrap();
+    // The checkout is `main` itself and nothing followed the landed commit, so `main` moves straight onto
+    // the squash commit. A merge commit on `main` would put the cutover commit off its first-parent line.
+    fx.git
+        .reset_keep(&merged)
+        .unwrap()
+        .expect("main moves onto the squash commit");
     PostC0 {
         fx,
         athena,

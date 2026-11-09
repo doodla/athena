@@ -23,7 +23,8 @@
 //!    `athena/records` of the bare remote and of the work repository: the landing-intent record, the landing
 //!    record, and, from the landing's cutover hook, one commit holding the import of `records/` at `C0`
 //!    with its manifest and the legacy-exempt record. The work repository's `main` is then moved onto the
-//!    squash commit with [`crate::Athena::resync_onto_merge`], as `athena land --pr` does.
+//!    squash commit with a `reset --keep`: the checkout is `main` itself, so the merge commit that
+//!    [`crate::Athena::resync_onto_merge`] makes on a working branch would put `C0` off `main`'s first-parent line.
 //!
 //! `C0` is the squash commit: the host commit of the cutover job's landing record.
 //!
@@ -43,7 +44,7 @@
 //!   [`CutoverFixture::build`]. The `athena-cli` wrapper is the model to copy.
 //! - **To add history after the cutover** (a job landed after `C0`): use [`CutoverFixture::athena`] to get an
 //!   [`crate::Athena`] over the work repository and the shared state directory, run `ask` and `go`, and land
-//!   it with [`land_through_pr`] (then [`Athena::resync_onto_merge`] to move `main` onto the squash).
+//!   it with [`land_through_pr`] (then `reset --keep` to move `main` onto the squash, as the fixture does).
 //! - **If a job changes how commits are made** (the trailer job), change the writers, not this fixture: the
 //!   history is rebuilt through them on each run. Update the assertions that read the trailers
 //!   ([`CutoverFixture::trailers_of`] returns what the commit carries).
@@ -556,8 +557,15 @@ impl CutoverFixture {
             .merged_commit
             .clone()
             .context("the merged commit")?;
-        go.resync_onto_merge(&cutover_local_landing, &c0, &Quiet)
-            .context("moving main onto the squash commit")?;
+        // The checkout is `main` itself, and attribution reads main's first-parent line from C0. A merge
+        // commit on `main` would put C0 off that line, so `main` moves straight onto the squash commit
+        // (nothing followed the landed commit here).
+        if let Err(stderr) = git
+            .reset_keep(&c0)
+            .context("moving main onto the squash commit")?
+        {
+            bail!("moving main onto the squash commit: {}", stderr.trim());
+        }
 
         Ok(CutoverFixture {
             work_dir,
@@ -613,7 +621,8 @@ impl CutoverFixture {
 /// Lands `job`, whose verified landing commit `landed` is on the work repository's `main` on top of `base`
 /// (the remote's `main`), through [`land_pr`] with the real records sink and a [`FakeHost`]. `fingerprint` is
 /// the job's verified content fingerprint. The remote's `main` and `athena/records` are updated; the work
-/// repository's `main` is not moved (see [`Athena::resync_onto_merge`]).
+/// repository's `main` is not moved (move it with `reset --keep`, or on a working branch with
+/// [`Athena::resync_onto_merge`], which merges the squash commit in).
 pub fn land_through_pr(
     git: &Git,
     state_root: &Path,

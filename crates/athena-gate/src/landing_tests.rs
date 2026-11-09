@@ -658,6 +658,51 @@ fn a_second_landing_of_the_same_job_after_a_squash_is_refused() {
 }
 
 #[test]
+fn a_landed_commit_and_its_squash_on_one_branch_are_refused_by_the_walk_before_the_cutover() {
+    // Known limit, named in CHANGELOG.md. After a landing the working branch is merged with the
+    // host's squash instead of being rewritten, so it holds both the job's landed commit and the
+    // squash that copies it. The walk over every reachable commit, which runs when no cutover is
+    // shown, counts that as a second landing of the job. The walk after the cutover judges only the
+    // branch's own commits and is not affected. A later change to the gate can teach the walk this
+    // shape; this test pins the current behavior so the change is deliberate.
+    let (dir, git) = owner_repo();
+    let base = git.head().unwrap().unwrap();
+    stage_landing(dir.path(), &git, &base, &HONEST);
+    let landed = commit(&git, "Land job A\n");
+    assert_eq!(history_of(&git), vec![]);
+
+    // The host squashes the same landing onto the base.
+    git.run(["checkout", "-q", "--detach", &base]).unwrap();
+    stage_landing(dir.path(), &git, &base, &HONEST);
+    let squash = commit(&git, "Change a (#1)\n");
+    assert_eq!(
+        git.tree_of(&landed).unwrap(),
+        git.tree_of(&squash).unwrap(),
+        "the squash holds the landed tree"
+    );
+
+    // The resync merge: the landed commit first, the squash second, the landed tree.
+    let tree = git.tree_of(&landed).unwrap();
+    let merge = git
+        .commit_tree(
+            &tree,
+            &[landed.as_str(), squash.as_str()],
+            "Merge the host's commit into the branch\n",
+            false,
+        )
+        .unwrap();
+    git.run(["reset", "-q", "--hard", &merge]).unwrap();
+
+    let found = history_of(&git);
+    assert!(
+        found
+            .iter()
+            .any(|v| v.rule == Rule::Invariant && v.detail.contains("already landed")),
+        "{found:?}"
+    );
+}
+
+#[test]
 fn trailers_on_a_squash_neither_admit_nor_refuse_by_themselves() {
     let (dir, git) = owner_repo();
     let base = git.head().unwrap().unwrap();
