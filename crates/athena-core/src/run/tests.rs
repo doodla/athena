@@ -88,6 +88,9 @@ mod produce_and_verify_order_tests {
     /// A capability that edits files and runs one configured check, so the baseline has something to say.
     /// The check is the command `check` (`true` passes, `false` fails).
     struct Docs {
+        /// The capability id the reading names: `study` for most tests, `change` where the changelog default
+        /// applies.
+        id: &'static str,
         check: &'static [&'static str],
         /// Checks with the three names of the CI workflow (`fmt`, `clippy`, `test`), each running `check`
         /// and none skipped by path, so the route asks for a CI result. Off, the one check is `probe`.
@@ -101,11 +104,11 @@ mod produce_and_verify_order_tests {
 
     impl Capability for Docs {
         fn id(&self) -> &'static str {
-            "study"
+            self.id
         }
         fn card(&self) -> CapabilityCard {
             CapabilityCard {
-                id: "study",
+                id: self.id,
                 purpose: "describe a demo.",
                 when: "for a request to describe a demo.",
                 produces: "files describing the demo.",
@@ -199,6 +202,7 @@ mod produce_and_verify_order_tests {
             state,
             driver: std::sync::Arc::new(driver),
             capabilities: vec![Box::new(Docs {
+                id: "study",
                 check,
                 ci_steps: false,
             })],
@@ -3208,6 +3212,151 @@ mod produce_and_verify_order_tests {
         assert_eq!(counts.all().3, 1);
     }
 
+    /// Runs one job whose reader names the `change` capability, so `ensure_changelog` adds CHANGELOG.md and the
+    /// `changelog` default. The producer edits README.md on every pass and edits CHANGELOG.md from its
+    /// `changelog_from`th pass on (counting from 0), if ever; before that it reports CHANGELOG.md as unchanged
+    /// with a reason. Returns the Athena, the closing, the counts, every producer prompt and what the UI said.
+    fn changelog_job(
+        repo: &tempfile::TempDir,
+        state: &tempfile::TempDir,
+        changelog_from: Option<usize>,
+    ) -> (Athena, Finished, Arc<Counts>, Vec<String>, Vec<String>) {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let inner = editing(counts.clone(), prompts.clone(), Vec::new());
+        let attempts = AtomicUsize::new(0);
+        let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            match spec.role {
+                Role::Reader => {
+                    if let Some(out) = turn.structured.as_mut() {
+                        out["capability"] = json!("change");
+                    }
+                }
+                Role::Producer => {
+                    let attempt = attempts.fetch_add(1, SeqCst);
+                    let out = turn.structured.as_mut().unwrap();
+                    if changelog_from.is_some_and(|from| attempt >= from) {
+                        turn.edits.push((
+                            "CHANGELOG.md".into(),
+                            Some("# Changelog\n\n- Entry.\n".into()),
+                        ));
+                        out["files"] = json!(["README.md", "CHANGELOG.md"]);
+                    } else {
+                        // A stated reason excused the file before the changelog rule.
+                        out["unchanged_planned_files"] = json!([
+                            { "path": "CHANGELOG.md", "reason": "a small change needs no entry" }
+                        ]);
+                    }
+                }
+                _ => {}
+            }
+            turn
+        });
+        let mut athena = athena_with(
+            repo,
+            state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        athena.capabilities = vec![Box::new(Docs {
+            id: "change",
+            check: PASSES,
+            ci_steps: false,
+        })];
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        let said = ui.0.lock().unwrap().clone();
+        let prompts = prompts.lock().unwrap().clone();
+        (athena, done, counts, prompts, said)
+    }
+
+    #[test]
+    fn a_change_job_sent_back_for_the_changelog_adds_it_and_reaches_the_verifier() {
+        // Pass one edits README.md only and gives a reason for CHANGELOG.md; pass two adds the entry.
+        let (repo, state) = (repo(), tempfile::tempdir().unwrap());
+        let (_athena, done, counts, prompts, said) = changelog_job(&repo, &state, Some(1));
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (2, 1), "{said:#?}");
+        assert!(!prompts[0].contains("## Sent back"), "{}", prompts[0]);
+        let (_, sent_back) = prompts[1].split_once("## Sent back").expect("a send-back");
+        assert!(
+            sent_back.contains("CHANGELOG.md is a deliverable"),
+            "{sent_back}"
+        );
+        assert!(sent_back.contains("does not excuse it"), "{sent_back}");
+    }
+
+    #[test]
+    fn a_change_job_that_never_adds_the_changelog_is_refused_before_the_verifier() {
+        let (repo, state) = (repo(), tempfile::tempdir().unwrap());
+        let (athena, done, counts, _prompts, said) = changelog_job(&repo, &state, None);
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            done.reason.contains("admission refused the change"),
+            "{}",
+            done.reason
+        );
+        assert!(done.reason.contains("CHANGELOG.md"), "{}", done.reason);
+        // The shared send-back, the changelog's own send-back, and the pass that ends the job; no verifier.
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (3, 0), "{said:#?}");
+        assert!(
+            said.iter().any(|l| l
+                == "producer   CHANGELOG.md still not changed after the send-back; the job ends at admission"),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.starts_with("verifier   ")),
+            "{said:#?}"
+        );
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let candidate = records.jobs[done.job.as_str()]
+            .candidate
+            .as_ref()
+            .expect("the refused candidate is kept");
+        let rules: Vec<&str> = candidate
+            .violations
+            .iter()
+            .map(|v| v.rule.as_str())
+            .collect();
+        assert_eq!(rules, ["changelog"]);
+        // A refusal at admission has no verification, so a retry restarts from the base.
+        assert!(!crate::reading::qualifies_for_tree_retry(
+            crate::store::JobState::Closed(OutcomeState::Failed),
+            Some(candidate),
+            None,
+        ));
+    }
+
+    #[test]
+    fn a_change_job_that_edits_the_changelog_at_once_reaches_the_verifier() {
+        let (repo, state) = (repo(), tempfile::tempdir().unwrap());
+        let (_athena, done, counts, prompts, said) = changelog_job(&repo, &state, Some(0));
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (1, 1), "{said:#?}");
+        assert_eq!(prompts.len(), 1);
+    }
+
     /// The criterion that limits which files may change in the scope tests. The base reading's one deliverable
     /// is README.md and `ensure_changelog` adds CHANGELOG.md, so those are the allowed paths. The limit names
     /// both because the reading gate (`check_scope_limit`) refuses a limit that leaves out CHANGELOG.md.
@@ -5844,6 +5993,7 @@ mod produce_and_verify_order_tests {
             script,
         );
         athena.capabilities = vec![Box::new(Docs {
+            id: "study",
             check,
             ci_steps: true,
         })];

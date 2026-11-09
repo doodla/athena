@@ -245,6 +245,27 @@ pub(crate) fn append_mirror_drift(text: String, drift: &[Drift]) -> String {
     text
 }
 
+/// `text`, a send-back brief, with a closing section for a `CHANGELOG.md` the change reading asks for and the
+/// work tree does not change. With `missing` false the text is returned unchanged.
+///
+/// Root cause of the failure class: the changelog default was a rule the producer must remember, and no code
+/// compared the diff with the deliverables. A reason in `unchanged_planned_files` excused the file, so the
+/// section says that a reason does not.
+pub(crate) fn append_missing_changelog(mut text: String, missing: bool) -> String {
+    if !missing {
+        return text;
+    }
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(
+        "\nCHANGELOG.md is a deliverable (the changelog default applies) and your change does not \
+         touch it; add an entry. A reason in unchanged_planned_files does not excuse it. If it is \
+         still unchanged afterwards, the job ends at admission, before the verifier runs.\n",
+    );
+    text
+}
+
 /// A criterion's text reduced for comparison: no leading number (`1.`, `2)`, `3:`), no leading `[kind]`
 /// tag, lowercase, single spaces, no trailing punctuation.
 fn criterion_key(text: &str) -> String {
@@ -305,6 +326,27 @@ mod mirror_drift_tests {
             out.ends_with("- docs/decisions.md is append-only\n"),
             "{out}"
         );
+    }
+}
+
+#[cfg(test)]
+mod missing_changelog_tests {
+    use super::*;
+
+    #[test]
+    fn a_changelog_not_missing_leaves_the_text_unchanged() {
+        let text = send_back_text("brief", &["c".to_string()], &[]);
+        assert_eq!(append_missing_changelog(text.clone(), false), text);
+    }
+
+    #[test]
+    fn a_missing_changelog_adds_a_section_naming_the_file_and_the_reason_rule() {
+        let text = send_back_text("brief", &[], &[]);
+        let out = append_missing_changelog(text.clone(), true);
+        assert!(out.starts_with(&text), "{out}");
+        assert!(out.contains("CHANGELOG.md is a deliverable"), "{out}");
+        assert!(out.contains("does not excuse it"), "{out}");
+        assert!(out.ends_with('\n'));
     }
 }
 

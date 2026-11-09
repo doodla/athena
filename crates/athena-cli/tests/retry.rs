@@ -352,7 +352,9 @@ fn a_retry_brief_carries_the_earlier_jobs_files_and_a_reading_that_ignores_them_
         .nth(1)
         .unwrap_or_else(|| panic!("no section:\n{brief}"));
     for needle in [
-        "Files its candidate changed (1)",
+        // The change reading's changelog default made the scenario's producer add a CHANGELOG.md entry too.
+        "Files its candidate changed (2)",
+        "> added CHANGELOG.md",
         "> deleted README.md",
         "> Deleted README.md as asked.",
         "Measured checks:\n> ",

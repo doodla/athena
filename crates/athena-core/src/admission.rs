@@ -683,6 +683,31 @@ pub fn admit(input: &AdmissionInput<'_>) -> Result<Vec<PolicyViolation>> {
     Ok(violations)
 }
 
+/// Whether the candidate owes a `CHANGELOG.md` edit it has not made: the reading lists the file and carries the
+/// `changelog` default ([`crate::reading::changelog_unproduced`]), and the base treats `CHANGELOG.md` as an
+/// ordinary governed file. A repository that marks it `athena-readonly` or `athena-exclude` already refuses any
+/// edit with `owner-maintained` or `owner-private`, so requiring the edit too would make every change job
+/// unadmittable there.
+///
+/// Root cause of the failure class this closes: the `changelog` default was a rule the producer must remember,
+/// and no code compared the diff's file list with the reading's deliverables, so a candidate that skipped the
+/// changelog was caught only at the final verdict (jobs 20261108-183842-fsaz and 20261028-000831-rkv5). The
+/// admission rule and the producer loop both call this function, so a producer is sent back for the file
+/// before admission would refuse it. `base` must be a commit of the repository `git` points at.
+pub(crate) fn changelog_required(
+    git: &Git,
+    base: &str,
+    reading: &Reading,
+    changed: &[String],
+) -> Result<bool> {
+    if !crate::reading::changelog_unproduced(reading, changed.iter().map(String::as_str)) {
+        return Ok(false);
+    }
+    let path = "CHANGELOG.md".to_string();
+    let classes = classify(git, base, std::slice::from_ref(&path))?;
+    Ok(classes.get(&path).copied().unwrap_or(PathClass::Governed) == PathClass::Governed)
+}
+
 /// Every admission rule except the secret scan, which needs the pinned gitleaks binary.
 fn admit_without_secrets(input: &AdmissionInput<'_>) -> Result<Vec<PolicyViolation>> {
     let git = input.git;
@@ -840,6 +865,17 @@ fn admit_without_secrets(input: &AdmissionInput<'_>) -> Result<Vec<PolicyViolati
                 ),
             ));
         }
+    }
+
+    // The changelog deliverable. Root cause: the `changelog` default was a rule the producer must remember, and
+    // no code compared the diff's file list with the reading's deliverables, so a skipped changelog was caught
+    // only at the final verdict. This is the first code that holds the reading and the change list together.
+    if changelog_required(git, input.base, input.reading, &paths)? {
+        violations.push(violation(
+            "changelog",
+            Some("CHANGELOG.md"),
+            "CHANGELOG.md is a deliverable of this change reading (the changelog default applies) but the candidate does not change it; add the entry".into(),
+        ));
     }
     Ok(violations)
 }
@@ -1548,6 +1584,16 @@ mod tests {
     /// Commits the base files, then a candidate with `files` written over them; returns the violations of
     /// the rules admission applies to content, which do not need gitleaks.
     fn admit_files(files: &[(&str, &str)]) -> Vec<PolicyViolation> {
+        admit_files_with(&reading(), &[], files)
+    }
+
+    /// Like [`admit_files`], for a given `reading`, with `base_extra` files also committed in the base. A
+    /// candidate file the base does not hold has the status added.
+    fn admit_files_with(
+        reading: &Reading,
+        base_extra: &[(&str, &str)],
+        files: &[(&str, &str)],
+    ) -> Vec<PolicyViolation> {
         let dir = tempfile::tempdir().unwrap();
         let git = Git::isolated(dir.path());
         git.run(["init", "-q", "-b", "main"]).unwrap();
@@ -1556,15 +1602,25 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
         std::fs::create_dir_all(dir.path().join("crates/athena-data/src")).unwrap();
         std::fs::write(dir.path().join(SCHEMA_FILE), "// schema\n").unwrap();
+        for (path, text) in base_extra {
+            std::fs::write(dir.path().join(path), text).unwrap();
+        }
         git.run(["add", "-A"]).unwrap();
         git.run(["commit", "-q", "-m", "base"]).unwrap();
         let base = git.head().unwrap().unwrap();
         let mut changes = Vec::new();
         for (path, text) in files {
-            std::fs::write(dir.path().join(path), text).unwrap();
+            let file = dir.path().join(path);
+            let status = if file.exists() {
+                ChangeStatus::Modified
+            } else {
+                ChangeStatus::Added
+            };
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, text).unwrap();
             changes.push(Changed {
                 path: path.to_string(),
-                status: ChangeStatus::Modified,
+                status,
                 mode: "100644".into(),
                 size: text.len() as u64,
             });
@@ -1578,12 +1634,124 @@ mod tests {
             base: &base,
             candidate: &candidate,
             changes: &changes,
-            reading: &reading(),
+            reading,
             max_file_bytes: 1 << 20,
             personal_data: &config.personal_data,
             config: &config,
         })
         .unwrap()
+    }
+
+    /// A change reading carrying the changelog default, built the way both failed jobs' readings were.
+    fn changelog_reading(files: &[&str]) -> Reading {
+        let mut r = reading();
+        r.deliverables = files
+            .iter()
+            .map(|path| Deliverable {
+                path: (*path).into(),
+                action: DeliverableAction::Modify,
+                p: 0.9,
+            })
+            .collect();
+        crate::reading::ensure_changelog(&mut r);
+        r
+    }
+
+    fn changelog_violations(found: Vec<PolicyViolation>) -> Vec<PolicyViolation> {
+        found
+            .into_iter()
+            .filter(|v| v.rule == "changelog")
+            .collect()
+    }
+
+    #[test]
+    fn a_docs_only_candidate_for_a_reading_with_the_changelog_default_is_refused() {
+        let r = changelog_reading(&["docs/a.md"]);
+        let found = changelog_violations(admit_files_with(&r, &[], &[("docs/a.md", "text\n")]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].path.as_deref(), Some("CHANGELOG.md"));
+        assert!(found[0].detail.contains("CHANGELOG.md"), "{found:?}");
+    }
+
+    #[test]
+    fn a_candidate_that_also_changes_the_changelog_is_admitted() {
+        let r = changelog_reading(&["docs/a.md"]);
+        let base = [("CHANGELOG.md", "# Changelog\n")];
+        let found = admit_files_with(
+            &r,
+            &base,
+            &[
+                ("docs/a.md", "text\n"),
+                ("CHANGELOG.md", "# Changelog\n- x\n"),
+            ],
+        );
+        assert!(changelog_violations(found).is_empty());
+    }
+
+    #[test]
+    fn a_study_reading_or_a_reading_without_the_default_needs_no_changelog() {
+        let mut study = changelog_reading(&["docs/a.md"]);
+        study.capability = Some("study".into());
+        let found = admit_files_with(&study, &[], &[("docs/a.md", "text\n")]);
+        assert!(changelog_violations(found).is_empty());
+
+        let mut plain = changelog_reading(&["docs/a.md"]);
+        plain.defaults_applied.clear();
+        let found = admit_files_with(&plain, &[], &[("docs/a.md", "text\n")]);
+        assert!(changelog_violations(found).is_empty());
+    }
+
+    #[test]
+    fn a_changelog_the_owner_keeps_is_not_demanded() {
+        let r = changelog_reading(&["docs/a.md"]);
+        let base = [
+            (".gitattributes", "/CHANGELOG.md athena-readonly\n"),
+            ("CHANGELOG.md", "# Changelog\n"),
+        ];
+        let found = admit_files_with(&r, &base, &[("docs/a.md", "text\n")]);
+        assert!(changelog_violations(found).is_empty());
+    }
+
+    #[test]
+    fn the_changelog_is_demanded_even_when_the_reading_leaves_it_out_of_scope() {
+        let mut r = changelog_reading(&["docs/a.md"]);
+        r.out_of_scope = vec!["the changelog".into()];
+        let found = admit_files_with(&r, &[], &[("docs/a.md", "text\n")]);
+        assert_eq!(changelog_violations(found).len(), 1);
+    }
+
+    #[test]
+    fn a_changelog_added_where_the_base_has_none_satisfies_the_rule() {
+        let r = changelog_reading(&["docs/a.md"]);
+        let found = admit_files_with(
+            &r,
+            &[],
+            &[("docs/a.md", "text\n"), ("CHANGELOG.md", "# Changelog\n")],
+        );
+        assert!(changelog_violations(found).is_empty());
+    }
+
+    #[test]
+    fn a_docs_only_design_reading_built_by_ensure_changelog_is_refused_before_verification() {
+        // The path both failed jobs took: a design job, class docs, whose reader never listed the changelog.
+        let mut r = reading();
+        r.class_of_work = "docs".into();
+        r.deliverables = vec![Deliverable {
+            path: "docs/design/x.md".into(),
+            action: DeliverableAction::Modify,
+            p: 0.9,
+        }];
+        assert!(r.deliverables.iter().all(|d| d.path != "CHANGELOG.md"));
+        crate::reading::ensure_changelog(&mut r);
+        assert!(r.deliverables.iter().any(|d| d.path == "CHANGELOG.md"));
+        assert!(r.defaults_applied.iter().any(|d| d.id == "changelog"));
+        let found = changelog_violations(admit_files_with(
+            &r,
+            &[],
+            &[("docs/design/x.md", "design\n")],
+        ));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].detail.contains("CHANGELOG.md"));
     }
 
     const SCHEMA_FILE: &str = "crates/athena-data/src/config.rs";
