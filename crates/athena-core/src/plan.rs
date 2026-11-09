@@ -28,15 +28,19 @@
 //!   item ([`Plan::build_with`], given the jobs' end states as [`JobEnd`]s). The retry itself ("try again on
 //!   <job>") names the job it retries and is not held by it. Only an id the history does not show failing
 //!   (unknown, dropped, declined or abandoned) still counts as done.
-//! - **Parallel groups.** A wave is split into groups of items that no dependency links and whose touched
-//!   paths are disjoint; the items of one group could run side by side. An item that names no touched path is
+//! - **Parallel groups.** The groups are built from the order, taking items in plan order: an item joins the
+//!   last group when its touched paths are disjoint from every member's and it depends on none of them,
+//!   otherwise it opens a new group. A group is therefore never before the group of anything its items depend
+//!   on, the groups flattened equal [`Plan::order`], and a later group never holds an item the order ranks
+//!   ahead of an earlier group's (groups allow parallel work; they never reorder it). The items of one group
+//!   could run side by side. An item that names no touched path is
 //!   never grouped with another, because nothing is known about what it changes. The shared append-only files
 //!   (`SHARED_APPEND_ONLY`: `CHANGELOG.md`, `docs/decisions.md`, `README.md`; `docs/design/parallel-jobs.md`
 //!   section 9) are left out of the overlap test, since nearly every item touches them; an item whose only
 //!   paths are shared files therefore names nothing else and is not grouped. The landing check stays the
 //!   authority for conflicting edits to a shared file; this changes only the grouping. The drain works the groups in
-//!   plan order and runs the items of one group at once, up to `[parallel] max_concurrency` (default 1: one
-//!   job at a time).
+//!   sequence and runs the items of one group at once, up to `[parallel] max_concurrency` (default 1: one
+//!   job at a time, which dispatches exactly in plan order).
 //! - **Gate.** An item whose plan has no goal, no ladder rung or no acceptance is refused for design or code
 //!   ([`PlanEntry::missing`], [`Plan::refused`]), so planning cannot be skipped. A read request whose design
 //!   names no existing code it changes or reuses, and does not say it is wholly new, is refused the same way
@@ -423,10 +427,11 @@ fn unmet_dependency(dep: &str, history: &[JobEnd]) -> Option<String> {
 /// The coordinated plan of all open requests.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct Plan {
-    /// Every planned item, in the order to work them.
+    /// Every planned item, in the order to work them. The drain dispatches in this order when it runs one job
+    /// at a time; `groups` only mark which neighbours could run side by side.
     pub order: Vec<String>,
-    /// The same items in groups: each group's items could run in parallel, and each group comes after the
-    /// groups holding what its items depend on.
+    /// The same items in groups, built from `order`: each group's items could run in parallel, each group comes
+    /// after the groups holding what its items depend on, and the groups flattened equal `order`.
     pub groups: Vec<Vec<String>>,
     /// Items whose plan is incomplete: not in `order`.
     pub refused: Vec<Refusal>,
@@ -559,6 +564,34 @@ pub fn shared_path(a: &PlanEntry, b: &PlanEntry) -> Option<String> {
         .map(String::from)
 }
 
+/// Builds the parallel groups from the plan `order`, taking items in that order. An item joins the last group
+/// when it is [`disjoint`] with every member and depends on none of them; otherwise it opens a new group.
+/// Dependencies always sit earlier in `order`, so the last group is the earliest one after everything the item
+/// depends on that it may join without being placed ahead of an earlier item it could not join. The groups
+/// therefore flatten to exactly `order`: working them in sequence is working the plan in order.
+fn groups_in_order(order: &[String], planned: &[&PlanEntry]) -> Vec<Vec<String>> {
+    let mut groups: Vec<Vec<&PlanEntry>> = Vec::new();
+    for id in order {
+        let Some(entry) = planned.iter().find(|e| e.id == *id) else {
+            continue;
+        };
+        match groups.last_mut() {
+            Some(last)
+                if last
+                    .iter()
+                    .all(|m| disjoint(m, entry) && !entry.depends_on.contains(&m.id)) =>
+            {
+                last.push(entry);
+            }
+            _ => groups.push(vec![entry]),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|g| g.into_iter().map(|e| e.id.clone()).collect())
+        .collect()
+}
+
 /// Effective priority of each entry, in the entries' order: its own, raised to the best of whatever depends on
 /// it (to a fixpoint).
 fn effective_priorities(entries: &[&PlanEntry]) -> Vec<Priority> {
@@ -633,6 +666,13 @@ impl Plan {
     /// ordered but listed in [`Plan::refused`] with a reason naming the dependency (and an empty `missing`),
     /// and so is everything that depends on a held item. An item that is itself the retry of that dependency
     /// (the history links it to it) is not held by it.
+    ///
+    /// Waves fix the order only (best effective priority among the ready items, then rung, then age). The
+    /// groups are then built from that order alone (see `groups_in_order`): an item joins the last group when
+    /// it is path-disjoint with its members and independent of them, else it opens a new group. A lower-priority
+    /// item therefore never lands in an earlier group than a higher-priority one, and the drain, which works
+    /// the groups in sequence, dispatches in plan order. The cost is breadth: an item that clashes with an
+    /// earlier one opens a new group, and later disjoint items join that group, not an earlier one.
     pub fn build_with(entries: &[PlanEntry], history: &[JobEnd]) -> Plan {
         let mut plan = Plan::default();
         let mut pending: Vec<(usize, &PlanEntry)> = Vec::new();
@@ -719,27 +759,13 @@ impl Plan {
                 ready.retain(|(_, e)| effective_of(&e.id) == best);
             }
             ready.sort_by_key(|(age, e)| (e.rung, *age));
-            // Greedy groups: an item joins the first group all of whose members it can run beside.
-            let mut groups: Vec<Vec<&PlanEntry>> = Vec::new();
-            for (_, entry) in &ready {
-                match groups
-                    .iter_mut()
-                    .find(|g| g.iter().all(|m| disjoint(m, entry)))
-                {
-                    Some(group) => group.push(entry),
-                    None => groups.push(vec![entry]),
-                }
-            }
-            for group in groups {
-                let ids: Vec<String> = group.iter().map(|e| e.id.clone()).collect();
-                plan.order.extend(ids.iter().cloned());
-                plan.groups.push(ids);
-            }
             for (_, e) in &ready {
+                plan.order.push(e.id.clone());
                 done.push(e.id.clone());
             }
             pending.retain(|(_, e)| !done.contains(&e.id));
         }
+        plan.groups = groups_in_order(&plan.order, &planned);
         plan
     }
 
@@ -926,6 +952,8 @@ impl Plan {
             i += 1;
         }
         if turns.iter().any(|t| t.moved) {
+            // The built groups are runs of the unmoved order, so splitting them around each moved request
+            // keeps the groups flattening to the moved order.
             let group_of = |id: &str| plan.groups.iter().position(|g| g.iter().any(|m| m == id));
             let moved = |id: &str| turns.iter().any(|t| t.moved && t.id == id);
             let mut groups: Vec<Vec<String>> = Vec::new();
@@ -1297,15 +1325,13 @@ mod tests {
             entry("after", top, &["crates/cli/"], &["base"]),
         ]);
         let group = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        // `clash` overlaps `base`, so it is not beside it; `after` needs `base`, so it waits for the next wave.
+        // `clash` overlaps `base`, so it opens the next group; `after` needs `base` (in an earlier group) and
+        // is disjoint from `clash`, so it joins that group. The groups flatten to the order.
         assert_eq!(
             plan.groups,
-            [
-                group(&["base", "docs"]),
-                group(&["clash"]),
-                group(&["after"])
-            ]
+            [group(&["base", "docs"]), group(&["clash", "after"])]
         );
+        assert_eq!(plan.groups.concat(), plan.order);
         assert!(plan.position("after") > plan.position("base"));
     }
 
@@ -1473,9 +1499,12 @@ mod tests {
                 .position(|g| g.iter().any(|i| i == id))
                 .unwrap()
         };
+        // Groups follow the order: `two` clashes with `one`, so it opens a new group, which the later
+        // disjoint items join (they are not placed ahead of `two`).
         assert_ne!(group_of("one"), group_of("two"));
-        assert_eq!(group_of("one"), group_of("three"));
+        assert_eq!(group_of("two"), group_of("three"));
         assert_eq!(group_of("three"), group_of("four"));
+        assert_eq!(plan.groups.concat(), plan.order);
     }
 
     #[test]
@@ -1906,6 +1935,148 @@ mod tests {
     }
 
     /// Six person-filed urgent requests (`u1`..`u6`, in this order) and two normal Steward requests, oldest last.
+    fn group_index(plan: &Plan, id: &str) -> usize {
+        plan.groups
+            .iter()
+            .position(|g| g.iter().any(|m| m == id))
+            .unwrap_or_else(|| panic!("{id} is in no group: {:?}", plan.groups))
+    }
+
+    #[test]
+    fn a_dependency_group_comes_before_its_dependent_whatever_their_priorities() {
+        let (top, low) = rungs();
+        // (dependency priority, dependent priority, a distinct unrelated item's priority)
+        let cases = [
+            (Priority::Normal, Priority::Urgent, Priority::Normal),
+            (Priority::Urgent, Priority::Low, Priority::Normal),
+            (Priority::Normal, Priority::High, Priority::Urgent),
+            (Priority::Low, Priority::Low, Priority::Urgent),
+        ];
+        for (base_p, after_p, other_p) in cases {
+            // All three touch different paths, so only the dependency keeps `after` from joining `base`.
+            let entries = [
+                with_priority(entry("base", low, &["base/"], &[]), base_p),
+                with_priority(entry("other", low, &["other/"], &[]), other_p),
+                with_priority(entry("after", top, &["after/"], &["base"]), after_p),
+            ];
+            let plan = Plan::build(&entries);
+            let label = format!("{base_p:?} base, {after_p:?} dependent, {other_p:?} other");
+            assert!(
+                plan.position("base") < plan.position("after"),
+                "{label}: {:?}",
+                plan.order
+            );
+            assert!(
+                group_index(&plan, "base") < group_index(&plan, "after"),
+                "{label}: {:?}",
+                plan.groups
+            );
+            assert_eq!(plan.groups.concat(), plan.order, "{label}");
+        }
+    }
+
+    /// Whether `id` is `of` or something `of` depends on, directly or through other entries.
+    fn needed_by(entries: &[PlanEntry], id: &str, of: &str) -> bool {
+        let mut stack = vec![of.to_string()];
+        let mut seen = BTreeSet::new();
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur.clone()) {
+                continue;
+            }
+            if let Some(e) = entries.iter().find(|e| e.id == cur) {
+                for d in &e.depends_on {
+                    if d == id {
+                        return true;
+                    }
+                    stack.push(d.clone());
+                }
+            }
+        }
+        false
+    }
+
+    /// Every pair where a later item has a better own priority than an earlier one, with no item at least as
+    /// urgent as the later one depending (transitively) on the earlier one.
+    fn unexplained_inversions(plan: &Plan, entries: &[PlanEntry]) -> Vec<String> {
+        let prio = |id: &str| entries.iter().find(|e| e.id == id).unwrap().priority;
+        let mut out = Vec::new();
+        for (i, x) in plan.order.iter().enumerate() {
+            for y in &plan.order[i + 1..] {
+                if prio(y) < prio(x)
+                    && !entries.iter().any(|z| {
+                        prio(&z.id) <= prio(y) && (z.id == *x || needed_by(entries, x, &z.id))
+                    })
+                {
+                    out.push(format!("{y} is after {x} with no dependency reason"));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn groups_flatten_to_the_order_and_a_later_group_never_outranks_an_earlier_one_without_a_dependency()
+     {
+        let (top, low) = rungs();
+        // The 2026-10-27 shape: u1 and u2 clash; normal `n` is a dependency of urgent `u4`; `u3` is urgent.
+        let entries = vec![
+            with_priority(entry("u1", low, &["src/p.rs"], &[]), Priority::Urgent),
+            with_priority(entry("u2", low, &["src/p.rs"], &[]), Priority::Urgent),
+            entry("n", low, &["n/"], &[]),
+            with_priority(entry("u3", low, &["u3/"], &[]), Priority::Urgent),
+            with_priority(entry("u4", low, &["u4/"], &["n"]), Priority::Urgent),
+            with_priority(entry("h", top, &["h/"], &[]), Priority::High),
+            entry("m", low, &["m/"], &[]),
+            with_priority(entry("l", low, &["l/"], &[]), Priority::Low),
+        ];
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let plan = Plan::build(&entries);
+        assert_eq!(
+            plan.order,
+            ids(&["u1", "u2", "n", "u3", "u4", "h", "m", "l"])
+        );
+        assert_eq!(
+            plan.groups,
+            [
+                ids(&["u1"]),
+                ids(&["u2", "n", "u3"]),
+                ids(&["u4", "h", "m", "l"])
+            ]
+        );
+        assert!(plan.priority_violations(&entries).is_empty());
+        assert_eq!(
+            unexplained_inversions(&plan, &entries),
+            Vec::<String>::new()
+        );
+
+        let (capped, capped_entries) = Plan::build_capped(&entries, &[], CAPS, &[]);
+        assert_eq!(capped.groups.concat(), capped.order);
+        assert!(capped.priority_violations(&capped_entries).is_empty());
+        assert_eq!(
+            unexplained_inversions(&capped, &capped_entries),
+            Vec::<String>::new()
+        );
+
+        // With a steward request moved up, the groups still flatten to the moved order.
+        let mut with_steward = entries.clone();
+        with_steward.push(entry("s1", low, &["s1/"], &[]));
+        let (improved, _) = Plan::build_improving(
+            &with_steward,
+            &[],
+            TierCaps::UNLIMITED,
+            &[],
+            &improvement(&["s1"]),
+        );
+        assert!(
+            improved.turns.iter().any(|t| t.moved),
+            "{:?}",
+            improved.turns
+        );
+        assert_eq!(improved.groups.concat(), improved.order);
+        let unmoved = Plan::build(&with_steward);
+        assert_eq!(unmoved.groups.concat(), unmoved.order);
+    }
+
     fn six_urgent_and_two_steward() -> Vec<PlanEntry> {
         let (_, low) = rungs();
         let mut entries: Vec<PlanEntry> = (1..=6)

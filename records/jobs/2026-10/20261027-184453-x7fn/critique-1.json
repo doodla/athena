@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-184453-x7fn",
+  "round": 1,
+  "at": "2026-11-09T06:26:57.41907102Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "A design doc still says plan.rs splits a wave into groups, which is no longer true after the change.",
+      "evidence": "Line 458 reads 'plan.rs leaves these three files out of the overlap test when it splits a wave' into groups. Under the new rule, groups are built from the whole plan order and can span waves (the plan's own Risks section says so). The Dependents list says this doc is unchanged in meaning, and the file is not among the deliverables. Fix: Have the producer name this line as a follow-up in its output, or ask Athena to add this one doc line to scope. Do not leave it unmentioned.",
+      "location": "docs/design/parallel-jobs.md:458; plan Dependents entry 'Group sizes and the parallel-groups design'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The run command names only test (a), which passes before the change; test (b), the one that fails on old code, has no name or command.",
+      "evidence": "The plan's text says test (a) 'may already pass before the change' and that test (b) is the one that fails on the old greedy grouping. The Run line lists only drain::tests::drain_with_a_bound_of_one_starts_the_urgent_item_before_the_normal_one. Fix: Give test (b) a name and add it to the Run command, so the demonstration that fails without the behavior is the one that gets run.",
+      "location": "Demonstrations, Criterion 1, Run command",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test-local priority-inversion check runs over build_capped and build_improving results without saying it skips moved improvement requests or uses the capped entries.",
+      "evidence": "build_improving deliberately puts a moved normal Steward request ahead of urgent items (plan.rs L905-924). priority_violations skips moved turns (L603-608). The plan's custom helper ('for every earlier x and later y with y's own priority better than x's') does not say it does the same. build_capped and build_improving also return demoted copies (L819-821), and those are what own priority must be read from. Fix: Say that the helper skips items in plan.turns with moved == true and reads own priority from the entries the builder returns. Or run the custom check only on the Plan::build case, and use priority_violations plus the flattened-groups-equal-order check for the other two builders.",
+      "location": "Step 6 / Demonstrations, Criterion 3 (test-local inversion helper)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In the plain case the two normal requests now share the urgent items' group, so with 3 workers the test's start-order assertion can race and fail now and then; the plan updates the test only if it fails.",
+      "evidence": "run_batches pops items from one VecDeque per group (drain.rs L2735-2740), and 'start' is logged later in Steps::run. Today s1 and s2 are a separate later group, so they cannot start before u6. Under the new rule all eight items are one group [[u1..u6,s1,s2]]. A worker can pop s1 and log its start before the worker holding u6 logs 'start u6'. That can break first_six == u1..u6 intermittently, and the test's comment ('ahead of both Steward requests') becomes wrong. The plan says to update the test only 'if its assertions fail', which an occasional failure can slip past. Fix: Update this test in step 7 regardless of whether it fails. Fix its comment to the new group shape, and make the plain-case assertion deterministic: assert report.plan_groups directly, or assert that s1 and s2 are not among the first three starts, rather than relying on the exact start-log order.",
+      "location": "crates/athena-cli/tests/drain.rs:7742 a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn (plan Dependents, last risk)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes the fault where it starts. In Plan::build_with (plan.rs L722-737), each wave's items are grouped greedily, and plan.order is the concatenation of those groups, so the grouping reorders a wave's items. A disjoint normal item that is a dependency of an urgent item gets ahead of an urgent item that clashes on a path. Worked by hand from the snapshot: old code gives groups [[u1,n,u3],[u2],[u4]], so n is dispatched second. The plan's rule (keep the wave's rung-then-age order; an item joins only the last group, when disjoint and independent of its members) gives [[u1],[u2,n,u3],[u4]], with flattened groups equal to the order. Joining only the last group differs from the reading's literal 'earliest group after its dependencies', but it is the only form that keeps the reading's own flattened-groups-equal-order rule (Decision 1 explains this). The World fixture's queue() returns every item on each replan, so drain keeps the first plan's groups and skips tried items. The incident drain test (b) and the criterion-3 test therefore fail on old code and pass after the fix. Test (a) is the brief's literal pair and passes on old code; the planner keeps it as a guard and says so. I recomputed each existing group assertion the plan names under the new rule ([[base,docs],[clash,after]], [[one],[two,three,four]], [[b,a,c],[d]], [3,1,2], [2], the drain_order_equals_plan_order first group, the improvement regrouping), and the plan's claims hold. The four findings are minor: a stale design-doc line, an under-named run command, an underspecified inversion check over build_improving output, and a possible start-order race in one existing concurrency test whose group shape changes. Nothing was run; every claim comes from reading the snapshot."
+}

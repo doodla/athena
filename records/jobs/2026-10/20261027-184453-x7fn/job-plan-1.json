@@ -1,0 +1,238 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-184453-x7fn",
+  "round": 1,
+  "at": "2026-11-09T06:23:59.429071252Z",
+  "invocation_seq": 2,
+  "approach": "Fix group construction in `Plan::build_with`. The wave loop keeps choosing items in the existing order: best effective priority among ready items, then rung, then age. It stops grouping items itself and only appends the wave's sorted ids to `plan.order`. After the loop, a new private helper `groups_in_order` builds `plan.groups` from `plan.order`, taking items in plan order. An item joins the current last group only when it is `disjoint()` with every member and depends on none of them. Otherwise it starts a new group. Joining only the last group is what lets an item land in the earliest group after its dependencies while keeping the flattened groups equal to `order`. A lower-priority item can then never slip into a group ahead of a higher-priority item it clashes with, and with one job at a time drain dispatches exactly in plan order. The `build_improving` regrouping is left as it is: it splits the new groups around a moved item and still flattens to the moved order. `batches_for` stays a filter. Docs in `plan.rs` and `drain.rs` are updated, as are the existing group tests whose expectations the new rule changes. New tests are added in `plan.rs` and `drain.rs`, plus a `CHANGELOG.md` entry.",
+  "decisions": [
+    {
+      "choice": "Build groups in a separate pass over `plan.order`. An item joins only the last group, when it is `disjoint()` with all members and depends on none of them. Otherwise it opens a new group.",
+      "reason": "The brief wants an item to join the earliest group after its dependencies, in plan order, and also wants drain to dispatch exactly in plan order. Both hold only if no item is placed ahead of an earlier-ordered item it could not join. Since deps always sit earlier in the order, 'earliest legal group' reduces to 'the last group, if no dependency is in it'. Flattened groups then equal `order` by construction, and `batches_for` needs no change.",
+      "rejected": [
+        {
+          "option": "Literal 'earliest group after deps where disjoint', searching all existing groups, then deriving `order` from the groups",
+          "why": "Say u1 and u2 clash and n is disjoint. n would join u1's group ahead of u2. That is exactly today's fault: a lower-priority item dispatches before a higher-priority one."
+        },
+        {
+          "option": "Reorder inside `batches_for` in drain.rs",
+          "why": "Treats the symptom. `athena plan` would still print groups that disagree with the order, and the user default is to fix group construction."
+        },
+        {
+          "option": "Keep each wave as a group boundary, so a group never spans two effective-priority waves",
+          "why": "The brief says dependencies are the only barrier ('earliest group after everything it depends on'). Wave boundaries would also keep disjoint urgent and normal items from running side by side when max_concurrency is above 1."
+        }
+      ]
+    },
+    {
+      "choice": "`order` becomes the wave's (rung, age)-sorted list. It is no longer the concatenation of greedy groups. Nothing else about the wave selection changes: best effective priority among ready items, then rung, then age.",
+      "reason": "The greedy grouping was reshuffling the wave's items. A disjoint later item could join an early group and run before an earlier clashing item of its own wave. Making the plan order the sorted wave removes that, and groups are derived from it.",
+      "rejected": [
+        {
+          "option": "Add own priority as a within-wave tiebreak, so urgent items precede a normal dependency raised to urgent",
+          "why": "It changes the ordering rules, which the brief puts out of scope. The dependency reason already covers a raised item sitting ahead of its dependents' peers."
+        }
+      ]
+    },
+    {
+      "choice": "Leave the `build_improving` regrouping (plan.rs ~L928-943) unchanged. Add an assertion that the flattened groups equal the moved order.",
+      "reason": "It splits groups around a moved improvement request, and its input groups now flatten to the original order. Each old group still sits wholly before the groups holding its dependents, so the dependency rule holds. The brief says to keep it consistent, not to redesign it.",
+      "rejected": [
+        {
+          "option": "Rebuild groups from the moved order with `groups_in_order`, then force moved items into singletons",
+          "why": "More change for the same result, and it risks the 'moved request is a group of its own' guarantee."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "In `build_with`, drop the greedy grouping from the wave loop so each wave appends its (rung, age)-sorted ids to `order`. Add private `groups_in_order(order, &planned)` and call it after the loop. Update the module doc bullet 'Parallel groups', the `Plan::groups` and `Plan::order` field docs and the `build_with` doc. Update the group expectations of `disjoint_independent_items_share_a_group_and_dependents_come_after` and `two_items_naming_the_same_path_are_in_different_groups_and_disjoint_ones_share_one`. Add the criterion-2 and criterion-3 tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Docs only in production code: the module bullet 'The drain follows the plan as it stands', the 'Concurrency' bullet, the `Report::plan_groups` doc and the `batches_for` doc now say groups are built from the plan order, flattened groups equal the order, and with one job at a time drain dispatches exactly in plan order. In the tests module, add `priorities` and `World::with_priority` to the `World` fixture and the two criterion-1 tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Update the `group 1/2/3` needles of the `athena plan` display test to the new groups [urgent, a],[b]. Change other group expectations only if the test run shows the new rule justifies it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under Unreleased (Fixed) saying drain now dispatches in plan order when groups are involved because groups are built from the plan order, and naming the root cause.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "plan.rs: in `build_with`, replace the greedy per-wave grouping with `for (_, e) in &ready { plan.order.push(e.id.clone()); }`, leaving the ready/best-priority/(rung, age) selection and the `done` bookkeeping untouched.",
+    "plan.rs: add private `fn groups_in_order(order: &[String], planned: &[&PlanEntry]) -> Vec<Vec<String>>`. For each id in order, find its entry (skip any with none). If the last group exists, every member is `disjoint(member, entry)` and none is in `entry.depends_on`, push into the last group. Otherwise start a new group. Set `plan.groups = groups_in_order(&plan.order, &planned)` after the loop. `planned` is the vector of retained pending entries built before the loop. Cyclic items are not in `order`, so they are not grouped.",
+    "plan.rs docs: rewrite the module bullet 'Parallel groups' (L31-39) and the `Plan::groups` and `Plan::order` docs (L426-430), and add a paragraph to the `build_with` doc. They should say that groups are built from the order, that an item joins only the last group when disjoint and independent, that flattened groups equal the order, that a group is never earlier than the group of anything it depends on, and that drain with one job at a time dispatches exactly in plan order. Note in a comment that `build_improving` splits groups around a moved request and keeps flat == order.",
+    "drain.rs: in the `tests` module, add a `priorities: BTreeMap<String, athena_core::plan::Priority>` field to `World`, init it empty in `World::new`, add `fn with_priority(mut self, id: &str, p: Priority) -> World`, and set `priority` on the entries built in `World::queue`. Add two tests that use `concurrent(&world, 1)` and compare the `start` entries: (a) normal n queued first, urgent u second, disjoint paths, no dependency, expect [u, n]; (b) the incident shape — u1 and u2 sharing `src/p.rs`, normal n that urgent u4 depends on, urgent u3, in age order u1,u2,n,u3,u4 — expect [u1,u2,n,u3,u4]. Also assert report.stop == QueueEmpty.",
+    "drain.rs docs: update the module bullets (L11-13, L20-26, L56-57), the `Report::plan_groups` doc (L1135-1138) and the `batches_for` doc (L2913-2915). Say groups are built from the plan order, flattened groups equal the plan order, batches_for filters and never reorders, and with one job at a time drain dispatches exactly in plan order. Production logic in drain.rs is unchanged.",
+    "plan.rs tests: update `disjoint_independent_items_share_a_group_and_dependents_come_after` to expect [[base,docs],[clash,after]] with a comment. Update `two_items_naming_the_same_path_…` to assert one≠two and group_of(two)==group_of(three)==group_of(four). Add `a_dependency_group_comes_before_its_dependent_whatever_their_priorities` (criterion 2: a normal base with an urgent dependent; an urgent base with a low dependent; a normal base with a high dependent beside an unrelated urgent item; assert the group index of the dependency is smaller and the order matches). Add `groups_flatten_to_the_order_and_a_later_group_never_outranks_an_earlier_one_without_a_dependency` (criterion 3) with a test-local transitive-dependents helper. It builds with `Plan::build`, `build_capped` and `build_improving` (including one with a moved improvement request), asserts concat == order, pins the incident shape's exact order [u1,u2,n,u3,u4] and groups [[u1],[u2,n,u3],[u4]], and asserts `priority_violations` is empty.",
+    "tests/drain.rs: update the `plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_is_open` needles to 'group 1     urgent, a' and 'group 2     b' and remove the 'group 3     b' needle. Run `cargo test --locked`. If any other group-size or start-order assertion fails, review it against the new rule and update it only if the rule justifies the change; otherwise fix the grouping code.",
+    "CHANGELOG.md: under `## [Unreleased]`, add an entry in the section the file uses for fixes (add `### Fixed` if the section is missing). It says: `athena drain` now dispatches in `athena plan`'s order when groups are involved. The plan built groups per wave by greedy joining, so a lower-priority item could sit in an earlier group than a higher-priority one that clashed with an earlier item, and drain, which works groups in sequence, started it first. Groups are now built from the plan order — each item joins the last group if it is path-disjoint and independent, otherwise it opens a new group, so a group is always after its dependencies — and flattened groups equal the order. State the effect on parallel group shape.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "Cross-priority joins: a lower-priority disjoint item can now share a group with a higher-priority one that precedes it, because waves no longer bound groups. With max_concurrency above 1 they run side by side.",
+      "mitigation": "This is the stated rule ('earliest group after everything it depends on'). Groups are still path-disjoint and dependency-free, which is all the parallel scheduler and landing check rely on. The only visible changes are the `athena plan` group lines and some group sizes. The plan lists each existing group assertion, and the producer runs the full `cargo test --locked`."
+    },
+    {
+      "risk": "Less parallelism in the clash case. An item that clashes with an earlier one now starts a new group, and later disjoint items join that group instead of the earliest one.",
+      "mitigation": "Under the new rule, rung and age order sets the plan order within a wave, so an item that clashes with an earlier one waits instead of being passed by later disjoint items. Breadth on realistic plans is mostly unchanged ([3,1,2] sizes stay the same), but a clash chain can now give narrower groups. The trade-off is documented in the `build_with` doc."
+    },
+    {
+      "risk": "The brief's literal case (normal plus urgent, disjoint, no dependency) already orders correctly in the old wave loop, so on its own it would not show the fix.",
+      "mitigation": "The criterion-1 test (b) and the criterion-3 test pin the incident shape (clashing urgent items plus a normal dependency of an urgent item), which fails on the old code. Test (a) is kept as the brief's literal case and as a guard."
+    },
+    {
+      "risk": "The improvement-turn move can still put a normal Steward request ahead of urgent items. That is by design, not a regression.",
+      "mitigation": "Left unchanged by design (out of scope). The existing tests assert it, and `priority_violations` already exempts moved items. The new flatten == order assertions run over `build_improving` output."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Plan::build_with grouping and order",
+      "dependent": "crates/athena-core/src/plan.rs `Plan::build_capped` (calls `build_with` twice)",
+      "kind": "code",
+      "test": "plan::tests::five_urgent_items_keep_three_urgent_and_a_person_set_one_is_among_them and the other build_capped tests assert order and tiers, not group shape. The new criterion-3 test calls build_capped and checks that groups flatten to the order.",
+      "reason": null
+    },
+    {
+      "name": "Plan.groups shape fed to the improvement regrouping",
+      "dependent": "crates/athena-core/src/plan.rs `Plan::build_improving` regroup at ~L928-943 and its tests (`improvement_turn_puts_a_steward_request_among_the_first_three_dispatches`: moved requests are singletons, groups of at most 2, flat == order; `improvement_turn_waits_for_nothing_but_leaves_a_better_ranked_request_in_place`: groups equal build_capped's; `build_improving_without_improvement_items_equals_build_capped`)",
+      "kind": "code",
+      "test": "With six disjoint urgent items and two disjoint normal ones, the new base groups are [[u1..u6, s1, s2]]. Moving s1 and s2 gives [u1,u2],[s1],[u3,u4],[s2],[u5,u6], as asserted today. The existing tests are the guard.",
+      "reason": null
+    },
+    {
+      "name": "Group expectations",
+      "dependent": "crates/athena-core/src/plan.rs existing tests `disjoint_independent_items_share_a_group_and_dependents_come_after` (~L1291) and `two_items_naming_the_same_path_are_in_different_groups_and_disjoint_ones_share_one` (~L1462)",
+      "kind": "code",
+      "test": "Updated in step 4. The first: new groups are [[base,docs],[clash,after]], because `after` needs base (an earlier group) and is disjoint from clash. The second: new groups are [[one],[two,three,four]]; assertions change to one≠two and two=three=four. `disjoint_independent_…`, `an_item_that_names_no_path_is_never_grouped…` ([[x],[y]]), `shared_append_only_files_…` and `without_priorities_the_order_is_rung_then_age` ([[b,a,c],[d]]) give the same results under the new rule.",
+      "reason": null
+    },
+    {
+      "name": "Plan::build group 0 and order",
+      "dependent": "crates/athena-core/src/reading.rs ~L2580 `plan.groups[0] == [\"new\"]` and ~L2537 and L2579 plan order assertions",
+      "kind": "code",
+      "test": "reading::tests (the addendum-priority tests around L2530-2590) run in `cargo test -p athena-core`",
+      "reason": "These entries name no touched path, so `disjoint` is false and none is grouped. The urgent item stays alone in group 0, and the order is by priority, then rung, then age, as before."
+    },
+    {
+      "name": "Plan order from build_improving",
+      "dependent": "crates/athena-core/src/hestia.rs ~L6337 test using `Plan::build_improving`",
+      "kind": "code",
+      "test": null,
+      "reason": "It asserts only `plan.order` positions and `promoted`. The order within a wave is still rung then age, and the promoted request is still first."
+    },
+    {
+      "name": "Groups consumed in order by drain",
+      "dependent": "crates/athena-cli/src/drain.rs `batches_for` (L2916), `drain_with` (L2948-3090), `run_serial`, `run_parallel` and `Drain::sweep` (L2363)",
+      "kind": "code",
+      "test": "drain.rs `batches_tests::batches_for_flattened_equal_the_plan_order_and_tried_removes_only_that_item`, the new drain.rs World tests, and tests/drain.rs `drain_order_equals_plan_order`",
+      "reason": "`batches_for` only filters `plan.groups` and is unchanged. The replan after each wave still rebuilds through `Drain::prepare`. Groups are now no larger than before, except for cross-priority joins of disjoint items, and the dependency order is preserved. `sweep` reads the groups only for the not-reached notes."
+    },
+    {
+      "name": "`athena plan` output: `group N` lines",
+      "dependent": "crates/athena-cli/tests/drain.rs `plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_is_open` (~L672-700)",
+      "kind": "code",
+      "test": "That test: `athena plan` display of urgent (high), a, b. New groups are [urgent, a],[b]. Step 4 changes its needles from 'group 1     urgent', 'group 2     a', 'group 3     b' to 'group 1     urgent, a' and 'group 2     b'. The 'order       urgent → a → b' needle is unchanged. Run by `cargo test --locked`.",
+      "reason": null
+    },
+    {
+      "name": "Report plan_groups, plan_group_sizes and start order",
+      "dependent": "crates/athena-cli/tests/drain.rs group, order and concurrency tests: `items_are_worked_in_plan_order_not_oldest_first` (~L360, expects [[c,a],[b]]), `group_sizes_*` (~L7647-7690, [3,1,2]; [2]), `with_a_bound_of_one_items_run_strictly_in_plan_order_and_alone`, `a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn`, the lowered-urgent tests (~L6052-6062, started = [u1,n,u2]), the rebase test (~L8691, [[a,b]]), and ~L5859 `plan_groups.concat()`",
+      "kind": "code",
+      "test": "I computed these by hand and they come out the same under the new rule: [[c,a],[b]], [3,1,2], [2], [[a,b]], and the same start orders. The one risk is `a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn`, whose plain case now has all eight disjoint items in one group. The producer runs `cargo test -p athena-cli` and, if its group-size or start-order assertions fail, updates them only where the new rule justifies it. All of tests/drain.rs is run by `cargo test --locked`.",
+      "reason": null
+    },
+    {
+      "name": "Group sizes and the parallel-groups design",
+      "dependent": "docs/design/agent-and-build-slots.md L500 (group sizes in the drain report) and docs/design/parallel-jobs.md",
+      "kind": "rule",
+      "test": null,
+      "reason": "The doc says group sizes are recorded as `plan_group_sizes`; that field and its meaning are unchanged. Only how the groups are formed changes, and the module docs in plan.rs and drain.rs carry the new rule. docs/system-facts.md has no entry about grouping."
+    },
+    {
+      "name": "Parallel scheduling and landing checks",
+      "dependent": "Landing check and rebase re-check (`[parallel] max_concurrency` path in drain.rs: the landing lock, `RECHECK_RULE`, `shared_path` in `sweep`)",
+      "kind": "rule",
+      "test": "tests/drain.rs rebase tests (`with_two_workers_the_second_job_of_a_group_still_lands_after_the_first`, ~L8682) and `drain.rs` World concurrency tests, run by `cargo test --locked`",
+      "reason": "Out of scope and unchanged. They read the touched paths and the dispatched group, not how it was built. A group is still made only of path-disjoint, dependency-free items, so the invariant these rules rely on holds."
+    },
+    {
+      "name": "Configuration, records and refusal rules",
+      "dependent": "records, `athena.toml`, `defaults.toml` and the refusal corpus (`crates/athena-core/tests/refusal_corpus.rs`)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No record, config key, check name or refusal or matching rule is added or changed. The refusal-corpus requirement does not apply, and no records validation allow-list is affected."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Add two unit tests in the `tests` module of drain.rs. Test (a) queues a normal item n first, then an urgent item u, with disjoint touched paths and no dependency. It runs `drain_concurrent(&world, limits(20.0), &Quiet, 1)` and asserts the `start` entries in the log are [u, n], and that `Plan::build` groups flatten to the same order. Test (b) is the incident shape described above, with 1 worker, and asserts the start order.",
+      "command": "cargo test -p athena-cli --lib drain::tests::drain_with_a_bound_of_one_starts_the_urgent_item_before_the_normal_one",
+      "observes": "Starts follow plan order, with the urgent item first in (a) and [u1,u2,n,u3,u4] in (b). The report stop is `QueueEmpty`.",
+      "fails_without": "Test (a), the brief's normal plus urgent pair, is a regression guard and may already pass before the change. Test (b) uses the shape from the 2026-10-27 report. u1 and u2 share a path, n is a normal dependency of urgent u4, and u3 is urgent. The old greedy grouping starts u1, n, u3, u2, u4, so (b) fails there. The test expects u1, u2, n, u3, u4.",
+      "seam": "Production entry point: `drain_concurrent` in drain.rs, which calls `drain_with`, then `Drain::prepare` (which calls `Plan::build_improving`), then `batches_for` and `run_serial`. The fixture is the existing `World` test double in the `tests` module (queue(), plan entries, log). Step 3 adds a `priorities: BTreeMap<String, Priority>` field and a builder `World::with_priority(id, Priority)`, applied to the entries `World::queue` builds. `World` and `concurrent` exist today; the priority builder is added by step 3. The double only records calls. Ordering and grouping come from the real `Plan` code."
+    },
+    {
+      "criterion": 2,
+      "method": "Add a unit test in plan.rs `tests`. It builds `Plan::build` for three cases, each with an unrelated disjoint item. (i) A normal base with an urgent dependent. (ii) An urgent base with a low dependent. (iii) A high dependent of a normal base alongside an urgent unrelated item. For each case it asserts the base's group index is less than the dependent's, and that the base precedes the dependent in `order`.",
+      "command": "cargo test -p athena-core --lib plan::tests::a_dependency_group_comes_before_its_dependent_whatever_their_priorities",
+      "observes": "The group-index and order comparisons hold in all three cases.",
+      "fails_without": "Delete the `depends_on` check in `groups_in_order` and a dependent that follows its dependency directly in the order joins the dependency's group. The group-index assertion fails.",
+      "seam": "Production entry point: `Plan::build`, which calls `build_with` and then the new `groups_in_order`. The existing `entry`, `with_priority` and `rungs` helpers in plan.rs `tests` supply the plan entries. No double is used. The seam exists; `groups_in_order` is added by step 1."
+    },
+    {
+      "criterion": 3,
+      "method": "Add a unit test in plan.rs. The mixed plan is: urgent u1 and u2 on the same path, normal n that urgent u4 depends on, urgent u3, plus a high item, a low item and a normal item on other paths and rungs. It builds `Plan::build`, then `Plan::build_capped` and `Plan::build_improving`. It asserts `groups.concat() == order` for each. For every earlier x and later y with y's own priority better than x's, it asserts that x is a transitive dependency of an item at least as urgent as y. A small test-local helper walks `depends_on` to check this. It also asserts `priority_violations(&entries)` is empty and pins the exact order and groups for the incident shape.",
+      "command": "cargo test -p athena-core --lib plan::tests::groups_flatten_to_the_order_and_a_later_group_never_outranks_an_earlier_one_without_a_dependency",
+      "observes": "Flattened groups equal the order in all three builders, no unexplained priority inversion exists, and the exact order and groups match.",
+      "fails_without": "With the old greedy grouping, the exact assertions fail on this mixed plan. Old groups are [[u1,n,u3],[u2],[u4]] and the old order is u1,n,u3,u2,u4. The expected order is [u1,u2,n,u3,u4] and the expected groups are [[u1],[u2,n,u3],[u4]]. The fault also shows if the joining pass is changed to search earlier groups.",
+      "seam": "Production entry points: `Plan::build`, `Plan::build_capped` and `Plan::build_improving`. The plan.rs `tests` helpers `entry`, `with_priority` and `improvement` supply the entries. No double is used. The seam exists; `groups_in_order` is added by step 1."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three checks Athena runs, as separate simple commands: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. This covers every crate that calls Plan::build*, including athena-core (plan, reading, hestia) and athena-cli (drain unit tests and tests/drain.rs).",
+      "fails_without": "A format drift, a clippy warning or a test left on the old expectation fails the corresponding command: for example the group assertions in plan.rs (the `after`/`clash` and `one`/`two` tests) and `plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_is_open` in tests/drain.rs.",
+      "seam": "The workspace's own test suites. Test fixtures are the existing ones. Existing group expectations are updated in step 4 where the new rule justifies it. No new seam."
+    },
+    {
+      "criterion": 5,
+      "method": "Content check. `git diff` shows `groups_in_order` and its call in `build_with`, with no grouping inside the wave loop. It shows the updated module bullet 'Parallel groups', the updated docs on `Plan::groups` and `Plan::build_with`, and the updated `batches_for`, module and `Report::plan_groups` docs in drain.rs.",
+      "command": "git diff -- crates/athena-core/src/plan.rs crates/athena-cli/src/drain.rs",
+      "observes": "The diff shows the doc comments describing: groups built from plan order, an item joining only the last group when disjoint and independent, flattened groups equal to the order, and drain with one job at a time dispatching in plan order.",
+      "fails_without": "If the module doc and the `Plan::groups` doc still said 'groups come from greedy joins per wave', or drain.rs still described only filtering by group order, the diff would not show the updated text and a reader would find the wrong description.",
+      "seam": "None: a content criterion read from the diff."
+    },
+    {
+      "criterion": 6,
+      "method": "Content check. `git diff` shows added lines under `## [Unreleased]`, `### Fixed` (or `### Changed`, following the file's convention), saying groups are now built from the plan order so drain dispatches in plan order.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "Only added lines, naming the root cause (groups built per wave by greedy joining, which let a lower-priority item run before a higher-priority one) and the fix.",
+      "fails_without": "No entry means the diff is empty.",
+      "seam": "None: a content criterion read from the diff."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "a75a5fafd0ef33169ec0100fb7e389ff404f9011a24138fc21aa8bab9284e6b4"
+}

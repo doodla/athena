@@ -694,9 +694,8 @@ fn plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_i
     let text = display::plan(&report);
     for needle in [
         "order       urgent → a → b",
-        "group 1     urgent",
-        "group 2     a",
-        "group 3     b",
+        "group 1     urgent, a",
+        "group 2     b",
         "priority    high",
         "priority    normal",
         "goal        goal of a",
