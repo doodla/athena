@@ -440,6 +440,20 @@ mod tests {
     }
 
     #[test]
+    fn the_real_steward_prompt_fits_its_budget() {
+        // The test above composes a placeholder; this composes the stored prompt the steward actually runs.
+        let role = athena_data::roles::steward("2026-11-09T00:00:00Z".parse().unwrap());
+        assert_eq!(role.prompt, athena_data::roles::STEWARD_PROMPT);
+        let composed = steward_system_prompt(athena_data::roles::STEWARD_PROMPT, role.version);
+        assert!(
+            check_budget(BudgetSet::Steward, &composed).is_ok(),
+            "{} tokens",
+            composed.estimated_tokens()
+        );
+        assert!(composed.estimated_tokens() <= 600);
+    }
+
+    #[test]
     fn reader_checks_for_governance_files_and_producer_stops_on_unlisted_ones() {
         // Guidance only: admission enforces the rule; these frames help the agents avoid a refusal.
         let reader = READER_FRAME.text;

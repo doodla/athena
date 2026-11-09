@@ -10,8 +10,9 @@
 //! Athena, not the model, decides what happens to a report. Each item is validated (known sources, existing
 //! jobs, stable keys), items whose key is already recorded are dropped, and every remaining item goes through
 //! [`decide`]: the requirements ladder (`athena_data::roles::may_change`) queues a request for a rung at or
-//! below the role's limit, which then runs as a job under the normal checks and the independent verifier, and
-//! only a proposal with its evidence above it.
+//! below the role's limit, which then runs as a job under the normal checks and the independent verifier. A
+//! finding above the limit is only recorded. The owner is asked about an item only when it carries a brief,
+//! which the steward writes for an environment change or a token Athena lacks.
 
 use crate::Athena;
 use crate::capability::{JobConfig, ToolGrant};
@@ -311,7 +312,9 @@ pub struct ProposedChange {
     pub evidence: Vec<Reference>,
     /// The request queued when the steward may change this rung itself.
     pub request: String,
-    /// The owner's brief, kept only when the change is raised above the role's limit.
+    /// The owner's brief, written only for an environment change or a token or credential Athena lacks. A
+    /// change with a brief goes to the owner at any rung and is never applied; a change without one is
+    /// decided by the steward and never reaches the owner ([`decide`]).
     pub brief: Option<OwnerBrief>,
 }
 
@@ -684,7 +687,9 @@ impl Applier for RequestQueue {
 pub enum Decision {
     /// The role may change the rung itself: a request was queued for it.
     Applied(QueuedRequest),
-    /// The rung is above the role's limit: only the work item was queued.
+    /// Nothing was applied; only the work item was recorded. The item carries a brief when the owner must
+    /// supply an environment change or a token, and then it reaches the owner at any rung. Without a brief
+    /// (the rung is above the role's limit) it reaches no owner surface.
     Proposed,
 }
 
@@ -698,23 +703,33 @@ pub fn decide(
     now: Timestamp,
 ) -> Result<(Decision, WorkItem)> {
     let mut evidence = change.evidence.clone();
-    let decision = if role.may_change(change.rung) {
+    // A brief means the steward judged that the fix needs an environment change or a token the owner must
+    // supply. That is the owner's, whatever the rung, so it is never applied. With no brief the steward
+    // decides: it is applied inside its limit, and above it only recorded, without reaching the owner.
+    let owner_bound = change.brief.is_some();
+    let decision = if !owner_bound && role.may_change(change.rung) {
         let queued = applier.apply(change, taken)?;
         evidence.push(Reference::job(&queued.job));
         Decision::Applied(queued)
     } else {
         Decision::Proposed
     };
-    // Only a proposal above the limit goes to the owner, so only it carries a brief.
     let brief = match decision {
         Decision::Proposed => change.brief.clone(),
         Decision::Applied(_) => None,
+    };
+    // The owner's surfaces list only a work item of kind `Proposal`, so a briefed item of any kind is
+    // recorded as one; its title, key and evidence still show where it came from.
+    let kind = if owner_bound {
+        WorkItemKind::Proposal
+    } else {
+        change.kind
     };
     let item = WorkItem {
         id: RecordId::generate(now),
         at: now,
         role: role.name.clone(),
-        kind: change.kind,
+        kind,
         key: change.key.clone(),
         title: change.title.clone(),
         rung: change.rung,
@@ -746,6 +761,24 @@ pub fn blind_spot_change(source: &str, title: &str) -> ProposedChange {
         evidence: Vec::new(),
         request: blind_spot_request(source, title),
         brief: None,
+    }
+}
+
+/// The change for a source that could not be read because the environment lacks a token or credential Athena
+/// cannot supply, such as a missing `GH_TOKEN`. It carries the owner's brief (whose `if_yes` names what the
+/// owner must do), so [`decide`] records it for the owner at any rung and never applies it. It is a proposal
+/// with the source as its evidence, and its key differs from [`blind_spot_key`]'s, so a plain blind spot
+/// recorded earlier for the same source does not hide it.
+pub fn blind_spot_needing_owner(source: &str, title: &str, brief: OwnerBrief) -> ProposedChange {
+    ProposedChange {
+        kind: WorkItemKind::Proposal,
+        key: format!("{}:owner-action", blind_spot_key(source)),
+        title: title.to_string(),
+        rung: Ladder::Implementation,
+        source: Reference::path(source),
+        evidence: vec![Reference::path(source)],
+        request: blind_spot_request(source, title),
+        brief: Some(brief),
     }
 }
 
@@ -939,7 +972,15 @@ fn validate_item(
                 source_names().join(", ")
             ));
         }
-        return Ok(blind_spot_change(source, &title));
+        // A blind spot with a brief is a missing token or environment the owner must supply.
+        return match item.brief {
+            Some(raw) => {
+                let brief = check_brief(raw)
+                    .map_err(|e| format!("{}: brief: {e}", blind_spot_key(source)))?;
+                Ok(blind_spot_needing_owner(source, &title, brief))
+            }
+            None => Ok(blind_spot_change(source, &title)),
+        };
     }
     let key = check_key(&item.key)?;
     if item.evidence.is_empty() {
@@ -958,7 +999,12 @@ fn validate_item(
     let rung = ladder(item.rung);
     let request = plain_boundary_text(item.request.unwrap_or_default().trim())
         .map_err(|e| format!("{key}: request: {e}"))?;
-    if role.may_change(rung) && request.is_empty() {
+    let brief = item
+        .brief
+        .map(|b| check_brief(b).map_err(|e| format!("{key}: brief: {e}")))
+        .transpose()?;
+    // A briefed item goes to the owner and is never applied, so it needs no request.
+    if role.may_change(rung) && brief.is_none() && request.is_empty() {
         return Err(format!(
             "{key}: rung {} is at or below your limit, so the item needs a request to queue",
             rung.as_str()
@@ -969,10 +1015,6 @@ fn validate_item(
             "{key}: a request is at most {MAX_REQUEST} characters"
         ));
     }
-    let brief = item
-        .brief
-        .map(|b| check_brief(b).map_err(|e| format!("{key}: brief: {e}")))
-        .transpose()?;
     Ok(ProposedChange {
         kind: match item.kind {
             StewardKindOutput::RepeatedFailure => WorkItemKind::RepeatedFailure,
@@ -1034,8 +1076,11 @@ pub fn brief(
     );
     text.push_str(&format!(
         "## Your limit\n\nYou may change rungs at or below `{}` yourself: for those, give a `request` that \
-         says what to do, and Athena queues it as a job. Above that, Athena queues only a proposal with your \
-         evidence. The top two rungs are never changed by a role.\n\n",
+         says what to do, and Athena queues it as a job. Above that, Athena only records your item and does \
+         not ask the owner. The top two rungs are never changed by a role. The owner decides only an item \
+         that carries a `brief`: write one when the fix needs an environment change or a token or credential \
+         Athena lacks, whatever the rung, and put what the owner must do in `if_yes`. Decide everything else \
+         yourself, with a null `brief`.\n\n",
         role.highest_rung.as_str()
     ));
     text.push_str("## Sources\n\n");
@@ -1044,7 +1089,8 @@ pub fn brief(
     }
     text.push_str(&format!(
         "\n## GitHub\n\nThe source `{GITHUB_SOURCE}` is CI runs, pull requests, and deploys, read with `gh`. If \
-         `gh` fails or has no access (no `GH_TOKEN` or `GITHUB_TOKEN` set), report a blind spot with source `{GITHUB_SOURCE}`.\n"
+         `gh` fails or has no access (no `GH_TOKEN` or `GITHUB_TOKEN` set), report a blind spot with source \
+         `{GITHUB_SOURCE}`. When the cause is a missing token, give it a `brief` whose `if_yes` names setting it.\n"
     ));
     if !unreadable.is_empty() {
         text.push_str(&format!(
@@ -1616,6 +1662,24 @@ mod tests {
         }
     }
 
+    /// A change the steward decides itself: no environment or token need, so no brief.
+    fn plain_change(rung: Ladder) -> ProposedChange {
+        ProposedChange {
+            brief: None,
+            ..change(rung)
+        }
+    }
+
+    fn token_brief() -> OwnerBrief {
+        OwnerBrief {
+            question: "Can you set GH_TOKEN where Athena runs?".into(),
+            if_yes: "You set GH_TOKEN, then approve the work to make GitHub readable.".into(),
+            if_no: "The steward stays blind to CI runs and pull requests.".into(),
+            cost: "A few minutes of your time.".into(),
+            recommendation: "Yes: without it the steward cannot read GitHub.".into(),
+        }
+    }
+
     fn owner_brief() -> OwnerBrief {
         OwnerBrief {
             question: "Should the steward retry a failed check once?".into(),
@@ -1651,7 +1715,8 @@ mod tests {
     }
 
     #[test]
-    fn a_change_above_the_limit_is_queued_with_evidence_and_not_applied() {
+    fn an_unbriefed_change_above_the_limit_is_recorded_without_a_brief_and_not_applied() {
+        // No environment or token need, so no brief: the steward decides, and the owner is not asked.
         let role = steward(at());
         for rung in [
             Ladder::OwnerGoals,
@@ -1660,18 +1725,81 @@ mod tests {
         ] {
             let applier = Counting::default();
             let (decision, item) =
-                decide(&role, &change(rung), &applier, &BTreeSet::new(), at()).unwrap();
+                decide(&role, &plain_change(rung), &applier, &BTreeSet::new(), at()).unwrap();
             assert_eq!(decision, Decision::Proposed, "{rung:?}");
             assert_eq!(*applier.0.borrow(), 0, "{rung:?} is not applied");
             assert_eq!(item.rung, rung);
             assert_eq!(item.evidence.len(), 1, "the evidence is cited");
-            assert_eq!(
-                item.brief,
-                Some(owner_brief()),
-                "{rung:?} carries the brief"
-            );
+            assert_eq!(item.brief, None, "{rung:?} carries no brief");
             assert!(item.validate().is_ok());
+            // The owner's list does not hold it.
+            let mut records = Records::default();
+            records.roles.push(role.clone());
+            records.work_items.push(item);
+            assert!(
+                crate::work_decisions::open_proposals(&records).is_empty(),
+                "{rung:?} is not listed"
+            );
         }
+    }
+
+    #[test]
+    fn a_briefed_change_goes_to_the_owner_at_every_rung_and_is_never_applied() {
+        let role = steward(at());
+        for rung in Ladder::ALL {
+            let applier = Counting::default();
+            let (decision, item) =
+                decide(&role, &change(rung), &applier, &BTreeSet::new(), at()).unwrap();
+            assert_eq!(decision, Decision::Proposed, "{rung:?}");
+            assert_eq!(*applier.0.borrow(), 0, "{rung:?} is not applied");
+            assert_eq!(item.kind, WorkItemKind::Proposal);
+            assert_eq!(item.brief, Some(owner_brief()), "{rung:?} keeps the brief");
+            assert!(item.validate().is_ok());
+            let mut records = Records::default();
+            records.roles.push(role.clone());
+            records.work_items.push(item.clone());
+            let open = crate::work_decisions::open_proposals(&records);
+            assert_eq!(open.len(), 1, "{rung:?} is listed");
+            assert_eq!(open[0].brief, Some(owner_brief()));
+        }
+    }
+
+    #[test]
+    fn a_briefed_item_of_any_kind_is_recorded_as_a_proposal() {
+        let role = steward(at());
+        let mut c = change(Ladder::Implementation);
+        c.kind = WorkItemKind::RepeatedFailure;
+        c.key = "repeat:token".into();
+        let (_, item) = decide(&role, &c, &Counting::default(), &BTreeSet::new(), at()).unwrap();
+        assert_eq!(item.kind, WorkItemKind::Proposal);
+        assert_eq!(item.key, "repeat:token");
+        // Without a brief the kind is kept.
+        let mut plain = plain_change(Ladder::Implementation);
+        plain.kind = WorkItemKind::RepeatedFailure;
+        let (_, item) =
+            decide(&role, &plain, &Counting::default(), &BTreeSet::new(), at()).unwrap();
+        assert_eq!(item.kind, WorkItemKind::RepeatedFailure);
+    }
+
+    #[test]
+    fn a_missing_token_blind_spot_carries_its_brief_and_reaches_the_owner() {
+        let role = steward(at());
+        let change = blind_spot_needing_owner("github", "gh has no GH_TOKEN", token_brief());
+        assert_eq!(change.key, "blind-spot:github:owner-action");
+        assert_ne!(change.key, blind_spot_key("github"));
+        assert_eq!(change.rung, Ladder::Implementation);
+        let applier = Counting::default();
+        let (decision, item) = decide(&role, &change, &applier, &BTreeSet::new(), at()).unwrap();
+        assert_eq!(decision, Decision::Proposed);
+        assert_eq!(*applier.0.borrow(), 0, "no request is queued");
+        assert_eq!(item.kind, WorkItemKind::Proposal);
+        assert_eq!(item.brief, Some(token_brief()));
+        assert_eq!(item.source, Reference::path("github"));
+        assert!(item.validate().is_ok());
+        let mut records = Records::default();
+        records.roles.push(role);
+        records.work_items.push(item);
+        assert_eq!(crate::work_decisions::open_proposals(&records).len(), 1);
     }
 
     #[test]
@@ -1679,7 +1807,7 @@ mod tests {
         let role = steward(at());
         let (decision, item) = decide(
             &role,
-            &change(Ladder::Implementation),
+            &plain_change(Ladder::Implementation),
             &Counting::default(),
             &BTreeSet::new(),
             at(),
@@ -1687,6 +1815,64 @@ mod tests {
         .unwrap();
         assert!(matches!(decision, Decision::Applied(_)));
         assert_eq!(item.brief, None);
+    }
+
+    #[test]
+    fn a_briefed_item_needs_no_request_and_a_plain_in_limit_item_still_does() {
+        let role = steward(at());
+        let records = records_with_job("20261010-153012-k7q2");
+        // In limit, with a brief and no request: accepted, since it is never applied.
+        let mut briefed = item(
+            StewardKindOutput::RepeatedFailure,
+            "repeat:needs-token",
+            RungOutput::Implementation,
+        );
+        briefed.request = None;
+        // In limit, no brief, no request: refused.
+        let mut plain = item(
+            StewardKindOutput::RepeatedFailure,
+            "repeat:plain",
+            RungOutput::Implementation,
+        );
+        plain.request = None;
+        plain.brief = None;
+        // A github blind spot with a brief becomes the owner-action change; without one it is the plain one.
+        let mut spot = item(
+            StewardKindOutput::BlindSpot,
+            "ignored",
+            RungOutput::OwnerGoals,
+        );
+        spot.source = StewardRefOutput {
+            kind: RefKindOutput::Path,
+            value: "github".into(),
+        };
+        spot.evidence.clear();
+        let mut plain_spot = spot.clone();
+        plain_spot.brief = None;
+        let valid = validate_items(vec![briefed, plain, spot, plain_spot], &role, &records);
+        assert_eq!(valid.rejected.len(), 1, "{:?}", valid.rejected);
+        assert!(valid.rejected[0].contains("repeat:plain"));
+        assert_eq!(valid.changes.len(), 3);
+        assert_eq!(valid.changes[0].brief, Some(owner_brief()));
+        assert_eq!(valid.changes[1].key, "blind-spot:github:owner-action");
+        assert_eq!(valid.changes[1].brief, Some(owner_brief()));
+        assert_eq!(valid.changes[2].key, "blind-spot:github");
+        assert_eq!(valid.changes[2].brief, None);
+        // A bad field in a blind spot's brief drops the item.
+        let mut bad = item(
+            StewardKindOutput::BlindSpot,
+            "ignored",
+            RungOutput::OwnerGoals,
+        );
+        bad.source.value = "github".into();
+        bad.evidence.clear();
+        bad.brief = Some(StewardBriefOutput {
+            cost: " ".into(),
+            ..brief_output()
+        });
+        let invalid = validate_items(vec![bad], &role, &records);
+        assert!(invalid.changes.is_empty());
+        assert!(invalid.rejected[0].contains("brief: cost"), "{invalid:?}");
     }
 
     #[test]
@@ -1738,7 +1924,7 @@ mod tests {
         for rung in [Ladder::DefaultsConventions, Ladder::Implementation] {
             let applier = Counting::default();
             let (decision, item) =
-                decide(&role, &change(rung), &applier, &BTreeSet::new(), at()).unwrap();
+                decide(&role, &plain_change(rung), &applier, &BTreeSet::new(), at()).unwrap();
             assert!(matches!(decision, Decision::Applied(_)), "{rung:?}");
             assert_eq!(*applier.0.borrow(), 1);
             assert!(
@@ -1755,7 +1941,7 @@ mod tests {
         let applier = Counting::default();
         let (decision, _) = decide(
             &role,
-            &change(Ladder::BriefRequirements),
+            &plain_change(Ladder::BriefRequirements),
             &applier,
             &BTreeSet::new(),
             at(),
@@ -1865,6 +2051,8 @@ mod tests {
         raw.request = Some(format!(
             "Ask the {word} before each run.\n- The {word} is told\nFiles: records/jobs"
         ));
+        // No brief: the steward decides this itself (a brief would send it to the owner instead).
+        raw.brief = None;
         // The seed trips the admission scan, so the test would fail if nothing cleaned it.
         assert!(!crate::reading::scan_request_input(&raw.title).is_empty());
 
@@ -1970,6 +2158,7 @@ mod tests {
             RungOutput::Implementation,
         );
         no_request.request = None;
+        no_request.brief = None;
         let reserved = item(
             StewardKindOutput::Proposal,
             "blind-spot:github",
@@ -2038,6 +2227,7 @@ mod tests {
             value: "github".into(),
         };
         spot.evidence.clear();
+        spot.brief = None;
         spot.title = "gh said: HTTP 401 at 12:00:01".into();
         let valid = validate_items(vec![spot.clone()], &role, &records);
         let change = &valid.changes[0];
