@@ -2069,6 +2069,219 @@ fn the_new_binary_is_started_with_the_remaining_budget_and_job_limit() {
     assert_eq!(drain::reexec_args(&left, true).last().unwrap(), "--json");
 }
 
+/// A whole run as the command runs it: `run_pass` around one pass, and for the restart a closure that stands in
+/// for the exec by running the next pass in the same way. The carry crosses through the real file in `root`,
+/// which must be there whenever the restart is called. Every `Limits` handed on is pushed to `seen`.
+fn whole_run(
+    stub: &Stub,
+    root: &Path,
+    left: Limits,
+    seen: &RefCell<Vec<Limits>>,
+) -> anyhow::Result<drain::Report> {
+    drain::run_pass(root, &Quiet, || drain::drain(stub, left, &Quiet), &|next| {
+        assert!(
+            drain::carry_file(root).exists(),
+            "the carry is written before the exec"
+        );
+        seen.borrow_mut().push(next);
+        whole_run(stub, root, next, seen)
+    })
+}
+
+#[test]
+fn a_rebuild_between_two_landings_reports_the_whole_run() {
+    let root = tempfile::tempdir().unwrap();
+    let stub = rebuilding(Ok(()));
+    let seen = RefCell::new(Vec::new());
+    let report = whole_run(&stub, root.path(), limits(9.0), &seen).unwrap();
+
+    assert_eq!(rebuilds(&stub), 1);
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_eq!(report.landed, 2);
+    let items: Vec<_> = report.jobs.iter().map(|j| j.item.as_str()).collect();
+    assert_eq!(items, ["a", "b"]);
+    // Each pass spent a read (0.1), a run (0.5) and a rating (0.2).
+    assert!(
+        (report.spent_usd - 1.6).abs() < 1e-9,
+        "{}",
+        report.spent_usd
+    );
+    assert!(
+        (report.budget_usd - 9.0).abs() < 1e-9,
+        "{}",
+        report.budget_usd
+    );
+    assert!(
+        !drain::carry_file(root.path()).exists(),
+        "the carry is taken by the continuing pass"
+    );
+
+    // The printed summary covers both landings and the whole run's spend, not only the last pass.
+    let text = display::drain(&report);
+    assert!(text.contains("landed      2\n"), "{text}");
+    assert!(!text.contains("landed      1\n"), "{text}");
+    assert!(
+        text.contains("(item a)") && text.contains("(item b)"),
+        "{text}"
+    );
+    assert!(text.contains("spent       $1.60 of $9.00\n"), "{text}");
+    assert!(text.contains("taken after a landing"), "{text}");
+    let value = serde_json::to_value(&report).unwrap();
+    assert_eq!(value["landed"], 2);
+    assert_eq!(value["jobs"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn the_restart_limits_are_unchanged_and_spend_is_carried_once_across_two_rebuilds() {
+    let root = tempfile::tempdir().unwrap();
+    // a and b change Athena's own code, so each is followed by a rebuild; c changes a study.
+    let stub = Stub {
+        items: vec!["a", "b", "c"],
+        unrelated: vec!["a", "b"],
+        ratings: RefCell::new(vec![1, 1, 1]),
+        ..rebuilding(Ok(()))
+    };
+    let seen = RefCell::new(Vec::new());
+    let report = whole_run(&stub, root.path(), limits(9.0), &seen).unwrap();
+
+    // What is handed on is what is left of the budget and job limit, as a single pass computes it.
+    let seen = seen.into_inner();
+    assert_eq!(seen.len(), 2);
+    assert!((seen[0].budget_usd - 8.2).abs() < 1e-9, "{:?}", seen[0]);
+    assert_eq!((seen[0].max_jobs, seen[0].target_rating), (9, 4));
+    assert!((seen[1].budget_usd - 7.4).abs() < 1e-9, "{:?}", seen[1]);
+    assert_eq!((seen[1].max_jobs, seen[1].target_rating), (8, 4));
+
+    // The tallies are the run's, with each pass's spend counted once.
+    assert_eq!(rebuilds(&stub), 2);
+    assert_eq!(report.landed, 3);
+    let items: Vec<_> = report.jobs.iter().map(|j| j.item.as_str()).collect();
+    assert_eq!(items, ["a", "b", "c"]);
+    assert!(
+        (report.spent_usd - 2.4).abs() < 1e-9,
+        "{}",
+        report.spent_usd
+    );
+    assert!(
+        (report.budget_usd - 9.0).abs() < 1e-9,
+        "{}",
+        report.budget_usd
+    );
+    let line_costs: f64 = report.jobs.iter().map(|j| j.cost_usd).sum();
+    assert!(line_costs <= report.spent_usd + 1e-9);
+    assert!(report.outcome_changed, "c changed a study");
+    assert!(!report.page_unchanged);
+}
+
+fn carried_line(item: &str) -> drain::JobLine {
+    drain::JobLine {
+        item: item.into(),
+        job: format!("job-{item}"),
+        outcome: "passed".into(),
+        reason: None,
+        cost_usd: 2.0,
+        landing: "landed".into(),
+    }
+}
+
+/// Three landings and $7 of an earlier pass, as a carry file holds them.
+fn earlier_pass() -> drain::Carried {
+    drain::Carried {
+        spent_usd: 7.0,
+        landed: 3,
+        outcome_changed: true,
+        jobs: vec![carried_line("x"), carried_line("y"), carried_line("z")],
+        ..drain::Carried::default()
+    }
+}
+
+/// One drain of one item under `guarded`, as `athena drain` starts: the report it gives.
+fn guarded_drain(root: &Path) -> drain::Report {
+    let stub = Stub {
+        items: vec!["a"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1]),
+        ..Stub::default()
+    };
+    drain::guarded(root, &drain::RealProcs, "athena test", &|| None, || {
+        drain::run_pass(
+            root,
+            &Quiet,
+            || drain::drain(&stub, limits(9.0), &Quiet),
+            &|_| panic!("no restart"),
+        )
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_fresh_drain_and_a_stale_carry_start_at_zero() {
+    use drain::Procs;
+    // (a) No carry: only this pass's own work.
+    let root = tempfile::tempdir().unwrap();
+    let report = guarded_drain(root.path());
+    assert_eq!(report.landed, 1);
+    assert_eq!(report.jobs.len(), 1);
+    assert!(report.spent_usd < 1.0, "{}", report.spent_usd);
+
+    // (b) A stale carry (left by a run that died) and a fresh start: it is dropped, not applied.
+    drain::store_carry(root.path(), &earlier_pass()).unwrap();
+    let report = guarded_drain(root.path());
+    assert_eq!(report.landed, 1);
+    assert_eq!(report.jobs.len(), 1);
+    assert!(report.spent_usd < 1.0, "{}", report.spent_usd);
+    assert!((report.budget_usd - 9.0).abs() < 1e-9);
+    assert!(!drain::carry_file(root.path()).exists());
+
+    // (c) The drain that replaced its own image (its pid file names this process) applies it.
+    let me = std::process::id();
+    let record = drain::PidRecord {
+        pid: me,
+        started: drain::RealProcs.start_marker(me).unwrap(),
+        build: "athena test".into(),
+        at: "2026-10-27T00:00:00Z".into(),
+    };
+    drain::write_record(root.path(), &record).unwrap();
+    drain::store_carry(root.path(), &earlier_pass()).unwrap();
+    let report = guarded_drain(root.path());
+    assert_eq!(report.landed, 4);
+    let items: Vec<_> = report.jobs.iter().map(|j| j.item.as_str()).collect();
+    assert_eq!(items, ["x", "y", "z", "a"]);
+    assert!(
+        (report.spent_usd - 7.8).abs() < 1e-9,
+        "{}",
+        report.spent_usd
+    );
+    assert!(
+        (report.budget_usd - 16.0).abs() < 1e-9,
+        "{}",
+        report.budget_usd
+    );
+    assert!(!drain::carry_file(root.path()).exists());
+
+    // (d) A carry that cannot be read is no carry, and is removed.
+    drain::write_record(root.path(), &record).unwrap();
+    std::fs::write(drain::carry_file(root.path()), "not json").unwrap();
+    let report = guarded_drain(root.path());
+    assert_eq!(report.landed, 1);
+    assert_eq!(report.jobs.len(), 1);
+    assert!(!drain::carry_file(root.path()).exists());
+}
+
+#[test]
+fn a_failed_exec_leaves_no_carry_behind() {
+    let root = tempfile::tempdir().unwrap();
+    let stub = rebuilding(Ok(()));
+    let failed = drain::run_pass(
+        root.path(),
+        &Quiet,
+        || drain::drain(&stub, limits(9.0), &Quiet),
+        &|_| anyhow::bail!("exec failed"),
+    );
+    assert!(failed.is_err());
+    assert!(!drain::carry_file(root.path()).exists());
+}
+
 #[test]
 fn only_changes_to_code_and_the_files_that_build_it_touch_the_build() {
     let paths = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();

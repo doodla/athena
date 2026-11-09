@@ -334,22 +334,27 @@ pub(crate) fn drain(budget: f64, rating_threshold: u8, job_limit: u32, json: boo
                     .config
                     .parallel
                     .max_concurrency;
-            let report = drain::drain_concurrent(
-                &drain::RealSteps::live(&athena, &Terminal),
-                drain::Limits {
-                    budget_usd: budget,
-                    target_rating: rating_threshold,
-                    max_jobs: job_limit,
-                },
-                &Terminal,
-                max_concurrency,
-            )?;
             // After a landing that changed Athena's own code and a successful rebuild, the newly
-            // installed binary carries on with the remaining budget and job limit. This returns only
-            // if that failed.
-            drain::follow_restart(report, &Terminal, &|left| {
-                reexec(&drain::reexec_args(&left, json))
-            })
+            // installed binary carries on with the remaining budget and job limit, and the run's tallies
+            // so far ride in the state directory so its summary covers the whole run. This returns only
+            // if the re-exec failed.
+            drain::run_pass(
+                athena.state.root(),
+                &Terminal,
+                || {
+                    drain::drain_concurrent(
+                        &drain::RealSteps::live(&athena, &Terminal),
+                        drain::Limits {
+                            budget_usd: budget,
+                            target_rating: rating_threshold,
+                            max_jobs: job_limit,
+                        },
+                        &Terminal,
+                        max_concurrency,
+                    )
+                },
+                &|left| reexec(&drain::reexec_args(&left, json)),
+            )
         },
     )?;
     if json {

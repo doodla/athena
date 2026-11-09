@@ -137,6 +137,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena drain`'s closing summary now covers the whole run across rebuild re-execs. On 2026-10-27 a run landed
+  four jobs but printed `landed 1`: each rebuild re-execs `athena drain`, and the new process started its
+  tallies at zero, so the summary showed only the last pass. Now `drain::run_pass` writes the run's tallies so
+  far (landed, spend, the job lines, which are the jobs started, notes, rebases, improvement turns, the rating)
+  to `drain.carry` in the state directory before the re-exec, and the continuing process takes the file and
+  adds it to its own report; the summary's budget is the whole run's, so it reads `spent X of Y`. The
+  remaining budget and job limit handed to the new binary are unchanged, so spend is not counted twice against
+  them. `guarded` drops a carry when the start is not the drain's own exec, so a fresh drain starts at zero,
+  and a carry that cannot be read is ignored. The plan, queue and waiting lists stay those of the last pass.
+  Tests drive a rebuild between two landings and three passes with two rebuilds, and check the printed text.
 - `athena drain` now dispatches in `athena plan`'s order when groups are involved. On 2026-10-27 the plan began
   with urgent items, yet drain started a normal item first. Root cause: `Plan::build_with` built the parallel
   groups wave by wave with greedy joining (an item joined the first group it could run beside), so a
