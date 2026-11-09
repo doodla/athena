@@ -22,6 +22,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   request that starts with `Priority: urgent` is titled by its next line. Root cause: the shared title in
   `JobRecords::title` (`store.rs`) took the request's first line; it now calls `plan::title_line`. A request
   made only of Priority lines keeps its first line. Titles that come from a reading are unchanged.
+- The commit subjects of queued and dropped requests skip leading `Priority:` lines and blank lines, so a request
+  that starts with `Priority: urgent` is no longer titled `Priority: urgent`. `Queue a request:` takes its
+  subject from `plan::title_line` (in `reading.rs`, `queue_subject`). `Dropped:` already took its title from
+  `JobRecords::title`, which uses the same helper, so it is unchanged in code. Subjects are still cut at 60
+  characters for queued requests.
 
 ### Added
 

@@ -1,0 +1,179 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-115358-jfc3",
+  "n": 1,
+  "at": "2026-11-09T02:35:19.975788131Z",
+  "invocation_seq": 1,
+  "base_commit": "edfef3150498ebc531275faed176eb2b82a5130c",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Keep working branch append-only after landing; push it after each",
+  "summary": "Replace the rewrite in resync_onto_merge/resync_tip with a merge commit of the merged main into the working branch, so the branch stays a descendant of its remote head. Then have athena land --pr and athena drain plain-push the working branch after each landing. Audience: the maintainer who runs drains and sees a refused push.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus fmt, clippy -D warnings and cargo test criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the landing and drain and check ancestry and push outcome."
+    },
+    {
+      "id": "root-cause",
+      "how": "Stops the history rewrite itself instead of force-pushing around it."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name commands the verifier runs."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and CHANGELOG describe the new behavior."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/land.rs (resync_onto_merge at ~311 and resync_tip at ~218, which calls git.replay to rewrite the branch and then reset_keep), crates/athena-core/src/gh/landing.rs (after_merge ~959 calls resync_onto_merge after a landed PR), crates/athena-git/src/lib.rs (push_branch is a plain non-forced push; push_if_remote_at is a guarded force; reset_keep, merge_tree, is_ancestor exist) and crates/athena-cli/src/drain.rs (PrLander::land ~3256 calls athena.land_pr; no push after landing). The request names gh/mod.rs, but the rewrite lives in land.rs, so land.rs is the file to change; gh/landing.rs is the likely place for the push after after_merge.",
+    "Existing callers and tests of resync_onto_merge/resync_tip (crates/athena-cli/tests/trailer_stop.rs, crates/athena-core/src/test_support.rs, crates/athena-core/src/gh/tests.rs rebase_tests) assert the rewritten shape and will need updating to the merge shape.",
+    "Environment: git remote (origin, GitHub) write access to push the working branch; tests use local bare-repo remotes and fake hosts, no network. The push is plain (no force); a refused push is reported as a warning and does not undo the landing.",
+    "The merge commit has the landed branch as first parent and the merged main as second parent, is signed when the repo signs commits, and leaves local edits alone as reset_keep did; a conflict is an error and the branch is unchanged.",
+    "The no-op cases stay: if merged is already an ancestor of head, or landed is not on head, nothing moves.",
+    "No config changes: athena.toml and defaults.toml are not touched."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in crates/athena-core (run: cargo test -p athena-core) lands a job on a branch with a bare-repo remote copy, resyncs onto a squash-merged main, and asserts the branch is a descendant of both its previous remote head and the merged commit (git is_ancestor both ways true), and that a plain push (push_branch) then succeeds.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A drain test in crates/athena-cli/src/drain.rs (run: cargo test -p athena-cli drain) shows the working branch is pushed after each landing, once per landed job, with a plain push; a failed push is shown as a warning and the landing stays landed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "resync_tip/resync_onto_merge in crates/athena-core/src/land.rs no longer call git.replay or otherwise rewrite existing branch commits; the diff shows a merge commit instead, and no force or push_if_remote_at is used for the working branch push (Grep for --force in the diff finds none).",
+      "kind": "content"
+    },
+    {
+      "text": "A test shows the unchanged no-op cases (merged already an ancestor of head; landed not on head) and a conflicting merge leaves the branch unchanged with an error (cargo test -p athena-core).",
+      "kind": "behavior"
+    },
+    {
+      "text": "athena land --pr pushes the working branch after the landing; a test covers it in crates/athena-core/src/gh/tests.rs or the CLI tests.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry describing the append-only resync and the push after each landing.",
+      "kind": "content"
+    },
+    {
+      "text": "Docs and doc comments that describe the branch being rebuilt/rewritten (resync_onto_merge doc, after_merge comment) are updated to describe the merge commit.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/gh/mod.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/trailer_stop.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Changing the hand-run landing script",
+    "Changing how the PR/squash merge itself is made on the host",
+    "Force-pushing or push_if_remote_at for the working branch",
+    "athena.toml, defaults.toml and workflow changes"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2400.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6797520661157025,
+      "p_user_intervenes": 0.07225325884543761,
+      "cost_usd": {
+        "p10": 0.5656278339630169,
+        "p50": 1.4780460000000002,
+        "p90": 4.8407906853387255
+      },
+      "wall_time_s": {
+        "p10": 569.0908389672028,
+        "p50": 2110.0096338949816,
+        "p90": 4316.98131771686
+      }
+    }
+  },
+  "departures": "Larger than typical: touches core landing logic, several existing tests that assert the rewrite shape, and a new push step in the drain.",
+  "hard_reason": "It changes landing: how the working branch is brought onto the merged commit after a landing, and adds a push to the drain's landing step.",
+  "producer_effort": "high"
+}
