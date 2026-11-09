@@ -25,6 +25,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Design note `docs/design/per-job-main-landing.md` (proposed, nothing built) for throughput review
+  `20261109-014617-5cg0`: one job, one commit, one pull request cut from current main. It first checks the review's
+  premise: the 1842.1-minute landing stage is mostly a measurement effect (the newest landing record that lists a
+  job's commit is used, and later pull requests list it again), so the 1830.0-minute saving is not claimed. The
+  saving is stated in minutes from verifier pass to first landing record, and the next review reports both stages.
+  `per-job-landing-branches.md` points to it.
 - Earlier pull requests are closed when a later job's pull request lands their commits. Root cause: a job built
   on an earlier unmerged job's branch had no recorded dependency, and nothing reconciled the earlier pull
   requests after the later one merged, so they stayed open although `main` carried their commits. Failure class

@@ -4802,3 +4802,25 @@ should replace those estimates with its figures.
   (`accept_request`), `crates/athena-core/src/run/tests.rs`, and the two introspections' proposed preventions.
   Measured: unit and corpus cases that call `refusing_check` and assert the refusing check by name. Not measured: the
   share of past readings newly refused; the loop replay records it at verification.
+
+## D167 · Proposed: per-job main landing is designed on a premise check, and its saving is scored on the first landing record
+
+- **Case:** Throughput review 20261109-014617-5cg0 named the landing-and-rebuild stage, 1842.1 of 1903.5 minutes per
+  landed job, and expected 1830.0 minutes saved by cutting each job's commit from current main. The first design
+  attempt (job 20261109-014709-kxrd) treated the stage as real waiting and was rejected.
+- **Decision:** `docs/design/per-job-main-landing.md` proposes the cut from main, but states that the stage is mostly a
+  measurement effect: `landing_end` in `crates/athena-core/src/status/throughput.rs` uses the newest landing record
+  that lists the job, and `docs/design/agent-and-build-slots.md` section 6.1 shows a commit listed in many records
+  (60 of 215 landing files for one job in the evidence snapshot). The claimed saving is in minutes from verifier pass
+  to first landing record (sample median 4.6 minutes), the 1830.0 figure is not claimed, and the next review reports
+  both the unchanged stage and the first-landing stage. An implementing change cites review 20261109-014617-5cg0.
+- **Alternatives:** Measure from the first landing record only (kept as a companion, not the fix: it changes no
+  landing behavior and breaks comparison with earlier reviews); accept the review's 1830.0 prediction (scores repeated
+  listings as saved wait); keep stacking or chain pull requests (the cause stays).
+- **Tradeoff:** The claimed real saving is small (0 to about 5 minutes per job, an estimate); the case for the change
+  rests on stack replay, conflicts and resync, which no record sizes yet.
+- **Reversal cost:** Low. The note is a design only; nothing in `crates/` depends on it.
+- **Provenance:** Read: `crates/athena-core/src/status/throughput.rs` (`landing_record_time`, `landing_end`),
+  `docs/design/agent-and-build-slots.md` section 6.1, `crates/athena-core/src/land.rs`, the throughput review record,
+  and `landings/` in the evidence snapshot. Measured: `status --snapshot` output and the landing-file count. Not
+  measured: the first-landing stage of the newest 20 jobs.
