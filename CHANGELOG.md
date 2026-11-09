@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `docs/design/early-pr-no-staging-branch.md`: design for opening each job's pull request when the producer
+  finishes, building the single landing commit on the host's current main, and dropping the long-lived local
+  staging branch. It answers throughput review 20261109-201520-z1xg (landing and rebuild: 1811.5 of the 1859.9
+  median minutes per landed job in THROUGHPUT.md), predicts a saving of 7.0 minutes per landed job, and says how
+  the next throughput review measures it. Design only; no code changed.
+
 ### Changed
 
 - Records-history step 7b (D111), first slice: readers can now read the current records from the `athena/records`
