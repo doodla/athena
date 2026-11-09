@@ -570,6 +570,7 @@ mod tests {
             "Check whether the outcome needs a change to athena.toml",
         ),
         ("reader", ".github/workflows/"),
+        ("reader", "docs or agent behavior"),
         (
             "reader",
             "Write at least one as an outcome the named audience can check",
@@ -661,6 +662,30 @@ mod tests {
         let doc =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/agent-reference.md");
         assert!(doc.is_file(), "{} is missing", doc.display());
+    }
+
+    /// Root cause of a repeated misreading: "Athena knows X" is ambiguous between documentation for readers
+    /// and behavior built into the agents, and nothing made the reader ask which, or list the rules that
+    /// bound the affected role. The rule must be in the reading section of the text the reader receives.
+    #[test]
+    fn the_reader_must_say_docs_or_agent_behavior_and_list_bounding_rules() {
+        let text = compose(&[CONTRACT.into(), READER_FRAME.into()]).text;
+        let start = text
+            .find("## Reading the request")
+            .expect("the reader prompt has a reading section");
+        let end = text.find("## Forecasts").expect("and a forecasts section");
+        let section = &text[start..end];
+        for phrase in [
+            "docs or agent behavior",
+            "roles and prompts",
+            "ladder rungs",
+            "budgets",
+            "role limits",
+            "admission",
+            "blocking non-owner-only rules",
+        ] {
+            assert!(section.contains(phrase), "the reading rules lack: {phrase}");
+        }
     }
 
     #[test]

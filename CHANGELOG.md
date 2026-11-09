@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The reader prompt gains one rule under "Reading the request". Root cause of a repeated misreading: "Athena
+  knows X" is ambiguous between documentation for readers and behavior built into the agents, and nothing made
+  the reader ask which, or list the rules that bound the affected role. Now, when a request says Athena or its
+  agents should know or act on something, the reading says docs or agent behavior, names the roles and prompts
+  that change, lists the bounding rules (ladder rungs, budgets, role limits, admission) and makes the blocking
+  rules that are not owner-only deliverables. The fix is in the reader prompt, not in jobs 20261109-080749-p0fs
+  or 20261109-080220-zkhy, whose README and steward changes are not kept. Prose-only: no refusal rule, check,
+  governance file or budget changes. The filler "Users write lazily." is removed to fit; the reader set goes
+  from 1929 to 1998 of 2000 tokens. A new test composes the real reader prompt and asserts each element. Docs:
+  D170.
 - The steward decides for itself and asks the owner only for an environment change or a token or credential
   Athena lacks (such as a missing `GH_TOKEN`). The steward role is version 3 (`records/roles/steward-3.json`):
   its prompt tells it to step back across repeated failures and blind spots, to decide and queue a request

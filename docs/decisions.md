@@ -4910,3 +4910,33 @@ should replace those estimates with its figures.
   the real `STEWARD_PROMPT` composed with the contract at most 600 estimated tokens (`ceil(bytes/3)`, an
   estimate). Not measured: whether the model writes briefs only for an environment or token need; the share of
   newly refused readings (no reading rule changed).
+
+## D170 · The reader must say whether "Athena knows X" means docs or agent behavior, and list the rules that bound the role
+
+- **Case:** Two jobs misread a request that Athena or its agents should know or act on something. Job
+  20261109-080749-p0fs wrote documentation for readers (README.md); job 20261109-080220-zkhy changed the steward
+  prompt and code without listing the rules that bound the steward. Introspections 20261109-091753-tt8c and
+  20261109-125651-wz8f recorded the class `knowledge-request-read-as-docs-for-humans-not-agent-behavior`. Root
+  cause: "Athena knows X" is ambiguous between documentation for readers and behavior built into the agents, and
+  the reader prompt never made the reader decide which, nor list the rules (ladder rungs, budgets, role limits,
+  admission) that stop the agents acting on the stated fact.
+- **Decision:** One bullet in `crates/athena-context/prompts/reader.md`, under "Reading the request": when Athena
+  or agents should know or act on something, the reading says docs or agent behavior, names the roles and prompts
+  that change, lists the bounding rules, and makes the blocking rules that are not owner-only deliverables. The
+  test `the_reader_must_say_docs_or_agent_behavior_and_list_bounding_rules` checks each element in the composed
+  reading section, and `FRAME_ANCHORS` gains the phrase. To fit the budget, the filler sentence "Users write
+  lazily." is removed and the next bullet is shortened ("what they left unsaid" becomes "what users leave unsaid",
+  "the defaults" becomes "defaults"); no tested rule is lost. The reader set is now 1998 of 2000 tokens
+  (`docs/system-facts.md` updated). Prose-only: no check, refusal rule, governance file or budget changes, and the
+  two earlier jobs' outputs are not touched; the fix is where the readings are made.
+- **Alternatives:** A rule in `defaults.toml` (a governance file, and defaults count in the reader budget); a
+  description on a reading-schema field (outside the listed deliverables; kept as the fallback if the rule did not
+  fit); a steward prompt or README fix (the instances, not the cause); a code check that refuses readings (prose
+  cannot be judged reliably by a matcher); raising the reader budget (budgets never rise to fit a set).
+- **Tradeoff:** The reader set has 2 tokens of headroom, so a later addition pays with a removal. The effect on
+  what the model writes is not measured; the test reads the text the reader receives.
+- **Reversal cost:** Low. One bullet, one test and one anchor; nothing recorded depends on them.
+- **Provenance:** Read: `crates/athena-context/prompts/reader.md`, `crates/athena-context/src/lib.rs`,
+  `crates/athena-cli/tests/budgets.rs`, the two introspections' proposed preventions. Measured: `cargo test -p
+  athena-context` and `cargo test -p athena-cli --test budgets` on the final text (reader set 1998 of 2000). Not
+  measured: whether readings improve; the share of newly refused readings (no reading rule changed).
