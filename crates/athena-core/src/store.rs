@@ -4,7 +4,6 @@
 
 use crate::plan::Priority;
 use anyhow::{Result, anyhow, bail};
-use athena_data::records::check_record_file;
 use athena_data::records::{
     AnyRecord, Baseline, Candidate, Correction, Critique, DecisionState, DecisionStateKind,
     DefaultExpectations, FailureClass, HostError, Intervention, IntrospectionRecord, Invocation,
@@ -12,7 +11,7 @@ use athena_data::records::{
     Resolution, Restart, Role, Score, Verification, fold_decision_states,
 };
 use athena_data::{JobId, RecordId};
-use athena_gate::records::{RecordFile, RecordSet};
+use athena_gate::records::RecordSet;
 use athena_git::Git;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -354,25 +353,23 @@ impl Records {
     /// Loads every record from an evidence snapshot directory (`records/` and `landings/` under `dir`), through
     /// the same assembly as [`Records::load`], so both give the same records for the same files.
     pub fn load_dir(dir: &Path) -> Result<Records> {
-        let files = read_files_under(dir, "records")?
-            .into_iter()
-            .map(|(path, bytes)| match check_record_file(&path, &bytes) {
-                Ok(record) => RecordFile {
-                    path,
-                    record,
-                    error: None,
-                    bytes,
-                },
-                Err(error) => RecordFile {
-                    path,
-                    record: None,
-                    error: Some(error),
-                    bytes,
-                },
-            })
-            .collect();
+        let set = RecordSet::load_dir(dir)?;
         let landings = read_files_under(dir, "landings")?;
-        Ok(Records::from_parts(&RecordSet { files }, &landings))
+        Ok(Records::from_parts(&set, &landings))
+    }
+
+    /// Loads the current records (D111): the `athena/records` worktree at `worktree` when that directory
+    /// exists, and `records/` in `treeish` (as [`Records::load`]) only when it is absent. An existing
+    /// worktree is read as it is, even when empty, so a broken one is not hidden behind in-tree records.
+    ///
+    /// Landings come only from the worktree's `landings/`: they are not merged with the local records
+    /// branch's tip as [`Records::load`] does, so the writer must keep the worktree at the branch tip.
+    pub fn load_current(git: &Git, treeish: &str, worktree: &Path) -> Result<Records> {
+        if worktree.is_dir() {
+            Records::load_dir(worktree)
+        } else {
+            Records::load(git, treeish)
+        }
     }
 
     /// Assembles the records from the checked files under `records/` and the files under `landings/`.
@@ -772,5 +769,67 @@ mod tests {
         let loaded = Records::load(&git, "HEAD").unwrap();
         assert!(loaded.invalid.is_empty(), "{:?}", loaded.invalid);
         assert_eq!(loaded.jobs[job_id().as_str()].replay, Some(replay));
+    }
+
+    fn other_job_id() -> JobId {
+        JobId::parse("20261011-090000-z4d8").unwrap()
+    }
+
+    fn write_job(root: &Path, id: JobId) {
+        let mut job = dispatched();
+        job.id = id;
+        let record = AnyRecord::Job(Box::new(job));
+        let path = root.join(record.canonical_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, record.to_json()).unwrap();
+    }
+
+    fn repo_with_in_tree_job() -> (tempfile::TempDir, Git) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::at(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        for (key, value) in [
+            ("user.name", "Test User"),
+            ("user.email", "noreply@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            git.run(["config", key, value]).unwrap();
+        }
+        write_job(dir.path(), job_id());
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "A job"]).unwrap();
+        (dir, git)
+    }
+
+    fn job_ids(records: &Records) -> Vec<String> {
+        records.jobs.keys().cloned().collect()
+    }
+
+    #[test]
+    fn load_current_reads_the_worktree_when_it_exists_and_the_tree_when_it_is_absent() {
+        let (dir, git) = repo_with_in_tree_job();
+        let worktree = tempfile::tempdir().unwrap();
+        write_job(worktree.path(), other_job_id());
+
+        let current = Records::load_current(&git, "HEAD", worktree.path()).unwrap();
+        assert_eq!(job_ids(&current), vec![other_job_id().as_str().to_string()]);
+        let same = Records::load_dir(worktree.path()).unwrap();
+        assert_eq!(job_ids(&current), job_ids(&same));
+
+        let absent = dir.path().join("no-such-worktree");
+        let current = Records::load_current(&git, "HEAD", &absent).unwrap();
+        let tree = Records::load(&git, "HEAD").unwrap();
+        assert_eq!(job_ids(&current), job_ids(&tree));
+        assert_eq!(job_ids(&current), vec![job_id().as_str().to_string()]);
+    }
+
+    #[test]
+    fn load_current_does_not_fall_back_when_the_worktree_is_empty() {
+        let (_dir, git) = repo_with_in_tree_job();
+        let worktree = tempfile::tempdir().unwrap();
+        let current = Records::load_current(&git, "HEAD", worktree.path()).unwrap();
+        assert!(current.jobs.is_empty());
+        assert!(current.invalid.is_empty());
     }
 }

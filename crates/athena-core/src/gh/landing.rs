@@ -843,7 +843,9 @@ impl Athena {
             ui.line(&line);
         }
         let head = self.head()?;
-        let records = crate::store::Records::load(&self.git, &head)?;
+        // The job comes from the `athena/records` worktree when it exists, else from `records/` at HEAD (D111).
+        let worktree = athena_data::paths::records_worktree(self.state.root());
+        let records = crate::store::Records::load_current(&self.git, &head, &worktree)?;
         let id = records.resolve(job_ref)?;
         let Some(_lock) = self.state.try_lock_job(&id)? else {
             bail!("job {id} is busy in another athena process");

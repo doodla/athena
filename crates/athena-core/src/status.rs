@@ -985,8 +985,11 @@ impl Athena {
     pub fn status(&self) -> Result<StatusView> {
         self.state.registry().reap();
         let head = self.head()?;
-        let records = Records::load(&self.git, &head)?;
-        let set = athena_gate::records::RecordSet::load(&self.git, &head)?;
+        // The records come from the `athena/records` worktree when it exists, else from `records/` at HEAD
+        // (D111). The per-class forecasts below are computed from the same `records`.
+        let worktree = athena_data::paths::records_worktree(self.state.root());
+        let records = Records::load_current(&self.git, &head, &worktree)?;
+        let set = athena_gate::records::RecordSet::load_current(&self.git, &head, &worktree)?;
         let scan = self.scan_jobs(&records);
         let (by_category, by_class) = intervention_counts(&records);
         let pending = pending_views(&records, &set);
@@ -1553,6 +1556,166 @@ mod build_measurement_tests {
         assert!(!line.contains("not installed"), "{line}");
         let json = serde_json::to_value(&view).unwrap();
         assert_eq!(json["build_measurement"], line.as_str());
+    }
+}
+
+/// Status, its per-class forecasts and `land_pr`'s job lookup read the `athena/records` worktree when it
+/// exists and `records/` at HEAD only when it is absent (D111). The fixtures here give the two sources
+/// different job ids and different classes, so a test shows which one was read.
+#[cfg(test)]
+pub(crate) mod records_worktree_tests {
+    use super::*;
+    use crate::commits::{NewFile, message};
+    use athena_data::JobId;
+    use athena_data::records::{AnyRecord, JobKind, Owner, Score};
+
+    /// The job committed under `records/` at HEAD.
+    pub(crate) const TREE_JOB: &str = "20261010-153012-k7q2";
+    /// The job that exists only in the worktree.
+    pub(crate) const WORKTREE_JOB: &str = "20261011-090000-z4d8";
+
+    /// A dispatched request job of `class`.
+    pub(crate) fn job_record(id: &str, class: &str) -> AnyRecord {
+        AnyRecord::Job(Box::new(athena_data::records::Job {
+            id: JobId::parse(id).unwrap(),
+            kind: JobKind::Request,
+            title: "A job".into(),
+            class_of_work: Some(class.into()),
+            capability: None,
+            accepted_reading: None,
+            accepted_by: None,
+            owner: Owner {
+                role: "athena".into(),
+                capability: None,
+                model: None,
+                note: None,
+            },
+            verifier_model: None,
+            caps: None,
+            base_commit: None,
+            config_sha256: None,
+            defaults_sha256: None,
+            athena: None,
+            driver: None,
+            brief_sha256: None,
+            dispatched_at: None,
+            request_path: None,
+            request_sha256: None,
+            cost: None,
+            tokens: None,
+            note: None,
+            pin: None,
+            dispatch_branch: None,
+            allowed_paths: None,
+        }))
+    }
+
+    /// A closing score for the job, with no events, so the job counts in its class's forecast.
+    pub(crate) fn score_record(id: &str) -> AnyRecord {
+        AnyRecord::Score(Box::new(Score {
+            job: JobId::parse(id).unwrap(),
+            at: "2026-10-12T10:00:00Z".parse().unwrap(),
+            rules: athena_score::RULES.into(),
+            cause: None,
+            events: vec![],
+            deliverables: None,
+            quantities: vec![],
+            models: None,
+        }))
+    }
+
+    /// Commits the records under `records/` at HEAD.
+    pub(crate) fn commit_in_tree(athena: &Athena, records: &[AnyRecord]) {
+        let files: Vec<NewFile> = records.iter().map(NewFile::record).collect();
+        athena
+            .commit_records(&files, &message("Records in the tree", "", &[]))
+            .unwrap();
+    }
+
+    /// Writes the records into the worktree directory, creating it.
+    pub(crate) fn write_in_worktree(athena: &Athena, records: &[AnyRecord]) {
+        let root = athena_data::paths::records_worktree(athena.state.root());
+        for record in records {
+            let path = root.join(record.canonical_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, record.to_json()).unwrap();
+        }
+    }
+
+    pub(crate) fn remove_worktree(athena: &Athena) {
+        std::fs::remove_dir_all(athena_data::paths::records_worktree(athena.state.root())).unwrap();
+    }
+
+    /// The ids status lists, over the recent and the open lines, sorted.
+    fn listed(view: &StatusView) -> Vec<String> {
+        let mut ids: Vec<String> = view
+            .recent
+            .iter()
+            .chain(&view.open)
+            .map(|l| l.id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    #[test]
+    fn status_records_worktree_decides_which_jobs_are_listed() {
+        let (_dir, _state, athena) = crate::code_health::tests::set_up();
+        commit_in_tree(&athena, &[job_record(TREE_JOB, "class-tree")]);
+        write_in_worktree(&athena, &[job_record(WORKTREE_JOB, "class-wt")]);
+
+        let view = athena.status().unwrap();
+        assert_eq!(listed(&view), vec![WORKTREE_JOB.to_string()]);
+        assert_eq!(view.jobs_by_state.values().sum::<usize>(), 1);
+        assert!(
+            view.invalid_records.is_empty(),
+            "{:?}",
+            view.invalid_records
+        );
+
+        remove_worktree(&athena);
+        let view = athena.status().unwrap();
+        assert_eq!(listed(&view), vec![TREE_JOB.to_string()]);
+        assert_eq!(view.jobs_by_state.values().sum::<usize>(), 1);
+        assert!(
+            view.invalid_records.is_empty(),
+            "{:?}",
+            view.invalid_records
+        );
+    }
+
+    #[test]
+    fn forecast_records_worktree_decides_which_classes_are_headlined() {
+        let (_dir, _state, athena) = crate::code_health::tests::set_up();
+        commit_in_tree(
+            &athena,
+            &[job_record(TREE_JOB, "class-tree"), score_record(TREE_JOB)],
+        );
+        write_in_worktree(
+            &athena,
+            &[
+                job_record(WORKTREE_JOB, "class-wt"),
+                score_record(WORKTREE_JOB),
+            ],
+        );
+        let classes = |view: &StatusView| -> Vec<String> {
+            view.forecasts.iter().map(|f| f.class.clone()).collect()
+        };
+
+        let view = athena.status().unwrap();
+        assert_eq!(classes(&view), vec!["class-wt".to_string()]);
+        assert_eq!(view.forecasts[0].scored_jobs, 1);
+        assert!(
+            view.invalid_records.is_empty(),
+            "{:?}",
+            view.invalid_records
+        );
+
+        remove_worktree(&athena);
+        let view = athena.status().unwrap();
+        assert_eq!(classes(&view), vec!["class-tree".to_string()]);
+        assert_eq!(view.forecasts[0].scored_jobs, 1);
     }
 }
 

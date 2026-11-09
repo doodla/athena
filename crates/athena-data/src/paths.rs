@@ -54,6 +54,12 @@ pub fn repo_state_dir(common_git_dir: &Path) -> PathBuf {
     state_root().join(format!("{name}-{key}"))
 }
 
+/// The checkout of the `athena/records` branch inside a repository's state directory: the one place the
+/// current records are read from once it exists (D111). Nothing in this function creates it.
+pub fn records_worktree(state_dir: &Path) -> PathBuf {
+    state_dir.join("records-worktree")
+}
+
 /// The path of a pinned tool's binary inside the install directory.
 pub fn tool_path(tool: &str, version: &str) -> PathBuf {
     athena_home()
@@ -119,5 +125,12 @@ mod tests {
         let b = repo_state_dir(Path::new("/nonexistent/two/.git"));
         assert_ne!(a, b);
         assert!(a.file_name().unwrap().to_string_lossy().starts_with("one-"));
+    }
+
+    #[test]
+    fn the_records_worktree_lies_under_the_state_directory() {
+        let a = records_worktree(Path::new("/state/one"));
+        assert_eq!(a, Path::new("/state/one/records-worktree"));
+        assert_ne!(a, records_worktree(Path::new("/state/two")));
     }
 }
