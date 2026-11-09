@@ -1,0 +1,305 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-233442-hyv6",
+  "round": 1,
+  "at": "2026-11-09T22:00:37.540474799Z",
+  "invocation_seq": 3,
+  "approach": "The base already has the study correction. Commit 30642c0 and CHANGELOG.md line 987 show it: model.json has 'reopened' as kind \"waiting\" with t12 reopened -> queued, claim c45 is in claims.json, and the intro.json lead-in and glossary say reopened is not finished. The plan therefore pins that state with a test and leaves the study files alone unless c45's citation is found wrong. The real work is the drain change. (a) pin.rs gets a structured `SourceFinding` (study, file, kind, statement, evidence) beside the existing problem strings. (b) steward.rs gets `source_fix_request`, which builds one request through `StewardRequest::new` citing each finding's statement and its source, plus a dedupe key and the commit helper. (c) drain.rs `Check` carries `findings`. `Steps` gets two default-inert hooks, `open_requests` and `queue_request`, that `RealSteps` implements over the records. When the source check fails in `Drain::rate`, drain drops findings that an open request already cites, then queues one request for the rest. The decision logic lives in production code; test doubles only store text.",
+  "decisions": [
+    {
+      "choice": "Carry structured `SourceFinding`s from pin.rs into `Check` instead of parsing the joined detail string.",
+      "reason": "`Check.detail` is `problems.join(\"; \")`, and statements and evidence can contain '; '. The checker output already has file, kind, statement and evidence as separate fields (pin.rs CheckerProblem), so keeping them avoids a parser coupled to the format string at pin.rs:489-492.",
+      "rejected": [
+        {
+          "option": "Split `Check.detail` on '; ' and regex out the statement",
+          "why": "Breaks on any statement or evidence containing '; ' and silently couples drain to a format string in another crate."
+        },
+        {
+          "option": "Have the fake in the test return only a detail string",
+          "why": "The request could not cite statement and source separately, and the dedupe key could not exclude the evidence text."
+        }
+      ]
+    },
+    {
+      "choice": "The dedupe key is the finding's file path, kind and quoted statement, with whitespace collapsed. The evidence is left out of the key. The key is passed through `plain_boundary_text`, as the request body is.",
+      "reason": "The model words its evidence differently on every check, so a key that included it would queue a duplicate each drain. The statement quote is stable. Running the key through the same reword as `StewardRequest::new` (steward.rs:544-546) makes the contains-test match the text actually stored.",
+      "rejected": [
+        {
+          "option": "Key on the full problem string including evidence",
+          "why": "Evidence text varies run to run, so the same contradiction would be queued again each drain, which is the defect to fix."
+        },
+        {
+          "option": "Key on the statement alone",
+          "why": "The same sentence in intro.json and claims.json would hide a second file's finding."
+        }
+      ]
+    },
+    {
+      "choice": "Put the request builder, the dedupe functions and the commit helper in steward.rs. drain.rs only orchestrates, through two new `Steps` methods with inert defaults (`open_requests` returns an empty list, `queue_request` returns `Ok(None)`).",
+      "reason": "steward.rs already owns `StewardRequest`, `REQUEST_CHANNEL` and the request-queue code (steward.rs:522-683), so the shared builder is reused. Defaults leave the roughly 15 existing `Steps` implementors in drain.rs and tests/drain.rs compiling and behaving as before.",
+      "rejected": [
+        {
+          "option": "Make `Steps` methods required",
+          "why": "Forces edits to every stub in two files for no gain."
+        },
+        {
+          "option": "Queue straight from `Drain::rate` through an `Athena` handle",
+          "why": "`Drain` holds only `Steps`, and the tests with a fake source check could not observe the queueing."
+        }
+      ]
+    },
+    {
+      "choice": "An 'open' request is any job with a request record whose state is not Closed, on any channel. Only the checker's findings and the model-free floor's findings are queued. Infrastructure problems stay in `held_back` only: the checker did not run, did not report reading a file, a study could not be read, or model.json is not valid JSON.",
+      "reason": "A running or blocked fix request is still an open fix, so another one must not be queued. A person's own request on the same sentence counts too. A transient checker failure is not a statement to fix, and queueing a request for it would only add noise.",
+      "rejected": [
+        {
+          "option": "Count only Queued/Proposed jobs, as `improvement_requests` does (steward.rs:376)",
+          "why": "A fix job that is dispatched and running would be duplicated on the next drain."
+        },
+        {
+          "option": "Queue a request for every problem string",
+          "why": "Checker timeouts and unreadable studies are not content fixes."
+        }
+      ]
+    },
+    {
+      "choice": "Leave model.json, intro.json and claims.json unchanged. Pin the corrected state with a test in drain.rs that reads the real model.json and runs `model_contradictions` on it. Edit claims.json c45 only if its citation is found wrong.",
+      "reason": "Reading the base shows part (1) is done (model.json:10 'waiting', model.json:109-115 t12, intro.json:54 lead-in, intro.json:115 glossary, claims.json:345-350 c45). Editing it again would only add churn. c45 cites bin/fm-teardown.sh lines 3894-3896 with the quote 'Queued', while every other citation to that file is at line 184 or earlier, which looks suspect.",
+      "rejected": [
+        {
+          "option": "Rewrite the study text anyway so a diff exists",
+          "why": "Changes accurate text with no source to check against, and risks introducing a real contradiction."
+        },
+        {
+          "option": "Create studies/firstmate-work-handling/glossary.json",
+          "why": "The glossary lives in intro.json; a new file would be unread page text that the source check would also have to cover."
+        }
+      ]
+    },
+    {
+      "choice": "One request per drain run's failed check, capped at 20 findings (the cap of `steward::MAX_ITEMS`). Findings beyond the cap are picked up on a later drain because they are still uncited.",
+      "reason": "Satisfies 'queue one fix request', and keeps the request text well below the reading limits.",
+      "rejected": [
+        {
+          "option": "One request per finding",
+          "why": "Contradicts the 'one fix request' acceptance and floods the queue."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/pin.rs",
+      "action": "modify",
+      "purpose": "Add `pub struct SourceFinding { study, file, kind, statement, evidence }` and `SourceReport.findings`. `check_study_text_inner` returns the findings it already builds into problem strings (pin.rs:485-494). The `problems` strings stay identical.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "purpose": "Add `source_fix_request(&[SourceFinding]) -> Result<StewardRequest, String>` (Priority::High, one body line per finding starting 'Finding N:', one acceptance bullet per finding naming the file, the statement and the cited source, a closing bullet that the site builds and fmt/clippy/test pass, Files = the studies/<study>/<file> paths). Also add `finding_key`, `cites_finding(request_text, finding)` and `uncited_findings(open_texts, findings)`, `open_request_texts(&Records)` (non-Closed jobs with a request), and `queue_steward_request(&Athena, &str) -> Result<JobId>` (fresh id, `Request` on `REQUEST_CHANNEL`, `Committer::commit_records` with subject 'Queue a request: <title>'). Unit tests for each.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Check.findings` and `Check::with_findings`. `RealSteps::check_page` fills findings from the checker and from the model-free floor. Add the `Steps::open_requests` and `Steps::queue_request` defaults. `RealSteps` implements them over `Records` and `steward::queue_steward_request`. `Drain::rate` calls `queue_source_fix` on a failed check, which dedupes, builds, queues and notes. Update the module doc at line 206. Add tests: `FixStub` fix-request tests (named `source_check_fix_*`) and `the_firstmate_study_returns_a_reopened_item_to_the_queue`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add `open_requests`/`queue_request` delegation to `WithRealCheck`, and a `source_check_fix_*` integration test over `RealSteps` and the fake `judge` checker: one steward-channel request after the first drain, none more after the second.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add the case 'structural-term-source-fix-request-is-accepted' for the generated request text, next to 'structural-term-blind-spot-request-is-accepted' (line 1436).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under Unreleased > Changed covering the drain fix-request queueing, the `SourceFinding` type, and the note that the reopened correction was already in place and is now pinned by a test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "studies/firstmate-work-handling/claims.json",
+      "action": "modify",
+      "purpose": "Conditional: change only claim c45's source (path, lines, quote) if its citation of bin/fm-teardown.sh lines 3894-3896 is found wrong against the pinned source. Otherwise untouched. model.json and intro.json are not touched: they already meet criteria 1 and 2.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "pin.rs: add `SourceFinding` (derive Debug, Clone, PartialEq, Eq) and `SourceReport.findings: Vec<SourceFinding>`. Make `check_study_text_inner` return both problem strings and findings (the same loop at pin.rs:485-494); `check_study_text` fills both. Do not change the `problems` format.",
+    "steward.rs: add `source_fix_request`, `finding_key`, `cites_finding`, `uncited_findings`, `open_request_texts` and `queue_steward_request`, using `StewardRequest::new` and `plain_boundary_text`. Cap at 20 findings. The title, the body lines (one per finding, whitespace collapsed, 'Finding N:' prefix), the acceptance bullets and the Files line are set as in the files list. Unit tests: a request cites every finding's statement and evidence; an empty finding list builds nothing; a statement with a newline and a mid-line '- ' still builds and parses with `request_text_acceptance`; a boundary-word statement is reworded and still matched by `cites_finding`; `uncited_findings` drops only the findings an open text cites and ignores the evidence wording; `open_request_texts` skips Closed jobs and keeps Dispatched and Blocked ones; `queue_steward_request` commits one steward-channel request (follow the temp-repo fixtures already in steward.rs tests).",
+    "drain.rs: add `findings` to `Check` with `with_findings`. In `RealSteps::check_page`, attach the checker's `report.findings` and a finding per floor problem from `model_contradictions` (file 'model.json', kind 'behavior'); infrastructure problems stay in `detail` only. Add `Steps::open_requests` (default empty) and `Steps::queue_request` (default `Ok(None)`). Implement both on `RealSteps` over `self.records()`, `steward::open_request_texts` and `steward::queue_steward_request`. In `Drain::rate`, after printing the failure line and before setting `held_back`, call `queue_source_fix(&check.findings)`: return if there are none, filter with `uncited_findings`, return (with a ui line) if nothing is left, build with `source_fix_request`, call `steps.queue_request`, and record the job in `notes` or the error in a note. Update the module doc at line 206. Add the tests: `FixStub` and `source_check_fix_*` (first drain queues one, second queues none, a third with a new finding queues one citing only the new finding) and `the_firstmate_study_returns_a_reopened_item_to_the_queue` with `include_str!` of the real model.json, intro.json and claims.json.",
+    "tests/drain.rs: add the two delegating methods to `WithRealCheck`, and a `source_check_fix_*` test using `commit_study` and `judged_scenario(judge)` with `WRONG_CLAIM`: after `drain::drain` there is exactly one steward-channel job, its text contains the statement and the `pinned-source/...` evidence, and a second `drain::drain` with a fresh stub (the same repository) adds none.",
+    "refusal_corpus.rs: add the case 'structural-term-source-fix-request-is-accepted', with source text naming `athena_core::steward::source_fix_request`, built over a finding with a newline and a mid-line '- ' in its statement; expected `Accept`.",
+    "CHANGELOG.md: add the entry under Unreleased > Changed (root cause, fix, dedupe, `SourceFinding`, the reopened study state pinned by a test).",
+    "Studies: confirm model.json, intro.json and claims.json against the criteria without editing. Edit claims.json c45 only if its citation is shown wrong (see the Host open question); otherwise report that the study already met criteria 1 and 2.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, `cargo test -p athena-core --test refusal_corpus` and `cargo run -p xtask -- site`."
+  ],
+  "risks": [
+    {
+      "risk": "The request brief says the study still marks reopened terminal-success, but the base already fixed it. The producer or verifier may expect a study diff.",
+      "mitigation": "The approach, decision 5 and criteria 1-2 demonstrations state that the base already satisfies them (model.json:10, 109-115; intro.json:54, 115; claims.json:345-350; commit 30642c0). The new test fails if the study regresses."
+    },
+    {
+      "risk": "Claim c45's cited lines (fm-teardown.sh 3894-3896) may not exist at the pin, so the live drain source check could still fail on the study and the model-backed half of criterion 3 cannot be shown here.",
+      "mitigation": "Raised as the Host open question. The drain change then queues a fix request for that citation, which is the behavior being added. Criterion 3 is demonstrated with the site build and the model-free floor test, and the plan does not claim a live model result."
+    },
+    {
+      "risk": "A fix request that is queued but whose job fails leaves a closed request, so the next drain queues another for the same finding, forever, at one request per drain.",
+      "mitigation": "Intended: 'open' means not closed, so one request is queued per drain until the page is fixed. The 20-finding cap and one request per failed check bound the rate."
+    },
+    {
+      "risk": "The checker's quoted statement could contain a structural term or boundary word that the reading or admission rules refuse, so the queued request never runs.",
+      "mitigation": "`StewardRequest::new` rewords boundary words and the dedupe key uses the same reword, so a refused or unread request still counts as open and is not duplicated. The new corpus case covers the accepted form."
+    },
+    {
+      "risk": "Free-text model statements might contain a line starting '- ', '* ' or '1. ' that `athena plan` would read as acceptance.",
+      "mitigation": "Each statement is collapsed to a single line and placed after a 'Finding N:' prefix or inside a bullet, and `StewardRequest::new` rejects a text whose parsed acceptance differs (steward.rs:586-589). A unit test and the corpus case use a statement with a newline and a mid-line '- '."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "The `Steps` trait gains `open_requests` and `queue_request`",
+      "dependent": "crates/athena-cli/src/drain.rs and crates/athena-cli/tests/drain.rs: every `impl Steps` (src: Stub, Capped, Housekeeping and the stubs at 6281 and 7195; tests: lines 292, 1806, 6204, 7106 `WithRealCheck`, 7823, 8703)",
+      "kind": "code",
+      "test": "cargo test --locked (whole suite). The new methods have defaults, so no existing implementor changes. `WithRealCheck` gets two delegating methods in step 4 and is exercised by `source_check_fix_*` in tests/drain.rs.",
+      "reason": null
+    },
+    {
+      "name": "`Check` gains a `findings` field",
+      "dependent": "crates/athena-cli/src/drain.rs `Check::pass` / `Check::fail` / `costing` and every `Check` consumer (Drain::rate at 2457-2464, tests/drain.rs lines 1422-1451 and 6890-7050 reading `held_back`)",
+      "kind": "code",
+      "test": "tests/drain.rs lines ~1422-1451 (Stub check with no findings keeps `held_back` and queues nothing) and 6890-7050 (real check, `held_back` still names the statement). No struct literal of `Check` exists outside drain.rs:557-577, so constructors absorb the field.",
+      "reason": null
+    },
+    {
+      "name": "`SourceReport` gains `findings`; `problems` strings are unchanged",
+      "dependent": "crates/athena-core/src/pin.rs `SourceReport` and `Athena::check_study_text`; the only caller is `RealSteps::check_page` (drain.rs:4711)",
+      "kind": "code",
+      "test": null,
+      "reason": "`problems` is built exactly as before (pin.rs:485-502), so `Check.detail` and every test asserting the 'demo/<file>' and 'did not report reading' text are unchanged. SourceReport derives Default, so the added field is safe."
+    },
+    {
+      "name": "Report output when the source check fails",
+      "dependent": "crates/athena-cli/src/display.rs:748 and `Report` JSON (`held_back`, `notes`)",
+      "kind": "code",
+      "test": null,
+      "reason": "`held_back` still carries `check.detail` unchanged. No `Report` field is added, so the `--json` shape is unchanged. Only one extra line in `notes` ('queued fix request <job>') appears when findings exist. Existing tests assert `notes.iter().any(..)`, not exact lists (tests/drain.rs:6713)."
+    },
+    {
+      "name": "A new request on the steward channel appears in the queue and gets the improvement turn",
+      "dependent": "crates/athena-core/src/hestia.rs `improvement_of` and steward.rs `improvement_requests` / `queued_work` (the drain's queue read at drain.rs:4363)",
+      "kind": "code",
+      "test": "The RealSteps test in tests/drain.rs checks the record shape; the existing hestia.rs test `improvement_of_lists_open_steward_channel_requests` (line 6442) shows such requests are listed. The reading of the fix request runs `check_reading_text` and `request_text_acceptance`, which `StewardRequest::new` already validates (steward.rs:586-593).",
+      "reason": null
+    },
+    {
+      "name": "Reading and admission rules applied to the new generated request text",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (structural-term and boundary checks on generated requests; case 'structural-term-blind-spot-request-is-accepted' at line 1436)",
+      "kind": "rule",
+      "test": "A new case 'structural-term-source-fix-request-is-accepted' in the corpus builds `steward::source_fix_request` over a finding that has a mid-line '- ' and a newline in its statement. Run `cargo test -p athena-core --test refusal_corpus`. Input forms are mapped in the open items below. The existing case 'structural-term-approve-request-title-use-is-refused' (line 1424) shows a structural term in a generated title is refused, which is existing behavior for a quoted statement that uses such a word.",
+      "reason": null
+    },
+    {
+      "name": "Statements quoted from the page pass through the boundary reword",
+      "dependent": "Admission boundary scan on request text (steward.rs:544-559, athena_context::briefs::plain_boundary_text)",
+      "kind": "rule",
+      "test": "steward.rs unit test: a statement with a listed boundary word is reworded in the request and `cites_finding` still matches the reworded text, so the second drain does not re-queue.",
+      "reason": null
+    },
+    {
+      "name": "A records-only commit made during a drain",
+      "dependent": "Landing/commit rules (athena-gate record gating via `Committer::commit_records`, steward.rs:1415, commits.rs:240; `RealSteps::off_branch` drain.rs:4194)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The commit has the same shape as the existing 'Queue a request: <title>' commits from `Athena::queue` (reading.rs:940-947) and the steward's own request commit. No landing, history-check or attribution rule is changed. The helper commits only a request record plus the Athena-Job trailer, through the same gated `Committer`. Drain's rate step runs under the landing lock (drain.rs:2399), so no two queue writes interleave in `drain_concurrent`."
+    },
+    {
+      "name": "Study files model.json, intro.json, claims.json",
+      "dependent": "xtask site build and tests (xtask/src/site.rs:233 and the tests at 1019-1032), studies/firstmate-work-handling/*",
+      "kind": "code",
+      "test": null,
+      "reason": "Not changed by the plan, apart from a possible c45 citation edit; the site tests that assert the 'waiting' tag and 'Reopened is not a failure' stay green. If c45 is edited, only a path/line/quote in claims.json changes, with no id or text change, so model.json's claim ids and intro.json's claims lists stay valid."
+    },
+    {
+      "name": "CHANGELOG.md gets a new bullet",
+      "dependent": "CHANGELOG.md and any policy test over it (xtask/tests/policy.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Added in the same bullet style under Unreleased > Changed; nothing parses individual entries beyond admission's 'candidate includes CHANGELOG.md' check."
+    },
+    {
+      "name": "Documentation of what drain does on a failed source check",
+      "dependent": "docs/decisions.md:2251 and README.md:203-207 (source check behavior)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Both describe the held-back report and the budget reserve, which are unchanged. The drain.rs module doc at line 206 is updated in step 3 to add that a fix request is queued; the doc is code-adjacent, with no test reading it."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff and the file. The base already satisfies the criterion, so the diff of model.json may be empty. A new unit test makes the state a checked fact: it includes the real model.json and asserts the 'reopened' state is not kind 'terminal-success', t9 goes ready -> reopened, t12 goes reopened -> queued, and `model_contradictions` returns nothing. It also asserts claim c45 in claims.json cites path bin/fm-teardown.sh.",
+      "command": "cargo test -p athena-cli --lib the_firstmate_study_returns_a_reopened_item_to_the_queue",
+      "observes": "The test passes. model.json shows state 'reopened' with kind 'waiting', t9 ready -> reopened and t12 reopened -> queued. Claim c45 is cited by t12. The 'terminal-success' tag is only on 'done'.",
+      "fails_without": "If model.json marked reopened 'terminal-success', or t12 were missing, the test fails on its first assertions. It is a content criterion and this test is the guard against regression.",
+      "seam": "Production entry point: `drain::model_contradictions` (drain.rs:3426, exists). Fixture: the real studies/firstmate-work-handling/model.json and claims.json read with `include_str!`. No fake. The test is added in step 3."
+    },
+    {
+      "criterion": 2,
+      "method": "Grep intro.json and read the lines. The base already says only Done ends the task (intro.json:54 lead-in) and the 'reopened' glossary entry says the item goes back to Queued and the task is not finished (intro.json:115, claims c23 and c45). The same unit test asserts the lead-in does not contain 'Reopened ... end the task' and that no glossary definition for 'reopened' contains 'final state'.",
+      "command": "cargo test -p athena-cli --lib the_firstmate_study_returns_a_reopened_item_to_the_queue",
+      "observes": "Grep for 'final state' in intro.json matches only the 'done' term (line 83). The 'reopened' term at line 115 says 'goes back to Queued ... not finished' with claims c23 and c45.",
+      "fails_without": "If the lead-in were reverted to say both Done and Reopened end the task, or the glossary called reopened 'the final state', the test's string assertions fail.",
+      "seam": "Production data: the real intro.json read with `include_str!` and parsed with serde_json inside the test (added in step 3). No fake."
+    },
+    {
+      "criterion": 3,
+      "method": "Build the site, then run the unit test that applies the model-free floor of the drain source check (`model_contradictions`) to the real study. The verifier cannot run the model-backed half of the drain source check. It needs a live model call and a network pin, so the plan does not claim it. The site test in xtask/src/site.rs:1019 (`reopened_no_longer_carries_the_bare_terminal_success_tag_and_it_is_explained`) shows reopened with the 'waiting' tag.",
+      "command": "cargo run -p xtask -- site",
+      "observes": "Exit 0 and the page is written. The reopened line carries the 'waiting' tag, not 'ends the task', and the t12 card goes to queued. `cargo test -p xtask` keeps the page test green.",
+      "fails_without": "If model.json were invalid, if reopened regained 'terminal-success', or if t12 were removed, the site build or the xtask test at site.rs:1019 and the floor test fail.",
+      "seam": "Production entry point: the xtask `site` command (xtask/src/site.rs, exists). The real study directory is the fixture. No fake."
+    },
+    {
+      "criterion": 4,
+      "method": "Two tests. (1) In drain.rs `mod tests`, a stub `FixStub` implements `Steps`. Its `check_page` is the fake source check and returns `Check::fail(..).with_findings(vec![contradiction])`; its rating is 4 with a landing under studies/, so `drain()` reaches the check. Its `queue_request` appends the text to a `RefCell<Vec<String>>` and `open_requests` returns that vector. That is storage only. The code under test is `Drain::rate` -> `queue_source_fix` -> `steward::uncited_findings` / `source_fix_request`. Run `drain()` twice on one stub, then a third time with a second, different finding. (2) In tests/drain.rs, the real `RealSteps` queue is exercised with the existing fake checker (`judged_scenario(judge)`, `WithRealCheck`): one commit lands on channel 'steward' and nothing more on the second drain. The matching rule is also checked by `cargo test -p athena-core --test refusal_corpus` through a new case that the generated request is accepted.",
+      "command": "cargo test -p athena-cli source_check_fix",
+      "observes": "After the first drain, exactly one text in the store. It starts with 'Priority: high', names the statement and the cited source (evidence) of each finding, has an 'Acceptance:' section with '- ' bullets, and a 'Files:' line with studies/... paths; `athena_core::reading::request_text_acceptance` on it is non-empty. After the second drain the store still holds one. After the third, a second request is queued, citing only the new finding. In the RealSteps test, `Records::load` shows exactly one job with channel 'steward' whose text contains the contradicted statement, and still one after a second drain. Report.notes names the queued job.",
+      "fails_without": "With no queueing in `rate()`, the store stays empty and the first assertion `len() == 1` fails. With no dedupe, the second drain produces two texts and the `len() == 1` assertion after it fails. With the evidence in the dedupe key, the third-drain test (same statement, different evidence wording) queues a duplicate.",
+      "seam": "Production entry point: `drain::drain(&steps, limits, &ui)` (exists, drain.rs). The injected fake is `FixStub` (step 3, in drain.rs `mod tests`), which implements `Steps`, including the `check_page` fake and the storage of `queue_request`/`open_requests`. Those two trait methods are added by step 3. The RealSteps variant uses `WithRealCheck` and `Fixture`/`judged_scenario` (tests/drain.rs, exist), plus two delegating methods added in step 4."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks. `cargo test --locked` includes `cargo test -p athena-core --test refusal_corpus` (new accept case for the generated request), the steward.rs unit tests for the builder and dedupe, and the budget test `system_facts_budgets_match_computed` (no prompt text changes).",
+      "command": "cargo test --locked",
+      "observes": "All three pass: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` exit 0. The verifier runs the first two as separate commands.",
+      "fails_without": "A compile break in any `Steps` implementor, a clippy warning in the new code, or a failing new test would fail this run.",
+      "seam": "Whole workspace; no fake. Existing `Steps` stubs compile unchanged because the new methods have defaults."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the CHANGELOG.md diff. One entry under '## [Unreleased]' covers the drain change: root cause (a failed source check queued nothing, so one contradiction was reported on every drain), the fix request via `StewardRequest`, the dedupe against open requests, and the new `SourceFinding`. It also records that the reopened correction was already in place (commit 30642c0) and is now pinned by a test.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new bullet near the top of '### Changed' under '## [Unreleased]', wrapped like the neighbouring bullets, naming drain.rs, steward.rs and pin.rs.",
+      "fails_without": "Admission refuses a candidate that leaves CHANGELOG.md out (CHANGELOG line 29 entry for 40eacc8), so a missing entry is caught."
+    }
+  ],
+  "open_questions": [
+    "Host: Does bin/fm-teardown.sh at firstmate commit 6407052f4c521e39401ce2305dfa45d201249827 have lines 3894-3896 holding the word 'Queued'? Claim c45 (claims.json:345-350) cites them. Every other citation of that file is at line 184 or earlier. The snapshot does not hold the pinned source, and the site build never checks cited lines. The drain's live source check, which needs a model call, is the only check. If the lines are wrong, c45's source in claims.json must be corrected."
+  ],
+  "producer_section_sha256": "bba02514d41fe7b5852e7ead560c3bdadd83ec4d97d5cfe53932dbfb49aafff7"
+}
