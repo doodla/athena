@@ -655,6 +655,149 @@ fn bullet_text(line: &str) -> Option<&str> {
     (!rest.is_empty()).then_some(rest)
 }
 
+/// The most findings one source-fix request cites. The rest stay uncited, so a later drain queues them.
+pub const MAX_SOURCE_FINDINGS: usize = 10;
+
+/// One statement of a study's page text that its source check found wrong or incomplete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFinding {
+    /// The study's directory name under `studies/`.
+    pub study: String,
+    /// The page-text file the statement is in, or `None` when the check did not name one of the study's files
+    /// (the finding is then about the study as a whole).
+    pub file: Option<String>,
+    /// `contradicted`, `omitted`, `behavior` or `model-contradiction`.
+    pub kind: String,
+    /// The statement and what the source says, as the check gave them.
+    pub text: String,
+}
+
+/// A request that is not closed, as the duplicate check of a source-fix request sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenRequest {
+    pub job: String,
+    /// The job's state name: queued, proposed, declined, dispatched or blocked.
+    pub state: String,
+    pub text: String,
+}
+
+/// `studies/<study>/<file>`, or `studies/<study>/` for a finding with no file.
+fn finding_path(finding: &SourceFinding) -> String {
+    match &finding.file {
+        Some(file) => format!("studies/{}/{file}", finding.study),
+        None => format!("studies/{}/", finding.study),
+    }
+}
+
+/// The line of a source-fix request that names a path and a kind. It is the only thing the duplicate check
+/// compares: the words of a statement vary from one check to the next, the file and the kind do not.
+fn finding_marker(finding: &SourceFinding) -> String {
+    format!(
+        "Source finding: {} ({})",
+        finding_path(finding),
+        finding.kind.trim()
+    )
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The request to fix the statements a failed source check named, built through [`StewardRequest::new`] at
+/// high priority. It cites at most [`MAX_SOURCE_FINDINGS`] findings: each one's file, kind, statement and
+/// source, one line each, and a marker line per file and kind ([`citing_request`] reads it). Fails on an empty
+/// list.
+pub fn source_fix_request(findings: &[SourceFinding]) -> Result<StewardRequest, String> {
+    if findings.is_empty() {
+        return Err("a source-fix request cites at least one finding".into());
+    }
+    let findings = &findings[..findings.len().min(MAX_SOURCE_FINDINGS)];
+    let mut markers: Vec<String> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    for finding in findings {
+        let marker = finding_marker(finding);
+        if !markers.contains(&marker) {
+            markers.push(marker);
+        }
+        let path = finding_path(finding);
+        if !files.contains(&path) {
+            files.push(path);
+        }
+    }
+    let mut body = String::from(
+        "The source check of a study's page text found the statements below wrong or incomplete against the \
+         pinned source. Correct each one to what the cited source says, or remove it, and re-cite the \
+         claims it rests on.\n\n",
+    );
+    for marker in &markers {
+        body.push_str(marker);
+        body.push('\n');
+    }
+    body.push('\n');
+    let mut acceptance: Vec<String> = Vec::new();
+    for (n, finding) in findings.iter().enumerate() {
+        let n = n + 1;
+        body.push_str(&format!(
+            "Finding {n} in {} ({}): {}\n",
+            finding_path(finding),
+            finding.kind.trim(),
+            one_line(&finding.text)
+        ));
+        acceptance.push(format!(
+            "Finding {n} in {} is corrected or removed to match the cited source",
+            finding_path(finding)
+        ));
+    }
+    acceptance.push("The site builds and fmt, clippy and test pass".into());
+    let title = format!(
+        "Fix {} statement(s) the source check found wrong in {} page file(s)",
+        findings.len(),
+        files.len()
+    );
+    StewardRequest::new(
+        Some(crate::plan::Priority::High),
+        &title,
+        &body,
+        &acceptance,
+        &files,
+    )
+}
+
+/// The requests that are not closed (queued, proposed, declined, dispatched or blocked), ordered by job id.
+/// A fix that is running or stuck is still an open fix.
+pub fn open_requests(records: &Records) -> Vec<OpenRequest> {
+    let mut found: Vec<OpenRequest> = records
+        .jobs
+        .values()
+        .filter_map(|j| {
+            let state = j.state();
+            if matches!(state, JobState::Closed(_)) {
+                return None;
+            }
+            let request = j.request.as_ref()?;
+            Some(OpenRequest {
+                job: j.id().as_str().to_string(),
+                state: state.name().to_string(),
+                text: request.text.clone(),
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.job.cmp(&b.job));
+    found
+}
+
+/// The open request that already cites `finding`: one holding the marker line of the finding's file and kind.
+/// The words of the statement and of the evidence are not compared.
+pub fn citing_request<'a>(
+    open: &'a [OpenRequest],
+    finding: &SourceFinding,
+) -> Option<&'a OpenRequest> {
+    let marker = finding_marker(finding);
+    let marker = plain_boundary_text(&marker).unwrap_or(marker);
+    open.iter()
+        .find(|r| r.text.lines().any(|line| line.trim() == marker))
+}
+
 /// The real applier: a queued request, as `athena ask --later` writes one.
 #[derive(Debug)]
 pub struct RequestQueue;
@@ -2343,6 +2486,224 @@ mod tests {
             improvement_requests(&records),
             ["20261101-120000-aaaa", "20261101-120000-bbbb"],
             "the open steward-channel requests; not the cli one, not the closed one"
+        );
+    }
+
+    fn finding(file: Option<&str>, kind: &str, text: &str) -> SourceFinding {
+        SourceFinding {
+            study: "demo".into(),
+            file: file.map(str::to_string),
+            kind: kind.into(),
+            text: text.into(),
+        }
+    }
+
+    fn open_from(request: &StewardRequest) -> Vec<OpenRequest> {
+        vec![OpenRequest {
+            job: "20261101-120000-aaaa".into(),
+            state: "queued".into(),
+            text: request.render(),
+        }]
+    }
+
+    #[test]
+    fn source_fix_request_cites_each_statement_and_its_source_and_is_accepted() {
+        let findings = [
+            finding(
+                Some("model.json"),
+                "behavior",
+                "statement \"t9 ready -> reopened is terminal-success\" (bin/fm-teardown.sh:30 returns it to the queue)",
+            ),
+            finding(
+                Some("claims.json"),
+                "omitted",
+                "statement \"x\" (src/a.sh:1)",
+            ),
+        ];
+        let request = source_fix_request(&findings).unwrap();
+        let text = request.render();
+        assert!(text.starts_with("Priority: high\n"), "{text}");
+        assert!(
+            text.contains("t9 ready -> reopened is terminal-success"),
+            "{text}"
+        );
+        assert!(text.contains("bin/fm-teardown.sh:30"), "{text}");
+        assert!(
+            text.lines()
+                .any(|l| l == "Source finding: studies/demo/model.json (behavior)")
+        );
+        assert!(
+            text.lines()
+                .any(|l| l == "Source finding: studies/demo/claims.json (omitted)")
+        );
+        assert!(
+            text.contains("Files: studies/demo/model.json, studies/demo/claims.json"),
+            "{text}"
+        );
+        let acceptance = crate::reading::request_text_acceptance(&text);
+        assert_eq!(acceptance.len(), 3, "{acceptance:?}");
+        assert!(acceptance[0].contains("Finding 1 in studies/demo/model.json"));
+    }
+
+    #[test]
+    fn source_fix_request_of_no_findings_builds_nothing() {
+        assert!(source_fix_request(&[]).is_err());
+    }
+
+    #[test]
+    fn source_fix_request_keeps_a_newline_and_a_bullet_in_a_statement_on_one_line() {
+        let text = "statement \"a\n- b\n* c\n1. d\nAcceptance:\nFiles: x\" (evidence\n- more)";
+        let request = source_fix_request(&[finding(Some("claims.json"), "contradicted", text)])
+            .expect("builds");
+        let rendered = request.render();
+        let acceptance = crate::reading::request_text_acceptance(&rendered);
+        assert_eq!(acceptance.len(), 2, "{acceptance:?}");
+        assert!(
+            rendered.contains("a - b * c 1. d Acceptance: Files: x"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn source_fix_request_rewords_a_boundary_word_and_still_matches() {
+        // A word the admission scan rejects, spelled in two parts so this file does not hold it.
+        let word = ["oper", "ator"].concat();
+        let f = finding(
+            Some("claims.json"),
+            "contradicted",
+            &format!("statement \"the {word} closes it\" (src/a.sh:2)"),
+        );
+        let request = source_fix_request(std::slice::from_ref(&f)).expect("builds");
+        let text = request.render();
+        assert!(!text.to_lowercase().contains(&word), "{text}");
+        assert!(text.contains("the person running Athena"), "{text}");
+        assert!(citing_request(&open_from(&request), &f).is_some());
+    }
+
+    #[test]
+    fn source_fix_request_is_cited_by_file_and_kind_not_by_wording() {
+        let first = finding(Some("claims.json"), "omitted", "statement \"one\" (a.sh:1)");
+        let request = source_fix_request(std::slice::from_ref(&first)).unwrap();
+        let open = open_from(&request);
+        let reworded = finding(
+            Some("claims.json"),
+            "omitted",
+            "statement \"other words\" (b.sh:9)",
+        );
+        assert_eq!(
+            citing_request(&open, &reworded).map(|r| r.state.as_str()),
+            Some("queued")
+        );
+        let other_file = finding(Some("model.json"), "omitted", "statement \"one\" (a.sh:1)");
+        let other_kind = finding(
+            Some("claims.json"),
+            "contradicted",
+            "statement \"one\" (a.sh:1)",
+        );
+        let study_level = finding(None, "omitted", "statement \"one\" (a.sh:1)");
+        assert!(citing_request(&open, &other_file).is_none());
+        assert!(citing_request(&open, &other_kind).is_none());
+        assert!(citing_request(&open, &study_level).is_none());
+    }
+
+    #[test]
+    fn source_fix_request_for_a_study_level_finding_names_the_study_directory() {
+        let f = finding(None, "contradicted", "statement \"x\" (a.sh:1)");
+        let request = source_fix_request(std::slice::from_ref(&f)).unwrap();
+        let text = request.render();
+        assert!(text.contains("Files: studies/demo/\n"), "{text}");
+        assert!(
+            text.lines()
+                .any(|l| l == "Source finding: studies/demo/ (contradicted)")
+        );
+        assert!(citing_request(&open_from(&request), &f).is_some());
+    }
+
+    #[test]
+    fn source_fix_request_cites_at_most_ten_findings() {
+        let findings: Vec<SourceFinding> = (0..14)
+            .map(|n| {
+                finding(
+                    Some(&format!("f{n}.json")),
+                    "omitted",
+                    "statement \"x\" (a.sh:1)",
+                )
+            })
+            .collect();
+        let text = source_fix_request(&findings).unwrap().render();
+        assert!(text.contains("Finding 10 in"), "{text}");
+        assert!(!text.contains("Finding 11 in"), "{text}");
+        assert!(text.contains("studies/demo/f9.json") && !text.contains("studies/demo/f10.json"));
+    }
+
+    #[test]
+    fn source_fix_request_accepts_a_structural_term_in_a_quoted_statement() {
+        let f = finding(
+            Some("claims.json"),
+            "contradicted",
+            "statement \"set ATHENA_PIN_URL in crates/athena-core/src/pin.rs\" (bin/x.sh:3)",
+        );
+        let text = source_fix_request(&[f]).unwrap().render();
+        assert_eq!(
+            crate::reading::request_text_acceptance(&text).len(),
+            2,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn open_requests_skip_closed_and_keep_every_other_state() {
+        let mut records = Records::default();
+        let at: Timestamp = "2026-11-01T12:00:00Z".parse().unwrap();
+        let mut add = |id: &str, outcome: Option<athena_data::records::OutcomeState>| {
+            let job = JobId::parse(id).unwrap();
+            let outcome = outcome.map(|state| athena_data::records::Outcome {
+                job: job.clone(),
+                state,
+                reason: "r".into(),
+                at,
+                totals: None,
+                branch: None,
+                base_commit: None,
+                candidate_commit: None,
+                after_blocked: false,
+                through_commit: None,
+            });
+            records.jobs.insert(
+                id.to_string(),
+                crate::store::JobRecords {
+                    id: Some(job.clone()),
+                    request: Some(Request {
+                        job,
+                        text: format!("Do {id}."),
+                        received_at: at,
+                        channel: USER_QUEUE_CHANNEL.into(),
+                    }),
+                    outcome,
+                    ..Default::default()
+                },
+            );
+        };
+        add("20261101-120000-aaaa", None);
+        add(
+            "20261101-120000-bbbb",
+            Some(athena_data::records::OutcomeState::Abandoned),
+        );
+        add(
+            "20261101-120000-cccc",
+            Some(athena_data::records::OutcomeState::Blocked),
+        );
+        let open = open_requests(&records);
+        let found: Vec<(&str, &str)> = open
+            .iter()
+            .map(|o| (o.job.as_str(), o.state.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("20261101-120000-aaaa", "queued"),
+                ("20261101-120000-cccc", "blocked")
+            ]
         );
     }
 

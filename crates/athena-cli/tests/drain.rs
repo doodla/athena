@@ -7047,6 +7047,15 @@ fn a_model_whose_behavior_differs_from_the_code_fails_the_check_and_holds_drain_
     assert!(!report.target_met());
     let held = report.held_back.as_deref().unwrap();
     assert!(held.contains(WRONG_MODEL), "{held}");
+    // The failure is also queued once as a fix request that cites the model and the source's evidence.
+    let requests = open_fix_requests(&fx);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(
+        requests[0].contains("Source finding: studies/demo/model.json (behavior)"),
+        "{}",
+        requests[0]
+    );
+    assert!(requests[0].contains(WRONG_MODEL), "{}", requests[0]);
 }
 
 #[test]
@@ -7109,6 +7118,119 @@ impl Steps for WithRealCheck<'_> {
     fn check_cap(&self) -> f64 {
         self.real.check_cap()
     }
+    fn open_requests(&self) -> Result<Vec<athena_core::steward::OpenRequest>, String> {
+        self.real.open_requests()
+    }
+    fn queue_request(&self, text: &str) -> Result<Option<String>, String> {
+        self.real.queue_request(text)
+    }
+}
+
+/// The fake checker `judge`, with the file of every problem it reports spelled by `spell`.
+fn judge_spelling(workspace: &Path, spell: impl Fn(&str) -> String) -> serde_json::Value {
+    let mut report = judge(workspace);
+    for problem in report["problems"].as_array_mut().unwrap() {
+        let file = problem["file"].as_str().unwrap().to_string();
+        problem["file"] = json!(spell(&file));
+    }
+    report
+}
+
+/// One drain over the real source check and the real request queue of `fx`, with `judge` as the checker.
+fn drain_with_real_queue(fx: &Fixture, judge: SourceJudge) -> drain::Report {
+    let athena = fx.athena(judged_scenario(judge).script());
+    let real = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &RecordingLander::default(),
+    };
+    let steps = WithRealCheck {
+        stub: Stub {
+            items: vec!["a"],
+            outcomes: passing(),
+            ratings: RefCell::new(vec![5]),
+            ..Stub::default()
+        },
+        real,
+    };
+    drain::drain(&steps, limits(100.0), &Quiet).unwrap()
+}
+
+/// The text of every request that is not closed and carries a source-fix marker.
+fn open_fix_requests(fx: &Fixture) -> Vec<String> {
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    athena_core::steward::open_requests(&records)
+        .into_iter()
+        .filter(|r| r.text.contains("Source finding: "))
+        .map(|r| r.text)
+        .collect()
+}
+
+#[test]
+fn source_check_fix_queues_one_request_then_none_while_it_is_open() {
+    let fx = Fixture::new();
+    let texts = Texts {
+        claim: WRONG_CLAIM,
+        ..Texts::correct()
+    };
+    commit_study(&fx, "demo", &texts.files());
+
+    // The checker names the file the way its prompt lists it, with the page-text directory.
+    let prefixed: SourceJudge = Arc::new(|w| judge_spelling(w, |f| format!("page-text/{f}")));
+    let report = drain_with_real_queue(&fx, prefixed);
+    assert!(!report.target_met());
+    let requests = open_fix_requests(&fx);
+    assert_eq!(requests.len(), 1, "one fix request: {requests:?}");
+    let text = &requests[0];
+    assert!(text.starts_with("Priority: high\n"), "{text}");
+    assert!(
+        text.contains(WRONG_CLAIM),
+        "the contradicted statement: {text}"
+    );
+    assert!(
+        text.contains("pinned-source/bin/fm-spawn.sh lines 10-20"),
+        "its source: {text}"
+    );
+    assert!(
+        text.lines()
+            .any(|l| l == "Source finding: studies/demo/claims.json (contradicted)"),
+        "{text}"
+    );
+    assert!(text.contains("Files: studies/demo/claims.json"), "{text}");
+    assert!(
+        report.notes.iter().any(|n| n.contains("queued request")),
+        "{:?}",
+        report.notes
+    );
+
+    // The same fault, the file spelled bare this time: the open request cites it, so nothing is queued.
+    let bare: SourceJudge = Arc::new(|w| judge_spelling(w, str::to_string));
+    let report = drain_with_real_queue(&fx, bare);
+    assert!(!report.target_met());
+    assert_eq!(open_fix_requests(&fx).len(), 1, "none while it is open");
+    assert!(
+        report.notes.iter().any(|n| n.contains("already cites")),
+        "{:?}",
+        report.notes
+    );
+
+    // A file the checker names that is not in the study is study-level: no invented path is queued.
+    let unknown: SourceJudge = Arc::new(|w| judge_spelling(w, |_| "nothing.json".to_string()));
+    drain_with_real_queue(&fx, unknown.clone());
+    let requests = open_fix_requests(&fx);
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    let study_level = requests
+        .iter()
+        .find(|t| t.contains("Source finding: studies/demo/ (contradicted)"))
+        .expect("a study-level request");
+    assert!(
+        study_level.lines().any(|l| l == "Files: studies/demo/"),
+        "{study_level}"
+    );
+    assert!(!study_level.contains("nothing.json"), "{study_level}");
+    drain_with_real_queue(&fx, unknown);
+    assert_eq!(open_fix_requests(&fx).len(), 2, "and none for its repeat");
 }
 
 #[test]
