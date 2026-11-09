@@ -39,6 +39,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   rendering to `briefs/plan.rs`. `briefs.rs` re-exports every public item, so `athena_context::briefs::` paths
   are unchanged. `reader_brief` is now a list of calls to one helper per section. The brief text is
   byte-identical; `briefs.rs` has 1411 production lines and its longest function is 100 lines.
+- A reading check for job size, `reading::check_job_size`, run as a `step!` in `refusing_check` right after
+  `check_prior_result_and_scope`. Root cause: nothing before dispatch measured whether a request fits one
+  producer run. The gate checked what a reading said and never how much it asked for, so a request that touched a
+  decision doc, the tool pins in `athena.toml`, the CI workflow, the check runner's code and new tests passed
+  every check, was dispatched, and the producer ended with no change and nothing to report. Failure class
+  multi-surface-job-producer-makes-no-change-and-cannot-report; jobs 20261025-183644-t67q and
+  20261017-205554-zaj2. The check measures the size at the reading, where it originates. Each deliverable other
+  than `CHANGELOG.md` belongs to one group: docs, config (`athena.toml`, `defaults.toml`), ci (`.github/`) or
+  code (everything else). It refuses a change reading that spans more than 3 groups, which means only a reading
+  that spans all four groups, and one with more than 30 deliverables as a backstop. A directory deliverable takes
+  the group of its first path component and the root counts as every group. Study readings and readings with a
+  question are skipped, as in the scope-limit check. The error names the bound crossed and the groups found, and
+  says to split the job by surface and dependency: keep one group that depends on nothing left out and name the
+  rest in `out_of_scope` as separate requests, in dependency order. Evidence, an estimate and not a measurement,
+  from the landed-commit history (HISTORY.txt) of the planning round, where commit paths stand in for
+  deliverables: 0 of 200 landed commits span all four groups and 2 of 200 exceed 30 paths. Known miss: a large
+  job inside three groups. The complements are `check_reading_size` (the forecast-based check of the reader's
+  own wall time) and a later producer no-change guard, which this change leaves out; `run/producer.rs` is
+  unchanged. A stored Proposed reading that spans all four groups leaves the drain queue until it is read again,
+  because the queue re-checks the stored reading. No prompt, config or workflow file changes. Tests: the
+  `job_size_*` tests in `crates/athena-core/src/reading.rs` and the `job-size-*` cases of the refusal corpus.
+  This check refuses more readings; the higher refusal rate is intended: expected 6% of newly refused readings,
+  an estimate and not a measurement; the replay at verification measures it.
 
 ### Fixed
 

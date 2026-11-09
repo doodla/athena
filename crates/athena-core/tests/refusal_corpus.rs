@@ -87,7 +87,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 52] = [
+const INPUT_FORMS: [&str; 56] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -140,6 +140,10 @@ const INPUT_FORMS: [&str; 52] = [
     "scope-limit-consumer-not-a-deliverable",
     "scope-limit-proposal-apply",
     "scope-limit-bare-form",
+    "job-size-four-groups",
+    "job-size-over-count",
+    "job-size-directory-deliverable",
+    "job-size-within-bounds",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -296,7 +300,148 @@ fn cases() -> Vec<Case> {
     out.extend(delivery_cases());
     out.extend(defined_terms_cases());
     out.extend(scope_limit_cases());
+    out.extend(job_size_cases());
     out
+}
+
+/// Readings whose deliverables are too many, or span too many groups, for one producer run. The refusing cases
+/// have the shape of the two jobs that ended with no change, a count over the bound and a directory that hides
+/// groups; the accepting cases stay inside the bounds.
+fn job_size_cases() -> Vec<Case> {
+    const SOURCE_T67Q: &str = "job 20261025-183644-t67q, nine deliverables over docs, config, CI and code; rebuilt from the job brief";
+    const SOURCE_ZAJ2: &str = "job 20261017-205554-zaj2, twelve deliverables over docs, config, CI and code; rebuilt from the job brief";
+    const SOURCE_BOUND: &str =
+        "the bounds of the check (3 groups, 30 deliverables); built for the check";
+    let head = ["Update the guide."];
+    let criteria = ["The guide describes the change"];
+    let refuse = Expected::Refuse("check_job_size");
+    let t67q = [
+        "docs/decisions.md",
+        "athena.toml",
+        ".github/workflows/ci.yml",
+        "crates/athena-core/src/reading.rs",
+        "crates/athena-core/src/reading/checks.rs",
+        "crates/athena-core/tests/refusal_corpus.rs",
+        "xtask/src/main.rs",
+        "crates/athena-cli/tests/common/mod.rs",
+    ];
+    let zaj2 = [
+        "docs/decisions.md",
+        "docs/design/snapshot-isolation.md",
+        "docs/design/hermes-agent.md",
+        "athena.toml",
+        ".github/workflows/ci.yml",
+        "xtask/src/main.rs",
+        "crates/athena-data/src/config.rs",
+        "crates/athena-data/src/systems.rs",
+        "crates/athena-git/src/snapshot.rs",
+        "crates/athena-git/src/lib.rs",
+        "crates/athena-git/tests/snapshot.rs",
+        "xtask/shard-timings.txt",
+    ];
+    let directories = [
+        "docs/guide.md",
+        "athena.toml",
+        ".github/workflows/",
+        "crates/athena-core/src/",
+    ];
+    let many: Vec<String> = (0..31)
+        .map(|i| format!("crates/athena-core/src/part{i}.rs"))
+        .collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let nine: Vec<String> = (0..9)
+        .map(|i| format!("crates/athena-core/src/part{i}.rs"))
+        .collect();
+    let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
+    let three_groups = [
+        "athena.toml",
+        "docs/guide.md",
+        "crates/athena-core/src/reading.rs",
+    ];
+    vec![
+        scope_case(
+            (
+                "job-size-four-groups-t67q",
+                SOURCE_T67Q,
+                &["dash-bullet", "job-size-four-groups"],
+            ),
+            &head,
+            "- ",
+            &criteria,
+            &t67q,
+            &[],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "job-size-four-groups-zaj2",
+                SOURCE_ZAJ2,
+                &["dash-bullet", "job-size-four-groups"],
+            ),
+            &head,
+            "- ",
+            &criteria,
+            &zaj2,
+            &[],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "job-size-over-count",
+                SOURCE_BOUND,
+                &["job-size-over-count"],
+            ),
+            &head,
+            "- ",
+            &criteria,
+            &many,
+            &[],
+            refuse.clone(),
+        ),
+        scope_case(
+            (
+                "job-size-directory-deliverable",
+                SOURCE_BOUND,
+                &["job-size-directory-deliverable"],
+            ),
+            &head,
+            "- ",
+            &criteria,
+            &directories,
+            &[],
+            refuse,
+        ),
+        scope_case(
+            (
+                "job-size-within-bounds-one-crate",
+                SOURCE_BOUND,
+                &["job-size-within-bounds"],
+            ),
+            &head,
+            "- ",
+            &criteria,
+            &nine,
+            &[],
+            Expected::Accept,
+        ),
+        scope_case(
+            (
+                "job-size-three-groups-accepted",
+                SOURCE_BOUND,
+                &["governance-path", "job-size-within-bounds"],
+            ),
+            &head,
+            "- ",
+            &[
+                "athena.toml carries the key",
+                "The guide describes the key",
+                "The reading code checks it",
+            ],
+            &three_groups,
+            &[],
+            Expected::Accept,
+        ),
+    ]
 }
 
 /// A change reading in the production shape for a request whose bullets are `criteria` after the `head` lines,
@@ -2765,6 +2910,22 @@ fn an_extra_check_with_no_case_is_reported() {
         uncovered(&names, &checks_that_refuse()),
         vec!["check_new_rule".to_string()]
     );
+}
+
+#[test]
+fn job_size_refusal_is_declared_intended() {
+    // The declared share is read from the criterion text by the replay.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: "The check refuses more readings and the higher refusal rate is intended: expected 6% of \
+                   newly refused readings, an estimate and not a measurement"
+                .into(),
+            kind: CriterionKind::Content,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(6));
+    assert!(acceptance_check_names(reading_source()).contains(&"check_job_size".to_string()));
 }
 
 #[test]

@@ -8434,6 +8434,310 @@ mod tests {
         }
     }
 
+    /// A change reading as the gate sees it in production, listing these paths and `CHANGELOG.md`, with one
+    /// criterion per path so that no check before or after the size check refuses it for another reason.
+    fn job_size_reading(paths: &[&str]) -> Reading {
+        let criteria: Vec<String> = paths.iter().map(|p| format!("{p} is updated")).collect();
+        let criteria: Vec<&str> = criteria.iter().map(String::as_str).collect();
+        let mut all = paths.to_vec();
+        all.push("CHANGELOG.md");
+        governed_reading(&all, &criteria, &[])
+    }
+
+    /// `n` distinct files of one crate.
+    fn crate_files(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| format!("crates/athena-core/src/part{i}.rs"))
+            .collect()
+    }
+
+    fn as_strs(paths: &[String]) -> Vec<&str> {
+        paths.iter().map(String::as_str).collect()
+    }
+
+    /// The deliverables of job 20261025-183644-t67q: a decision doc, the tool pins, the CI workflow, the check
+    /// runner's code, new tests and a tool.
+    const T67Q_SHAPE: [&str; 8] = [
+        "docs/decisions.md",
+        "athena.toml",
+        ".github/workflows/ci.yml",
+        "crates/athena-core/src/checks.rs",
+        "crates/athena-core/src/gh.rs",
+        "crates/athena-core/tests/nextest.rs",
+        "xtask/src/main.rs",
+        "crates/athena-cli/tests/common/mod.rs",
+    ];
+
+    /// The 12 deliverables of job 20261017-205554-zaj2 over the same four groups.
+    const ZAJ2_SHAPE: [&str; 12] = [
+        "docs/decisions.md",
+        "docs/design/snapshot-isolation.md",
+        "docs/design/hermes-agent.md",
+        "athena.toml",
+        ".github/workflows/ci.yml",
+        "xtask/src/main.rs",
+        "crates/athena-data/src/config.rs",
+        "crates/athena-data/src/systems.rs",
+        "crates/athena-git/src/snapshot.rs",
+        "crates/athena-git/src/lib.rs",
+        "crates/athena-git/tests/snapshot.rs",
+        "xtask/shard-timings.txt",
+    ];
+
+    #[test]
+    fn job_size_refuses_the_two_failed_job_shapes() {
+        for (job, shape) in [
+            ("20261025-183644-t67q", &T67Q_SHAPE[..]),
+            ("20261017-205554-zaj2", &ZAJ2_SHAPE[..]),
+        ] {
+            let reading = job_size_reading(shape);
+            assert_eq!(
+                gate_refuser(&reading),
+                Some("check_job_size"),
+                "the shape of {job} must be refused by the size check"
+            );
+            let error = check_job_size(&reading).unwrap_err().to_string();
+            for needle in [
+                "too large for one producer run",
+                "4 groups, bound 3",
+                "docs, config, ci, code",
+                "split the job by surface and dependency",
+                "out_of_scope",
+            ] {
+                assert!(
+                    error.contains(needle),
+                    "{job}: the error lacks {needle:?}: {error}"
+                );
+            }
+        }
+        // The error reaches the reader through the gate with the same text.
+        let reading = job_size_reading(&T67Q_SHAPE);
+        let (name, error) =
+            refusing_check(&reading, "change the reading rules", None, &[], None).unwrap();
+        assert_eq!(name, "check_job_size");
+        assert!(error.to_string().contains("one producer run"));
+    }
+
+    #[test]
+    fn job_size_bound_is_general() {
+        // Count alone: many deliverables in one crate (one group) are refused.
+        let many = crate_files(31);
+        let reading = job_size_reading(&as_strs(&many));
+        assert_eq!(gate_refuser(&reading), Some("check_job_size"));
+        let error = check_job_size(&reading).unwrap_err().to_string();
+        assert!(error.contains("31 deliverables, bound 30"), "{error}");
+        // Exactly the bound passes, and CHANGELOG.md is not counted as a deliverable or as the docs group.
+        let at_bound = crate_files(30);
+        let reading = job_size_reading(&as_strs(&at_bound));
+        assert!(
+            reading
+                .deliverables
+                .iter()
+                .any(|d| d.path == "CHANGELOG.md")
+        );
+        assert_eq!(gate_refuser(&reading), None);
+        // Groups alone: four files in four groups are refused, three groups pass.
+        let four = [
+            "docs/a.md",
+            "athena.toml",
+            ".github/workflows/ci.yml",
+            "src/a.rs",
+        ];
+        assert_eq!(
+            gate_refuser(&job_size_reading(&four)),
+            Some("check_job_size")
+        );
+        for three in [
+            ["athena.toml", ".github/workflows/ci.yml", "src/a.rs"],
+            ["docs/a.md", ".github/workflows/ci.yml", "src/a.rs"],
+            ["docs/a.md", "athena.toml", "xtask/src/main.rs"],
+            ["docs/a.md", "defaults.toml", "README.md"],
+        ] {
+            let reading = job_size_reading(&three);
+            assert!(check_job_size(&reading).is_ok(), "{three:?}");
+        }
+        // A directory takes the group of its first path component and cannot hide a group.
+        let dir = [
+            "docs/a.md",
+            "athena.toml",
+            ".github/workflows/",
+            "crates/athena-core/src/",
+        ];
+        assert_eq!(
+            gate_refuser(&job_size_reading(&dir)),
+            Some("check_job_size")
+        );
+        // The root stands for every group, with any other path form of it.
+        for root in [".", "./", ""] {
+            let reading = job_size_reading(&[root]);
+            assert!(check_job_size(&reading).is_err(), "root form {root:?}");
+        }
+        // `./` prefixes and repeats are one path: `./docs/a.md` and `docs/a.md` are one docs deliverable.
+        let reading = job_size_reading(&["./docs/a.md", "docs/a.md", "./src/a.rs", "athena.toml"]);
+        assert!(check_job_size(&reading).is_ok());
+        let with_ci = job_size_reading(&[
+            "./docs/a.md",
+            "./athena.toml",
+            "./.github/workflows/ci.yml",
+            "src/a.rs",
+        ]);
+        assert!(check_job_size(&with_ci).is_err());
+        // A reading with a question and a study reading have no change to measure.
+        let mut reading = job_size_reading(&T67Q_SHAPE);
+        reading.question = Some("Which file?".into());
+        assert!(check_job_size(&reading).is_ok());
+        let mut reading = job_size_reading(&T67Q_SHAPE);
+        reading.capability = Some("study".into());
+        assert!(check_job_size(&reading).is_ok());
+        let mut reading = job_size_reading(&as_strs(&many));
+        reading.capability = Some("study".into());
+        assert!(check_job_size(&reading).is_ok());
+        let mut reading = job_size_reading(&as_strs(&many));
+        reading.capability = None;
+        assert!(check_job_size(&reading).is_ok());
+    }
+
+    #[test]
+    fn job_size_accepts_focused_shapes() {
+        // Ordinary jobs of one or two groups, and the largest three-group shapes, pass the whole gate.
+        let nine = crate_files(9);
+        let focused: Vec<Vec<&str>> = vec![
+            vec!["docs/a.md"],
+            vec!["docs/a.md", "crates/athena-core/src/reading.rs"],
+            vec![
+                "crates/athena-core/src/reading/checks.rs",
+                "crates/athena-core/src/reading.rs",
+                "crates/athena-core/tests/refusal_corpus.rs",
+            ],
+            vec![
+                "crates/athena-core/src/reading.rs",
+                "xtask/src/main.rs",
+                "docs/a.md",
+            ],
+            as_strs(&nine),
+        ];
+        for paths in focused {
+            let reading = job_size_reading(&paths);
+            assert_eq!(gate_refuser(&reading), None, "{paths:?}");
+        }
+    }
+
+    #[test]
+    fn job_size_refuses_a_backstop_shape_across_crates() {
+        // 31 files over several crates and tests stay in the code group and are refused by count.
+        let mut paths: Vec<String> = crate_files(20);
+        paths.extend((0..6).map(|i| format!("crates/athena-cli/tests/t{i}.rs")));
+        paths.extend((0..5).map(|i| format!("xtask/src/m{i}.rs")));
+        assert_eq!(paths.len(), 31);
+        let reading = job_size_reading(&as_strs(&paths));
+        let error = check_job_size(&reading).unwrap_err().to_string();
+        assert!(error.contains("31 deliverables, bound 30"), "{error}");
+        paths.pop();
+        assert!(check_job_size(&job_size_reading(&as_strs(&paths))).is_ok());
+    }
+
+    #[test]
+    fn job_size_refusal_needs_the_step_line() {
+        // The check reaches the reader only as a step of the gate: a refusal by the function alone is not enough.
+        let reading = job_size_reading(&ZAJ2_SHAPE);
+        assert!(check_job_size(&reading).is_err());
+        assert_eq!(gate_refuser(&reading), Some("check_job_size"));
+        // It runs before the checks that would repair a reading that must be split anyway.
+        let mut reading = job_size_reading(&T67Q_SHAPE);
+        reading.acceptance_criteria.clear();
+        assert_eq!(gate_refuser(&reading), Some("check_job_size"));
+    }
+
+    #[test]
+    fn job_size_has_one_step_line() {
+        let source = reading_source();
+        assert!(source.contains("pub fn check_job_size(reading: &Reading) -> Result<()>"));
+        let body = source
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        assert_eq!(
+            body.lines()
+                .filter(|l| l.trim() == "step!(check_job_size(reading));")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn job_size_refusal_reaches_a_stored_reading() {
+        // `queued_work` drops a Proposed job whose latest stored reading `check_reading_text` no longer accepts.
+        let request = "change the reading rules";
+        let reading = job_size_reading(&T67Q_SHAPE);
+        match check_reading_text(&reading, request) {
+            ReadingCheck::Refuse(reason) => {
+                assert!(reason.contains("one producer run"), "{reason}")
+            }
+            ReadingCheck::Accept => panic!("a reading over four groups was accepted"),
+        }
+        let split = job_size_reading(&["athena.toml", "docs/a.md", "xtask/src/main.rs"]);
+        assert_eq!(check_reading_text(&split, request), ReadingCheck::Accept);
+    }
+
+    #[test]
+    fn job_size_doc_and_changelog_name_the_cause() {
+        fn collapse(text: &str) -> String {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        let source = include_str!("reading/checks.rs");
+        let before = source.split("pub fn check_job_size(").next().unwrap();
+        let mut doc_lines: Vec<&str> = before
+            .lines()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("///"))
+            .map(|l| l.trim_start().trim_start_matches('/'))
+            .collect();
+        doc_lines.reverse();
+        let doc = collapse(&doc_lines.join(" "));
+        let changelog = include_str!("../../../CHANGELOG.md");
+        let unreleased = changelog
+            .split("## [Unreleased]")
+            .nth(1)
+            .unwrap()
+            .split("\n## [")
+            .next()
+            .unwrap();
+        let mut items: Vec<String> = Vec::new();
+        for line in unreleased.lines() {
+            if line.starts_with("- ") {
+                items.push(line.to_string());
+            } else if let Some(last) = items.last_mut() {
+                last.push(' ');
+                last.push_str(line);
+            }
+        }
+        let items: Vec<String> = items.iter().map(|i| collapse(i)).collect();
+        let item = items
+            .iter()
+            .find(|i| i.contains("reading::check_job_size"))
+            .expect("a changelog item names the check");
+        for (label, text) in [("doc comment", &doc), ("changelog item", item)] {
+            for needle in [
+                "nothing before dispatch measured whether a request fits one producer run",
+                "20261025-183644-t67q",
+                "20261017-205554-zaj2",
+                "higher refusal rate is intended",
+                "expected 6% of newly refused readings",
+                "estimate",
+                "HISTORY.txt",
+                "only a reading that spans all four groups",
+                "more than 3 groups",
+                "30 deliverables",
+                "2 of 200",
+                "check_reading_size",
+                "producer no-change guard",
+            ] {
+                assert!(text.contains(needle), "the {label} lacks {needle:?}");
+            }
+        }
+    }
+
     const EXISTING: &str =
         "Existing code: crates/athena-core/src/reading.rs and docs/design/jev-code-health.md";
     const EXISTING_CRITERION: &str =
