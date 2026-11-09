@@ -1,0 +1,163 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261026-180227-80cr",
+  "n": 1,
+  "at": "2026-11-09T19:12:24.378128248Z",
+  "invocation_seq": 1,
+  "base_commit": "85fa29d4c7c0763f82641d973ab7f29a7a28f09c",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add Records::load_current and move status, forecast, land_pr to it",
+  "summary": "First D111 step-7b slice. It defines the athena/records worktree path once in paths.rs and adds Records::load_current and RecordSet::load_current, which read the worktree and fall back to in-tree records/ only when the worktree is absent. Only `athena status`, the forecast and land_pr's job lookup move to them. The design doc lists every other reader by file and function as a follow-up. Audience: the maintainer and the verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Criteria require new tests plus fmt, clippy -D warnings and cargo test."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The test criteria use distinct job ids in the worktree and in-tree records/, so they check which source is read."
+    },
+    {
+      "id": "strangers",
+      "how": "The design doc follow-up list names each reader by file and function."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-data/src/paths.rs (repo_state_dir at line 43, so the worktree path helper goes beside it), crates/athena-core/src/store.rs (Records::load at line 349 and load_dir at 356, built from RecordSet::load plus landing_files), crates/athena-core/src/status.rs (status() at line 985 calls Records::load and athena_gate::records::RecordSet::load; the forecast code is also in status.rs; mistake_report at 906 and trace at 1119 also call Records::load), crates/athena-core/src/gh/landing.rs (Athena::land_pr at line 832 calls crate::store::Records::load at line 846). The new loaders check files through check_record_file, as the existing loaders do. No record or data file is added under crates/, so no AnyRecord or round-trip change is needed. Resolution order: use the worktree when its directory exists, else read records/ from the treeish as today. The worktree directory is probed first and records/ only on absence, not on an empty or invalid worktree.",
+    "Existing code: crates/athena-data/src/paths.rs (repo_state_dir), crates/athena-core/src/store.rs (Records::load, load_dir, from_parts), crates/athena-gate/src/records.rs (RecordSet::load) are reused and extended. docs/design/records-history.md section 7 (lines 455-511) already names the worktree under the state directory, for example <state>/records-worktree, and lists the readers per seam.",
+    "Environment: no network, CI or push is involved. Tests build a temporary worktree directory and a temporary git repository locally, so the test reads only local files and git. No workflow file changes.",
+    "The forecast reader is the status.rs code that computes the forecast, which I located only by grep. The producer must find the exact function and move only it. Reading status() also loads Records at line 988, so status and forecast may share one load.",
+    "Term worktree: a directory holding a checkout of the athena/records branch at a fixed path under the state directory. In-tree records/ is the records/ directory in the main checkout.",
+    "Governance files (athena.toml, defaults.toml, workflows) are not needed and not changed. CHANGELOG.md is a deliverable. No scan test is added, per the request."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test, run with `cargo test`, puts job ids that differ between a records worktree and in-tree records/. It shows that Athena::status, the forecast and land_pr's job lookup each see the worktree's job ids and not the in-tree ones.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run with `cargo test` removes the worktree directory and shows that status, the forecast and land_pr's lookup read the in-tree records/ job ids, as before the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "crates/athena-data/src/paths.rs defines the athena/records worktree path in one function beside repo_state_dir. A Grep of crates/ shows no other place builds that path (no repeated 'records-worktree' literal).",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-core/src/store.rs has Records::load_current and crates/athena-gate/src/records.rs has RecordSet::load_current. Each reads the worktree when it exists and falls back to the treeish's in-tree records/ only when the worktree is absent.",
+      "kind": "content"
+    },
+    {
+      "text": "The diff changes only three callers to load_current: status() (and the forecast) in crates/athena-core/src/status.rs, and Athena::land_pr in crates/athena-core/src/gh/landing.rs. A Grep for Records::load and RecordSet::load shows every other non-test caller unchanged. The request names landing.rs's land_pr as gh.rs.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/design/records-history.md has a follow-ups list naming every remaining non-test caller of Records::load, RecordSet::load, GitRecords::load and the file-based readers by file and function, including status.rs mistake_report and trace, review.rs, proposals.rs, work_decisions.rs, run/mod.rs, run/close.rs, land.rs, auditor.rs, evidence_labels.rs, introspect.rs read_records and the athena-gate readers. The list is checkable against a Grep of the callers.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry for the load_current slice of D111 step 7b. The diff adds no scan test.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-data/src/paths.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-gate/src/records.rs",
+      "action": "modify",
+      "p": 0.93
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    }
+  ],
+  "out_of_scope": [
+    "Moving any reader other than status, the forecast and land_pr's job lookup",
+    "A scan test that checks all readers",
+    "Creating, updating or syncing the worktree (the writer and the cutover)",
+    "Changing athena.toml, defaults.toml or workflows",
+    "Changing the records branch writer in athena-git"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6828282828282828,
+      "p_user_intervenes": 0.07262773722627737,
+      "cost_usd": {
+        "p10": 0.5663390223645198,
+        "p50": 1.490862948785461,
+        "p90": 4.985396127602597
+      },
+      "wall_time_s": {
+        "p10": 570.280683389,
+        "p50": 2112.801337854,
+        "p90": 4340.299688793997
+      }
+    }
+  },
+  "departures": "The cost and time medians sit above the reference. The change touches several crates, needs a fixture with two record sets, and has a long follow-up list to enumerate.",
+  "hard_reason": "It changes which records the run pipeline reads (status, forecast, landing job lookup), and a mistake there is costly and hard to see.",
+  "producer_effort": "high"
+}

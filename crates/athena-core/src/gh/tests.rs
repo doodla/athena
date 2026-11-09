@@ -4881,3 +4881,50 @@ mod stacked {
         assert!(parse_pr_status(&json!({"state": "weird", "head": {"sha": "h1"}})).is_err());
     }
 }
+
+/// A host client that must not be reached: the job lookup fails or stops the landing before any call.
+struct UnreachedHost;
+impl Runner for UnreachedHost {
+    fn gh(&self, args: &[String]) -> Result<String> {
+        anyhow::bail!("the host was called: {args:?}")
+    }
+}
+
+#[test]
+fn land_pr_records_worktree_decides_which_job_is_found() {
+    use crate::status::records_worktree_tests::{
+        TREE_JOB, WORKTREE_JOB, commit_in_tree, job_record, remove_worktree, write_in_worktree,
+    };
+    let (_dir, _state, athena) = crate::code_health::tests::set_up();
+    commit_in_tree(&athena, &[job_record(TREE_JOB, "class-tree")]);
+    write_in_worktree(&athena, &[job_record(WORKTREE_JOB, "class-wt")]);
+    let land = |job: &str| {
+        let sleep = |_: Duration| {};
+        let poll = Poll {
+            attempts: 1,
+            delay: Duration::ZERO,
+            sleep: &sleep,
+        };
+        let error = athena
+            .land_pr(job, &UnreachedHost, poll, &crate::Quiet)
+            .unwrap_err();
+        format!("{error:#}")
+    };
+    // A job the lookup finds goes on to the verification check, which it has none of; one it does not find
+    // stops at the lookup.
+    let found = |message: &str| message.contains("has no verification");
+    let missing = |message: &str| message.contains("no job matches");
+
+    // With the worktree: its job is found and the in-tree one is not.
+    let worktree_job = land(WORKTREE_JOB);
+    assert!(found(&worktree_job), "{worktree_job}");
+    let tree_job = land(TREE_JOB);
+    assert!(missing(&tree_job), "{tree_job}");
+
+    // Without it: the in-tree job is found and the worktree's is not.
+    remove_worktree(&athena);
+    let tree_job = land(TREE_JOB);
+    assert!(found(&tree_job), "{tree_job}");
+    let worktree_job = land(WORKTREE_JOB);
+    assert!(missing(&worktree_job), "{worktree_job}");
+}
