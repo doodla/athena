@@ -9,7 +9,7 @@ mod common;
 use athena_core::Quiet;
 use athena_core::store::{JobState, Records};
 use athena_data::records::{
-    AnyRecord, Reference, Request, WorkDecisionState, WorkItem, WorkItemKind,
+    AnyRecord, OwnerBrief, Reference, Request, WorkDecisionState, WorkItem, WorkItemKind,
 };
 use athena_data::roles::Ladder;
 use athena_data::{JobId, RecordId};
@@ -45,7 +45,15 @@ fn work_item(id: &str, kind: WorkItemKind) -> AnyRecord {
             Reference::job(&JobId::parse(CITED_JOB).unwrap()),
             Reference::path("records/jobs"),
         ],
-        brief: None,
+        // A brief makes the item the owner's, so `athena status` lists it (an unbriefed item above its
+        // role's limit is recorded but not listed).
+        brief: Some(OwnerBrief {
+            question: "Should readers see the cited records?".into(),
+            if_yes: "A request copies the cited content.".into(),
+            if_no: "Readers stay blind to records.".into(),
+            cost: "One more job.".into(),
+            recommendation: "Yes: readers cannot see records otherwise.".into(),
+        }),
     }))
 }
 

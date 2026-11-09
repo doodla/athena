@@ -1,0 +1,447 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261109-114117-pj6h",
+  "round": 3,
+  "at": "2026-11-09T11:55:18.797755355Z",
+  "invocation_seq": 7,
+  "approach": "Route by the presence of the five-field brief, in code, in four places that must agree: steward.rs decide(), work_decisions.rs open_proposals/in_limit, the owner decisions page (xtask/src/decisions.rs needs_owner), and the words the model reads (STEWARD_PROMPT in roles.rs and the steward output schema descriptions in outputs.rs). A change with a brief is owner-bound at any rung: decide() never applies it and records it as Decision::Proposed with kind Proposal and the brief (a briefed item of any kind becomes a proposal because the owner surfaces filter on kind Proposal). A change without a brief is applied if role.may_change(rung); otherwise it is recorded with brief None and reaches no owner surface. open_proposals lists an undecided proposal when it has a brief, or has none and the raising role may change its rung (the drain approves those; the audience role's items rely on that). in_limit is false for a briefed item, so the drain never auto-approves an owner-bound item. A new constructor, blind_spot_needing_owner, gives a missing-token blind spot a brief, kind Proposal, a distinct ':owner-action' key and evidence (the source), so WorkItem::validate passes. validate_items passes a blind spot's checked brief to it and requires a request for an in-limit rung only when there is no brief. STEWARD_PROMPT is rewritten inside the 600-token budget (step back across repeated failures and blind spots, decide and queue a request itself, write a brief only for an environment change or a token or credential, owner action in if_yes), and the schema doc comments on StewardItemOutput.brief and StewardBriefOutput are reworded to say the same, so the schema the model reads no longer says 'required for a proposal above your limit'. The role goes to version 3. Docs, CHANGELOG and decision D169 mark the prompt and schema wording prose-only and the routing code-enforced.",
+  "decisions": [
+    {
+      "choice": "A brief present means owner-bound at any rung. decide() skips the apply step, returns Decision::Proposed, keeps the brief, and sets kind Proposal when a brief is present.",
+      "reason": "Base decide() (steward.rs:701-712) applies in-limit changes and drops their brief, so an env/token need at implementation (a missing GH_TOKEN) never reached the owner. open_proposals and find_open (work_decisions.rs:47, 93) and the xtask page (decisions.rs:286) handle only kind Proposal, so a briefed repeated-failure or blind-spot item must become Proposal to be seen. Finding 6 (kind lost): this is stated in roles-and-ladder.md and D169 — a briefed item of any kind is recorded as a proposal so the owner surfaces, which filter on kind Proposal, can find it; the repeated-failure origin stays visible in the item's title, key and evidence.",
+      "rejected": [
+        {
+          "option": "Keep applying in-limit changes and attach the brief only above the limit (base behavior).",
+          "why": "This is the fault: env/token needs are hidden, and above-limit changes without a brief reach the owner."
+        },
+        {
+          "option": "Keep the original kind on a briefed item and make every reader accept any undecided item with a brief.",
+          "why": "It changes open_proposals, find_open, status and xtask read_snapshot for one distinction; overriding the kind in one place is smaller."
+        },
+        {
+          "option": "Add a code check that refuses briefs for anything but env/token needs.",
+          "why": "Out of scope. The prompt and schema wording limit briefs (prose-only); code routes by brief presence."
+        }
+      ]
+    },
+    {
+      "choice": "blind_spot_needing_owner(source, title, brief) builds a ProposedChange with kind Proposal, rung Implementation, source Reference::path(source), evidence vec![Reference::path(source)], the blind_spot_request text, brief Some, and key blind_spot_key(source) + ':owner-action' (for example blind-spot:github:owner-action). blind_spot_change is unchanged.",
+      "reason": "WorkItem::validate (records/work.rs:131) refuses a non-BlindSpot item with empty evidence and run() calls item.validate() for every decided item (steward.rs:1328), so a briefed blind spot with empty evidence would fail the whole run. The distinct key stops a plain blind-spot:github item recorded earlier (a transient gh error, already in known_keys, steward.rs:1286) from swallowing a later token need.",
+      "rejected": [
+        {
+          "option": "Keep kind BlindSpot and make open_proposals, find_open and xtask read_snapshot accept any undecided item with a brief.",
+          "why": "Changes three readers and their kind filters for one case."
+        },
+        {
+          "option": "Reuse blind_spot_key unchanged for the briefed variant.",
+          "why": "A plain blind spot for the same source recorded earlier would block the briefed one through the seen-key set (steward.rs:1322-1325)."
+        }
+      ]
+    },
+    {
+      "choice": "open_proposals keeps an undecided Proposal when brief.is_some() || in_limit(records, item); in_limit gains brief.is_none() &&; split_open is unchanged (briefed goes to 'above', unbriefed in-limit to 'within').",
+      "reason": "Unbriefed above-limit proposals must not be listed (criterion 1). The audience role raises unbriefed Implementation proposals that crates/athena-cli/tests/audience.rs:149 expects in status.work_proposals; that role is recorded with limit Implementation in the same commit, so they are in limit and the drain approves them. Both criteria hold with the audience role untouched.",
+      "rejected": [
+        {
+          "option": "List only items with a brief.",
+          "why": "Hides the audience role's in-limit items from athena status and the drain; the audience role is out of scope."
+        },
+        {
+          "option": "Change split_open separately.",
+          "why": "split_open partitions open_proposals by in_limit, so the new in_limit gives the right split."
+        }
+      ]
+    },
+    {
+      "choice": "Finding 4 of round 1, still held: needs_owner in xtask/src/decisions.rs becomes item.brief.is_some() (roles parameter dropped), with test fixtures updated. Reply to round-2 findings 1-3 (files outside the listed deliverables): xtask/src/decisions.rs, crates/athena-cli/tests/drain.rs and crates/athena-cli/tests/work_decisions.rs stay, as the smallest set that keeps criterion 6 true; each is named in files with the reason, and the edits are one predicate plus fixtures (xtask) and fixture-only briefs on seeded work items (the two cli tests). No production code changes in the two cli test files.",
+      "reason": "The page is the surface the owner judges by. Routing by rung there would hide env/token briefs at implementation and keep showing unbriefed above-limit items. The drain and status fixtures seed unbriefed above-limit proposals and assert they are listed; criterion 1 says such items are no longer listed, and criterion 6 requires cargo test to pass, so the seeded items must carry a brief. There is no way to meet criteria 1 and 6 without touching these tests.",
+      "rejected": [
+        {
+          "option": "Leave xtask out and document that the page does not show env/token briefs.",
+          "why": "The owner would never see the item on the page they judge by."
+        },
+        {
+          "option": "Weaken the assertions in drain.rs and work_decisions.rs tests, or keep open_proposals listing unbriefed above-limit items so no fixture changes.",
+          "why": "The first stops checking the drain's owner-bound rule; the second contradicts criterion 1."
+        }
+      ]
+    },
+    {
+      "choice": "No change to the seen-key rule. An unbriefed above-limit item is recorded and visible only in the records and by id; its key stays in known_keys.",
+      "reason": "Dropping keys from the seen set would make the steward record the same finding on every run, since nothing marks it decided. A model that later finds an env/token need writes a new key, or for a blind spot the distinct :owner-action key.",
+      "rejected": [
+        {
+          "option": "Leave unbriefed undecided above-limit keys out of the seen set.",
+          "why": "Creates a fresh duplicate work item every run."
+        }
+      ]
+    },
+    {
+      "choice": "The owner's action goes in the brief's if_yes. The prompt says 'put what the owner must do in if_yes' and the brief() user prompt says a missing GH_TOKEN or GITHUB_TOKEN is a github blind spot whose if_yes names setting it. Docs say approve-work is used only after the owner has supplied the token or made the environment change.",
+      "reason": "A producer job cannot set an environment variable; the brief text tells the owner the action, and approve-work queues the make-readable job, useful only once the token is in place.",
+      "rejected": [
+        {
+          "option": "Make approve-work check that the token is set.",
+          "why": "New code outside scope; the steward cannot see the model's gh environment (token passing lives in athena-agent env.rs)."
+        }
+      ]
+    },
+    {
+      "choice": "validate_items requires a request for an in-limit rung only when the item has no brief; a briefed blind-spot item goes through check_brief and then blind_spot_needing_owner.",
+      "reason": "A briefed item is never applied, so a request is dead text; the check at steward.rs:961 would otherwise drop an owner-bound item at implementation.",
+      "rejected": [
+        {
+          "option": "Keep requiring a request for every in-limit item.",
+          "why": "Forces dead text or drops the owner-bound item."
+        },
+        {
+          "option": "Make blind_spot_change detect GH_TOKEN itself.",
+          "why": "The steward process cannot see the model's gh environment."
+        }
+      ]
+    },
+    {
+      "choice": "Keep two Decision variants. Decision::Proposed means 'not applied, work item recorded'; whether the owner sees it depends on the item's brief.",
+      "reason": "A third variant would touch run() and every match for no behavior gain; the item's brief is the measured signal.",
+      "rejected": [
+        {
+          "option": "Add Decision::Recorded for unbriefed above-limit.",
+          "why": "More churn in run() and tests; the owner-visible fact is the brief."
+        }
+      ]
+    },
+    {
+      "choice": "The prompt fits by rewriting STEWARD_PROMPT in about 868 bytes or fewer (contract 929 bytes, 1800-byte cap for 600 tokens). Role version 3. A new context test measures the real composed set.",
+      "reason": "Budgets never rise to fit a set (lib.rs:176-178). The base context test composes only a placeholder, so the real prompt was never measured.",
+      "rejected": [
+        {
+          "option": "Raise the Steward budget.",
+          "why": "Forbidden by the budget comment; criterion 5 asserts at most 600."
+        }
+      ]
+    },
+    {
+      "choice": "Round-2 finding 4 (major): reword the schema descriptions in crates/athena-context/src/outputs.rs. The doc comment on StewardItemOutput.brief (line 320, now 'Required for a proposal above your limit; null for any other item.') becomes: 'The owner's brief. Write it only when the fix needs an environment change or a token or credential Athena lacks, and put what the owner must do in if_yes; null for every other item, whatever its rung.' The doc on StewardBriefOutput (line 325, 'that let the owner decide a proposal') becomes: 'The five short plain-language fields that let the owner act on an environment or token need. Each is one line.' A test in outputs.rs reads steward_schema() item['properties']['brief']['description'] (the schema is inlined, no $ref, per the test at outputs.rs:959) and asserts it contains 'environment', 'token', 'credential', 'if_yes' and not 'above your limit'; it also asserts the string 'above your limit' is absent from the whole serialized steward_schema(). The docs say this description, like the prompt, is prose-only.",
+      "reason": "JsonSchema turns doc comments into descriptions the model reads (outputs.rs:691). Left as is, the schema would tell the model to brief every over-limit proposal and, with brief-presence routing, send those to the owner, defeating the request's measure of how few decisions reach the owner. Grep for 'above your limit' finds only outputs.rs:320 and roles.rs:124.",
+      "rejected": [
+        {
+          "option": "Leave the schema unchanged (round-2 plan).",
+          "why": "It contradicts the new prompt and routes non-env/token proposals to the owner."
+        },
+        {
+          "option": "Add a code check that rejects briefs whose text does not mention a token or environment.",
+          "why": "Out of scope and brittle; routing stays by brief presence."
+        }
+      ]
+    },
+    {
+      "choice": "Round-2 finding 5: keep Brief::new's no-owner-brief branch (NO_BRIEF) in xtask/src/decisions.rs as a fallback for direct callers only, and say so in the module docs, replacing the sentence at lines 16-17 ('A proposal without them shows its title and No brief written yet'). The page itself lists only briefed proposals and never reaches that branch. The test a_proposal_without_a_brief_shows_its_title_and_says_none_is_written is renamed to say it covers the direct constructor, and the page-level assertion at line 523 becomes 'Nothing waiting for you'.",
+      "reason": "Removing the branch means changing the owner field's type, lines(), html() and five tests for no behavior gain; documenting it accurately removes the contradiction the critic named. The recommendation line is shown on a card only when there is no owner brief (decisions.rs:231), so briefed cards never show the 'the steward role may change this itself' wording.",
+      "rejected": [
+        {
+          "option": "Remove the no-brief branch and its test.",
+          "why": "Larger edit to a surface outside the deliverables; the fallback is harmless and now documented as unreachable from the page."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/roles.rs",
+      "action": "modify",
+      "purpose": "Rewrite STEWARD_PROMPT (step back, decide itself, brief only for env/token, owner action in if_yes) inside the budget; steward version 3; wording, version and path tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "purpose": "decide() routes by change.brief; new blind_spot_needing_owner; validate_items passes a blind spot's brief and requires a request for an in-limit rung only without a brief; brief() user-prompt wording; docs on Decision::Proposed and ProposedChange.brief; unit tests for each routing case.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/work_decisions.rs",
+      "action": "modify",
+      "purpose": "open_proposals lists briefed items and unbriefed in-limit ones; in_limit false for a briefed item; docs; updated and new tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/steward.rs",
+      "action": "modify",
+      "purpose": "Add a briefed(item, brief) helper and the end-to-end token test; add the not-open assertion to the real-gap test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Test only: the path assertion at about line 2265 becomes records/roles/steward-3.json.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add the_real_steward_prompt_fits_its_budget composing the real STEWARD_PROMPT and asserting at most 600 tokens.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable; needed (round-2 finding 4): reword the doc comments on StewardItemOutput.brief and StewardBriefOutput so the schema the model reads matches the prompt; add a schema-description test. Doc comments and one test only; no field, type or required-list change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/roles-and-ladder.md",
+      "action": "modify",
+      "purpose": "Describe version 3 and the brief-presence routing in decide(), open_proposals and the decisions page; kind Proposal for any briefed item; prompt and schema wording prose-only; where an unbriefed over-limit item can be seen; approve-work follows the owner's supply of the token.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased/Changed entry for the new steward behavior.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D169 in the D168 form (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance), citing the rejected job 20261109-080220-zkhy, its ten findings and the earlier plan findings.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/src/decisions.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable; needed so the owner's page follows the same rule: needs_owner becomes item.brief.is_some(); module docs say the no-brief card is a direct-caller fallback the page never reaches; page tests updated with briefs plus a new exact-cards test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable; test fixture only: seeded_proposals gives HIGH and GHOST an OwnerBrief so they stay owner-bound waiting items; LOW stays unbriefed. Required for criteria 1 and 6 together.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/work_decisions.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable; test fixture only: the seeded work_item gets a brief so athena status still lists it. Required for criteria 1 and 6 together.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read docs/decisions.md D168 and the CHANGELOG.md Unreleased section for the entry forms. In roles.rs rewrite STEWARD_PROMPT in about 868 bytes or fewer: step back across repeated failures and blind spots and decide yourself what to change; cite by reference; name the rung; Athena queues your request at or below your limit and records an item above it without asking the owner; write a brief only when the fix needs an environment change or a token or credential Athena lacks, with what the owner must do in if_yes; the five fields (question, if_yes, if_no, cost, recommendation with a one-line reason), each short, plain, no jargon; otherwise brief null. Set steward version 3 and its doc comment. Update the roles tests: version 3, path steward-3.json; add the_steward_prompt_tells_it_to_step_back_decide_itself_and_brief_only_for_env_or_token (asserts the new wording and that 'For a proposal above your limit, also write a brief' is gone); keep the five-field test.",
+    "In records.rs change the assertion at about line 2265 to records/roles/steward-3.json. In crates/athena-context/src/lib.rs add the_real_steward_prompt_fits_its_budget (compose roles::STEWARD_PROMPT with roles::steward(ts).version; check_budget(BudgetSet::Steward, &c) is Ok and estimated_tokens() <= 600). Run cargo test -p athena-data -p athena-context and trim the prompt until it passes.",
+    "In crates/athena-context/src/outputs.rs reword the doc comment at line 320 (StewardItemOutput.brief) to: only when the fix needs an environment change or a token or credential Athena lacks, with the owner's action in if_yes; null for every other item, whatever its rung. Reword line 325 (StewardBriefOutput) to say the fields let the owner act on an environment or token need. Add a test in the style of outputs.rs:702: read steward_schema(), take schema['properties']['items']['items']['properties']['brief']['description'] (if schemars nests it under anyOf, search that property's serialized subschema instead), assert it contains 'environment', 'token', 'credential', 'if_yes' and not 'above your limit', and assert schema.to_string() has no 'above your limit'. Run cargo test -p athena-context.",
+    "In steward.rs decide(): let owner_bound = change.brief.is_some(); apply only when !owner_bound && role.may_change(change.rung); otherwise Decision::Proposed; brief = change.brief.clone() (None whenever applied); kind = Proposal when owner_bound, else change.kind. Update the docs of Decision::Proposed and ProposedChange.brief (an environment or token need the owner must supply; routes to the owner at any rung; a briefed item of any kind is recorded as a proposal so the owner surfaces, which filter on kind Proposal, find it).",
+    "In steward.rs add pub fn blind_spot_needing_owner(source, title, brief: OwnerBrief) -> ProposedChange: kind Proposal, key blind_spot_key(source) + ':owner-action', rung Implementation, source Reference::path(source), evidence vec![Reference::path(source)], request blind_spot_request(source, title), brief Some(brief). In validate_item compute the brief first (check_brief with the key prefix as at lines 972-975, also for a blind-spot item) and return blind_spot_needing_owner when the blind-spot item has one, else blind_spot_change; change the request check at line 961 to role.may_change(rung) && brief.is_none() && request.is_empty(). Update the two user-prompt paragraphs of brief() (about lines 1036-1038 and 1046-1047): the owner decides only items with a brief; a missing GH_TOKEN or GITHUB_TOKEN is a github blind spot with a brief whose if_yes names the action.",
+    "In steward.rs tests: split the change() helper into plain_change(rung) (brief None) and the briefed form; rewrite an_applied_change_does_not_carry_the_brief; point a_change_on_a_lower_rung_is_applied at plain_change; set raw.brief = None in the applied half of a_steward_proposal_with_a_boundary_word_is_written_without_it.",
+    "Add steward.rs tests: unbriefed above-limit gives Proposed, brief None, no applier call at three rungs (criterion 1); a briefed change at all five rungs gives Proposed with the brief, kind Proposal, no applier call, item.validate() Ok; blind_spot_needing_owner with a GH_TOKEN brief through decide() then item.validate() Ok, with key blind-spot:github:owner-action; validate_items accepts a briefed in-limit item with no request and a github blind spot with a brief, and still refuses an unbriefed in-limit item with no request; the key does not collide with blind-spot:github (a recorded blind-spot:github key does not stop the briefed one).",
+    "In work_decisions.rs: in_limit returns false when item.brief.is_some(); open_proposals keeps a proposal only if w.brief.is_some() || in_limit(records, w); update the module doc and function docs (owner-bound versus drain-approved). Update the tests: only_undecided_proposals_are_open... uses a briefed item; a_proposal_is_in_limit_only_for... gives high and stranger a brief and asserts the unbriefed low is absent from both lists before its role is recorded; add a core test that an unbriefed above-limit proposal and an unbriefed unknown-role proposal are not listed while a briefed in-limit one is listed in 'above'.",
+    "In crates/athena-cli/tests/steward.rs add a briefed(item, brief) helper and a_missing_token_reaches_the_owner_with_its_brief_and_a_plain_gap_does_not as in demonstration 2, plus the case of a plain github blind spot recorded first and a briefed one after; add to scripted_output_with_a_real_gap... an assertion that open_proposals does not list the unbriefed brief-requirements proposal. In crates/athena-cli/tests/drain.rs seeded_proposals give HIGH and GHOST an OwnerBrief; in crates/athena-cli/tests/work_decisions.rs work_item give the item a brief.",
+    "In xtask/src/decisions.rs change needs_owner to item.brief.is_some() (drop the roles parameter and update the call at line 370; Brief::new, recommendation() and role_limit stay) and update the module docs (lines 3-17, 20-23): the page lists only open proposals that carry a brief, and the NO_BRIEF card is a fallback for direct Brief::new callers that the page never reaches. Update the tests: steward_item gets Some(owner_brief()) and the within and below items set brief None; the line-523 page assertion becomes 'Nothing waiting for you' and the no-brief test is renamed to the direct-constructor case; set briefs on the items in the_page_links_every_record_to_github_at_the_tip_and_lists_only_open_proposals, decided_on_main and the ghost test; add the_page_lists_exactly_the_briefed_open_proposals (four items: briefed in-limit, briefed above-limit, unbriefed above-limit, unbriefed in-limit; expects the two briefed cards).",
+    "Write the docs. roles-and-ladder.md: line 16 version 3; item 3 of 'How a run goes' (a request is needed for an in-limit item unless it carries a brief); item 5 (a brief means owner-bound at any rung and the item is recorded as a proposal whatever its kind; no brief means applied if in limit, otherwise recorded without the owner); the 'Deciding a proposal' bullet (only briefed or in-limit items are open and listed; the decisions page lists briefed items); a note that unbriefed over-limit items can be seen only in the records and by id; a note that approve-work follows the owner supplying the token; a note that the prompt and schema wording are prose-only and the routing is code-enforced in decide(), open_proposals and needs_owner. Add the CHANGELOG entry under Unreleased/Changed. Append D169 to docs/decisions.md in the D168 form, citing the rejected job 20261109-080220-zkhy, its ten findings, the earlier plan findings, the kind override, and what was and was not measured.",
+    "Run cargo fmt --all, then cargo test --locked, cargo clippy --all-targets --locked -- -D warnings, cargo fmt --all --check and cargo test -p athena-core --test refusal_corpus. Then git status and git diff --stat to confirm only the listed files changed and that athena.toml, defaults.toml, .github/workflows and records/ are untouched."
+  ],
+  "risks": [
+    {
+      "risk": "The new prompt does not fit: the composed steward set is limited to 1800 bytes (600 tokens × 3), the contract takes 929 plus separators, so the prompt text is about 868 bytes or less; the current one leaves about 150 bytes of room.",
+      "mitigation": "Step 1 writes the prompt and step 2 measures it with the new context test before anything else. Required terms are fixed by the roles.rs tests; drop prose that restates the schema first, since step 3 moves the field rules into the schema descriptions, which are outside the prompt budget. The budget is never raised."
+    },
+    {
+      "risk": "The model writes a brief for a non-env/token item, or omits one for a real token need. Code does not check the reason (out of scope).",
+      "mitigation": "The prompt and the schema description both say brief only for an environment change or a token or credential (marked prose-only in the docs). The routing holds either way: a brief reaches the owner, no brief never does. The measured check is the item's brief and open_proposals."
+    },
+    {
+      "risk": "An unbriefed above-limit item is recorded and then seen by no one except in the records or by id, and its key (in known_keys) stops the steward raising it again.",
+      "mitigation": "Stated in the docs and D169: such items are visible in the records branch and decidable by id only. If the finding later turns into an env/token need, the model uses a new key; for a blind spot the :owner-action key is distinct. Dropping the keys from the seen set was rejected because it would create a duplicate work item every run."
+    },
+    {
+      "risk": "A within-limit unbriefed steward item of kind Proposal that was applied (a request already queued) stays open, so the drain could approve it a second time. This exists at base: nothing records a decision for an applied item.",
+      "mitigation": "Not changed here. decide() applies only when there is no brief, and the prompt says proposals are for rungs above the limit. Named in D169 so the next change can close it."
+    },
+    {
+      "risk": "Edits to xtask/src/decisions.rs, outputs.rs, drain.rs and cli work_decisions.rs go beyond the listed deliverables (round-2 findings 1-3).",
+      "mitigation": "Each is named in files and dependents with its reason. The two cli edits are fixture-only (a brief on three work items); outputs.rs is doc comments plus one test; xtask is one predicate plus fixtures. Without them criteria 1, 5 and 6 cannot all hold or the model-facing text contradicts the prompt. cargo test covers all four."
+    },
+    {
+      "risk": "Role version 3 means the next steward run commits a new role record; a store with only version 2 recorded shows an extra role record.",
+      "mitigation": "This is the designed path (role_recorded check, run() lines 1345-1349); role_limit takes the newest version, so the limit does not change."
+    },
+    {
+      "risk": "A briefed blind spot recorded as kind Proposal could fail WorkItem::validate.",
+      "mitigation": "blind_spot_needing_owner sets evidence to the source reference; the end-to-end test runs steward::run on a briefed github blind spot and asserts the run succeeds and the commit holds the item. A core test also runs decide() then item.validate()."
+    },
+    {
+      "risk": "Reworded schema descriptions could break a test that quotes the old text.",
+      "mitigation": "Grep for 'above your limit' found only outputs.rs:320 and roles.rs:124 (both rewritten); the existing steward schema test checks field names and required lists, which do not change."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "decide() routing by brief",
+      "dependent": "crates/athena-core/src/steward.rs run() (line 1327) calls decide() for every candidate and pushes a request only on Decision::Applied; item.validate() at 1328 gates the whole run",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/steward.rs scripted_output_with_a_real_gap_commits_the_work_items_and_a_queued_request (the unbriefed Implementation/defaults item is still applied; the unbriefed brief-requirements item is only recorded and not open) and the new end-to-end token test (the run succeeds and commits the briefed blind spot)",
+      "reason": null
+    },
+    {
+      "name": "brief kept only above the limit (test helper assumption)",
+      "dependent": "steward.rs unit tests using change(rung) with a brief and expecting Applied: a_change_on_a_lower_rung_is_applied, an_applied_change_does_not_carry_the_brief, a_steward_proposal_with_a_boundary_word_is_written_without_it",
+      "kind": "code",
+      "test": "Rewritten in step 6: change(rung) splits into plain_change (brief None) and a briefed form; the boundary-word test sets raw.brief = None in its applied half; run under cargo test -p athena-core",
+      "reason": null
+    },
+    {
+      "name": "steward output schema description of the brief",
+      "dependent": "crates/athena-context/src/outputs.rs StewardItemOutput.brief and StewardBriefOutput doc comments (lines 320, 325), which JsonSchema turns into the descriptions the model reads via steward_schema() (line 599); the only other 'above your limit' text is roles.rs:124, rewritten in step 1",
+      "kind": "code",
+      "test": "New outputs.rs test reads steward_schema() brief description (step 3); the existing the_steward_schema_requires_every_field_of_an_item (outputs.rs:948) is unaffected because field names, types and required lists do not change",
+      "reason": null
+    },
+    {
+      "name": "open_proposals filter",
+      "dependent": "crates/athena-core/src/status.rs work_proposal_views (line 541) and proposal_next_lines feed athena status and crates/athena-cli/src/display.rs:1340 from open_proposals",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/work_decisions.rs status_lists_the_open_proposal_with_its_id_and_nothing_else (seeded item gets a brief); crates/athena-cli/tests/audience.rs:149 (audience items are in limit and unbriefed, so still listed; unchanged); new core and cli tests",
+      "reason": null
+    },
+    {
+      "name": "in_limit and split_open",
+      "dependent": "crates/athena-cli/src/drain.rs queue() (line 4227) via split_open, and RealSteps::approve via Athena::approve_in_limit (work_decisions.rs:358-361), which refuses when !in_limit",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/drain.rs the_real_steps_approve_only_the_in_limit_proposal_and_leave_the_others_waiting (HIGH and GHOST get a brief in seeded_proposals, so they still wait; LOW stays unbriefed and is approved); tests built on the Waiting stub (drain.rs in_limit_proposal) do not read records and are unaffected; work_decisions.rs core test a_proposal_is_in_limit_only_for... rewritten",
+      "reason": null
+    },
+    {
+      "name": "deciding a proposal by id",
+      "dependent": "work_decisions.rs find_open, approve_work, reject_work, approve_request",
+      "kind": "code",
+      "test": "cargo test -p athena-core: only_undecided_proposals_are_open_and_a_second_decision_is_refused (updated to a briefed item); find_open assertions unchanged",
+      "reason": "They find the item by id and kind Proposal and do not call open_proposals, so an unlisted unbriefed above-limit item or a briefed one can still be approved or rejected by id. approve_request builds from title, rung, source and evidence and ignores the brief. A briefed blind spot is kind Proposal, so the same path decides it."
+    },
+    {
+      "name": "owner decisions page",
+      "dependent": "xtask/src/decisions.rs needs_owner (line 94), render (line 370), read_snapshot (line 286, keeps kind Proposal only), the module docs (lines 3-17, 20-23), Brief::new fallback (NO_BRIEF, line 49), and its tests",
+      "kind": "code",
+      "test": "xtask decisions tests updated in step 10: a_proposal_without_a_brief_shows_its_title_and_says_none_is_written (renamed to the direct-constructor case; page part says 'Nothing waiting for you'), the_page_links_every_record_to_github_at_the_tip_and_lists_only_open_proposals, a_proposal_with_no_decision_on_main_is_still_listed, only_the_open_above_limit_proposal_is_a_card, with_only_decided_and_within_limit_proposals_the_page_says_nothing_is_waiting, a_proposal_from_a_role_with_no_recorded_definition_is_still_listed, plus the new test that exactly the briefed open proposals are cards. recommendation() and Brief::new are otherwise unchanged, so the_recommendation_follows_the_raising_roles_recorded_limit and each_brief_shows_its_own_proposal stay.",
+      "reason": null
+    },
+    {
+      "name": "audience work items",
+      "dependent": "crates/athena-core/src/audience.rs work_item (line 98): audience low-rating work items (kind Proposal, rung Implementation, brief None)",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/audience.rs a_rating_of_two_or_lower_raises_a_work_item_and_three_does_not",
+      "reason": "They stay listed and drain-approved because the audience role is recorded with limit Implementation in the same commit (audience.rs:333), so in_limit is true. They are unbriefed and in limit, so the xtask page does not show them (as before). No audience code or role changes."
+    },
+    {
+      "name": "steward role version 3 and prompt",
+      "dependent": "crates/athena-data/src/records.rs:2265 and roles.rs:306 assert the version-2 path; steward.rs role_recorded (line 1294) matches name and version; cli tests/steward.rs asserts after.roles[0].prompt == STEWARD_PROMPT",
+      "kind": "code",
+      "test": "records.rs roles_and_work_items_have_paths_schemas_and_round_trip (updated); roles.rs the_steward_is_valid_and_limited_to_the_lowest_two_rungs (version 3); cli scripted_output_with_a_real_gap... (prompt equals the constant)",
+      "reason": "The next steward run finds no version-3 role record and commits one with its items (run(), lines 1345-1349); role_limit takes the newest version, so the limit is unchanged (highest_rung stays defaults-conventions). steward_system_prompt(prompt, version) takes any version."
+    },
+    {
+      "name": "steward prompt budget",
+      "dependent": "BudgetSet::Steward (600) in crates/athena-context/src/lib.rs; system_facts_budgets_match_computed in crates/athena-cli/tests/budgets.rs; docs/system-facts.md budget lines",
+      "kind": "rule",
+      "test": "the_real_steward_prompt_fits_its_budget (new)",
+      "reason": "docs/system-facts.md lists no steward line and the budgets test compares only the listed sets (contract, reader, producer, verifier, planner, critic), so the steward set is checked by the new context test alone. The contract text and all budgets are unchanged. The outputs.rs schema text is not part of any prompt set."
+    },
+    {
+      "name": "blind_spot_change signature and request",
+      "dependent": "steward.rs blind_spot_change (lines 739-750) and its callers: run() at 1299, 1306, 1314; validate_item at 942; tests at 1572 and 1771-1779; cli tests/steward.rs:438, 482, 489-509; crates/athena-core/tests/refusal_corpus.rs:1440",
+      "kind": "code",
+      "test": "cargo test -p athena-core -p athena-cli and cargo test -p athena-core --test refusal_corpus, run unchanged",
+      "reason": "blind_spot_change keeps its signature, key, kind BlindSpot, empty evidence and request text; the briefed variant is a new function. A blind spot without a brief behaves as before, including github_being_unavailable_is_one_blind_spot_whatever_the_error_says. No refusal or matching rule is added, so no corpus case is added."
+    },
+    {
+      "name": "steward user-prompt wording",
+      "dependent": "steward.rs brief() user prompt (lines 1036-1038 and 1046-1047) and its test the_brief_names_the_sources_the_failures_and_the_queued_keys",
+      "kind": "code",
+      "test": "The same unit test, plus a new assertion for the 'token' and 'if_yes' wording",
+      "reason": "The test asserts only defaults-conventions, the sources and the keys, which stay."
+    },
+    {
+      "name": "known keys of recorded work items",
+      "dependent": "steward.rs seen-key set (known_keys from records.work_items, lines 1286, 1322-1325)",
+      "kind": "code",
+      "test": "New core test: a recorded blind-spot:github key does not stop blind_spot_needing_owner's key from being queued",
+      "reason": "Unchanged on purpose. An unbriefed above-limit item stays recorded, so its key still blocks a repeat; this is the stated risk and it is documented. The briefed blind-spot key is distinct."
+    },
+    {
+      "name": "documented steward behavior",
+      "dependent": "docs/design/roles-and-ladder.md (lines 16, 28-38, 95-98, 103-109), docs/design/explainer-site.md:56-58 and any docs quoting the per-proposal brief rule",
+      "kind": "rule",
+      "test": null,
+      "reason": "Searched docs/ for 'five fields', 'OwnerBrief' and brief-on-proposals: only roles-and-ladder.md states the old rule and is updated; explainer-site.md describes the decisions page as listing what waits for the owner and stays true. docs/decisions.md has no earlier entry on steward briefs, so D169 is new. No test reads these docs; checked by git diff (criterion 7)."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in steward.rs mod tests and work_decisions.rs mod tests. In steward.rs, a new plain_change(rung) helper (brief None) at DesignDecisions, BriefRequirements and OwnerGoals goes through decide() with the Counting applier. In work_decisions.rs, the resulting item (kind Proposal, role steward, steward role recorded in Records, no decision) is put in a Records and passed to open_proposals and split_open.",
+      "command": "cargo test -p athena-core",
+      "observes": "Decision::Proposed, the applier is called zero times, item.brief is None, and open_proposals(&records) is empty. A briefed copy of the same item is listed alone, and split_open puts it in 'above'. An unbriefed in-limit item still goes to 'within'. An unbriefed item from a role with no recorded definition is not listed.",
+      "fails_without": "With the base open_proposals (work_decisions.rs:43-51) every undecided Proposal is listed, so the 'not listed' assertion fails. With the base decide(), the brief is kept for a non-applied change whatever the reason, which is how the rejected job leaked briefless proposals.",
+      "seam": "Entry points: steward::decide(role, change, applier, taken, now) and work_decisions::open_proposals(&Records). Fakes: the Counting applier passed as &dyn Applier (exists, steward.rs tests) and a Records::default() filled with roles::steward(at()) and the work item, as in the work_decisions.rs tests (exists). The plain_change helper and the new tests are added by steps 6 and 7."
+    },
+    {
+      "criterion": 2,
+      "method": "Core: a briefed change at each of the five rungs (including Implementation and DefaultsConventions) goes through decide(): Decision::Proposed, zero applier calls, item.brief equal to the brief, kind Proposal, item.validate() Ok, listed by open_proposals. A blind_spot_needing_owner('github', ..., GH_TOKEN brief) goes through decide() and item.validate() is Ok. validate_items accepts a briefed in-limit item with no request and a github blind spot with a brief, and still refuses an unbriefed in-limit item with no request. End to end in crates/athena-cli/tests/steward.rs: a_missing_token_reaches_the_owner_with_its_brief_and_a_plain_gap_does_not scripts the fake steward (steward_scenario) to report (1) a blind-spot item for path github carrying a five-field GH_TOKEN brief and (2) an unbriefed proposal at brief-requirements, then calls run_steward (which calls steward::run). It asserts the run returns Ok, the commit holds both items, report.applied is empty, the github item has key blind-spot:github:owner-action, kind Proposal and brief Some, the other has brief None, work_decisions::open_proposals returns only the github item, and athena.status().work_proposals has one entry. A second case runs a plain github blind spot first, then the briefed one, and asserts the briefed one is recorded. xtask: a page test with a briefed in-limit item, a briefed above-limit item, an unbriefed above-limit item and an unbriefed in-limit item shows exactly the two briefed cards. outputs.rs: the schema test of step 3 shows the model-facing description routes briefs by need, not by rung.",
+      "command": "cargo test -p athena-core -p athena-cli -p athena-context -p xtask",
+      "observes": "The briefed item is recorded as Proposed with its brief at any rung, the run succeeds and commits, it is the only open proposal, and no request job is queued for it. The decisions page lists exactly the briefed open proposals. The steward schema's brief description mentions environment, token, credential and if_yes and no longer says 'above your limit'.",
+      "fails_without": "The base decide() applies the Implementation-rung change and drops its brief, so the brief assertion and report.applied.is_empty() fail. The base validate_items uses the brief-ignoring blind_spot_change, so the key and brief assertions fail. An empty-evidence constructor would make run() return Err and the end-to-end test fail. With the base needs_owner the briefed in-limit card is missing from the page. With the base outputs.rs comment the schema test fails on 'above your limit'.",
+      "seam": "Entry points: steward::decide, steward::validate_items (reached through steward::run), work_decisions::open_proposals, Athena::status(), xtask decisions::render(&locate(dir)), athena_context::outputs::steward_schema(). Fakes: the fake agent scripted through Scenario.steward and steward_scenario(items) (exists, cli tests/steward.rs:106), RequestQueue as the real applier, Fixture, and for xtask the temp git repository helpers init_repo and page_with (exist). Added by the plan: the briefed(item_json, brief) helper in the cli steward test (step 9), the blind_spot_needing_owner constructor (step 5), the briefed fixtures in xtask (step 10) and the schema test (step 3)."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the diff and grep it.",
+      "command": "git diff -- crates/athena-core/src/steward.rs crates/athena-core/src/work_decisions.rs xtask/src/decisions.rs",
+      "observes": "decide() branches on change.brief.is_some() before role.may_change. open_proposals keeps brief.is_some() || in_limit. in_limit requires brief.is_none(). blind_spot_needing_owner carries a brief, evidence and the :owner-action key, and validate_items calls it when a blind-spot item has a brief. needs_owner in xtask is item.brief.is_some().",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Read the STEWARD_PROMPT diff. A new roles.rs test, the_steward_prompt_tells_it_to_step_back_decide_itself_and_brief_only_for_env_or_token, asserts the wording: 'Step back', 'repeated failures', 'blind spots', 'decide', 'request', 'environment', 'token', 'credential', and that the owner's action goes in 'if_yes'. It asserts the old phrase 'For a proposal above your limit, also write a brief' is gone. The existing five-field test stays green.",
+      "command": "cargo test -p athena-data steward",
+      "observes": "Both prompt tests pass; the prompt carries the wording. The docs mark the prompt rule prose-only.",
+      "fails_without": "The old prompt lacks the step-back and token wording and contains the old phrase, so the test fails.",
+      "seam": "Entry point: the roles::STEWARD_PROMPT constant read by the test; no fake. Exists today; the new test is added by step 1."
+    },
+    {
+      "criterion": 5,
+      "method": "Add the_real_steward_prompt_fits_its_budget to athena-context lib.rs tests. It composes steward_system_prompt(athena_data::roles::STEWARD_PROMPT, athena_data::roles::steward(ts).version) and asserts check_budget(BudgetSet::Steward, &composed) is Ok and estimated_tokens() <= 600 (athena-context depends on data, per the crate-reach fact). The roles.rs steward test asserts version == 3 and path() == records/roles/steward-3.json. The records.rs assertion at about line 2265 becomes steward-3.json; its round trip and check_record_file are unchanged.",
+      "command": "cargo test -p athena-data -p athena-context",
+      "observes": "The real composed prompt is at most 600 tokens; the role is version 3; both path assertions expect steward-3.json; the round trip accepts the new role record.",
+      "fails_without": "A prompt over about 868 bytes makes check_budget return Err and the new test fails. The base test composed only 'You are the steward.', so it never measured the real prompt.",
+      "seam": "Entry points: athena_context::steward_system_prompt and check_budget fed the real constant. No fake. Both exist today; step 2 adds the test."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the full suite, clippy and fmt. The refusal corpus is run too because it calls blind_spot_change('jobs', ...).request (refusal_corpus.rs:1438-1440); that function and its request are unchanged and no result is claimed here.",
+      "command": "cargo test --locked",
+      "observes": "Everything passes, including the edited drain.rs (the_real_steps_approve_only_the_in_limit_proposal_and_leave_the_others_waiting), cli work_decisions.rs, audience.rs:149 (unchanged), the xtask decisions tests, the outputs.rs schema tests and the budgets test. Then cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check are clean.",
+      "fails_without": "If in_limit or open_proposals were wrong, the drain test or the audience status test would fail. If needs_owner and the fixtures disagree, the xtask page tests would fail.",
+      "seam": "Existing suites with fixture edits: drain.rs seeded_proposals (exists, about line 5552), cli work_decisions.rs work_item helper (exists, line 34), xtask page_with and steward_item helpers (exist, lines 835-861)."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff of CHANGELOG.md (Unreleased/Changed entry), docs/design/roles-and-ladder.md and docs/decisions.md (D169 in the D168 form). Grep both docs for the old rule that every over-limit proposal gets a brief. Then git status and git diff --stat.",
+      "command": "git diff --stat",
+      "observes": "No old text remains. The docs say the prompt and schema wording are prose-only and the routing is code-enforced in decide(), open_proposals and the decisions page; a briefed item of any kind is recorded as a proposal; where an unbriefed over-limit item can be seen (records and by id only); and that approve-work follows the owner's supply of the token or environment change. The stat shows none of athena.toml, defaults.toml, .github/workflows or records/.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "c692d1ec174fe3fba812a6a04cbfec96abcadbc89eab23554f1af75a562608f6"
+}

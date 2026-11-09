@@ -13,7 +13,9 @@ are not built.
   role may change by itself. A change to a role is a new record with the next version.
 - **One role, the steward.** It runs after every five finished tasks (a task that landed or was rejected),
   on its own thread, so the job that triggered it returns first. **The steward calls a model.** Its stored
-  prompt (`STEWARD_PROMPT`, recorded with the role; version 2 is the first that calls a model) is the system
+  prompt (`STEWARD_PROMPT`, recorded with the role; version 2 is the first that calls a model, version 3 steps
+  back across repeated failures and blind spots, decides for itself and briefs the owner only for an
+  environment change or a token) is the system
   prompt of an agent run through the same driver as the other roles. The agent reads and reports work items;
   Athena validates them and queues them. The invocation is recorded (role, usage, cost) like any other.
 - **Read-only, by the tool policy.** The agent gets Read, Grep, Glob and Bash. Bash allows `git status`,
@@ -25,8 +27,25 @@ are not built.
 - **A work item is a record** (`athena.work-item/1`). It names its source and cites its evidence by
   reference (a job id, a path, or a commit), never by copy. It has a kind (`blind-spot`,
   `repeated-failure`, `proposal`) and the rung it concerns.
+- **Who the owner is asked.** Only about an environment change or a token or credential Athena lacks, such as
+  a missing `GH_TOKEN`. The steward decides everything else itself and writes no brief for it. The rule is
+  the presence of the five-field brief (`question`, `if_yes`, `if_no`, `cost`, `recommendation`, each one
+  short plain line), and it is **enforced by code**, not by the prompt: `decide()` never applies a change that
+  carries a brief, and records it as a proposal at any rung; `open_proposals`, `athena status`, `athena drain`
+  and the decisions page list a proposal when it has a brief. A change without a brief is applied when the
+  role may change its rung, and above that is only recorded. It is listed nowhere, so no one is asked, and it
+  can be read in the records and decided by its id. A briefed item of any kind (a repeated failure, a blind
+  spot) is recorded as kind `proposal`, because those surfaces list only that kind; its title, key and
+  evidence still show where it came from. What the brief is about (the wording "write a brief only for an
+  environment change or a token or credential", in the prompt and in the descriptions of the output schema
+  in `crates/athena-context/src/outputs.rs`) is **prose-only**: no code checks it. A missing token is a
+  `github` blind spot with a brief (`blind_spot_needing_owner`, key `blind-spot:github:owner-action`, so a
+  plain `blind-spot:github` recorded earlier does not hide it); the owner's action is in `if_yes`, and
+  `athena approve-work <id>` is used once the owner has supplied the token or made the environment change.
+  The routing reads the brief and the work item, not the model's reason for writing it.
 - **Deciding a proposal.** A work item of kind `proposal` is open until a person decides it, by its id,
-  which `athena status` lists. `athena approve-work <id>` submits an ordinary job through the usual reading.
+  which `athena status` lists when it has a brief, or when the role that raised it may change its rung
+  and the drain approves it. `athena approve-work <id>` submits an ordinary job through the usual reading.
   Readers cannot see `records/`, so a request that only named the work item would be read blind; the request
   is built from the work item instead: its title, rung, source and key, and the content of the source and of
   each cited reference copied in as text (a job's request, reading and outcome; a file's text, clipped at
@@ -36,12 +55,13 @@ are not built.
   either the approving job or the rejection reason. An item with a decision is no longer open; a second
   decision, an unknown id and an empty reason are refused. Only proposals are decided this way; blind spots
   and repeated failures are not.
-- **What `athena drain` decides.** `drain` approves an open proposal itself only when the role that raised it
-  may change its rung (the role's newest recorded definition gives the limit, and the top two rungs are never
-  changed by a role). It approves as `approve-work` does, then runs the job that the decision records, and it
+- **What `athena drain` decides.** `drain` approves an open proposal itself only when it has no brief and the
+  role that raised it may change its rung (the role's newest recorded definition gives the limit, and the top
+  two rungs are never changed by a role). It approves as `approve-work` does, then runs the job that the
+  decision records, and it
   also runs any job a work decision records as approved that is still in state proposed (read once, never
-  read again; a closed job is not picked up). Rejecting a proposal, and approving one above its role's limit
-  or raised by a role with no recorded definition, stay with people: `drain` lists those as waiting.
+  read again; a closed job is not picked up). Rejecting a proposal, and approving one that carries a brief,
+  stay with people: `drain` lists those as waiting.
 - **Planning comes first, and the drain follows one plan** (`athena_core::plan`, D105). Before design or code,
   each open request is fleshed out as a plan entry: goal, ladder rung, acceptance, open questions, dependencies
   and touched paths. The rung is the proposal's, else what the request serves in BRIEF.md and its addenda
@@ -94,19 +114,23 @@ are not built.
    input and not a finding), and the keys already queued.
 3. The agent reports `items`: kind, key, title, rung, source, evidence (job ids, paths, commits), and a request
    text. Athena validates each one: the sources and evidence must be well formed, a cited job must exist, a
-   key has a fixed alphabet, and an item on a rung it may change needs a request. An invalid item is dropped
-   and reported, and does not stop the others.
+   key has a fixed alphabet, and an item on a rung it may change needs a request unless it carries a brief
+   (a briefed item is never applied, so a request would be dead text). An invalid item is dropped and
+   reported, and does not stop the others.
 4. **Blind spots.** A source the agent could not read (GitHub unavailable, say), a source Athena could not
    write to the workspace, and a file under `records/` that does not parse as a record each become a
    `blind-spot` item. Its key is `blind-spot:<source name>`, made by Athena from the stable name and never
    from error text, so the same failure on the next run has the same key.
-5. **Every item goes through `decide()`.** The ladder decides it:
-   - at or below the role's limit, the change is applied by queueing a request (the same record
+5. **Every item goes through `decide()`.** A brief decides first, then the ladder:
+   - with a brief (an environment change or a token the owner must supply), the change is not applied at any
+     rung. The work item is recorded as a proposal with its brief and reaches the owner;
+   - without a brief, at or below the role's limit, the change is applied by queueing a request (the same record
      `athena ask --later` writes, on the channel `steward` instead of `cli`). It is not run by the steward: it
      runs when someone runs `athena go` or `athena drain`, under
      the same checks and the independent verifier as any job. The work item cites the queued request. A
      blind spot is on the lowest rung, so its request asks for the source to be made readable;
-   - above the limit, only the work item is queued, as a proposal with its evidence. Nothing is applied.
+   - without a brief, above the limit, only the work item is recorded, with its evidence, and the owner is not
+     asked. Nothing is applied.
 6. Each finding has a key, and a key already on a work item is not queued again (the brief also lists the
    keys, so the agent need not repeat them). A run that queues nothing makes no commit; its invocation record
    waits in the state directory (`steward-pending`) and is committed with the next run's items.
@@ -192,14 +216,17 @@ graded by a yardstick its own reading set. The auditor is a second grader whose 
   lists what is passed, and the steward is only as able to read GitHub as that list allows. It passes
   `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` and `GH_ENTERPRISE_TOKEN`, each only when set (D96). The owner should
   export a read-only token before running Athena; the token reaches every agent role, so it must not have
-  write scope. Without a token the steward reports the `github` blind spot.
+  write scope. Without a token the steward reports the `github` blind spot, with a brief for the owner when
+  the cause is the missing token.
 - **Not run live.** The tests drive the steward with the fake driver. The real driver and the real
   Claude Code hook have not run it.
 
 ## Left for later
 
 Further roles; cost and yield tracking, reshaping and retiring a role (the rest of A10-1 and A9-2); closing a
-work item once it is done (today an item stays, and its key stops it being raised again); a second source
+work item once it is done (today an item stays, and its key stops it being raised again; that includes an
+unbriefed item above the limit, which stays recorded and unlisted, and an applied in-limit proposal, which
+nothing marks decided); a second source
 besides the records, such as the landing history; and a steward-specific model and budget. If the steward
 fails, its error is written to `steward-error.txt` in the state directory; a run that fails after the model
 answered still keeps its invocation record.

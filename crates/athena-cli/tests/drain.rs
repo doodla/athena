@@ -5546,9 +5546,26 @@ fn proposal(id: &str, role: &str, rung: Ladder) -> AnyRecord {
     }))
 }
 
+/// `proposal` with an owner's brief: it needs the owner (an environment change or a token), so it waits for
+/// a person whatever its rung.
+fn briefed_proposal(id: &str, role: &str, rung: Ladder) -> AnyRecord {
+    let AnyRecord::WorkItem(mut item) = proposal(id, role, rung) else {
+        unreachable!("a proposal is a work item")
+    };
+    item.brief = Some(athena_data::records::OwnerBrief {
+        question: "Can you set GH_TOKEN where Athena runs?".into(),
+        if_yes: "You set GH_TOKEN, then approve the work.".into(),
+        if_no: "The steward stays blind to GitHub.".into(),
+        cost: "A few minutes of your time.".into(),
+        recommendation: "Yes: without it GitHub cannot be read.".into(),
+    });
+    AnyRecord::WorkItem(item)
+}
+
 /// A repository with the steward's role recorded and three open proposals: one on the implementation rung
-/// from the steward, one on a design rung from the steward, and one on the implementation rung from a role
-/// that has no recorded definition.
+/// from the steward with no brief (the drain approves it), one on a design rung from the steward and one on
+/// the implementation rung from a role that has no recorded definition, both with a brief (they wait for the
+/// owner).
 fn seeded_proposals(fx: &Fixture) {
     let role = AnyRecord::Role(Box::new(athena_data::roles::steward(
         "2026-10-15T00:00:00Z".parse().unwrap(),
@@ -5556,8 +5573,8 @@ fn seeded_proposals(fx: &Fixture) {
     for record in [
         role,
         proposal(LOW, "steward", Ladder::Implementation),
-        proposal(HIGH, "steward", Ladder::DesignDecisions),
-        proposal(GHOST, "ghost", Ladder::Implementation),
+        briefed_proposal(HIGH, "steward", Ladder::DesignDecisions),
+        briefed_proposal(GHOST, "ghost", Ladder::Implementation),
     ] {
         write(fx.root(), &[(&record.canonical_path(), &record.to_json())]);
     }

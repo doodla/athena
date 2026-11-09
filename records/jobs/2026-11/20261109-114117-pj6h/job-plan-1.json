@@ -1,0 +1,339 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261109-114117-pj6h",
+  "round": 1,
+  "at": "2026-11-09T11:47:44.608924443Z",
+  "invocation_seq": 3,
+  "approach": "Route by the presence of the five-field brief, in code. In `decide()` (steward.rs) a change with a brief is owner-bound: it is never applied, whatever the rung, and is recorded as `Decision::Proposed` with the brief and kind Proposal. A change without a brief is applied if `role.may_change(rung)`; otherwise it is recorded with brief None and does not reach the owner. In work_decisions.rs `open_proposals` lists an undecided proposal only if it has a brief, or has none and the raising role may change its rung (the drain approves those, and the audience role's items rely on that). `in_limit` returns false for a briefed item, so the drain never auto-approves an owner-bound item. A new constructor gives a blind spot that needs a token or environment change a brief, and `validate_items` passes the model's checked brief to it; a briefed item no longer needs a request. `STEWARD_PROMPT` is rewritten to tell the steward to step back across repeated failures and blind spots, to decide and queue a request itself, and to write a brief only for an environment change or a token or credential. The prompt is kept inside the 600-token budget and the role goes to version 3. Tests cover each routing case in core and end to end in cli. A new context test composes the real prompt. The docs, CHANGELOG and a new decision entry are updated and mark the prompt rule prose-only and the routing code-enforced.",
+  "decisions": [
+    {
+      "choice": "Brief present means owner-bound, at any rung. `decide()` skips the apply step, returns `Decision::Proposed`, keeps the brief, and sets the work item kind to Proposal.",
+      "reason": "Rejected-job finding 1: an env/token need at a rung the steward may change (a missing GH_TOKEN is an `implementation` blind spot) was applied and the owner never saw it. Setting kind Proposal is needed because `open_proposals` and `find_open` (work_decisions.rs:43, 93) only handle kind Proposal, so a briefed repeated-failure or blind-spot item would otherwise stay invisible.",
+      "rejected": [
+        {
+          "option": "Keep applying in-limit changes and attach the brief only above the limit (the base behavior, steward.rs:709).",
+          "why": "This is the fault: env/token needs never reach the owner, and above-limit changes without a brief did."
+        },
+        {
+          "option": "Add a code check that refuses briefs for anything but env/token needs.",
+          "why": "Out of scope. The prompt limits briefs (prose-only); code routes by brief presence."
+        }
+      ]
+    },
+    {
+      "choice": "`open_proposals` lists an undecided proposal when `brief.is_some() || in_limit(records, item)`. `in_limit` gains `brief.is_none() &&`. `split_open` is unchanged and so sends briefed items to 'above' (a person) and unbriefed in-limit items to 'within' (drain).",
+      "reason": "Finding 2: unbriefed above-limit proposals must not be listed. The assumption text says 'only items with a brief', but the audience role raises unbriefed Implementation proposals that its own cli test expects in `status.work_proposals` (crates/athena-cli/tests/audience.rs:149). That role records its definition in the same commit (audience.rs:333), so they are in limit, and the drain approves them. Keeping in-limit unbriefed items listed leaves that role and the drain unchanged. Criteria 1 and 2 hold.",
+      "rejected": [
+        {
+          "option": "List only items with a brief.",
+          "why": "It hides the audience role's work items from `athena status` and breaks the audience tests, and the audience role is out of scope."
+        },
+        {
+          "option": "Change `split_open` separately from `open_proposals`.",
+          "why": "Not needed. `split_open` already partitions `open_proposals` by `in_limit`, and the new `in_limit` gives the right split."
+        }
+      ]
+    },
+    {
+      "choice": "A briefed blind spot gets a new constructor `blind_spot_needing_owner(source, title, brief)`. `validate_items` calls it for a blind-spot item that carries a brief, after `check_brief`. A blind spot without a brief still goes through `blind_spot_change`.",
+      "reason": "Criterion 3. The output schema already has an optional `brief` on every item (crates/athena-context/src/outputs.rs:322), so no schema change is needed. Only the model can tell a missing token from a transient gh error, so the model decides whether to write a brief, and the prompt (prose-only) limits it to env/token needs.",
+      "rejected": [
+        {
+          "option": "Make the blind-spot constructor detect GH_TOKEN itself.",
+          "why": "The steward's own process cannot see the model's gh environment; the token passing lives in athena-agent env.rs, outside this change."
+        },
+        {
+          "option": "Add a new kind to `StewardKindOutput`.",
+          "why": "It changes outputs.rs, which is not a deliverable, and the schema, for no gain."
+        }
+      ]
+    },
+    {
+      "choice": "`validate_items` requires a request for a rung the role may change only when the item has no brief.",
+      "reason": "A briefed item is never applied, so a request would be dead text. Without this, an env/token item at `implementation` with no request is dropped at steward.rs:961 before it reaches `decide()`.",
+      "rejected": [
+        {
+          "option": "Keep requiring a request for every in-limit item.",
+          "why": "It forces dead text, or drops the owner-bound item."
+        }
+      ]
+    },
+    {
+      "choice": "Keep two `Decision` variants. `Proposed` doc: 'not applied; the work item is recorded'. Whether the owner sees it depends on the item's brief.",
+      "reason": "A third variant would touch `run()` and every match for no behavior gain; the item's brief is the measured signal the criteria name.",
+      "rejected": [
+        {
+          "option": "Add `Decision::Recorded` for unbriefed above-limit.",
+          "why": "More churn in `run()` and tests; the owner-visible fact is the brief, not the variant."
+        }
+      ]
+    },
+    {
+      "choice": "The prompt fits by rewriting `STEWARD_PROMPT` in fewer bytes. The role goes to version 3. The ceiling is the composed contract (929 bytes, docs/decisions.md D168) plus the prompt: at most 1800 bytes (600 tokens × 3), so about 868 bytes of prompt.",
+      "reason": "Budgets never rise to fit a set (lib.rs:176-178). The current prompt leaves about 150 bytes of room, so the producer must measure the real composed size. Criterion 5's test does that.",
+      "rejected": [
+        {
+          "option": "Raise the Steward budget.",
+          "why": "Forbidden by the budget comment; the criterion asserts at most 600."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "purpose": "`decide()` routes by `change.brief`; the new constructor `blind_spot_needing_owner`; `validate_items` passes a blind spot's brief to it and requires a request only for an unbriefed in-limit item; `brief()` user-prompt wording; the `ProposedChange.brief` and `Decision::Proposed` docs; unit tests for each routing case.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/work_decisions.rs",
+      "action": "modify",
+      "purpose": "`open_proposals` lists briefed items and unbriefed in-limit ones; `in_limit` is false for a briefed item; module and function docs; updated and new unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/roles.rs",
+      "action": "modify",
+      "purpose": "Rewrite `STEWARD_PROMPT` (step back, decide itself, brief only for env/token) inside the budget; steward version 3; wording and version/path tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Path assertion at ~2265 becomes `records/roles/steward-3.json`. Test only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add the test that composes the real `STEWARD_PROMPT` and asserts at most 600 estimated tokens.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/steward.rs",
+      "action": "modify",
+      "purpose": "Add a `briefed` item helper and the end-to-end token test; add the not-open assertion to the existing real-gap test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Test fixture only: `seeded_proposals` gives the HIGH and GHOST proposals a brief so they remain owner-bound waiting items; LOW stays unbriefed. Not a listed deliverable; needed because those items now list only with a brief.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/work_decisions.rs",
+      "action": "modify",
+      "purpose": "Test fixture only: the seeded `work_item` gets a brief so `athena status` still lists it (steward role unrecorded there).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/roles-and-ladder.md",
+      "action": "modify",
+      "purpose": "Describe version 3, the brief-presence routing, the validation change, and which rules are prose-only (prompt) and which are code-enforced (`decide()`, `open_proposals`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased/Changed entry for the new steward behavior.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D169 in the D168 form (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `docs/decisions.md` D168 for the entry form and `CHANGELOG.md` Unreleased for the entry form. Then edit roles.rs: rewrite `STEWARD_PROMPT` to say, in at most about 868 bytes: step back across repeated failures and blind spots and decide yourself what to change; cite by reference; name the rung; Athena queues your request at or below your limit and records an item above it without asking the owner; write a brief only when the fix needs an environment change or a token or credential Athena lacks; the five fields (question, if_yes, if_no, cost, recommendation with a one-line reason), each short, plain, no jargon; otherwise brief null. Set steward `version: 3` and fix the doc comment ('Version 3 ...'). Update the roles tests: version 3 and path `steward-3.json`; add `the_steward_prompt_tells_it_to_step_back_decide_itself_and_brief_only_for_env_or_token` asserting the new wording and the absence of the old 'For a proposal above your limit, also write a brief'; keep the existing five-field test.",
+    "In records.rs change the assertion at ~2265 to `records/roles/steward-3.json`. In crates/athena-context/src/lib.rs add `the_real_steward_prompt_fits_its_budget`: compose the real `athena_data::roles::STEWARD_PROMPT` with `athena_data::roles::steward(ts).version`, assert `check_budget(BudgetSet::Steward, &c)` is Ok and `estimated_tokens() <= 600`. Run `cargo test -p athena-data -p athena-context` and trim the prompt until it passes.",
+    "In steward.rs `decide()`: `let owner_bound = change.brief.is_some();` apply only when `!owner_bound && role.may_change(change.rung)`; otherwise `Decision::Proposed`; `brief = change.brief.clone()` (None whenever applied); `kind = if owner_bound { WorkItemKind::Proposal } else { change.kind }`. Update the docs of `Decision::Proposed` and of `ProposedChange.brief` (an env or token need the owner must supply; routes to the owner at any rung).",
+    "In steward.rs add `pub fn blind_spot_needing_owner(source, title, brief: OwnerBrief) -> ProposedChange` (= `blind_spot_change` with `brief: Some(brief)`). In `validate_items` compute the brief first (`check_brief` as at lines 972-975, also for a blind-spot item), return `blind_spot_needing_owner` when the blind-spot item has one, else `blind_spot_change`; and change the request check at line 961 to `role.may_change(rung) && brief.is_none() && request.is_empty()`. Update the two prompt paragraphs of `brief()` (lines 1036-1038 and 1046-1047): the owner decides only items with a brief; a missing GH_TOKEN or GITHUB_TOKEN is a `github` blind spot with a brief.",
+    "In steward.rs tests: split the `change()` helper into `plain_change(rung)` (brief None) and the briefed form; rewrite `an_applied_change_does_not_carry_the_brief`; point `a_change_on_a_lower_rung_is_applied` at `plain_change`; set `raw.brief = None` in the applied half of `a_steward_proposal_with_a_boundary_word_is_written_without_it`. Add tests: unbriefed above-limit gives Proposed, brief None, no applier call (criterion 1, at three rungs); briefed change at every rung gives Proposed with the brief, kind Proposal, no applier call, and `item.validate()` Ok; `blind_spot_needing_owner` with a GH_TOKEN brief; `validate_items` accepts a briefed in-limit item with no request and a github blind spot with a brief, and still refuses an unbriefed in-limit item with no request.",
+    "In work_decisions.rs: `in_limit` returns false when `item.brief.is_some()`; `open_proposals` keeps a proposal only if `w.brief.is_some() || in_limit(records, w)`; update the module doc and function docs (owner-bound versus drain-approved). Update the tests: `only_undecided_proposals_are_open...` uses a briefed item; `a_proposal_is_in_limit_only_for...` gives `high` and `stranger` a brief and asserts that before the role is recorded the unbriefed `low` is absent from both lists; add a core test that an unbriefed above-limit proposal and an unbriefed unknown-role proposal are not listed while a briefed in-limit one is listed in 'above'.",
+    "In crates/athena-cli/tests/steward.rs add a `briefed(item, brief)` helper and `a_missing_token_reaches_the_owner_with_its_brief_and_a_plain_gap_does_not` as described in demonstration 2; add to `scripted_output_with_a_real_gap...` an assertion that `open_proposals` does not list the unbriefed brief-requirements proposal. In crates/athena-cli/tests/drain.rs `seeded_proposals` give HIGH and GHOST an `OwnerBrief`; in crates/athena-cli/tests/work_decisions.rs `work_item` give the item a brief.",
+    "Write the docs: roles-and-ladder.md (line 16 version 3; item 3 of 'How a run goes': a request is needed for an in-limit item unless it carries a brief; item 5: a brief means owner-bound at any rung, no brief means applied if in limit or else recorded without the owner; the 'Deciding a proposal' bullet: only briefed or in-limit items are open and listed; a note that the prompt rule is prose-only and the routing is code-enforced in `decide()` and `open_proposals`). Add the CHANGELOG entry under Unreleased/Changed. Append D169 to docs/decisions.md in the D168 form, citing the rejected job 20261109-080220-zkhy and its ten findings, and what was and was not measured.",
+    "Run `cargo fmt --all`, then `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo fmt --all --check` and `cargo test -p athena-core --test refusal_corpus`. Then `git status` and `git diff --stat` to confirm that only the listed files changed and that athena.toml, defaults.toml, .github/workflows and records/ are untouched."
+  ],
+  "risks": [
+    {
+      "risk": "The new prompt does not fit: the composed steward set is limited to 1800 bytes (600 tokens × 3), the contract takes 929 plus separators, so the prompt must be about 868 bytes or less, and the current one leaves only about 150 bytes of room.",
+      "mitigation": "Step 1 writes the prompt and measures it with the new context test before anything else. Required terms are fixed by the two roles.rs tests (question, if_yes, if_no, cost, recommendation, one-line reason, short, plain, no jargon, plus the new wording). Drop the existing prose that restates the schema first. Never raise the budget."
+    },
+    {
+      "risk": "The model writes a brief for a non-env/token item, or omits one for a real token need. Code does not check the reason (out of scope).",
+      "mitigation": "The prompt wording is marked prose-only in the docs. The routing still holds either way: a brief reaches the owner, no brief never does. The measured check is the item's brief and `open_proposals`."
+    },
+    {
+      "risk": "A within-limit unbriefed steward item of kind Proposal that was applied (a request already queued) stays open, so the drain could approve it a second time. This already happens at base: nothing records a decision for an applied item.",
+      "mitigation": "Not changed here. `decide()` still applies only when there is no brief, and the prompt says proposals are for rungs above the limit. Listed so the next change can close it."
+    },
+    {
+      "risk": "Editing drain.rs and cli work_decisions.rs test fixtures goes beyond the listed deliverables.",
+      "mitigation": "The edits are fixture-only (a brief on three work items) and are needed because those items now list only with a brief; they are named in files and dependents."
+    },
+    {
+      "risk": "Role version 3 means the next steward run commits a new role record; a store with only version 2 recorded shows an extra role record.",
+      "mitigation": "This is the designed path (`role_recorded` check, run() lines 1345-1349); `role_limit` takes the newest version, so no limit changes (highest_rung stays defaults-conventions)."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`decide()` routing",
+      "dependent": "crates/athena-core/src/steward.rs `run()` (line 1327) calls `decide()` for every candidate and pushes a request only on `Decision::Applied`",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/steward.rs `scripted_output_with_a_real_gap_commits_the_work_items_and_a_queued_request` (the unbriefed Implementation/defaults item is still applied and the brief-requirements item is only recorded) and the new end-to-end token test",
+      "reason": null
+    },
+    {
+      "name": "test helpers that assume a brief is kept only above the limit",
+      "dependent": "steward.rs unit tests that use `change(rung)` with a brief and expect Applied: `a_change_on_a_lower_rung_is_applied`, `an_applied_change_does_not_carry_the_brief`; and `a_steward_proposal_with_a_boundary_word_is_written_without_it`, whose `item()` helper adds a brief",
+      "kind": "code",
+      "test": "Rewritten in this change: `change(rung)` splits into `plain_change` (brief None) and a briefed form; the boundary-word test sets `raw.brief = None` for its applied half; the same tests then run under `cargo test -p athena-core`",
+      "reason": null
+    },
+    {
+      "name": "`open_proposals` filter",
+      "dependent": "crates/athena-core/src/status.rs `work_proposal_views` (line 541) feeds `athena status` and `proposal_next_lines` from `open_proposals`",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/work_decisions.rs (seeded item gets a brief so it stays open), crates/athena-cli/tests/audience.rs:149 (audience items are in limit and unbriefed, so still listed; unchanged), and the new core and cli tests",
+      "reason": null
+    },
+    {
+      "name": "`in_limit` and `split_open`",
+      "dependent": "crates/athena-cli/src/drain.rs `queue()` (line 4227) via `split_open`, and `RealSteps::approve` via `Athena::approve_in_limit` (work_decisions.rs:358), which refuses when `!in_limit`",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/drain.rs `the_real_steps_approve_only_the_in_limit_proposal_and_leave_the_others_waiting` (HIGH and GHOST get a brief in `seeded_proposals`, so they still wait; LOW stays unbriefed and approved). The tests built on the `Waiting` stub (`in_limit_proposal()`, drain.rs:5443) do not read records and are unaffected. Plus work_decisions.rs core test `a_proposal_is_in_limit_only_for_...` rewritten for the new rule",
+      "reason": null
+    },
+    {
+      "name": "deciding a proposal by id",
+      "dependent": "crates/athena-core/src/work_decisions.rs `find_open`, `approve_work`, `reject_work`, `approve_request`",
+      "kind": "code",
+      "test": "crates/athena-core/src/work_decisions.rs `only_undecided_proposals_are_open_and_a_second_decision_is_refused` (updated to a briefed item, its `find_open` asserts unchanged)",
+      "reason": "They do not call `open_proposals`; they look the item up by id, so an unlisted or briefed item can still be approved or rejected by id. `approve_request` builds from the item and ignores the brief. A briefed blind spot that becomes kind Proposal is decidable by the same path (approve queues the make-readable job)."
+    },
+    {
+      "name": "audience low-rating work items (kind Proposal, rung Implementation, brief None)",
+      "dependent": "crates/athena-core/src/audience.rs `work_item` (line 98) and `audience` role, out of scope",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/audience.rs `a_rating_of_two_or_lower_raises_a_work_item_and_three_does_not`",
+      "reason": "They stay listed because the audience role is recorded with limit Implementation in the same commit (audience.rs:333), so `in_limit` is true; the drain approves them as before. No audience code or role changes."
+    },
+    {
+      "name": "owner decisions page",
+      "dependent": "xtask/src/decisions.rs `read_snapshot`/`needs_owner` (lines 94, 286) builds the owner decisions page from records on the branch",
+      "kind": "code",
+      "test": null,
+      "reason": "It reads work items straight from the records branch and filters by rung against the role limit (`needs_owner`), not through `open_proposals`, so its tests are unaffected. Not a deliverable. Effect: unbriefed above-limit items still show there as 'No brief written yet', and briefed in-limit items are not shown there. This is raised as a user question."
+    },
+    {
+      "name": "steward role version 3 and prompt",
+      "dependent": "crates/athena-data/src/roles.rs `steward()` version, `path()`; records.rs:2265 asserts `steward-2.json`; `role_recorded` in steward.rs:1294 (matches name and version)",
+      "kind": "code",
+      "test": "records.rs `roles_and_work_items_have_paths_schemas_and_round_trip` (updated); roles.rs `the_steward_is_valid_and_limited_to_the_lowest_two_rungs`; cli tests/steward.rs `scripted_output...` asserts `after.roles[0].prompt == STEWARD_PROMPT`",
+      "reason": "Only records.rs:2265 and roles.rs:306 assert the version-2 path (searched all *.rs and docs). The next steward run finds no version-3 role record and commits one with its items (run(), lines 1345-1349); `role_limit` takes the newest version. `steward_system_prompt(prompt, version)` takes any version."
+    },
+    {
+      "name": "steward prompt budget",
+      "dependent": "BudgetSet::Steward (600) in crates/athena-context/src/lib.rs; `system_facts_budgets_match_computed` in crates/athena-cli/tests/budgets.rs; docs/system-facts.md budget lines",
+      "kind": "rule",
+      "test": "the new context test `the_real_steward_prompt_fits_its_budget`",
+      "reason": "docs/system-facts.md lists no steward line and the budgets test compares only the listed sets (contract, reader, producer, verifier, planner, critic), so the steward is checked by the new context test alone. The contract text is not changed."
+    },
+    {
+      "name": "`blind_spot_change` signature and request; `approve_request`",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs:1438-1440 and :1208",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus (run unchanged)",
+      "reason": "`blind_spot_change(source, title)` keeps its signature and request text (the briefed variant is a new function); `approve_request` is not edited. No refusal or matching rule is added, so no corpus case is added."
+    },
+    {
+      "name": "steward user-prompt wording about the limit and the GitHub blind spot",
+      "dependent": "steward.rs `brief()` user prompt (lines 1036-1038 and 1046-1047) and its test `the_brief_names_the_sources_the_failures_and_the_queued_keys`",
+      "kind": "code",
+      "test": "the same unit test, plus a new assertion for the 'environment, token' wording",
+      "reason": "The wording is updated to the new routing: above the limit or on a briefed item the owner decides; a missing token is a blind spot with a brief. The test only asserts `defaults-conventions`, the sources and the keys, which stay."
+    },
+    {
+      "name": "documented steward behavior",
+      "dependent": "docs/design/roles-and-ladder.md (lines 16, 28-38, 95-98, 103-109) and any docs that quote the old per-proposal brief rule",
+      "kind": "rule",
+      "test": "git diff review (criterion 7); no test reads these docs",
+      "reason": "Searched docs/ for 'five fields', 'OwnerBrief' and 'brief' on proposals: only roles-and-ladder.md and the unrelated docs/design/explainer-site.md:56-58, which describes the page and stays true. decisions.md has no earlier entry on steward briefs, so D169 is new."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Add unit tests in `steward.rs` `mod tests` and `work_decisions.rs` `mod tests`. In steward.rs, build a change with brief None at DesignDecisions, BriefRequirements and OwnerGoals (a new `plain_change(rung)` helper beside `change()`), call `decide` with the `Counting` applier, and assert `Decision::Proposed`, zero applier calls, `item.brief == None`. In work_decisions.rs, put that item (kind Proposal, role steward, steward role recorded, no decision) in a `Records` and assert it is absent from `open_proposals`. The same records with a briefed copy list that one.",
+      "command": "cargo test -p athena-core",
+      "observes": "The unbriefed above-limit item has brief None and `open_proposals(&records)` is empty. The briefed copy is listed alone. Also `split_open` puts an unbriefed in-limit item in 'within' and a briefed in-limit item in 'above'.",
+      "fails_without": "With the base code `open_proposals` lists every undecided Proposal, so the 'not listed' assertion fails. With the base `decide`, a non-brief change would also keep `change.brief`, which is how the previous run leaked briefless proposals.",
+      "seam": "Production entry points: `steward::decide(role, change, applier, taken, now)` and `work_decisions::open_proposals(&Records)`. Fakes: the `Counting` applier (exists, steward.rs tests ~1641) passed as `&dyn Applier`, and a `Records::default()` filled with `roles::steward(at())` and the work item (the pattern in work_decisions.rs tests 457-476). Both seams exist today. The plan step adds only the helpers."
+    },
+    {
+      "criterion": 2,
+      "method": "Core: a briefed change (`change(rung)`, brief Some(owner_brief())) at every rung (all five, including Implementation and DefaultsConventions) gives `Decision::Proposed`, zero applier calls, item.brief equal to the brief, kind Proposal, and is listed by `open_proposals`. A blind-spot test uses `blind_spot_needing_owner` with a GH_TOKEN brief, and `validate_items` on a blind-spot item JSON carrying a GH_TOKEN brief. End to end in `crates/athena-cli/tests/steward.rs`: a new test `a_missing_token_reaches_the_owner_with_its_brief_and_a_plain_gap_does_not` scripts the fake steward with `steward_scenario` to report (1) a blind-spot item for source `github` with a five-field GH_TOKEN brief and (2) an unbriefed proposal at `brief-requirements`. It runs `run_steward(&athena)`, loads `Records` at head, and asserts: `report.applied` is empty and no steward-channel job exists; the github item has kind Proposal and brief Some; the other has brief None; `work_decisions::open_proposals` returns only the github item; `athena.status().work_proposals` has one entry. `scripted_output_with_a_real_gap...` also gains the assertion that its above-limit unbriefed proposal is not open.",
+      "command": "cargo test -p athena-core -p athena-cli",
+      "observes": "The briefed item is recorded as Proposed with its brief, at any rung, and is the only open proposal. No request job is queued for it.",
+      "fails_without": "The base `decide` applies the Implementation-rung change and drops its brief, so the brief assertion and `report.applied.is_empty()` fail; the base `validate_items` would also use the brief-ignoring `blind_spot_change`.",
+      "seam": "Production entry points: `steward::decide`, `steward::validate_items` (reached through `steward::run`), `work_decisions::open_proposals`, and `Athena::status()`. Fakes: the fake agent scripted through `Scenario.steward` and `steward_scenario(items)` (exists, cli tests/steward.rs:106), `RequestQueue` as the real applier, and `Fixture`. A new helper `briefed(item_json, brief)` adds the `brief` key to the existing `item(...)` JSON; the plan adds it. The rest exists."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the diff of `decide()` and `open_proposals`/`in_limit` in work_decisions.rs, and of `blind_spot_needing_owner` and its use in `validate_items`. Grep to show that each carries the rule.",
+      "command": "git diff -- crates/athena-core/src/steward.rs crates/athena-core/src/work_decisions.rs",
+      "observes": "`decide` branches on `change.brief.is_some()` before `role.may_change`. `open_proposals` keeps `brief.is_some() || in_limit`. `in_limit` needs `brief.is_none()`. `blind_spot_needing_owner` is built from `blind_spot_change` plus the brief, and the blind-spot branch of `validate_items` calls it when a brief is present.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff of `STEWARD_PROMPT`. A new test in `roles.rs` `mod tests`, `the_steward_prompt_tells_it_to_step_back_decide_itself_and_brief_only_for_env_or_token`, asserts the wording: 'Step back', 'repeated failures', 'blind spots', 'decide', 'request', 'environment', 'token', 'credential'. It also asserts the old phrase 'For a proposal above your limit, also write a brief' is gone. The existing `the_steward_prompt_names_the_five_brief_fields_and_the_owner_style` stays green (question, if_yes, if_no, cost, recommendation, one-line reason, short, plain, no jargon).",
+      "command": "cargo test -p athena-data steward",
+      "observes": "Both prompt tests pass. The wording asserted is the content criterion's wording, and the prompt is prose-only (the doc says so).",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Add `the_real_steward_prompt_fits_its_budget` to `crates/athena-context/src/lib.rs` `mod tests`. It composes `steward_system_prompt(athena_data::roles::STEWARD_PROMPT, athena_data::roles::steward(ts).version)` (context depends on data, per the crate-reach fact) and asserts `check_budget(BudgetSet::Steward, &composed)` is Ok with `estimated_tokens() <= 600`. In roles.rs, the steward test asserts `version == 3` and `path() == records/roles/steward-3.json`. In records.rs (~2265), the `canonical_path` assertion becomes steward-3.json; the round trip in that test is unchanged.",
+      "command": "cargo test -p athena-data -p athena-context",
+      "observes": "The real composed prompt is at most 600 tokens. The role is version 3 and both path assertions expect steward-3.json. The round trip and `check_record_file` accept the new role record.",
+      "fails_without": "A prompt over about 868 bytes makes `check_budget` return Err and the new test fails. The base test only composed 'You are the steward.', so it never measured the real prompt.",
+      "seam": "Production entry points: `athena_context::steward_system_prompt` and `check_budget`, fed the real `STEWARD_PROMPT` constant. No fake. Exists today for both; the plan adds only the test."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the full suite, clippy with warnings denied and the format check. Also run the refusal corpus, since a changed validation sits near `blind_spot_change`: `crates/athena-core/tests/refusal_corpus.rs:1438-1440` feeds `blind_spot_change(\"jobs\", ...).request` to a case, and the plan does not change that function or its request. No case result is claimed here.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass, including the edited drain.rs, work_decisions.rs (cli) and audience.rs tests. The clippy and fmt commands are `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`. Run `cargo test -p athena-core --test refusal_corpus` as well.",
+      "fails_without": "If `in_limit` or `open_proposals` were wrong, `the_real_steps_approve_only_the_in_limit_proposal...` (drain.rs:5762) or the audience status test (audience.rs:149) would fail.",
+      "seam": "The existing suites with fixture edits: drain.rs `seeded_proposals` (exists, drain.rs:5552) and the cli work_decisions.rs `work_item` helper (exists, line 34)."
+    },
+    {
+      "criterion": 7,
+      "method": "Read `git diff` for CHANGELOG.md (an Unreleased/Changed entry), docs/design/roles-and-ladder.md and docs/decisions.md (new D169 in the D168 form: Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance). Check that no old text remains saying every over-limit proposal gets a brief, and that no governance path is touched.",
+      "command": "git status",
+      "observes": "Only the listed files changed. `git diff --stat` shows none of athena.toml, defaults.toml, .github/workflows or records/. The docs say the prompt rule is prose-only and the routing is enforced in `decide()` and `open_proposals`.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: Should a follow-up change the owner decisions page (xtask/src/decisions.rs `needs_owner`, built into decisions.html) to list only briefed items? Until then the page still shows unbriefed above-limit proposals as 'No brief written yet' and hides briefed in-limit ones. This plan leaves it because xtask is not a listed deliverable and its tests assert the 'No brief written yet' card."
+  ],
+  "producer_section_sha256": "f70e092da4978679d10e300ab1d073823b6e7cb8089dd70cc7a6f8db08a0492a"
+}

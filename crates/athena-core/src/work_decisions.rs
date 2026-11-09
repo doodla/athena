@@ -1,6 +1,8 @@
 //! Deciding a steward proposal (`docs/design/roles-and-ladder.md`).
 //!
-//! The steward queues a change above its own limit only as a work item of kind proposal. A work item cites its
+//! The steward records a change it needs the owner for (an environment change or a token Athena lacks) as a
+//! work item of kind proposal that carries a brief, at any rung. A change above its limit with no brief is only
+//! recorded, and the owner is not asked. A work item cites its
 //! source and evidence by reference (a job id, a path, a commit), and readers cannot see `records/`, so a job
 //! whose request only pointed at the work item would be read blind.
 //!
@@ -39,12 +41,22 @@ pub fn decision_of<'a>(records: &'a Records, item: &WorkItem) -> Option<&'a Work
         .max_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)))
 }
 
-/// The work items of kind proposal that no decision names, oldest first.
+/// The work items of kind proposal that no decision names and that someone has to act on, oldest first.
+///
+/// Two kinds are listed. An item with a brief is the owner's: the steward judged that it needs an environment
+/// change or a token Athena lacks, at any rung. An item without a brief is listed only when the role that
+/// raised it may change its rung itself ([`in_limit`]); the drain approves those without a person. An item
+/// without a brief above its role's limit is the steward's own finding. It is recorded and found by its id,
+/// but no one is asked about it, so it is not listed.
 pub fn open_proposals(records: &Records) -> Vec<&WorkItem> {
     let mut open: Vec<&WorkItem> = records
         .work_items
         .iter()
-        .filter(|w| w.kind == WorkItemKind::Proposal && decision_of(records, w).is_none())
+        .filter(|w| {
+            w.kind == WorkItemKind::Proposal
+                && decision_of(records, w).is_none()
+                && (w.brief.is_some() || in_limit(records, w))
+        })
         .collect();
     open.sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
     open
@@ -61,14 +73,16 @@ pub fn role_limit(records: &Records, name: &str) -> Option<Ladder> {
         .map(|r| r.highest_rung)
 }
 
-/// Whether the role that raised `item` may change the item's rung itself. A role with no recorded
-/// definition may not.
+/// Whether the drain may approve `item` without a person: it has no brief, and the role that raised it may
+/// change the item's rung itself. A role with no recorded definition may not. An item with a brief is the
+/// owner's, whatever its rung, so it is never in limit.
 pub fn in_limit(records: &Records, item: &WorkItem) -> bool {
-    role_limit(records, &item.role).is_some_and(|limit| may_change(limit, item.rung))
+    item.brief.is_none()
+        && role_limit(records, &item.role).is_some_and(|limit| may_change(limit, item.rung))
 }
 
-/// The open proposals, oldest first, split by the ladder: those the raising role may change itself, and those
-/// it may not (above its limit, or raised by a role with no recorded definition). Only the first kind is
+/// The open proposals, oldest first, split into those the drain approves (no brief, and the raising role may
+/// change the rung itself) and those that wait for the owner (they carry a brief). Only the first kind is
 /// approved without a person.
 pub fn split_open(records: &Records) -> (Vec<&WorkItem>, Vec<&WorkItem>) {
     open_proposals(records)
@@ -413,10 +427,27 @@ mod tests {
         }
     }
 
+    fn owner_brief() -> athena_data::records::OwnerBrief {
+        athena_data::records::OwnerBrief {
+            question: "Set GH_TOKEN so the steward can read GitHub?".into(),
+            if_yes: "You set GH_TOKEN, then approve the work.".into(),
+            if_no: "The steward stays blind to GitHub.".into(),
+            cost: "A few minutes of your time.".into(),
+            recommendation: "Yes: it is the only way to read runs.".into(),
+        }
+    }
+
+    fn briefed(mut item: WorkItem) -> WorkItem {
+        item.brief = Some(owner_brief());
+        item
+    }
+
     #[test]
     fn only_undecided_proposals_are_open_and_a_second_decision_is_refused() {
         let mut records = Records::default();
-        records.work_items.push(item(WorkItemKind::Proposal));
+        records
+            .work_items
+            .push(briefed(item(WorkItemKind::Proposal)));
         let mut other = item(WorkItemKind::BlindSpot);
         other.id = RecordId::parse("20261015-003904-aaaa").unwrap();
         records.work_items.push(other);
@@ -456,23 +487,53 @@ mod tests {
     #[test]
     fn a_proposal_is_in_limit_only_for_a_recorded_role_whose_limit_covers_its_rung() {
         let mut records = Records::default();
+        // `low` has no brief; `high` and `stranger` carry one, so they are the owner's.
         let mut low = item(WorkItemKind::Proposal);
         low.rung = Ladder::Implementation;
-        let mut high = item(WorkItemKind::Proposal);
+        let mut high = briefed(item(WorkItemKind::Proposal));
         high.id = RecordId::parse("20261015-003904-aaaa").unwrap();
-        let mut stranger = low.clone();
+        let mut stranger = briefed(low.clone());
         stranger.id = RecordId::parse("20261015-003905-bbbb").unwrap();
         stranger.role = "ghost".into();
         records.work_items.extend([low, high, stranger]);
-        // No role is recorded yet, so nothing is in limit.
+        // No role is recorded yet, so nothing is in limit: the unbriefed one is listed nowhere.
         let (within, above) = split_open(&records);
         assert!(within.is_empty());
-        assert_eq!(above.len(), 3);
+        assert_eq!(above.len(), 2, "only the briefed items are listed");
+        assert!(above.iter().all(|w| w.brief.is_some()));
         records.roles.push(athena_data::roles::steward(at()));
         let (within, above) = split_open(&records);
         assert_eq!(within.len(), 1);
         assert_eq!(within[0].rung, Ladder::Implementation);
         assert_eq!(above.len(), 2, "above the limit, and an unknown role");
+    }
+
+    #[test]
+    fn an_unbriefed_proposal_above_the_limit_is_not_open_and_a_briefed_one_in_limit_is() {
+        let mut records = Records::default();
+        records.roles.push(athena_data::roles::steward(at()));
+        // Above the steward's limit, no brief: recorded, nobody is asked.
+        let over = item(WorkItemKind::Proposal);
+        // A role with no recorded definition, no brief: not listed either.
+        let mut unknown = item(WorkItemKind::Proposal);
+        unknown.id = RecordId::parse("20261015-003904-aaaa").unwrap();
+        unknown.role = "ghost".into();
+        unknown.rung = Ladder::Implementation;
+        // In the steward's limit but with a brief (a missing token): the owner's, so listed and not approvable.
+        let mut token = briefed(item(WorkItemKind::Proposal));
+        token.id = RecordId::parse("20261015-003905-bbbb").unwrap();
+        token.rung = Ladder::Implementation;
+        records.work_items.extend([over, unknown, token.clone()]);
+        let open = open_proposals(&records);
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, token.id);
+        assert!(!in_limit(&records, &token));
+        let (within, above) = split_open(&records);
+        assert!(within.is_empty());
+        assert_eq!(above.len(), 1);
+        assert_eq!(above[0].id, token.id);
+        // The unlisted item can still be found and decided by its id.
+        assert!(find_open(&records, "20261015-003903-khz6").is_ok());
     }
 
     /// A repository with `athena.toml`, `defaults.toml` and the files given, and an Athena whose reader

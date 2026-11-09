@@ -4861,3 +4861,52 @@ should replace those estimates with its figures.
 - **Provenance:** Read: the base and candidate prompt files, `crates/athena-context/src/lib.rs`, the rejected job's
   findings. Measured: `cargo test -p athena-context` and `cargo test -p athena-cli --test budgets` on the final
   text. Not measured: whether the trimmed prompts change agent behavior.
+
+## D169 · The steward decides for itself; the owner is asked only about an environment change or a token, routed by the brief in code
+
+- **Case:** The owner wants few decisions to reach them. Before this change `decide()` kept a brief only on a change
+  above the steward's limit, so every over-limit finding reached the owner, and a missing `GH_TOKEN` (a `github`
+  blind spot on the lowest rung, built with no brief) was applied as a queued request and never asked. Job
+  20261109-080220-zkhy changed only the prompt, was rejected with ten findings, and left both faults: env or token
+  needs did not reach the owner, and over-limit proposals still did, now without a brief. Earlier plan rounds added
+  four more: a briefed item of another kind is invisible to surfaces that list only kind `proposal`; the output
+  schema still said a brief is "required for a proposal above your limit"; the decisions page decided by rung; and
+  the drain and status tests seeded unbriefed over-limit proposals.
+- **Decision:** A brief present means owner-bound, at any rung. `decide()` never applies a change that carries one,
+  records it as `Decision::Proposed` with the brief, and records it as kind `proposal` whatever its original kind,
+  because `open_proposals`, `find_open` and the decisions page list only that kind (the origin stays in the title,
+  key and evidence). A change without a brief is applied inside the limit and above it is recorded with brief None.
+  `open_proposals` lists an undecided proposal when it has a brief, or has none and the raising role may change its
+  rung (the drain approves those, and the audience role's items rely on that); `in_limit` is false for a briefed
+  item, so the drain never approves an owner-bound item; `needs_owner` in `xtask/src/decisions.rs` is the same
+  test. `blind_spot_needing_owner` gives a missing-token source a brief, kind proposal, the source as evidence, and
+  the key `blind-spot:github:owner-action`, distinct from `blind-spot:github`. `validate_items` requires a request
+  for an in-limit item only when it has no brief. The steward is version 3: the prompt steps back across repeated
+  failures and blind spots, decides and queues for itself, and writes a brief only for an environment change or a
+  token or credential, with the owner's action in `if_yes`. The descriptions in the steward output schema say the
+  same. Those two wordings are prose-only; the routing is code. `approve-work` is used once the owner has supplied
+  the token. Files outside the listed deliverables are `crates/athena-context/src/outputs.rs` (descriptions and
+  one test), `xtask/src/decisions.rs`, `crates/athena-cli/tests/drain.rs` and `crates/athena-cli/tests/work_decisions.rs`
+  (fixtures: a brief on seeded items); each is the smallest edit that keeps the rule and the full suite true together.
+- **Alternatives:** Keep applying in-limit changes and attach a brief only above the limit (the fault above); keep the
+  original kind on a briefed item and make each reader accept any item with a brief (changes `open_proposals`,
+  `find_open`, status and the page for one distinction); list only items with a brief (hides the audience role's
+  in-limit proposals from status and the drain); add a code check that refuses a brief about anything but a token or
+  environment (out of scope, and brittle: the model's reason is not visible to code); leave the schema text
+  unchanged (it tells the model to brief every over-limit proposal, which now sends them to the owner); raise the
+  steward budget (budgets never rise to fit a set).
+- **Tradeoff:** An unbriefed item above the limit is recorded and found only in the records or by its id; its key
+  stays in the seen set, so it is not raised again. If the model wrongly omits a brief for a real token need, the
+  owner is not asked; if it writes a brief for something else, the owner is asked. Neither is checked. An applied
+  in-limit proposal still has no decision recorded, so the drain could approve it a second time; this was so before
+  and is not changed here.
+- **Reversal cost:** Low. One branch in `decide()`, one predicate in `open_proposals`, one in the page, a role
+  version and test fixtures; nothing recorded depends on the new key beyond the work items written with it.
+- **Provenance:** Read: `crates/athena-core/src/steward.rs` (`decide`, `validate_item`), `work_decisions.rs`,
+  `xtask/src/decisions.rs`, `crates/athena-context/src/outputs.rs`, `crates/athena-data/src/roles.rs`, and the
+  rejected job's ten findings. Measured: unit tests on `decide()` at each rung with and without a brief,
+  `open_proposals` and `split_open`; an end-to-end test of `steward::run` with a scripted missing-token blind spot
+  and an unbriefed proposal (one open proposal, no queued request); the decisions page with four items (two cards);
+  the real `STEWARD_PROMPT` composed with the contract at most 600 estimated tokens (`ceil(bytes/3)`, an
+  estimate). Not measured: whether the model writes briefs only for an environment or token need; the share of
+  newly refused readings (no reading rule changed).

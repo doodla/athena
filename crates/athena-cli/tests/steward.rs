@@ -71,6 +71,23 @@ fn item(
     })
 }
 
+/// The five-field brief of an environment or token need, in the steward's output shape.
+fn token_brief() -> Value {
+    json!({
+        "question": "Can you set GH_TOKEN where Athena runs?",
+        "if_yes": "You set GH_TOKEN, then approve the work to make GitHub readable.",
+        "if_no": "The steward stays blind to CI runs and pull requests.",
+        "cost": "A few minutes of your time.",
+        "recommendation": "Yes: without it the steward cannot read GitHub."
+    })
+}
+
+/// `item` with the brief set.
+fn briefed(mut item: Value, brief: Value) -> Value {
+    item["brief"] = brief;
+    item
+}
+
 /// What the fake steward does with its brief and workspace: for each source the brief lists, it "reads" the
 /// path when the workspace has it, and says so in the commands it reports.
 fn reads(spec: &AgentInvocation) -> Vec<String> {
@@ -267,6 +284,11 @@ fn scripted_output_with_a_real_gap_commits_the_work_items_and_a_queued_request()
             .count(),
         1
     );
+    // The proposal above the limit has no environment or token need, so it has no brief and the owner is
+    // not asked: it is recorded, and no open proposal lists it.
+    assert_eq!(proposal.brief, None);
+    assert!(athena_core::work_decisions::open_proposals(&after).is_empty());
+    assert!(athena.status().unwrap().work_proposals.is_empty());
 
     // The invocation is recorded like any other role's: role, usage, and cost; and is no job.
     assert_eq!(after.steward_runs.len(), 1);
@@ -512,6 +534,123 @@ fn github_being_unavailable_is_one_blind_spot_whatever_the_error_says() {
     assert_eq!(after.work_items.len(), 1);
     assert_eq!(after.work_items[0].key, "blind-spot:github");
     assert!(!after.work_items[0].key.contains("401"));
+}
+
+#[test]
+fn a_missing_token_reaches_the_owner_with_its_brief_and_a_plain_gap_does_not() {
+    let fx = Fixture::new();
+    let scenario = steward_scenario(vec![
+        briefed(
+            item(
+                "blind-spot",
+                "ignored",
+                "gh has no GH_TOKEN, so GitHub cannot be read",
+                "owner-goals",
+                ("path", "github"),
+                &[],
+                None,
+            ),
+            token_brief(),
+        ),
+        item(
+            "proposal",
+            "proposal:brief-readme",
+            "BRIEF.md should say the README is never deleted",
+            "brief-requirements",
+            ("path", "README.md"),
+            &[("path", "README.md")],
+            None,
+        ),
+    ]);
+    let athena = fx.athena(scenario.script());
+    let before = fx.head();
+    let report = run_steward(&athena);
+    assert_ne!(fx.head(), before, "one records commit holds both items");
+    assert_eq!(
+        report.queued,
+        vec!["blind-spot:github:owner-action", "proposal:brief-readme"]
+    );
+    assert!(report.applied.is_empty(), "no request is queued for either");
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+
+    let after = records(&fx);
+    assert_eq!(after.work_items.len(), 2);
+    let token = after
+        .work_items
+        .iter()
+        .find(|w| w.key == "blind-spot:github:owner-action")
+        .unwrap();
+    assert_eq!(token.kind, WorkItemKind::Proposal);
+    assert_eq!(token.rung, Ladder::Implementation);
+    let brief = token.brief.as_ref().expect("the brief is kept");
+    assert!(brief.question.contains("GH_TOKEN"));
+    assert!(brief.if_yes.contains("set GH_TOKEN"));
+    let plain = after
+        .work_items
+        .iter()
+        .find(|w| w.key == "proposal:brief-readme")
+        .unwrap();
+    assert_eq!(plain.brief, None);
+
+    // Only the token item reaches the owner.
+    let open = athena_core::work_decisions::open_proposals(&after);
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].key, "blind-spot:github:owner-action");
+    let status = athena.status().unwrap();
+    assert_eq!(status.work_proposals.len(), 1);
+    assert_eq!(status.work_proposals[0].id, token.id.as_str());
+    assert_eq!(
+        after
+            .jobs
+            .values()
+            .filter(|j| j.request.as_ref().is_some_and(|r| r.channel == "steward"))
+            .count(),
+        0,
+        "no request job is queued"
+    );
+}
+
+#[test]
+fn a_plain_github_blind_spot_recorded_first_does_not_hide_a_later_token_need() {
+    let fx = Fixture::new();
+    let plain = steward_scenario(vec![item(
+        "blind-spot",
+        "x",
+        "gh: HTTP 502 Bad Gateway",
+        "implementation",
+        ("path", "github"),
+        &[],
+        None,
+    )]);
+    let first = run_steward(&fx.athena(plain.script()));
+    assert_eq!(first.queued, vec!["blind-spot:github"]);
+    assert_eq!(first.applied.len(), 1);
+
+    let token = steward_scenario(vec![briefed(
+        item(
+            "blind-spot",
+            "x",
+            "gh has no GH_TOKEN",
+            "implementation",
+            ("path", "github"),
+            &[],
+            None,
+        ),
+        token_brief(),
+    )]);
+    let second = run_steward(&fx.athena(token.script()));
+    assert_eq!(second.queued, vec!["blind-spot:github:owner-action"]);
+    assert!(second.applied.is_empty());
+    let after = records(&fx);
+    assert_eq!(after.work_items.len(), 2);
+    let open = athena_core::work_decisions::open_proposals(&after);
+    assert_eq!(
+        open.len(),
+        1,
+        "the earlier plain blind spot is not a proposal"
+    );
+    assert_eq!(open[0].key, "blind-spot:github:owner-action");
+    assert!(open[0].brief.is_some());
 }
 
 #[test]
