@@ -912,18 +912,11 @@ impl Athena {
             received_at: crate::now(),
             channel: "cli".into(),
         };
-        let first_line: String = request
-            .text
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(60)
-            .collect();
+        let subject = queue_subject(&request.text);
         let commit = self.commit_records(
             &[NewFile::record(&AnyRecord::Request(request))],
             &message(
-                &format!("Queue a request: {first_line}"),
+                &subject,
                 "The request, recorded to be read and run later. Nothing was read and no model was called.",
                 &[("Athena-Job", job.as_str().to_string())],
             ),
@@ -1360,10 +1353,70 @@ fn reading_title(text: &str) -> String {
     crate::truncate_at_word(text.lines().next().unwrap_or(""), crate::SUBJECT_MAX)
 }
 
+/// The subject of a queued request's commit: the line that names the request (not a `Priority:` line), cut to
+/// 60 characters.
+fn queue_subject(text: &str) -> String {
+    let line: String = crate::plan::title_line(text).chars().take(60).collect();
+    format!("Queue a request: {line}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use athena_data::records::{ChangeEntry, ChangeStatus, ProducerReport};
+
+    #[test]
+    fn a_queued_request_is_titled_by_its_request_not_its_priority() {
+        let subject = queue_subject("Priority: urgent\n\nFix the widget\nmore detail");
+        assert_eq!(subject, "Queue a request: Fix the widget");
+        assert!(!subject.contains("Priority"), "{subject}");
+        assert_eq!(
+            queue_subject("Priority: urgent"),
+            "Queue a request: Priority: urgent"
+        );
+    }
+
+    #[test]
+    fn a_queued_request_commit_names_the_request_not_its_priority() {
+        let repo = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let git = athena_git::Git::at(repo.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        for (key, value) in [
+            ("user.name", "Test User"),
+            ("user.email", "noreply@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            git.run(["config", key, value]).unwrap();
+        }
+        for (path, text) in [
+            ("athena.toml", include_str!("../../../athena.toml")),
+            ("defaults.toml", include_str!("../../../defaults.toml")),
+            ("README.md", "# Demo\n"),
+        ] {
+            std::fs::write(repo.path().join(path), text).unwrap();
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run([
+            "commit",
+            "-q",
+            "-m",
+            "Start a demo repository\n\nAthena-Job: bootstrap",
+        ])
+        .unwrap();
+        // Queuing runs no agent, so the script is never called.
+        let athena = crate::test_support::make_athena(
+            &git,
+            state.path(),
+            vec![],
+            Box::new(|_| unreachable!("queue runs no agent")),
+        );
+        let (_, commit) = athena.queue("Priority: urgent\n\nFix the widget").unwrap();
+        let subject = git.run(["log", "-1", "--format=%s", &commit]).unwrap();
+        assert_eq!(subject.trim(), "Queue a request: Fix the widget");
+        assert!(!subject.contains("Priority"), "{subject}");
+    }
 
     /// The text of this file and of its child modules, which tests that read the source search.
     fn reading_source() -> &'static str {
