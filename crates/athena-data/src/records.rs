@@ -2262,7 +2262,7 @@ mod tests {
     fn roles_and_work_items_have_paths_schemas_and_round_trip() {
         let role = AnyRecord::Role(Box::new(crate::roles::steward(ts())));
         assert_eq!(role.schema(), "athena.role/1");
-        assert_eq!(role.canonical_path(), "records/roles/steward-2.json");
+        assert_eq!(role.canonical_path(), "records/roles/steward-3.json");
         let json = role.to_json();
         assert!(json.contains("\"highest_rung\": \"defaults-conventions\""));
         assert_eq!(

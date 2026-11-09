@@ -118,20 +118,23 @@ pub const STEWARD: &str = "steward";
 
 /// The steward's prompt. It stays fixed so that a change to it is a new recorded version.
 pub const STEWARD_PROMPT: &str = "You are Athena's steward. You only read: Athena's code, its records, \
-its git log, and GitHub runs, pull requests and deploys. Report a work item for each repeated failure and \
-for each source you could not read. Cite sources and evidence by reference; copy no data. Name the rung of \
-the requirements ladder each item concerns; Athena queues a request for a rung at or below your limit and \
-only a proposal above it. For a proposal above your limit, also write a brief for the owner, who decides it. \
-The brief has five fields: question (one yes/no line), if_yes (what happens if the owner says yes), if_no \
-(what happens if the owner says no), cost (what yes costs), and recommendation (yes or no, with a one-line \
-reason). Keep each field short (at most 20 words) and plain, with no jargon. Leave the brief null for any other item.";
+its git log, and GitHub runs, pull requests and deploys. Step back: look across repeated failures and \
+blind spots for the root cause, and report one work item for the cause, not one per event. Cite sources and \
+evidence by reference; copy no data. Name the rung of the requirements ladder each item concerns. Decide the \
+fix yourself: for a rung at or below your limit, write a request and Athena queues it. Do not ask the owner \
+to decide. Write a brief for the owner only when Athena needs an environment change or a token or credential \
+(for example a missing GH_TOKEN). The brief has five fields: question (one yes/no line), if_yes (what \
+happens if the owner says yes), if_no (what happens if the owner says no), cost (what yes costs), and \
+recommendation (yes or no, with a one-line reason). Keep each field short (at most 20 words) and plain, with \
+no jargon. Leave the brief null for every other item.";
 
 /// The one steward definition: it runs every five finished tasks, and may change the lowest two rungs.
-/// Version 2 is the first that calls a model.
+/// Version 2 is the first that calls a model; version 3 steps back and decides itself, and asks the owner
+/// only for an environment change or a token.
 pub fn steward(at: jiff::Timestamp) -> RoleDefinition {
     RoleDefinition {
         name: STEWARD.into(),
-        version: 2,
+        version: 3,
         at,
         goal: "Keep Athena's work steered: read what Athena has done, notice repeated failures and blind spots, and queue work for them."
             .into(),
@@ -245,6 +248,12 @@ mod tests {
     #[test]
     fn the_steward_prompt_names_the_five_brief_fields_and_the_owner_style() {
         for term in [
+            "Step back",
+            "root cause",
+            "Decide the fix yourself",
+            "environment change",
+            "token or credential",
+            "Do not ask the owner",
             "question",
             "if_yes",
             "if_no",
@@ -303,7 +312,7 @@ mod tests {
         let role = steward(at());
         assert_eq!(role.validate(), Ok(()));
         assert_eq!(role.cadence_tasks, 5);
-        assert_eq!(role.path(), "records/roles/steward-2.json");
+        assert_eq!(role.path(), "records/roles/steward-3.json");
         assert!(!role.may_change(Ladder::DesignDecisions));
         assert!(role.may_change(Ladder::DefaultsConventions));
         assert!(role.may_change(Ladder::Implementation));

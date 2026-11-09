@@ -4861,3 +4861,17 @@ should replace those estimates with its figures.
 - **Provenance:** Read: the base and candidate prompt files, `crates/athena-context/src/lib.rs`, the rejected job's
   findings. Measured: `cargo test -p athena-context` and `cargo test -p athena-cli --test budgets` on the final
   text. Not measured: whether the trimmed prompts change agent behavior.
+
+## D169 · The steward steps back and decides itself; the owner is asked only for an environment change or a token
+
+- **Case:** The owner said the steward should do the step back, and that decisions are unwelcome unless Athena
+  needs an environment change or a token.
+- **Decision:** `STEWARD_PROMPT` and the steward brief text now tell the steward to look across repeated failures
+  and blind spots for the root cause, to decide the fix and write a request, and to write an owner brief only
+  for an environment change or a token or credential. The role is version 3. The rule is prose-only: no code
+  refuses a brief on another item. Cadence and highest rung are unchanged.
+- **Alternatives:** Refuse briefs for other items in code: adds a refusal rule, out of scope here.
+- **Tradeoff:** The model may still write a brief for another item; nothing stops it.
+- **Reversal cost:** Low. Prompt text, one version number and tests.
+- **Provenance:** Read: `roles.rs`, `steward.rs`, `roles-and-ladder.md`. Measured: the unit tests. Not measured:
+  how the model behaves under the new prompt.
