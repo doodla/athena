@@ -42,6 +42,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena drain` now dispatches in `athena plan`'s order when groups are involved. On 2026-10-27 the plan began
+  with urgent items, yet drain started a normal item first. Root cause: `Plan::build_with` built the parallel
+  groups wave by wave with greedy joining (an item joined the first group it could run beside), so a
+  lower-priority item could sit in an earlier group than a higher-priority one that clashed with an earlier
+  item, and drain, which works the groups in sequence, started it first. Groups are now built from the plan
+  order (`groups_in_order`): each item, in plan order, joins the last group if it is path-disjoint with its
+  members and depends on none of them, otherwise it opens a new group. A group is never before the group of
+  anything it depends on, the groups flattened equal `Plan::order`, and with one job at a time drain dispatches
+  exactly in plan order. Effect on group shape: an item that clashes with an earlier one now opens a new group
+  and later disjoint items join that group, not an earlier one, so a clash chain can give narrower groups, and
+  disjoint items of different priorities can share a group. `athena plan` prints the new groups.
 - A request's title in `athena plan` and `athena status` skips leading `Priority:` lines and blank lines, so a
   request that starts with `Priority: urgent` is titled by its next line. Root cause: the shared title in
   `JobRecords::title` (`store.rs`) took the request's first line; it now calls `plan::title_line`. A request

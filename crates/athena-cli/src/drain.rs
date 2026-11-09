@@ -8,8 +8,10 @@
 //!   needs, then priority from a `Priority:` line in the request, then higher rung, then age as the tiebreak),
 //!   not oldest first. An item whose plan lacks a goal, a rung or acceptance is
 //!   refused and reported with a reason ([`Report::refused`]). The plan also groups items that could run in
-//!   parallel ([`Report::plan_groups`]); [`drain_concurrent`] runs the items of one group side by side, up to
-//!   `[parallel] max_concurrency` (default 1, which is [`drain`]'s one job at a time). The pass is
+//!   parallel ([`Report::plan_groups`]); the groups are built from the plan order, so flattened they equal that
+//!   order and a group never reorders work. [`drain_concurrent`] runs the items of one group side by side, up to
+//!   `[parallel] max_concurrency` (default 1, which is [`drain`]'s one job at a time, dispatching exactly in
+//!   plan order). The pass is
 //!   deterministic code and calls no model of its own; nothing is defaulted into a plan.
 //! - **Athena's own requests get a guaranteed turn.** Requests from the Steward and from Hestia's reviews
 //!   ([`Steps::improvement`]) used to sort behind every request a person marked urgent or high. The plan now
@@ -21,8 +23,8 @@
 //!   each item (each group, under [`drain_concurrent`]) it reads the queue again and builds the plan again
 //!   through the same function `athena plan` uses (`Drain::prepare`, which calls
 //!   [`athena_core::plan::Plan::build_with`]), so a priority record, a job end or a request queued meanwhile
-//!   changes what is worked next. [`batches_for`] only filters that plan's groups: it drops what this run has
-//!   already tried and never reorders. Memory kept across these plans: the jobs the drain approved, the
+//!   changes what is worked next. [`batches_for`] only filters that plan's groups, which the plan built from its
+//!   order: it drops what this run has already tried and never reorders. Memory kept across these plans: the jobs the drain approved, the
 //!   readings it made, and the items it refused to read, so nothing is approved, read or paid for twice.
 //!   *Passed-over log line.* An item that is planned but not worked gets one line, `plan       <id> passed
 //!   over: <reason>`, once per run: refused, held by a failed dependency, in a loop of dependencies, not
@@ -54,7 +56,8 @@
 //!   pause or flag ended the whole batch (a 4 Nov batch with $43 and 3 job slots left stopped on one such
 //!   item).
 //! - **Concurrency.** A group is worked by up to `max_concurrency` workers; the next group starts only when
-//!   the group before it is done, so an item that depends on another starts after it has finished. Landing
+//!   the group before it is done, so an item that depends on another starts after it has finished. The groups
+//!   flatten to the plan order, so with one worker the items start exactly in plan order. Landing
 //!   and rating go one at a time (a lock), and every model call's cap is held against the budget while it is
 //!   in flight, so jobs side by side cannot overspend it. The first reason to stop ends the run: no worker
 //!   starts another job, jobs already started are finished (a failure or a refusal stops no sibling that is
@@ -1132,9 +1135,9 @@ pub struct Report {
     pub queued: Vec<Item>,
     /// Open proposals waiting for a person. The loop did not touch them.
     pub waiting: Vec<Waiting>,
-    /// The plan the loop followed: the planned items in groups. Items of one group have no dependency and
-    /// touch disjoint paths; they run side by side up to `[parallel] max_concurrency`, group after group in
-    /// this order (one job at a time when the bound is 1).
+    /// The plan the loop followed: the planned items in groups, built from the plan order (flattened they equal
+    /// it). Items of one group have no dependency and touch disjoint paths; they run side by side up to
+    /// `[parallel] max_concurrency`, group after group in this order (exactly the plan order when the bound is 1).
     pub plan_groups: Vec<Vec<String>>,
     /// How many items each of the plan's groups held when the run started, in group order. It measures how
     /// much parallel work the plan offered, so it is the same whatever `[parallel] max_concurrency` was.
@@ -2913,6 +2916,8 @@ pub fn drain_concurrent(
 /// The batches to work from `plan`, in the order to work them: items with no plan entry first, each alone,
 /// then the plan's groups in the plan's own order, without what this run has `tried`. It only filters; the
 /// order is the plan's, built by [`Plan::build_with`] in `Drain::prepare` (the function `athena plan` calls).
+/// The plan builds its groups from its order, so the groups flattened equal the order and filtering them
+/// keeps the dispatch order the plan shows.
 fn batches_for(
     items: &[Item],
     entries: &[PlanEntry],
@@ -5896,6 +5901,8 @@ mod read_ahead_tests {
         /// Items whose reading comes back not runnable, with an error, however often it is made.
         refuses: BTreeSet<String>,
         stop_after: Option<String>,
+        /// The priority an item's plan entry carries; normal for items not listed.
+        priorities: BTreeMap<String, athena_core::plan::Priority>,
         /// Jobs whose landing is a merge the host holds until checks finish.
         waiting: BTreeSet<String>,
         /// Jobs whose land step ends with this pull request state and checks, as `land_pr` reports them once
@@ -5923,12 +5930,28 @@ mod read_ahead_tests {
                 recheck_holds: true,
                 refuses: BTreeSet::new(),
                 stop_after: None,
+                priorities: BTreeMap::new(),
                 waiting: BTreeSet::new(),
                 reports: BTreeMap::new(),
                 reads: AtomicUsize::new(0),
                 ended: AtomicUsize::new(0),
                 widest: AtomicUsize::new(0),
             }
+        }
+
+        /// The plan entry of `id` carries this priority.
+        fn with_priority(mut self, id: &str, priority: athena_core::plan::Priority) -> World {
+            self.priorities.insert(id.into(), priority);
+            self
+        }
+
+        /// The items the drain started, in the order it started them.
+        fn started(&self) -> Vec<String> {
+            self.entries()
+                .iter()
+                .filter_map(|e| e.strip_prefix("start "))
+                .map(String::from)
+                .collect()
         }
 
         fn waits(mut self, job: &str) -> World {
@@ -6026,6 +6049,7 @@ mod read_ahead_tests {
                     .map(|(id, touches, deps)| PlanEntry {
                         touches: touches.clone(),
                         depends_on: deps.clone(),
+                        priority: self.priorities.get(id).copied().unwrap_or_default(),
                         ..entry(id, &[], &[])
                     })
                     .collect(),
@@ -6175,6 +6199,44 @@ mod read_ahead_tests {
 
     fn concurrent(world: &World, bound: u32) -> Report {
         drain_concurrent(world, limits(20.0), &Quiet, bound).unwrap()
+    }
+
+    #[test]
+    fn with_one_job_at_a_time_an_urgent_item_starts_before_an_older_disjoint_normal_one() {
+        use athena_core::plan::Priority;
+        // n is older and normal; u is newer and urgent; they touch different files and depend on nothing.
+        let world = World::new(0, &[("n", &["src/n.rs"], &[]), ("u", &["src/u.rs"], &[])])
+            .with_priority("u", Priority::Urgent);
+        let report = concurrent(&world, 1);
+        assert_eq!(report.stop, Stop::QueueEmpty, "{:?}", report.jobs);
+        assert_eq!(world.started(), ["u", "n"], "{:?}", world.entries());
+        assert_eq!(report.plan_groups.concat(), ["u", "n"]);
+    }
+
+    #[test]
+    fn with_one_job_at_a_time_drain_dispatches_exactly_in_plan_order_when_groups_form() {
+        use athena_core::plan::Priority;
+        // The shape of the 2026-10-27 drain: u1 and u2 clash on one file, normal n is what urgent u4 needs,
+        // u3 is urgent. Grouping by waves started n and u3 before u2; the plan order is u1, u2, n, u3, u4.
+        let world = World::new(
+            0,
+            &[
+                ("u1", &["src/p.rs"], &[]),
+                ("u2", &["src/p.rs"], &[]),
+                ("n", &["src/n.rs"], &[]),
+                ("u3", &["src/u3.rs"], &[]),
+                ("u4", &["src/u4.rs"], &["n"]),
+            ],
+        )
+        .with_priority("u1", Priority::Urgent)
+        .with_priority("u2", Priority::Urgent)
+        .with_priority("u3", Priority::Urgent)
+        .with_priority("u4", Priority::Urgent);
+        let report = concurrent(&world, 1);
+        assert_eq!(report.stop, Stop::QueueEmpty, "{:?}", report.jobs);
+        let order = ["u1", "u2", "n", "u3", "u4"];
+        assert_eq!(world.started(), order, "{:?}", world.entries());
+        assert_eq!(report.plan_groups.concat(), order);
     }
 
     #[test]
