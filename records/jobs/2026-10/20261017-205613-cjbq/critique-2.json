@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261017-205613-cjbq",
+  "round": 2,
+  "at": "2026-11-09T14:32:25.142252247Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "No test shows that the matching-pin branch of check_study runs validate() and compares it with validation.json.",
+      "evidence": "Criterion 1's \"fails without\" says \"If the matching branch never called `validate()`, a tampered validation.json copy would pass the rebuilt-tree test\". No step or test case builds a tampered validation.json, though. Criterion 2's cases (a)-(d), its control, and \"env unset, a changed quote\" never pair a matching env with a mount and a defect. If check_study had a matching branch that returned no problems without validating, every listed test would still pass: the rebuilt-tree test expects an empty result either way. The only thing that proves the branch fires is the mounted command, and the plan says the verifier cannot see that case. Fix: Add cases on temporary copies that call check_study with the pin's own URL and SHA and a synthetic_tree mount: (i) validation.json edited (for example one rule result flipped) must give a problem naming the study id and the computed/recorded mismatch; (ii) a changed claim quote must give a quote-mismatch problem naming the claim id, which contrasts with the existing \"env unset, changed quote gives no problems\" case. Better still, have check_study return the route it took ('fully validated' or 'conventions only') and assert it in the rebuilt-tree test.",
+      "location": "Demonstrations, criteria 1 and 2; plan step 4 (test list)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Nothing in the snapshot sets ATHENA_PIN_*, so study jobs will quietly stop validating against the mounted tree.",
+      "evidence": "A grep of crates/ for ATHENA_PIN finds nothing; pin.rs only defines MOUNT_DIR = \"pinned-source\". Today the kept test (rules.rs:1444) validates whenever pinned-source/ exists. crates/athena-cap-study/prompts/verifier.md line 3 tells the verifier \"Code already ran the study's validation rules: citations, pin, quotes...\". The request assumes a previous job set the pair, and the accepted reading says unset means conventions only, so the plan follows the reading. Its only mitigation is a printed line that nobody checks. Fix: Name the pinning change as a precondition and check it before landing. In the kept test, when pinned-source/ is a directory but no study matched the env pair, print a distinct, greppable warning (for example 'mounted tree present but no study matched ATHENA_PIN_*; tree validation did not run'). Name this degradation in the CHANGELOG entry so the verifier prompt's claim is not silently false.",
+      "location": "Risks (first bullet) and Open questions (Host); kept test in step 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Matching 'UNRESOLVED' case-insensitively flags the ordinary word \"unresolved\" in a study's prose.",
+      "evidence": "Step 2 says: no 'UNRESOLVED' or 'not examined' (case-insensitive). The existing test (rules.rs:1590) matches \"UNRESOLVED\" case-sensitively, the placeholder form, and lowercases only for \"not examined\". A second study of work handling could easily say \"conflicts are left unresolved\" in a claim or finding, which would fail the kept test with a false positive. Fix: Keep the existing semantics: \"UNRESOLVED\" case-sensitive, \"not examined\" case-insensitive. Add a test that a claim saying \"left unresolved\" passes.",
+      "location": "Plan step 2 (conventions: placeholder check)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Holding the study prompt to about 75 bytes of growth risks cutting existing rules, when the facts file says to update its line instead.",
+      "evidence": "The budget is producer 1043 of 1200, so there is headroom under the real budget. docs/system-facts.md says that when the computed value moves, you \"update the line, never the budget\". Recent commits 223de33 and d94ebc2 changed prompt files together with docs/system-facts.md. The plan rejects that fix only because the file is not a listed deliverable, and its fallbacks are to drop the claim-quote clause, shorten existing bullets, or stop the job. Fix: If the study set would pass 1043, let the producer update the single `- budget producer:` line in docs/system-facts.md, the documented fix, and keep the claim-quote clause. Record this as an added deliverable rather than dropping the clause or stopping.",
+      "location": "Decision 7, step 8, Open question 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. The files and functions it names exist: Study::admit at lib.rs:112, wrong_sha at rules.rs:264, cited_lines/quote_mismatch at rules.rs:292-365, the firstmate test section from rules.rs:1395, and boundary_scan and the planted-term test in xtask/tests/policy.rs:135/187. Its dependents list holds up against grep. The real Study capability is wired only in cli/src/wiring.rs, no integration test runs a study job, and the removed test names appear nowhere else. xtask already has serde_json, and tempfile is a workspace dependency. One demonstration gap matters: no planned test shows that check_study's matching-pin branch actually runs validate() and compares it with validation.json. The rebuilt-tree test passes just as well if that branch silently does nothing, and the \"fails without\" claim cites a tampered-validation.json case that no step adds. Three smaller points: (1) nothing in the snapshot sets ATHENA_PIN_URL/ATHENA_PIN_SHA (grep of crates/ finds none), so once this lands, study jobs lose today's validation against the mounted tree, while the study verifier prompt says code already ran the rules; (2) a case-insensitive \"UNRESOLVED\" placeholder check would match the ordinary word \"unresolved\"; (3) the 75-byte prompt growth limit trades existing prompt rules against a one-line facts update that the facts file itself prescribes. The verdict is revise because of the one major finding."
+}

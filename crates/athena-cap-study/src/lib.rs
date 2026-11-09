@@ -15,7 +15,7 @@ use athena_core::capability::{
 };
 use athena_data::config::CapabilityConfig;
 use athena_data::records::PolicyViolation;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The capability's id in records and in the reader's catalog.
 pub const ID: &str = "study";
@@ -109,19 +109,54 @@ impl Capability for Study {
         true
     }
 
+    /// A study job changes one `studies/<id>/` directory and, if it likes, `CHANGELOG.md`; build output is
+    /// refused on its own.
     fn admit(&self, change: &ChangeList, _config: &JobConfig) -> Vec<PolicyViolation> {
-        change
-            .paths()
-            .filter(|p| p.starts_with("target/") || p.contains("/target/"))
-            .map(|p| PolicyViolation {
-                rule: "build-output".into(),
-                path: Some(p.to_string()),
+        let mut violations = Vec::new();
+        let mut ids = BTreeSet::new();
+        for p in change.paths() {
+            if p.starts_with("target/") || p.contains("/target/") {
+                violations.push(PolicyViolation {
+                    rule: "build-output".into(),
+                    path: Some(p.to_string()),
+                    detail: format!(
+                        "{p} looks like build output, which never belongs in the repository"
+                    ),
+                });
+            } else if let Some(id) = study_dir_of(p) {
+                ids.insert(id);
+            } else if p != "CHANGELOG.md" {
+                violations.push(PolicyViolation {
+                    rule: "study-outside-directory".into(),
+                    path: Some(p.to_string()),
+                    detail: format!(
+                        "{p} is outside the study's directory; a study job changes one studies/<id>/ directory and CHANGELOG.md"
+                    ),
+                });
+            }
+        }
+        if ids.len() > 1 {
+            let named: Vec<&str> = ids.into_iter().collect();
+            violations.push(PolicyViolation {
+                rule: "study-one-directory".into(),
+                path: None,
                 detail: format!(
-                    "{p} looks like build output, which never belongs in the repository"
+                    "the change spans {} study directories ({}); a study job changes one studies/<id>/ directory",
+                    named.len(),
+                    named.join(", ")
                 ),
-            })
-            .collect()
+            });
+        }
+        violations
     }
+}
+
+/// The study id of a `studies/<id>/<file>` path whose segments are all plain, or `None` for any other path
+/// (a bare `studies/<name>`, or a path with an empty, `.` or `..` segment).
+fn study_dir_of(path: &str) -> Option<&str> {
+    let plain = |segment: &str| !matches!(segment, "" | "." | "..");
+    let (id, rest) = path.strip_prefix("studies/")?.split_once('/')?;
+    (plain(id) && rest.split('/').all(plain)).then_some(id)
 }
 
 #[cfg(test)]
@@ -183,19 +218,101 @@ mod tests {
         assert_eq!(Study.env(&jc), section.env);
     }
 
-    #[test]
-    fn build_output_is_refused() {
-        let entry = |path: &str| ChangeEntry {
+    fn entry(path: &str) -> ChangeEntry {
+        ChangeEntry {
             path: path.into(),
             status: ChangeStatus::Added,
             mode: Some("100644".into()),
             bytes: Some(1),
+        }
+    }
+
+    /// The (rule, path) pairs `admit` returns for a change of these paths.
+    fn admitted(paths: &[&str]) -> Vec<(String, Option<String>)> {
+        let change = ChangeList {
+            entries: paths.iter().map(|p| entry(p)).collect(),
         };
+        Study
+            .admit(&change, &job_config())
+            .into_iter()
+            .map(|v| (v.rule, v.path))
+            .collect()
+    }
+
+    fn refused(rule: &str, path: Option<&str>) -> (String, Option<String>) {
+        (rule.to_string(), path.map(String::from))
+    }
+
+    #[test]
+    fn build_output_is_refused() {
         let change = ChangeList {
             entries: vec![entry("target/debug/x"), entry("studies/s1/claims.json")],
         };
         let violations = Study.admit(&change, &job_config());
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].path.as_deref(), Some("target/debug/x"));
+    }
+
+    #[test]
+    fn a_change_inside_one_study_directory_and_the_changelog_is_admitted() {
+        assert!(
+            admitted(&[
+                "studies/a/claims.json",
+                "studies/a/model.json",
+                "CHANGELOG.md"
+            ])
+            .is_empty()
+        );
+        assert!(admitted(&["CHANGELOG.md"]).is_empty());
+        assert!(admitted(&["studies/a/sub/dir/x.json"]).is_empty());
+    }
+
+    #[test]
+    fn a_change_spanning_two_study_directories_is_refused() {
+        let found = admitted(&["studies/a/claims.json", "studies/b/claims.json"]);
+        assert_eq!(found, [refused("study-one-directory", None)]);
+        let change = ChangeList {
+            entries: vec![entry("studies/b/x.json"), entry("studies/a/x.json")],
+        };
+        let detail = Study.admit(&change, &job_config())[0].detail.clone();
+        assert!(detail.contains("a, b"), "{detail}");
+        // A deletion counts as touching the directory.
+        let mut deleted = entry("studies/b/old.json");
+        deleted.status = ChangeStatus::Deleted;
+        let change = ChangeList {
+            entries: vec![entry("studies/a/claims.json"), deleted],
+        };
+        assert_eq!(Study.admit(&change, &job_config()).len(), 1);
+    }
+
+    #[test]
+    fn a_file_outside_the_study_directory_and_the_changelog_is_refused() {
+        assert_eq!(
+            admitted(&["studies/a/claims.json", "docs/x.md"]),
+            [refused("study-outside-directory", Some("docs/x.md"))]
+        );
+        for outside in [
+            "docs/CHANGELOG.md",
+            "studies/x",
+            "studies/a/../b/c",
+            "studies//x.json",
+            "studies/./x.json",
+            "studies/a/",
+            "athena.toml",
+        ] {
+            assert_eq!(
+                admitted(&["studies/a/claims.json", outside]),
+                [refused("study-outside-directory", Some(outside))],
+                "{outside}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_output_keeps_its_single_violation_beside_the_new_rules() {
+        assert_eq!(
+            admitted(&["target/debug/x", "studies/s1/claims.json"]),
+            [refused("build-output", Some("target/debug/x"))]
+        );
     }
 }
