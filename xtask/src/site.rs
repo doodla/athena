@@ -275,7 +275,20 @@ pub fn render(study: &Study) -> Result<String> {
         sha = escape(sha),
     );
 
-    // Start here: what firstmate is and one piece of work end to end.
+    start_here(&mut body, study, &known)?;
+    states(&mut body, study, &known)?;
+    counters(&mut body, study, &known)?;
+    transitions(&mut body, study, &known)?;
+    rationales(&mut body, study, &known)?;
+    glossary(&mut body, study, &known)?;
+    findings(&mut body, study)?;
+    next_steps(&mut body, github.as_deref(), repo, system);
+    claims_section(&mut body, claims, github.as_deref(), sha)?;
+    Ok(finish(&mut body, known.len(), study_id, sha, system))
+}
+
+/// Start here: what firstmate is and one piece of work end to end.
+fn start_here(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Result<()> {
     body.push_str(
         "<section><h2>Start here</h2>\
          <p>The three parts below say what firstmate is, follow one piece of work, and say what happens \
@@ -289,9 +302,9 @@ pub fn render(study: &Study) -> Result<String> {
         body,
         "<p class=\"what-is\">{} {}</p><h3>Words used first</h3>",
         escape(str_of(what_is, "text", "intro.json what_is")?),
-        cites(what_is, "the what_is sentence", &known)?
+        cites(what_is, "the what_is sentence", known)?
     );
-    leadin(&mut body, &study.intro, "terms", &known)?;
+    leadin(body, &study.intro, "terms", known)?;
     body.push_str("<dl class=\"deciders\">");
     for t in array_of(&study.intro, "start_terms", "intro.json")? {
         let term = str_of(t, "term", "a start term")?;
@@ -301,26 +314,30 @@ pub fn render(study: &Study) -> Result<String> {
             "<dt>{}</dt><dd>{} {}</dd>",
             escape(term),
             escape(str_of(t, "text", &what)?),
-            cites(t, &what, &known)?
+            cites(t, &what, known)?
         );
     }
     body.push_str("</dl><h3>What firstmate is</h3><ul>");
     for item in array_of(&study.intro, "what", "intro.json")? {
-        intro_item(&mut body, item, "an intro sentence", &known)?;
+        intro_item(body, item, "an intro sentence", known)?;
     }
     body.push_str("</ul><h3>One piece of work, start to finish</h3><ol>");
     for item in array_of(&study.intro, "walkthrough", "intro.json")? {
-        intro_item(&mut body, item, "a walk-through step", &known)?;
+        intro_item(body, item, "a walk-through step", known)?;
     }
     body.push_str("</ol><h3>When things go wrong, and what is not limited</h3><ul>");
     for item in array_of(&study.intro, "limits", "intro.json")? {
-        intro_item(&mut body, item, "a failure or limit sentence", &known)?;
+        intro_item(body, item, "a failure or limit sentence", known)?;
     }
     body.push_str("</ul></section>");
 
-    // States
+    Ok(())
+}
+
+/// States of a piece of work.
+fn states(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Result<()> {
     body.push_str("<section><h2>States of a piece of work</h2>");
-    leadin(&mut body, &study.intro, "states", &known)?;
+    leadin(body, &study.intro, "states", known)?;
     body.push_str("<ul>");
     for state in array_of(&study.model, "states", "model.json")? {
         let id = str_of(state, "id", "a state")?;
@@ -330,16 +347,20 @@ pub fn render(study: &Study) -> Result<String> {
             "<li><strong>{}</strong> <span class=\"tag\">{}</span> {}</li>",
             escape(id),
             escape(kind_label(kind)),
-            cites(state, &format!("state {id}"), &known)?
+            cites(state, &format!("state {id}"), known)?
         );
     }
     body.push_str("</ul></section>");
 
-    // Counters
+    Ok(())
+}
+
+/// Counters, when the model has any.
+fn counters(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Result<()> {
     let counters = array_of(&study.model, "counters", "model.json")?;
     if !counters.is_empty() {
         body.push_str("<section><h2>Counters</h2>");
-        leadin(&mut body, &study.intro, "counters", &known)?;
+        leadin(body, &study.intro, "counters", known)?;
         body.push_str("<ul>");
         for counter in counters {
             let id = str_of(counter, "id", "a counter")?;
@@ -352,15 +373,19 @@ pub fn render(study: &Study) -> Result<String> {
                 "<li><strong>{}</strong>, changed by transitions {} {}</li>",
                 escape(id),
                 escape(&changed.join(", ")),
-                cites(counter, &format!("counter {id}"), &known)?
+                cites(counter, &format!("counter {id}"), known)?
             );
         }
         body.push_str("</ul></section>");
     }
 
-    // Transitions
+    Ok(())
+}
+
+/// Transitions, with deciders and one card each.
+fn transitions(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Result<()> {
     body.push_str("<section><h2>Transitions</h2>");
-    leadin(&mut body, &study.intro, "transitions", &known)?;
+    leadin(body, &study.intro, "transitions", known)?;
     body.push_str("<dl class=\"deciders\">");
     for d in array_of(&study.intro, "deciders", "intro.json")? {
         let term = str_of(d, "term", "a decider")?;
@@ -370,7 +395,7 @@ pub fn render(study: &Study) -> Result<String> {
             "<dt>{}</dt><dd>{} {}</dd>",
             escape(term),
             escape(str_of(d, "text", &what)?),
-            cites(d, &what, &known)?
+            cites(d, &what, known)?
         );
     }
     body.push_str("</dl><div class=\"cards\">");
@@ -391,7 +416,7 @@ pub fn render(study: &Study) -> Result<String> {
             escape(str_of(t, "from", &what)?),
             escape(str_of(t, "to", &what)?),
             escape(str_of(summary, "text", &summary_what)?),
-            cites(summary, &summary_what, &known)?
+            cites(summary, &summary_what, known)?
         );
         let _ = write!(
             body,
@@ -414,13 +439,17 @@ pub fn render(study: &Study) -> Result<String> {
         if let Some(failure) = t.get("failure").and_then(Value::as_str) {
             let _ = write!(body, "<dt>Failure</dt><dd>{}</dd>", escape(failure));
         }
-        let _ = write!(body, "</dl><p>{}</p></article>", cites(t, &what, &known)?);
+        let _ = write!(body, "</dl><p>{}</p></article>", cites(t, &what, known)?);
     }
     body.push_str("</div></section>");
 
-    // Rationales
+    Ok(())
+}
+
+/// Rationales: why it is built this way.
+fn rationales(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Result<()> {
     body.push_str("<section><h2>Why it is built this way</h2>");
-    leadin(&mut body, &study.intro, "why", &known)?;
+    leadin(body, &study.intro, "why", known)?;
     body.push_str("<div class=\"cards\">");
     let titles = array_of(&study.intro, "rationale_titles", "intro.json")?;
     for r in array_of_value(&study.rationales, "rationales.json")? {
@@ -449,12 +478,16 @@ pub fn render(study: &Study) -> Result<String> {
             body,
             "<p>Trade-off: {}</p><p>{}</p></article>",
             escape(str_of(r, "tradeoff", &what)?),
-            cites(r, &what, &known)?
+            cites(r, &what, known)?
         );
     }
     body.push_str("</div></section>");
 
-    // Glossary: after the walk-through and the sections that use its words.
+    Ok(())
+}
+
+/// Glossary: after the walk-through and the sections that use its words.
+fn glossary(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Result<()> {
     body.push_str("<section><h2>Glossary</h2><dl class=\"glossary\">");
     let mut entries: Vec<&Value> = array_of(&study.intro, "glossary", "intro.json")?
         .iter()
@@ -468,7 +501,7 @@ pub fn render(study: &Study) -> Result<String> {
         let cite = if entry.get("about").and_then(Value::as_str) == Some("page") {
             String::from("<span class=\"tag\">about this page</span>")
         } else {
-            cites(entry, &what, &known)?
+            cites(entry, &what, known)?
         };
         let _ = write!(
             body,
@@ -481,7 +514,11 @@ pub fn render(study: &Study) -> Result<String> {
     }
     body.push_str("</dl></section>");
 
-    // Findings: records of the study itself, not claims about the studied system.
+    Ok(())
+}
+
+/// Findings: records of the study itself, not claims about the studied system.
+fn findings(body: &mut String, study: &Study) -> Result<()> {
     body.push_str(
         "<section><h2>Limits of this study</h2><p>These are the study's own findings, identified \
          by finding id; they say nothing about firstmate beyond what the claims above support.</p><ul>",
@@ -498,8 +535,12 @@ pub fn render(study: &Study) -> Result<String> {
     }
     body.push_str("</ul></section>");
 
-    // Next steps: where to read more about Athena and firstmate.
-    let firstmate_url = github.clone().unwrap_or_else(|| repo.to_string());
+    Ok(())
+}
+
+/// Next steps: where to read more about Athena and firstmate.
+fn next_steps(body: &mut String, github: Option<&str>, repo: &str, system: &str) {
+    let firstmate_url = github.map_or_else(|| repo.to_string(), str::to_string);
     let firstmate_link = if firstmate_url.starts_with("https://") {
         format!("<a href=\"{0}\">{0}</a>", escape(&firstmate_url))
     } else {
@@ -521,8 +562,15 @@ pub fn render(study: &Study) -> Result<String> {
         a = ATHENA_URL,
         sys = escape(system),
     );
+}
 
-    // Claims and their sources
+/// Claims and their sources.
+fn claims_section(
+    body: &mut String,
+    claims: &[Value],
+    github: Option<&str>,
+    sha: &str,
+) -> Result<()> {
     body.push_str("<section><h2>Claims and sources</h2><ol class=\"claims\">");
     // Claims are listed in numeric order of their id (c9 before c10), whatever the order in the file.
     let mut ordered: Vec<&Value> = claims.iter().collect();
@@ -552,7 +600,7 @@ pub fn render(study: &Study) -> Result<String> {
             if !seen.insert(text.clone()) {
                 continue;
             }
-            match &github {
+            match github {
                 Some(base) => {
                     let _ = write!(
                         body,
@@ -569,7 +617,17 @@ pub fn render(study: &Study) -> Result<String> {
         body.push_str("</ul></li>");
     }
     body.push_str("</ol></section>");
+    Ok(())
+}
 
+/// The about section, the footer and the page wrapper.
+fn finish(
+    body: &mut String,
+    claim_count: usize,
+    study_id: &str,
+    sha: &str,
+    system: &str,
+) -> String {
     let _ = write!(
         body,
         "<section id=\"about-this-page\"><h2>About this page</h2><p>This page's study id, <code>{}</code>, is the \
@@ -581,16 +639,16 @@ pub fn render(study: &Study) -> Result<String> {
         body,
         "<footer>Generated from <code>{}</code>: {} claims at commit <code>{}</code>.</footer>",
         escape(STUDY_DIR),
-        known.len(),
+        claim_count,
         escape(sha)
     );
 
-    Ok(format!(
+    format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <title>Athena explains how {sys} handles work</title><style>{CSS}</style></head><body><main>{body}</main></body></html>\n",
         sys = escape(system)
-    ))
+    )
 }
 
 /// Sort key for a claim id: its number when it is `c<number>`, so `c9` sorts before `c10`; other ids follow, by text.
