@@ -1,0 +1,439 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261017-205613-cjbq",
+  "round": 3,
+  "at": "2026-11-09T14:34:14.152702187Z",
+  "invocation_seq": 8,
+  "approach": "Test-side generalisation in crates/athena-cap-study/src/rules.rs: replace the firstmate-only constants (STUDY_SHA, study_dir(), mounted_tree(), STUDY_FILES) with `check_study(dir, pin_env, mount) -> Outcome` and `check_studies(root, pin_env, mount)`. `Outcome` holds `route` (`FullyValidated` or `ConventionsOnly`) and `problems: Vec<String>`, so tests assert which route ran. The kept test reads ATHENA_PIN_URL and ATHENA_PIN_SHA from the process environment and passes them in as arguments (the workspace denies unsafe_code, so tests never set env vars). Conventions run for every studies/*/ directory. Full validation runs only when the pin's URL and SHA equal the env pair and a mount exists. A same-URL, different-SHA pin fails naming the study id. A tree rebuilt from a study's own citations (`synthetic_tree`) lets temp-copy tests drive the matching branch in any checkout, including cases with a tampered validation.json and a changed quote. The kept test prints a greppable warning when pinned-source/ exists but no study matched the env pair. `Study::admit` in lib.rs refuses a change spanning two studies/<id>/ directories and any path outside one study directory and CHANGELOG.md. The study producer prompt states the conventions, the one-directory rule and the verbatim-claim-quote clause in full. If that moves the largest producer set past 1043, the producer updates the single `- budget producer:` line in docs/system-facts.md, the documented fix, and does not cut rules. xtask/tests/policy.rs gets `boundary_scan_file(path, text)`: it blanks only claim-source `quote` values in `studies/<id>/claims.json` before word matching and always matches machine-path fragments on the raw text. Planted terms are split strings joined at run time. A CHANGELOG entry names the pinning precondition and the degradation when ATHENA_PIN_* is unset.",
+  "decisions": [
+    {
+      "choice": "Pass the pin env pair and the mount path to `check_study` as arguments; only the kept test calls `std::env::var`.",
+      "reason": "The workspace sets `unsafe_code = \"deny\"` (Cargo.toml line 59), so tests cannot call `set_var`. Arguments let temp-copy tests exercise every pin case in parallel without touching process state.",
+      "rejected": [
+        {
+          "option": "Tests set ATHENA_PIN_* with set_var",
+          "why": "Needs unsafe in edition 2024 and races with parallel tests."
+        },
+        {
+          "option": "Run a child `cargo test` with env set",
+          "why": "Slow, and the verifier may run only whole simple cargo commands."
+        }
+      ]
+    },
+    {
+      "choice": "Finding 1: `check_study` returns `Outcome { route, problems }`. Tests drive the matching branch on temp copies with the study's own URL and SHA plus a `synthetic_tree` mount: (i) a validation.json with one rule result flipped gives a problem naming the study id and the computed/recorded mismatch, with route FullyValidated; (ii) a changed claim quote gives a `quote-mismatch` problem naming the claim id, contrasting with the existing env-unset changed-quote case, which gives no problems and route ConventionsOnly. The rebuilt-tree test asserts route == FullyValidated and no problems on the untouched copy.",
+      "reason": "Without these, a matching branch that returned early would pass every test. Returning the route makes the branch observable without the host's pinned-source/. The tree for (i) and (ii) is built from the untouched study and then the copy is edited, so the tree holds the original quote.",
+      "rejected": [
+        {
+          "option": "Rely on the mounted command alone",
+          "why": "This job's verifier has no pinned-source/ and no code in the snapshot sets ATHENA_PIN_*."
+        },
+        {
+          "option": "Detect the route by capturing printed output",
+          "why": "Fragile. A returned value is asserted directly."
+        }
+      ]
+    },
+    {
+      "choice": "Reuse the existing `wrong_sha` rule (rules.rs:264-289) with a `NoTree` GitLookup for the source-SHA-differs-from-pin check. The offending id is the owner id the rule reports.",
+      "reason": "`wrong_sha` only compares strings and never calls git for file sources, so it works with no tree and avoids a second comparison that could drift.",
+      "rejected": [
+        {
+          "option": "Re-implement the SHA comparison in the test",
+          "why": "Duplicates logic that can drift from the rule."
+        }
+      ]
+    },
+    {
+      "choice": "Put the convention checks in the `#[cfg(test)]` module of rules.rs, as the kept test is today; `RULES` (18 rules) is unchanged.",
+      "reason": "The request names the kept test in rules.rs. New rules would change firstmate's validation.json, which may not change.",
+      "rejected": [
+        {
+          "option": "Add new entries to `RULES`",
+          "why": "Would change firstmate's validation.json; nothing under studies/firstmate-work-handling/ may change."
+        }
+      ]
+    },
+    {
+      "choice": "Finding 3: the placeholder convention keeps the existing semantics. \"UNRESOLVED\" is matched case-sensitively, since it is the placeholder form (rules.rs:1590). \"not examined\" is matched case-insensitively (rules.rs:1591). A test shows a claim saying \"conflicts are left unresolved\" passes.",
+      "reason": "A second study of work handling could say \"unresolved\" in ordinary prose. Case-insensitive matching would be a false positive.",
+      "rejected": [
+        {
+          "option": "Case-insensitive match on UNRESOLVED",
+          "why": "Flags the ordinary word."
+        }
+      ]
+    },
+    {
+      "choice": "With no mount, env unset, or env naming another URL, check conventions only. With env naming the pin's URL and SHA but no mount, conventions only. With env naming the pin's URL and a different SHA, fail naming the study id and both SHAs, whether or not a mount exists.",
+      "reason": "This is the request's rule. A mismatch is a fault in pin.json or in the pinning, never a reason to validate quietly against the wrong tree. crates/athena-core/src/run/pin.rs `study_pin` (lines 82-133) lets several studies share one URL and picks one by study id. The env pair carries no study id, so a job on study B makes study A (same URL, other SHA) fail. This is recorded in the CHANGELOG entry and as a User question.",
+      "rejected": [
+        {
+          "option": "Validate any mounted tree against every study",
+          "why": "A second study would fail its own quote checks against firstmate's tree."
+        },
+        {
+          "option": "Compare only the study the pinning step picked",
+          "why": "ATHENA_PIN_* has no study id and no code in the snapshot sets the pair."
+        },
+        {
+          "option": "Skip a same-URL different-SHA study silently",
+          "why": "Criterion 2 requires a failure naming the id."
+        }
+      ]
+    },
+    {
+      "choice": "Finding 2: the pinning change is a named precondition. The kept test prints a distinct, greppable line when `../../pinned-source` is a directory but no study matched the env pair: `WARNING: mounted tree present but no study matched ATHENA_PIN_*; tree validation did not run`. A pure function `degradation_warning(routes, mount_present) -> Option<String>` is unit-tested for four inputs. The CHANGELOG entry says that with ATHENA_PIN_* unset the kept test validates conventions only, so the verifier prompt's \"code already ran the study's validation rules\" holds only once the pinning change sets the pair.",
+      "reason": "Today the kept test validates whenever pinned-source/ exists (rules.rs ~1444). A grep of *.rs, *.md and *.toml for ATHENA_PIN finds nothing, so the loss would otherwise be silent. The test cannot fail on this: the accepted reading says unset means conventions only.",
+      "rejected": [
+        {
+          "option": "Fail the kept test when the mount exists but no env pair is set",
+          "why": "Contradicts the accepted reading and criterion 1 (no ATHENA_PIN_* set passes)."
+        },
+        {
+          "option": "Fall back to validating every study against any mounted tree",
+          "why": "A second study would fail against the wrong tree."
+        }
+      ]
+    },
+    {
+      "choice": "Admission: collect `studies/<id>/...` ids over all non-build-output paths. More than one id gives one `study-one-directory` violation naming the ids. Every path that is not build output, not exactly `CHANGELOG.md` at the root and not under `studies/<id>/` gives a `study-outside-directory` violation. Paths with `.`, `..` or empty segments, and a bare `studies/<name>` file, count as outside. Build-output paths keep their single `build-output` violation.",
+      "reason": "Matches the brief. The existing `build_output_is_refused` (lib.rs:187) still sees exactly one violation.",
+      "rejected": [
+        {
+          "option": "Also flag build output as outside the directory",
+          "why": "Gives two violations for one path and breaks the existing test."
+        },
+        {
+          "option": "Allow files directly under studies/",
+          "why": "They belong to no study id."
+        }
+      ]
+    },
+    {
+      "choice": "The boundary exemption blanks only the string values of `sources[].quote` of claims, only in `studies/<id>/claims.json` (exactly one id segment). It parses with serde_json, collects the claim quote strings, and replaces `\"quote\": <literal>` pairs whose literal is in that set, keeping line numbers. Words are matched on the blanked text, fragments on the raw text. If the file does not parse, nothing is exempt. `boundary_scan` stays unchanged so `the_admission_scan_finds_what_the_policy_scan_finds` compares like with like.",
+      "reason": "Exempts only text quoting studied source and keeps scanning prose and machine-path fragments.",
+      "rejected": [
+        {
+          "option": "Skip all of claims.json, or all of studies/",
+          "why": "Would hide a claim's own prose and the rest of the study."
+        },
+        {
+          "option": "Exempt rationale-card quotes too",
+          "why": "The request names the claims' quote fields. Raised as a User question."
+        }
+      ]
+    },
+    {
+      "choice": "Finding 4: write the study producer prompt in full (three conventions, the one-directory rule, the verbatim-claim-quote clause) with only light tightening, and keep every existing rule. After editing, run `cargo test -p athena-cli --test budgets`. If `system_facts_budgets_match_computed` reports a larger producer value, update only the `- budget producer: N of 1200` line in docs/system-facts.md to the computed value, the documented fix (\"update the line, never the budget\"). docs/system-facts.md becomes a conditional added deliverable. The growth ceiling is the real 1200 budget (182 tokens of headroom over the study set's 1018, criterion 5).",
+      "reason": "The facts file says to update the line, never the budget. Recent commits 223de33 and d94ebc2 changed prompt files together with docs/system-facts.md. Cutting existing rules or dropping the clause to save a few tokens is worse than a one-line facts update. The clause matters: producer briefs forbid the scan's words in any file (crates/athena-context/src/briefs/boundary.rs:54-62), so without it a study producer may reword a quote and trip `quote-mismatch`.",
+      "rejected": [
+        {
+          "option": "Hold growth to about 25 tokens, dropping the clause or existing bullets",
+          "why": "Risks cutting existing rules when the documented fix is a one-line update."
+        },
+        {
+          "option": "Raise the producer budget",
+          "why": "The facts file forbids it."
+        },
+        {
+          "option": "Edit boundary.rs to tell study producers about the exception",
+          "why": "Shared by every capability's brief and not a deliverable."
+        }
+      ]
+    },
+    {
+      "choice": "`synthetic_tree(&Loaded) -> TempDir` builds each file as a vector of lines sized to the highest `end_line` cited for that path. It appends each quote at its `start_line`, joining quotes that share a start line with one space. The tests first require `bad_citation` and `quote_mismatch` to report nothing on this tree.",
+      "reason": "A one-quote-per-line layout collides on firstmate's data (docs/configuration.md 357-357 and 1088-1088, AGENTS.md 234-234, docs/agent-control.md 131-131, bin/fm-project-capacity-lib.sh 49-49, bin/fm-spawn.sh 3165-3165). `cited_lines` (rules.rs:292-299) joins the lines of the range and needs only `end <= lines.len()`, and `quote_mismatch` (339-365) checks a substring. Firstmate has no commit or run sources, so file sources are all the tree must hold. The tree proves the route and the recorded equality, not that the real tree holds the quotes.",
+      "rejected": [
+        {
+          "option": "One quote per line, panic on collision",
+          "why": "Panics on firstmate's real data."
+        },
+        {
+          "option": "Place colliding quotes on neighbouring lines",
+          "why": "A single-line range cites exactly one line."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cap-study/src/rules.rs",
+      "action": "modify",
+      "purpose": "Replace the firstmate-only test section (from about line 1395) with `NoTree`, `Loaded::read(dir)`, `conventions`, `check_study` returning `Outcome { route, problems }`, `check_studies`, `degradation_warning`, `synthetic_tree`, the kept test over every studies/*/, and the temp-copy fault tests, including matching-pin cases on tampered validation.json and a changed quote. Non-test code is unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-study/src/lib.rs",
+      "action": "modify",
+      "purpose": "`admit()` also refuses a change spanning more than one studies/<id>/ and any path outside one study directory and CHANGELOG.md (build output keeps its own violation); add `study_dir_of` and unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-study/prompts/producer.md",
+      "action": "modify",
+      "purpose": "State the conventions: enforcement tags, no placeholders, a 'none' guard never checked by code, one studies/<id>/ plus CHANGELOG.md per job, and that claim quotes stay verbatim. Keep every existing rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/tests/policy.rs",
+      "action": "modify",
+      "purpose": "Split word and fragment scanning, add `boundary_scan_file` with the claim-quote exemption, use it in the tree scan, and add tests that plant split-string terms.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under [Unreleased] / Changed describing per-study validation, the prompt conventions, the admission rule, the boundary exemption, the pinning precondition and degradation, and the several-studies-of-one-URL note.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-study/Cargo.toml",
+      "action": "modify",
+      "purpose": "Add `tempfile.workspace = true` to [dev-dependencies] for the temp-copy tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "purpose": "Add \"tempfile\" to the athena-cap-study dependency list so `--locked` passes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Conditional added deliverable (finding 4): only if `system_facts_budgets_match_computed` reports a larger producer value after the prompt edit, update the single `- budget producer: N of 1200` line to the computed value. No other line changes.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "rules.rs test module: remove `STUDY_SHA`, `study_dir()`, the firstmate-only `mounted_tree()` and `STUDY_FILES` as a fixed list (derive the file list from `studies/<dir>/`). Add `NoTree` (a GitLookup answering None/false), generalise `MountedTree::new(sha, root)`, and add `Loaded::read(dir) -> Result<Loaded, String>` (pin, claims, rationales, model, findings, validation) with `violations(git, rule)` and `validate(git)`. Before writing, grep firstmate's claims.json for escaped newlines in quotes and for kinds other than file, and report what is found.",
+    "rules.rs: add `conventions(dir, loaded) -> Vec<String>`. It checks: 'UNRESOLVED' absent, case-sensitive; 'not examined' absent, case-insensitive (finding 3, keeping rules.rs:1590-1591 semantics); pin.sha is 40-hex; `wrong_sha` (via `NoTree`) reports no owner; every claim text starts '[mechanism] ' or '[prose-only] '; every transition with guard 'none' has `guard_evaluated_by != Code` and empty `guard_counters`; pin.study_id and validation.study_id equal the directory name; each file source has a non-blank quote. Every message starts with the offending id (claim, card, transition, finding or study).",
+    "rules.rs: add `enum Route { FullyValidated, ConventionsOnly }`, `struct Outcome { route, problems }` (derive Debug), `check_study(dir, pin_env: Option<(&str,&str)>, mount: Option<&Path>) -> Outcome` and `check_studies(root, pin_env, mount) -> Vec<(String, Outcome)>` (sorted directories, fails if none). Rules: conventions always. If the env url equals pin.repository_url and the sha differs, add a problem naming the study id and both SHAs (route ConventionsOnly). If url and sha equal and a mount exists, run `validate()` with `MountedTree`, report each failing rule with its offending ids, report a problem naming the study id and 'validation.json' when `computed != validation.json`, and set route FullyValidated. Add `degradation_warning(routes, mount_present) -> Option<String>`, returning the warning line when a mount is present and no route is FullyValidated. The kept test `every_study_follows_the_conventions_and_the_matching_one_validates` reads the two env vars (non-empty), uses `../../pinned-source` if it is a directory, calls `check_studies` on `../../studies`, prints per study 'fully validated' or 'conventions only' plus the warning if any, and asserts no problems.",
+    "rules.rs: add `synthetic_tree(&Loaded) -> TempDir`: for every path cited by a file source, a vector of lines sized to the highest end_line cited for that path (blank by default). Append each quote at its start_line, joining quotes that share a line with one space, and write the lines joined by newline. Add tests: (a) `the_study_matching_the_pin_validates_against_a_tree_rebuilt_from_its_citations`: assert `bad_citation` and `quote_mismatch` report nothing on the tree, then route == FullyValidated, no problems, and `validate()` equals validation.json. (b) `a_matching_pin_runs_validation_and_reports_a_tampered_record_or_quote` (finding 1): build the tree from the untouched study, copy the study to a TempDir, then in separate copies flip one rule result in validation.json (expect route FullyValidated and a problem containing the study id and 'validation.json') and change one claim quote (expect a problem containing the claim id and 'quote-mismatch'); the same quote edit with env unset gives ConventionsOnly and no problems. (c) `a_study_that_breaks_a_convention_or_its_pin_fails_naming_the_id`: four faults (untagged claim, none-guard checked by code, source SHA differing from the pin, same-URL different-SHA pin with a temp mount), plus a control. (d) `the_word_unresolved_in_prose_is_not_a_placeholder`: 'left unresolved' passes, 'UNRESOLVED' fails naming the claim id, 'Not Examined' in a finding fails. (e) `a_second_study_directory_is_checked_too` with a temp studies root. (f) a `degradation_warning` test over four inputs. (g) ports of the quote, SHA and range mutation checks from the old firstmate test, using ids read from the data instead of the literals c1 and ra1.",
+    "lib.rs: add `fn study_dir_of(path) -> Option<&str>` (a `studies/<id>/<rest>` path whose segments are all plain, with a non-empty id and rest) and extend `admit()`. Build-output paths produce `build-output` as before and are skipped by the new checks. More than one id gives one `study-one-directory` violation naming the ids. Each other path that is not exactly `CHANGELOG.md` and not under a study directory gives a `study-outside-directory` violation with its path. Add tests for the six cases in the criterion 3 demonstration, keeping `build_output_is_refused` as is.",
+    "xtask/tests/policy.rs: split `boundary_scan` into `scan_words` and `scan_fragments`, keeping `boundary_scan` as their union so the admission-agreement test is unchanged. Add `claim_quote_exempt(path)` (exactly `studies/<one id>/claims.json`), `without_claim_quotes(text)` (serde_json parse, collect `sources[].quote` strings, replace `\"quote\": <literal>` for those literals with an empty string, one line in and one line out) and `boundary_scan_file(path, text)` (words on the blanked text, fragments on the raw text). Use it in `athena_refers_to_no_one_who_runs_it_or_where`. Add tests for each case in the criterion 4 demonstration, planting words and fragments with `.concat()` from split parts. Grep the file for the banned words before finishing.",
+    "crates/athena-cap-study/Cargo.toml: add `tempfile.workspace = true` under [dev-dependencies]. Cargo.lock: add \"tempfile\" after \"serde_json\" in the athena-cap-study entry.",
+    "producer.md: keep every existing rule and add, in this order: start every claim text with `[mechanism]` or `[prose-only]`; give the full pinned SHA; no placeholders (UNRESOLVED, not examined); a guard that does not exist is `none`, never checked by code; change only one `studies/<id>/` and CHANGELOG.md; a claim quote stays verbatim even if it holds a scanned word, since the scan skips claim quotes only. Tighten wording lightly (merge the tag rule into the claim bullet), but cut no rule and do not drop the quote clause. Do not write the scan's word list in the prompt and avoid the text 'agent-reference'. Then run `cargo test -p athena-cli --test budgets` and `cargo test -p athena-context`.",
+    "docs/system-facts.md, only if step 8's budgets run reports that `system_facts_budgets_match_computed` fails with a larger producer value: change the single `- budget producer: 1043 of 1200` line to the value the test reports, nothing else, and rerun the budgets test. If the producer value is unchanged, leave the file untouched. If the new value exceeds 1200, stop and report it.",
+    "CHANGELOG.md: add the entry under [Unreleased] / ### Changed, without the banned words. It covers per-study validation, the prompt conventions, the admission refusal, the boundary exemption for claim quotes, the pinning precondition (ATHENA_PIN_* must be set by the pinning change) and the degradation (conventions only, with a warning, when it is unset, so the verifier prompt's claim holds only after that change), and the note that a study sharing a repository URL with another fails the kept test when its pin has the same URL and a different SHA than ATHENA_PIN_*.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked` (or the crate tests named in the demonstrations: `cargo test -p athena-cap-study`, `cargo test -p xtask --test policy`, `cargo test -p athena-cli --test budgets`, `cargo test -p athena-context`, `cargo test -p athena-core --test refusal_corpus`). Where pinned-source/ and ATHENA_PIN_* are present, confirm the log shows firstmate fully validated. Run `git status` and confirm nothing under studies/ and no athena.toml changed, and docs/system-facts.md changed only on the budget line, if at all."
+  ],
+  "risks": [
+    {
+      "risk": "The ATHENA_PIN_* variables may not reach the test process, so tree validation would silently not run. That is weaker than today's behavior of validating whenever pinned-source/ exists.",
+      "mitigation": "The kept test prints, per study, 'fully validated' or 'conventions only'. When pinned-source/ is a directory and no study matched, it prints the greppable line 'WARNING: mounted tree present but no study matched ATHENA_PIN_*; tree validation did not run'. `degradation_warning` is unit-tested. The CHANGELOG names the pinning precondition and the degradation. The rebuilt-tree tests run the full-validation route in every checkout."
+    },
+    {
+      "risk": "The reconstructed tree is built from the study's own citations, so it cannot show that the real tree holds the quotes.",
+      "mitigation": "The test's doc comment says so. The matching-pin cases assert the route and that tampered validation.json or a changed quote is caught. Only a mounted tree proves the quotes, and criterion 1's mounted command covers that on a host with pinned-source/."
+    },
+    {
+      "risk": "Several single-line ranges in firstmate's claims.json are shared by different quotes, so a one-quote-per-line tree collides. A quote containing a newline could shift later lines.",
+      "mitigation": "`synthetic_tree` joins quotes that start on one line with a space and pads to the highest end line. The tests assert `bad_citation` and `quote_mismatch` are empty on the tree before comparing, so a placement fault is reported by claim id. Before writing, the producer greps firstmate's claims.json for escaped newlines in quotes and for non-file kinds, and reports any."
+    },
+    {
+      "risk": "The rewritten study prompt grows past 1043, the recorded largest producer set, and `system_facts_budgets_match_computed` fails.",
+      "mitigation": "The headroom to the real 1200 budget is 182 tokens, so rules are not cut. The producer updates the one `- budget producer:` line in docs/system-facts.md to the computed value, the documented fix, and reruns the budgets test. Anything else in the facts file stays unchanged."
+    },
+    {
+      "risk": "Study jobs that legitimately touch another path (for example a shared doc) are now refused.",
+      "mitigation": "The brief expects about 5% newly refused readings. The violation detail names the allowed set (one studies/<id>/ plus CHANGELOG.md) so the producer can fix the change in one retry, and the prompt states the rule."
+    },
+    {
+      "risk": "A studied system's words in a rationale-card quote, or in a claim's own prose, still fail the boundary scan.",
+      "mitigation": "The request exempts only claim quotes. Raised as a User question."
+    },
+    {
+      "risk": "With several studies of one repository, the same-URL-different-SHA failure can fire for a study the job did not pick.",
+      "mitigation": "The request's rule is kept. The failure names the study id and both SHAs, the CHANGELOG records the conflict, and the third open question asks the user whether to relax it."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Study::admit behavior (new violations)",
+      "dependent": "crates/athena-core/src/run/candidate.rs:164 and crates/athena-core/src/run/mod.rs:783 call `Capability::admit` through the trait",
+      "kind": "code",
+      "test": "cargo test -p athena-cap-study admit (the new cases and the unchanged `build_output_is_refused` in lib.rs). The callers extend the violation list with whatever `admit` returns, so they do not change.",
+      "reason": null
+    },
+    {
+      "name": "Study::admit behavior",
+      "dependent": "Stub capabilities overriding `admit`: crates/athena-core/src/run_pin_tests.rs:71, crates/athena-core/src/run/tests.rs:160, crates/athena-core/src/scope_guard.rs:1017",
+      "kind": "code",
+      "test": null,
+      "reason": "They implement their own `admit` returning no violations, so the study capability's new rules never reach them. Only crates/athena-cli/src/wiring.rs:23 registers the real `Study`, and no test under crates/*/tests/ names the capability 'study'."
+    },
+    {
+      "name": "study change class and admission",
+      "dependent": "crates/athena-core/src/routing.rs `Kind::Study` (routing_study_job_that_changes_rust_runs_fmt_and_clippy, line 415)",
+      "kind": "code",
+      "test": null,
+      "reason": "Routing decides which checks run from a job's class and changed paths and never calls `admit`, so the new admission rule does not change it."
+    },
+    {
+      "name": "studies/<id>/pin.json url and sha, and the ATHENA_PIN_URL/ATHENA_PIN_SHA names",
+      "dependent": "crates/athena-core/src/run/pin.rs `study_pin` (lines 82-133) and crates/athena-core/src/run_pin_tests.rs",
+      "kind": "code",
+      "test": null,
+      "reason": "The plan reads pin.json fields and does not change them. A grep of *.rs, *.md and *.toml for ATHENA_PIN finds no producer of the pair, so mounted full validation depends on the pinning change the request says set them. The kept test prints a warning when a mount exists but no study matched, and the rebuilt-tree tests cover the route in any checkout. `study_pin` allows several studies per URL and picks one by study id, so the same-URL different-SHA failure can name a study the job did not pick (CHANGELOG and User question)."
+    },
+    {
+      "name": "the kept test's mounted validation, which runs only when ATHENA_PIN_* matches",
+      "dependent": "crates/athena-cap-study/prompts/verifier.md line 3 (\"Code already ran the study's validation rules: citations, pin, quotes...\")",
+      "kind": "code",
+      "test": null,
+      "reason": "That claim holds only when the pinning change sets the pair. The plan names the precondition and the degradation in the CHANGELOG entry and adds a greppable warning to the kept test. The verifier prompt is not edited because it is not a deliverable."
+    },
+    {
+      "name": "crates/athena-cap-study/prompts/producer.md",
+      "dependent": "crates/athena-context/src/lib.rs:652-659, a test that includes the study producer prompt",
+      "kind": "code",
+      "test": "cargo test -p athena-context: asserts the text lacks 'agent-reference'; the new prompt text avoids it.",
+      "reason": null
+    },
+    {
+      "name": "study producer prompt size",
+      "dependent": "crates/athena-cli/tests/budgets.rs (`system_facts_budgets_match_computed`, `every_role_set_is_within_its_budget`, `the_reader_headroom_rows_equal_the_budget_figures_and_name_shared_files`)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets. `computed_rows` takes the maximum producer set over capabilities. If the study set passes the recorded 1043, the producer updates the single `- budget producer:` line (docs/system-facts.md line 23), the documented fix, and the test passes again. The 1200 budget is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "docs/system-facts.md (conditional edit)",
+      "dependent": "docs/system-facts.md budget lines, other than `- budget producer:`",
+      "kind": "rule",
+      "test": null,
+      "reason": "Only the producer line can move, because only the study producer prompt changes and the other role sets (contract, reader, verifier, planner, critic) are unchanged. The crate lines and the banned-words note are untouched."
+    },
+    {
+      "name": "crates/athena-cap-study/prompts/producer.md content",
+      "dependent": "xtask/tests/policy.rs `athena_bin_keys_cover_every_compiled_in_file` (line 937) lists crates/athena-cap-study/prompts/producer.md as compiled in",
+      "kind": "rule",
+      "test": null,
+      "reason": "The test checks that the path is in the ci.yml cache-key globs, not its content, so an edit changes nothing."
+    },
+    {
+      "name": "boundary scan (M19)",
+      "dependent": "xtask/tests/policy.rs `athena_refers_to_no_one_who_runs_it_or_where` scanning tracked files, including the prompt, CHANGELOG.md, docs/system-facts.md and studies/",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test policy: the new exemption tests plus the unchanged `the_boundary_scanner_flags_a_planted_term`, `the_producer_brief_lists_exactly_the_scanners_terms` and `the_admission_scan_finds_what_the_policy_scan_finds` (which keeps calling the unchanged `boundary_scan`). The prompt, CHANGELOG entry and the facts line contain none of the scan's words.",
+      "reason": null
+    },
+    {
+      "name": "the boundary word and fragment lists",
+      "dependent": "crates/athena-context/src/briefs/boundary.rs `boundary_scan` and its callers (reading/checks.rs:244, reading/topics.rs:303, steward.rs, hestia.rs, introspect.rs, work_decisions.rs)",
+      "kind": "code",
+      "test": null,
+      "reason": "The plan does not edit boundary.rs or the lists. It only adds a file-level exemption in the policy test, so the admission scan of requests is unchanged."
+    },
+    {
+      "name": "studies/firstmate-work-handling/* files",
+      "dependent": "xtask/src/site.rs (`STUDY_DIR` = studies/firstmate-work-handling) and docs/conventions/study-claim-support.md",
+      "kind": "code",
+      "test": null,
+      "reason": "No file under studies/ is modified, so the site generator and the claim-support convention see the same data."
+    },
+    {
+      "name": "crates/athena-cap-study/Cargo.toml dev-dependencies (adds tempfile)",
+      "dependent": "xtask/tests/policy.rs `dependency_direction_matches_the_architecture` (the `actual()` graph keeps only entries with null `kind`) and crates/athena-cli/tests/budgets.rs `system_facts_crate_lines_match_manifests` (workspace_crates keeps only athena-* names)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The graph check ignores dev-dependencies and the crate-line check lists only athena-* crates, so adding the non-workspace `tempfile` changes neither. `tempfile = \"3\"` is already a workspace dependency (Cargo.toml line 53)."
+    },
+    {
+      "name": "Cargo.lock entry for athena-cap-study",
+      "dependent": "`cargo test --locked` and clippy --locked in the checks",
+      "kind": "host_setting",
+      "test": "cargo build --locked: the lock's athena-cap-study dependency list (Cargo.lock lines 100-109) gets \"tempfile\" after \"serde_json\". The tempfile package is already locked (line 813), so no version changes.",
+      "reason": null
+    },
+    {
+      "name": "CHANGELOG.md `[Unreleased]` entry and the allowance of CHANGELOG.md in study admission",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (reads CHANGELOG.md at line 966 and mentions CHANGELOG.md as the file Athena always adds)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus: it requires only its own phrases to be present in the changelog; a new bullet leaves them alone. Admission allows CHANGELOG.md as it does for every job.",
+      "reason": null
+    },
+    {
+      "name": "the firstmate-specific tests, replaced",
+      "dependent": "rules.rs tests `the_firstmate_study_passes_every_rule_against_the_pinned_tree`, `a_wrong_sha_or_a_changed_quote_fails_the_firstmate_study`, `the_firstmate_study_carries_the_pin_and_tags_every_claim`, `a_guard_of_none_is_never_said_to_be_evaluated_by_code`",
+      "kind": "code",
+      "test": "cargo test -p athena-cap-study rules::tests. A grep for these names outside rules.rs found only decisions-log prose, no test or doc that asserts them by name. Their checks move into the generic functions and are ported with ids read from the data.",
+      "reason": null
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Run the study crate tests. The kept test `every_study_follows_the_conventions_and_the_matching_one_validates` calls `check_studies(studies root, env pair read from ATHENA_PIN_URL/ATHENA_PIN_SHA, mount ../../pinned-source if it is a directory)` and prints one line per study: `<id>: fully validated` or `<id>: conventions only`. Test `the_study_matching_the_pin_validates_against_a_tree_rebuilt_from_its_citations` passes the study's own URL and SHA as the env pair and a `synthetic_tree` as the mount. It first asserts `bad_citation` and `quote_mismatch` are empty on that tree, then asserts route == FullyValidated and no problems, so `validate()` equals validation.json. Finding 1: `a_matching_pin_runs_validation_and_reports_a_tampered_record_or_quote` copies the study to a TempDir and calls `check_study` with the pin's own URL and SHA and a `synthetic_tree` built from the untouched study. Case (i) flips one rule result in the copy's validation.json and expects route FullyValidated and a problem containing the study id and 'validation.json'. Case (ii) changes one claim quote in the copy's claims.json and expects a problem containing that claim id and 'quote-mismatch'. Case (iii) is the same changed quote with the env pair unset: route ConventionsOnly and no problems. `a_second_study_directory_is_checked_too` builds a temp studies root with the firstmate copy and a renamed copy holding an untagged claim. Mounted-case command for a host with pinned-source/: `ATHENA_PIN_URL=<repository_url in studies/firstmate-work-handling/pin.json> ATHENA_PIN_SHA=<sha in the same file> cargo test -p athena-cap-study rules::tests -- --nocapture`, which should print 'firstmate-work-handling: fully validated'. This job's verifier cannot see that case.",
+      "command": "cargo test -p athena-cap-study rules::tests -- --nocapture",
+      "observes": "With no ATHENA_PIN_* set, every studies/*/ passes the conventions and the output says 'conventions only'. The rebuilt-tree test passes with route FullyValidated. The tampered-record case returns a problem naming the study id. The changed-quote case with a matching pin names the claim id, while the same edit with env unset returns nothing. The second-directory test fails naming the second directory and its claim id. In the mounted case (host only) the printed line says fully validated.",
+      "fails_without": "If the matching branch returned early without calling `validate()`, cases (i) and (ii) would return no problems and the route assertion would fail. If the loop skipped a directory, the second-directory test would not name the bad claim. If `synthetic_tree` collided on shared single-line ranges, the pre-check would name the claim and fail.",
+      "seam": "Production entry points `validate()` and the rules exist in rules.rs. New test-module items `check_study` (returning `Outcome`), `check_studies`, `Loaded::read(dir)`, `synthetic_tree(&Loaded) -> TempDir` and the copy helper are added by plan steps 1-4. Fixtures: the real studies/ directory, `tempfile::TempDir` copies, and a `MountedTree` (exists in the rules.rs test module at ~1412, generalised in step 1) over a rebuilt root. Root, env pair and mount are injected as arguments. The doubles hold no rule logic: validation, `wrong_sha`, `bad_citation`, `quote_mismatch` and the conventions run the real code."
+    },
+    {
+      "criterion": 2,
+      "method": "The test copies the first study directory into a TempDir and edits its JSON with serde_json, then calls `check_study`. (a) Set claims[0].text to untagged prose: a problem containing that claim id and 'enforcement'. (b) Set transitions[0].guard to \"none\" and guard_evaluated_by to \"code\": a problem naming the transition id. (c) Set claims[0].sources[0].sha to a different 40-hex: a problem naming the claim id (via `wrong_sha`). (d) Leave the copy unchanged and pass an env pair with the pin's URL and a different SHA, with a temp dir as mount: a problem naming the study id and both SHAs. A control (unmodified copy, env unset) returns no problems. Finding 3 is covered by `the_word_unresolved_in_prose_is_not_a_placeholder`: a claim text containing 'conflicts are left unresolved' returns no problems, and a claim text containing the placeholder 'UNRESOLVED' returns a problem naming the claim id. A case with 'Not Examined' in a finding returns a problem naming the finding id.",
+      "command": "cargo test -p athena-cap-study rules::tests::a_study_that_breaks_a_convention_or_its_pin_fails_naming_the_id",
+      "observes": "Four asserts of the form `problems.iter().any(|p| p.contains(<id>))` plus the control returning empty. Failure strings begin with the offending id (claim, transition or study). The lowercase 'unresolved' passes while the placeholder fails.",
+      "fails_without": "If the tag check, the none-guard check, the SHA check or the pin-mismatch check were removed, the matching case would return an empty list and its assertion would fail. If a message omitted the id, `contains(id)` would fail. A case-insensitive UNRESOLVED check would fail the 'left unresolved' test.",
+      "seam": "`check_study(dir, pin_env, mount)` is added in step 3. Fixtures are `tempfile::TempDir` copies of the real study, with `tempfile` added to dev-dependencies in step 7. The pin env pair and mount are injected as arguments. The conventions run the real `wrong_sha` rule with a `NoTree` lookup (added in step 1) that only supplies absent git answers."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in lib.rs call `Study.admit(&ChangeList, &job_config())`. Input forms (path shapes) and cases: (1) studies/a/claims.json, studies/a/model.json and CHANGELOG.md give none. (2) studies/a/claims.json and studies/b/claims.json give one `study-one-directory` violation naming a and b. (3) studies/a/claims.json and docs/x.md give one `study-outside-directory` violation with path docs/x.md. (4) CHANGELOG.md alone gives none. (5) docs/CHANGELOG.md, bare studies/x, studies/a/../b/c, and a deleted file under a second directory are refused. (6) target/debug/x with studies/s1/claims.json gives exactly one violation, the existing build-output case. athena-core's refusal_corpus covers request-reading checks. A grep of crates/athena-core/tests/refusal_corpus.rs for admit, ChangeList and studies/ found no case for change-path admission, so no corpus case maps to these forms and none is added. `cargo test -p athena-core --test refusal_corpus` can still be run to show the reading corpus is unchanged; no result is cited here.",
+      "command": "cargo test -p athena-cap-study admit",
+      "observes": "Violations returned by `admit()` equal the expected rule names and paths for every case. The existing `build_output_is_refused` still passes. The tightening is intended: expected 5% of study readings newly refused.",
+      "fails_without": "With the old admit, the two-directory and outside-file cases return zero violations, so the count and rule-name assertions fail.",
+      "seam": "`Study::admit` exists (crates/athena-cap-study/src/lib.rs:112). Callers reach it through the `Capability` trait at crates/athena-core/src/run/candidate.rs:164 and run/mod.rs:783. The seam is a directly built `ChangeList` and the existing `job_config()` fixture (lib.rs:132). The helper `study_dir_of(path) -> Option<&str>` is added in step 5 and called by the real code, not faked."
+    },
+    {
+      "criterion": 4,
+      "method": "New tests call the new `boundary_scan_file(path, text)` (step 6). Claims text is built with `serde_json::json!` and `to_string_pretty`. The planted word and the machine-path fragment are built with `.concat()` from split parts, as in `the_boundary_scanner_flags_a_planted_term` (policy.rs:187). Cases: a banned word in a claim's source quote in studies/s/claims.json gives no hit. The same word in the claim's `text` gives a hit. The word in studies/s/findings.json or studies/s/notes.md prose gives a hit. The same claims JSON at docs/x/claims.json, crates/x/claims.json or studies/a/b/claims.json gives a hit. A machine-path fragment inside a claim quote gives a hit. A word in a rationale-card quote in studies/s/rationales.json gives a hit. Invalid JSON in claims.json exempts nothing. `athena_refers_to_no_one_who_runs_it_or_where` calls the new function over tracked files. A Grep of xtask/tests/policy.rs for each banned word in the list there (not written in this plan) must find no match outside the existing `boundary_words()` list itself.",
+      "command": "cargo test -p xtask --test policy",
+      "observes": "All new tests and the existing M19 tests pass: `the_boundary_scanner_flags_a_planted_term`, `the_producer_brief_lists_exactly_the_scanners_terms`, `the_admission_scan_finds_what_the_policy_scan_finds` and the tree scan.",
+      "fails_without": "If the exemption were missing, the claim-quote case would report a hit. If the exemption covered all of claims.json, the claim-text case would report none. If fragments were also exempted, the fragment-in-quote case would report none.",
+      "seam": "`boundary_scan_file` is a new function in policy.rs (step 6). `boundary_scan`, `boundary_words`, `boundary_fragments` and `athena_files()` exist. Fixtures are in-memory strings with no filesystem. The real regex and serde_json do the matching."
+    },
+    {
+      "criterion": 5,
+      "method": "Read crates/athena-cap-study/prompts/producer.md and Grep it for the `[mechanism]` and `[prose-only]` tags, the placeholder rule (UNRESOLVED, not examined), the 'none' guard rule, the one-directory rule and the verbatim-quote clause. Run the budget tests. If the study set moved the largest producer set past 1043, `git diff` shows docs/system-facts.md changed on the single `- budget producer:` line only, to the computed value. Also run `cargo test -p athena-context`, which asserts the prompt lacks 'agent-reference' (crates/athena-context/src/lib.rs:652-659).",
+      "command": "cargo test -p athena-cli --test budgets",
+      "observes": "`system_facts_budgets_match_computed` and `every_role_set_is_within_its_budget` pass, and the producer set is at most 1200 tokens. The prompt contains all five statements. Any facts-file edit is limited to the one budget line.",
+      "fails_without": "If the prompt omitted a convention, the Grep finds no match. If the set grew and the facts line was not updated, `system_facts_budgets_match_computed` fails reporting the new computed value. If the set passed 1200, `every_role_set_is_within_its_budget` fails.",
+      "seam": "The budget tests in crates/athena-cli/tests/budgets.rs exist (`computed_rows` takes the maximum over capabilities). The prompt is a plain file included at compile time. No fake. Step 8 edits the prompt, and step 9 edits the facts line only if the test requires it."
+    },
+    {
+      "criterion": 6,
+      "method": "Run `cargo fmt --all` once after the edits, then clippy on the whole workspace, then `cargo fmt --all --check`.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Clippy finishes with no warnings and fmt --check exits 0 with no diff.",
+      "fails_without": "An unused import or variable, a type without Debug (missing_debug_implementations = warn), a needless clone or unformatted lines would make clippy or fmt --check exit non-zero.",
+      "seam": "The workspace's own tooling over the changed crates. `--all-targets` compiles the athena-cap-study tests and the xtask tests. No fake or fixture."
+    },
+    {
+      "criterion": 7,
+      "method": "Read CHANGELOG.md `## [Unreleased]` for a new bullet under `### Changed`. It covers per-study validation, the prompt conventions, the new admission refusal, the boundary exemption for claim quotes, the same-URL-several-studies note, the precondition (the pinning change that sets ATHENA_PIN_*) and the degradation that with the pair unset only conventions are checked. Run `git diff --stat` and `git status`.",
+      "command": "git diff --stat",
+      "observes": "The changed files are only those in the plan's files list. Nothing under studies/ and not athena.toml changed. docs/system-facts.md appears only if the budget line needed updating, and then only on that line. The bullet contains none of the boundary list's words.",
+      "fails_without": "A missing changelog entry, or a stray change under studies/firstmate-work-handling/ or to athena.toml, shows in the diff stat.",
+      "seam": "No test double. `git diff` and `git status` over the working tree (verifier-permitted commands). The CHANGELOG bullet is added in step 10."
+    }
+  ],
+  "open_questions": [
+    "Host: Are ATHENA_PIN_URL and ATHENA_PIN_SHA set in the environment of study jobs' producer, verifier and cargo checks? A search of this snapshot (*.rs, *.md, *.toml) finds no code that sets them, and athena.toml's [capabilities.study.env] (out of scope) lists only CARGO_TARGET_DIR and CARGO_TERM_COLOR. If unset, the kept test checks conventions only and prints the mounted-tree warning, and the verifier prompt's claim that code already ran the validation rules is false until the pinning change lands.",
+    "User: Should rationale-card source quotes in rationales.json be exempt from the boundary scan as well? The request names only the quote fields of a study's claims, so the plan exempts only claims.json; a studied system's own words in a rationale quote would still fail the scan.",
+    "User: Several studies may share one repository URL (pin.rs `study_pin` picks one by the study id in the request), but ATHENA_PIN_URL and ATHENA_PIN_SHA carry no study id. The request's rule makes every other study of that URL with a different SHA fail the kept test. The plan keeps the rule as asked; should it instead skip, not fail, a same-URL study whose SHA differs once the pinning change can pass the study id?"
+  ],
+  "producer_section_sha256": "8c7135ff99b4a8f6cc29ec16b15debd7c5949a95bf7e379a17463b242ff51a68"
+}

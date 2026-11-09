@@ -1392,26 +1392,48 @@ pub(crate) mod tests {
         assert!(f.repo.file_lines(PIN, "nope").is_none());
     }
 
-    // ---- the firstmate work-handling study, checked against the real pinned tree ------------------------
+    // ---- every study, checked against its own pin -------------------------------------------------------
+    //
+    // Conventions are checked for every `studies/<id>/`. Full validation against a tree runs only for the
+    // study whose pin names the URL and SHA of ATHENA_PIN_URL and ATHENA_PIN_SHA, and only when a tree is
+    // mounted. The environment pair and the mount are arguments, so the tests below drive every case on
+    // temporary copies without touching process state.
 
     use serde::de::DeserializeOwned;
+    use serde_json::{Value, json};
     use std::path::{Component, Path, PathBuf};
+    use tempfile::TempDir;
 
-    const STUDY_SHA: &str = "6407052f4c521e39401ce2305dfa45d201249827";
-    const STUDY_FILES: [&str; 6] = [
-        "pin.json",
-        "claims.json",
-        "rationales.json",
-        "model.json",
-        "findings.json",
-        "validation.json",
-    ];
+    static NO_INTERVENTIONS: BTreeSet<String> = BTreeSet::new();
 
-    /// The tree mounted at `pinned-source/`, answering git questions for the one commit it holds.
+    /// A lookup that knows no commit and no file, for the rules that only compare strings.
+    #[derive(Debug)]
+    struct NoTree;
+
+    impl GitLookup for NoTree {
+        fn file_lines(&self, _sha: &str, _path: &str) -> Option<Vec<String>> {
+            None
+        }
+
+        fn reachable(&self, _commit: &str, _from: &str) -> bool {
+            false
+        }
+    }
+
+    /// A tree on disk, answering git questions for the one commit it holds.
     #[derive(Debug)]
     struct MountedTree {
         sha: String,
         root: PathBuf,
+    }
+
+    impl MountedTree {
+        fn new(sha: &str, root: &Path) -> MountedTree {
+            MountedTree {
+                sha: sha.into(),
+                root: root.to_path_buf(),
+            }
+        }
     }
 
     impl GitLookup for MountedTree {
@@ -1431,25 +1453,37 @@ pub(crate) mod tests {
         }
     }
 
-    fn study_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../studies/firstmate-work-handling")
+    fn studies_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../studies")
     }
 
-    fn load<T: DeserializeOwned>(name: &str) -> T {
-        let text = std::fs::read_to_string(study_dir().join(name)).expect("a study file");
-        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}"))
+    /// The study directories under `root`, sorted.
+    fn study_dirs(root: &Path) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(root)
+            .map(|rd| {
+                rd.filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default();
+        dirs.sort();
+        dirs
     }
 
-    /// The mounted tree, or `None` where `pinned-source/` is absent (a plain checkout has no mount).
-    fn mounted_tree() -> Option<MountedTree> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pinned-source");
-        root.is_dir().then(|| MountedTree {
-            sha: STUDY_SHA.into(),
-            root,
-        })
+    fn dir_name(dir: &Path) -> String {
+        dir.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
     }
 
-    /// The study's records, owned.
+    fn read_json<T: DeserializeOwned>(dir: &Path, name: &str) -> Result<T, String> {
+        let text = std::fs::read_to_string(dir.join(name)).map_err(|e| format!("{name}: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))
+    }
+
+    /// The study's records, owned, with the recorded validation.
     #[derive(Clone)]
     struct Loaded {
         pin: Pin,
@@ -1457,169 +1491,678 @@ pub(crate) mod tests {
         rationales: Vec<Rationale>,
         model: Model,
         findings: Vec<Finding>,
+        recorded: Validation,
     }
 
     impl Loaded {
-        fn read() -> Loaded {
-            Loaded {
-                pin: load("pin.json"),
-                claims: load("claims.json"),
-                rationales: load("rationales.json"),
-                model: load("model.json"),
-                findings: load("findings.json"),
-            }
+        fn read(dir: &Path) -> Result<Loaded, String> {
+            Ok(Loaded {
+                pin: read_json(dir, "pin.json")?,
+                claims: read_json(dir, "claims.json")?,
+                rationales: read_json(dir, "rationales.json")?,
+                model: read_json(dir, "model.json")?,
+                findings: read_json(dir, "findings.json")?,
+                recorded: read_json(dir, "validation.json")?,
+            })
         }
 
-        fn violations(&self, tree: &MountedTree, rule: &str) -> Vec<String> {
-            let none = BTreeSet::new();
-            let study = Study {
+        fn study<'a>(&'a self, git: &'a dyn GitLookup) -> Study<'a> {
+            Study {
                 pin: &self.pin,
                 claims: &self.claims,
                 runs: &[],
                 rationales: &self.rationales,
                 model: &self.model,
                 findings: &self.findings,
-                user_interventions: &none,
+                user_interventions: &NO_INTERVENTIONS,
                 template_voice: &[Provenance::Stated],
-                git: tree,
-            };
+                git,
+            }
+        }
+
+        fn violations(&self, git: &dyn GitLookup, rule: &str) -> Vec<String> {
             let rule = RULES.iter().find(|r| r.id == rule).expect("a known rule");
-            (rule.check)(&study)
+            (rule.check)(&self.study(git))
                 .into_iter()
                 .flat_map(|v| v.ids)
                 .collect()
         }
 
-        fn validate(&self, tree: &MountedTree) -> Validation {
-            let none = BTreeSet::new();
-            validate(&Study {
-                pin: &self.pin,
-                claims: &self.claims,
-                runs: &[],
-                rationales: &self.rationales,
-                model: &self.model,
-                findings: &self.findings,
-                user_interventions: &none,
-                template_voice: &[Provenance::Stated],
-                git: tree,
-            })
+        fn validate(&self, git: &dyn GitLookup) -> Validation {
+            validate(&self.study(git))
         }
     }
 
-    #[test]
-    fn the_firstmate_study_passes_every_rule_against_the_pinned_tree() {
-        let Some(tree) = mounted_tree() else {
-            eprintln!("pinned-source/ is absent; the study is not checked against a tree here");
-            return;
-        };
-        let study = Loaded::read();
-        let computed = study.validate(&tree);
-        assert!(
-            computed.passed(),
-            "{:?}",
-            computed
-                .results
-                .iter()
-                .filter(|r| !r.pass)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(computed.results.len(), RULES.len());
-        // The recorded validation is what the rules answer now.
-        let recorded: Validation = load("validation.json");
-        assert_eq!(recorded, computed);
-        // The citations were really checked: the study has file sources, all with quotes.
-        let sources: Vec<&Source> = study
-            .claims
-            .iter()
-            .flat_map(|c| &c.sources)
-            .chain(study.rationales.iter().flat_map(|r| &r.sources))
-            .collect();
-        assert!(sources.len() > 20);
-        assert!(sources.iter().all(|s| s.kind == SourceKind::File));
-    }
-
-    #[test]
-    fn a_wrong_sha_or_a_changed_quote_fails_the_firstmate_study() {
-        let Some(tree) = mounted_tree() else {
-            return;
-        };
-        let study = Loaded::read();
-        assert!(study.violations(&tree, "wrong-sha").is_empty());
-        assert!(study.violations(&tree, "quote-mismatch").is_empty());
-
-        let mut other_sha = study.clone();
-        other_sha.claims[0].sources[0].sha = Some(OTHER.into());
-        assert_eq!(other_sha.violations(&tree, "wrong-sha"), ["c1"]);
-
-        let mut other_pin = study.clone();
-        other_pin.pin.sha = OTHER.into();
-        assert!(
-            other_pin
-                .violations(&tree, "wrong-sha")
-                .contains(&"c1".to_string())
-        );
-        assert!(
-            other_pin
-                .violations(&tree, "bad-citation")
-                .contains(&"c1".to_string())
-        );
-
-        let mut other_quote = study.clone();
-        other_quote.claims[0].sources[0].quote = Some("text that is not in the file".into());
-        assert_eq!(other_quote.violations(&tree, "quote-mismatch"), ["c1"]);
-
-        let mut other_card_quote = study.clone();
-        other_card_quote.rationales[0].sources[0].quote = Some("text that is not there".into());
-        assert_eq!(
-            other_card_quote.violations(&tree, "quote-mismatch"),
-            ["ra1"]
-        );
-
-        let mut other_lines = study;
-        other_lines.claims[0].sources[0].end_line = Some(999_999);
-        assert_eq!(other_lines.violations(&tree, "bad-citation"), ["c1"]);
-    }
-
-    #[test]
-    fn the_firstmate_study_carries_the_pin_and_tags_every_claim() {
-        let study = Loaded::read();
-        assert_eq!(study.pin.sha, STUDY_SHA);
-        assert_eq!(study.pin.sha.len(), 40);
-        for name in STUDY_FILES {
-            let text = std::fs::read_to_string(study_dir().join(name)).unwrap();
-            assert!(!text.contains("UNRESOLVED"), "{name}: a placeholder pin");
-            assert!(!text.to_lowercase().contains("not examined"), "{name}");
+    /// The first placeholder word in `text`, if any. `UNRESOLVED` is case-sensitive, so the ordinary word
+    /// `unresolved` in prose is not a placeholder.
+    fn placeholder_in(text: &str) -> Option<&'static str> {
+        if text.contains("UNRESOLVED") {
+            Some("UNRESOLVED")
+        } else if text.to_lowercase().contains("not examined") {
+            Some("not examined")
+        } else {
+            None
         }
-        for source in study
-            .claims
+    }
+
+    /// Visits every string of `value`, skipping only the `quote` of an object inside a `sources` array
+    /// (verbatim text of the studied system). The owner is the nearest enclosing object's `id`.
+    fn walk_placeholders(value: &Value, owner: &str, file: &str, out: &mut Vec<String>) {
+        match value {
+            Value::String(text) => {
+                if let Some(word) = placeholder_in(text) {
+                    out.push(format!("{owner}: {file} holds the placeholder {word:?}"));
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    walk_placeholders(item, owner, file, out);
+                }
+            }
+            Value::Object(map) => {
+                let owner = map.get("id").and_then(Value::as_str).unwrap_or(owner);
+                for (key, child) in map {
+                    match (key.as_str(), child) {
+                        ("sources", Value::Array(sources)) => {
+                            for source in sources {
+                                match source {
+                                    Value::Object(fields) => {
+                                        for (_, c) in fields.iter().filter(|(k, _)| *k != "quote") {
+                                            walk_placeholders(c, owner, file, out);
+                                        }
+                                    }
+                                    other => walk_placeholders(other, owner, file, out),
+                                }
+                            }
+                        }
+                        _ => walk_placeholders(child, owner, file, out),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Placeholder text anywhere in a study's JSON files, outside source quotes.
+    fn placeholders(name: &str, dir: &Path) -> Vec<String> {
+        let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+            Ok(rd) => rd
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .collect(),
+            Err(e) => return vec![format!("{name}: {e}")],
+        };
+        files.sort();
+        let mut out = Vec::new();
+        for path in files {
+            let file = dir_name(&path);
+            let parsed: Result<Value, String> = std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()));
+            match parsed {
+                Ok(value) => walk_placeholders(&value, name, &file, &mut out),
+                Err(e) => out.push(format!("{name}: {file}: {e}")),
+            }
+        }
+        out
+    }
+
+    /// The conventions every study keeps, whatever tree is or is not mounted. Each message starts with the
+    /// offending id.
+    fn conventions(dir: &Path, l: &Loaded) -> Vec<String> {
+        let name = dir_name(dir);
+        let name = name.as_str();
+        let mut out = Vec::new();
+        let sha = &l.pin.sha;
+        if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            out.push(format!(
+                "{name}: pin.json sha {sha:?} is not a full 40-hex commit id"
+            ));
+        }
+        for (file, id) in [
+            ("pin.json", &l.pin.study_id),
+            ("validation.json", &l.recorded.study_id),
+        ] {
+            if id != name {
+                out.push(format!(
+                    "{name}: {file} study_id {id:?} differs from the directory name"
+                ));
+            }
+        }
+        let study = l.study(&NoTree);
+        for v in wrong_sha(&study) {
+            for id in &v.ids {
+                out.push(format!("{id}: {}: {}", v.rule, v.detail));
+            }
+        }
+        for (owner, src) in sources(&study) {
+            if src.kind == SourceKind::File && src.quote.as_deref().is_none_or(blank) {
+                out.push(format!("{owner}: a file source has no quote"));
+            }
+        }
+        for claim in &l.claims {
+            if !claim.text.starts_with("[mechanism] ") && !claim.text.starts_with("[prose-only] ") {
+                out.push(format!(
+                    "{}: enforcement is not tagged: the text must start [mechanism] or [prose-only]",
+                    claim.id
+                ));
+            }
+        }
+        for t in l
+            .model
+            .transitions
             .iter()
-            .flat_map(|c| &c.sources)
-            .chain(study.rationales.iter().flat_map(|r| &r.sources))
+            .filter(|t| t.guard.as_deref() == Some("none"))
         {
-            assert_eq!(source.sha.as_deref(), Some(STUDY_SHA));
+            if t.guard_evaluated_by == EvaluatedBy::Code {
+                out.push(format!(
+                    "{}: a guard of none is said to be evaluated by code",
+                    t.id
+                ));
+            }
+            if !t.guard_counters.is_empty() {
+                out.push(format!("{}: a guard of none names counters", t.id));
+            }
         }
-        for claim in &study.claims {
+        out.extend(placeholders(name, dir));
+        out
+    }
+
+    /// How far a study was checked.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Route {
+        /// The conventions, and every rule against the mounted tree.
+        FullyValidated,
+        /// The conventions only.
+        ConventionsOnly,
+    }
+
+    /// The result of checking one study: how far, and the problems found (each starts with an id).
+    #[derive(Debug)]
+    struct Outcome {
+        route: Route,
+        problems: Vec<String>,
+    }
+
+    /// Checks the study in `dir`. The conventions always run. When `pin_env` (the URL and SHA from
+    /// ATHENA_PIN_URL and ATHENA_PIN_SHA) names this study's repository URL: a different SHA is a
+    /// problem, and the same SHA with a `mount` runs every rule against the tree and compares the result
+    /// with validation.json.
+    fn check_study(dir: &Path, pin_env: Option<(&str, &str)>, mount: Option<&Path>) -> Outcome {
+        let name = dir_name(dir);
+        let loaded = match Loaded::read(dir) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                return Outcome {
+                    route: Route::ConventionsOnly,
+                    problems: vec![format!("{name}: {e}")],
+                };
+            }
+        };
+        let mut problems = conventions(dir, &loaded);
+        let mut route = Route::ConventionsOnly;
+        if let Some((url, sha)) = pin_env
+            && url == loaded.pin.repository_url
+        {
+            if sha != loaded.pin.sha {
+                problems.push(format!(
+                    "{name}: pin.json names {url} at {}, but the pinned tree is at {sha}",
+                    loaded.pin.sha
+                ));
+            } else if let Some(root) = mount {
+                let tree = MountedTree::new(&loaded.pin.sha, root);
+                let computed = loaded.validate(&tree);
+                for r in computed.results.iter().filter(|r| !r.pass) {
+                    problems.push(format!(
+                        "{name}: {} fails for {}",
+                        r.rule,
+                        r.offending.join(", ")
+                    ));
+                }
+                if computed != loaded.recorded {
+                    problems.push(format!(
+                        "{name}: validation.json differs from the validation computed against the pinned tree"
+                    ));
+                }
+                route = Route::FullyValidated;
+            }
+        }
+        Outcome { route, problems }
+    }
+
+    /// Checks every study directory under `root`, in order.
+    fn check_studies(
+        root: &Path,
+        pin_env: Option<(&str, &str)>,
+        mount: Option<&Path>,
+    ) -> Vec<(String, Outcome)> {
+        study_dirs(root)
+            .iter()
+            .map(|dir| (dir_name(dir), check_study(dir, pin_env, mount)))
+            .collect()
+    }
+
+    /// A line to print when a tree is mounted but no study was checked against it.
+    fn degradation_warning(routes: &[Route], mount_present: bool) -> Option<String> {
+        (mount_present && !routes.contains(&Route::FullyValidated)).then(|| {
+            "WARNING: mounted tree present but no study matched ATHENA_PIN_*; tree validation did not run"
+                .to_string()
+        })
+    }
+
+    /// A tree rebuilt from a study's own citations: each cited path holds each quote at its start line.
+    /// It lets the full-validation route run in any checkout. It shows the route and the recorded
+    /// equality, not that the real tree holds the quotes.
+    fn synthetic_tree(l: &Loaded) -> TempDir {
+        let mut files: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (_, src) in sources(&l.study(&NoTree)) {
+            let (Some(path), Some(start), Some(end), Some(quote)) = (
+                src.path.as_deref(),
+                src.start_line,
+                src.end_line,
+                src.quote.as_deref(),
+            ) else {
+                continue;
+            };
+            if src.kind != SourceKind::File
+                || start < 1
+                || end < start
+                || !Path::new(path)
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_)))
+            {
+                continue;
+            }
+            let lines = files.entry(path.to_string()).or_default();
+            if lines.len() < end as usize {
+                lines.resize(end as usize, String::new());
+            }
+            let slot = &mut lines[start as usize - 1];
+            if !slot.is_empty() {
+                slot.push(' ');
+            }
+            slot.push_str(quote);
+        }
+        let tree = TempDir::new().unwrap();
+        for (path, lines) in files {
+            let target = tree.path().join(path);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            std::fs::write(target, text).unwrap();
+        }
+        tree
+    }
+
+    /// Copies the files of `from` into a new `<name>/` directory of a new temporary directory.
+    fn copy_study(from: &Path, name: &str) -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(name);
+        copy_files(from, &dir);
+        (tmp, dir)
+    }
+
+    fn copy_files(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().filter_map(Result::ok) {
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+            }
+        }
+    }
+
+    /// Rewrites one JSON file of a study copy.
+    fn edit(dir: &Path, file: &str, change: impl FnOnce(&mut Value)) {
+        let path = dir.join(file);
+        let mut value: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        change(&mut value);
+        std::fs::write(path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    }
+
+    /// True when one problem contains every needle.
+    fn mentions(problems: &[String], needles: &[&str]) -> bool {
+        problems
+            .iter()
+            .any(|p| needles.iter().all(|n| p.contains(n)))
+    }
+
+    fn first_study() -> PathBuf {
+        study_dirs(&studies_root())
+            .into_iter()
+            .next()
+            .expect("a study under studies/")
+    }
+
+    /// The kept test. It reads ATHENA_PIN_URL and ATHENA_PIN_SHA (set by the pinning step of a study job)
+    /// and uses `pinned-source/` when it is a directory. With no pair that matches a study's pin, only
+    /// the conventions are checked.
+    #[test]
+    fn every_study_follows_the_conventions_and_the_matching_one_validates() {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        let (url, sha) = (var("ATHENA_PIN_URL"), var("ATHENA_PIN_SHA"));
+        let pin_env = url.as_deref().zip(sha.as_deref());
+        let mount_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pinned-source");
+        let mount = mount_dir.is_dir().then_some(mount_dir.as_path());
+
+        let results = check_studies(&studies_root(), pin_env, mount);
+        assert!(!results.is_empty(), "no study under studies/");
+        for (name, outcome) in &results {
+            let how = match outcome.route {
+                Route::FullyValidated => "fully validated",
+                Route::ConventionsOnly => "conventions only",
+            };
+            eprintln!("{name}: {how}");
+        }
+        let routes: Vec<Route> = results.iter().map(|(_, o)| o.route).collect();
+        if let Some(warning) = degradation_warning(&routes, mount.is_some()) {
+            eprintln!("{warning}");
+        }
+        let problems: Vec<&String> = results.iter().flat_map(|(_, o)| &o.problems).collect();
+        assert!(problems.is_empty(), "{problems:#?}");
+    }
+
+    #[test]
+    fn the_study_matching_the_pin_validates_against_a_tree_rebuilt_from_its_citations() {
+        let dir = first_study();
+        let l = Loaded::read(&dir).unwrap();
+        let tree = synthetic_tree(&l);
+        let mounted = MountedTree::new(&l.pin.sha, tree.path());
+        // The rebuilt tree must hold every citation, or the comparison below proves nothing.
+        assert!(l.violations(&mounted, "bad-citation").is_empty());
+        assert!(l.violations(&mounted, "quote-mismatch").is_empty());
+
+        let pin_env = Some((l.pin.repository_url.as_str(), l.pin.sha.as_str()));
+        let outcome = check_study(&dir, pin_env, Some(tree.path()));
+        assert_eq!(outcome.route, Route::FullyValidated);
+        assert!(outcome.problems.is_empty(), "{:?}", outcome.problems);
+
+        let computed = l.validate(&mounted);
+        assert!(computed.passed());
+        assert_eq!(computed.results.len(), RULES.len());
+        assert_eq!(
+            computed, l.recorded,
+            "validation.json is what the rules answer"
+        );
+        // The citations were really checked: the study has file sources.
+        let files = sources(&l.study(&NoTree))
+            .iter()
+            .filter(|(_, s)| s.kind == SourceKind::File)
+            .count();
+        assert!(files > 20);
+    }
+
+    #[test]
+    fn a_matching_pin_runs_validation_and_reports_a_tampered_record_or_quote() {
+        let src = first_study();
+        let name = dir_name(&src);
+        let l = Loaded::read(&src).unwrap();
+        let tree = synthetic_tree(&l);
+        let pin_env = Some((l.pin.repository_url.as_str(), l.pin.sha.as_str()));
+        let claim = l.claims[0].id.clone();
+
+        // (i) One recorded rule result is flipped.
+        let (_keep, dir) = copy_study(&src, &name);
+        edit(&dir, "validation.json", |v| {
+            let pass = v["results"][0]["pass"].as_bool().unwrap();
+            v["results"][0]["pass"] = json!(!pass);
+        });
+        let out = check_study(&dir, pin_env, Some(tree.path()));
+        assert_eq!(out.route, Route::FullyValidated);
+        assert!(
+            mentions(&out.problems, &[&name, "validation.json"]),
+            "{:?}",
+            out.problems
+        );
+
+        // (ii) A claim quote is changed: the rules, run against the tree, name the claim.
+        let (_keep2, dir) = copy_study(&src, &name);
+        edit(&dir, "claims.json", |v| {
+            v[0]["sources"][0]["quote"] = json!("text that is not in the cited lines");
+        });
+        let out = check_study(&dir, pin_env, Some(tree.path()));
+        assert_eq!(out.route, Route::FullyValidated);
+        assert!(
+            mentions(&out.problems, &[&claim, "quote-mismatch"]),
+            "{:?}",
+            out.problems
+        );
+
+        // (iii) The same edit with no pair set checks the conventions only, which it keeps.
+        let out = check_study(&dir, None, Some(tree.path()));
+        assert_eq!(out.route, Route::ConventionsOnly);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+    }
+
+    #[test]
+    fn a_study_that_breaks_a_convention_or_its_pin_fails_naming_the_id() {
+        let src = first_study();
+        let name = dir_name(&src);
+        let l = Loaded::read(&src).unwrap();
+        let (url, pin_sha) = (l.pin.repository_url.clone(), l.pin.sha.clone());
+        let claim = l.claims[0].id.clone();
+        let transition = l.model.transitions[0].id.clone();
+        let other_sha = "a".repeat(40);
+        assert_ne!(other_sha, pin_sha);
+
+        // The control: an unchanged copy passes, whatever the pair says about another repository.
+        let (_k0, dir) = copy_study(&src, &name);
+        let out = check_study(&dir, None, None);
+        assert_eq!(out.route, Route::ConventionsOnly);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        let other = check_study(
+            &dir,
+            Some(("https://example.invalid/x.git", &other_sha)),
+            None,
+        );
+        assert!(other.problems.is_empty(), "{:?}", other.problems);
+        // The pair matching with no tree mounted checks the conventions only.
+        let no_tree = check_study(&dir, Some((&url, &pin_sha)), None);
+        assert_eq!(no_tree.route, Route::ConventionsOnly);
+        assert!(no_tree.problems.is_empty(), "{:?}", no_tree.problems);
+
+        // (a) An untagged claim.
+        let (_k1, dir) = copy_study(&src, &name);
+        edit(&dir, "claims.json", |v| {
+            v[0]["text"] = json!("Spawning refuses work it has no item for.");
+        });
+        let out = check_study(&dir, None, None);
+        assert!(
+            mentions(&out.problems, &[&claim, "enforcement"]),
+            "{:?}",
+            out.problems
+        );
+
+        // (b) A guard of none that code is said to evaluate.
+        let (_k2, dir) = copy_study(&src, &name);
+        edit(&dir, "model.json", |v| {
+            v["transitions"][0]["guard"] = json!("none");
+            v["transitions"][0]["guard_evaluated_by"] = json!("code");
+        });
+        let out = check_study(&dir, None, None);
+        assert!(
+            mentions(&out.problems, &[&transition, "guard of none"]),
+            "{:?}",
+            out.problems
+        );
+
+        // (c) A source SHA that differs from the pin.
+        let (_k3, dir) = copy_study(&src, &name);
+        edit(&dir, "claims.json", |v| {
+            v[0]["sources"][0]["sha"] = json!(other_sha);
+        });
+        let out = check_study(&dir, None, None);
+        assert!(
+            mentions(&out.problems, &[&claim, "wrong-sha"]),
+            "{:?}",
+            out.problems
+        );
+
+        // (d) A pin.json for the mounted URL with a different SHA, with or without a tree.
+        let (_k4, dir) = copy_study(&src, &name);
+        let mount = TempDir::new().unwrap();
+        for mount in [None, Some(mount.path())] {
+            let out = check_study(&dir, Some((&url, &other_sha)), mount);
+            assert_eq!(out.route, Route::ConventionsOnly);
             assert!(
-                claim.text.starts_with("[mechanism] ") || claim.text.starts_with("[prose-only] "),
-                "{}: enforcement is not tagged",
-                claim.id
+                mentions(&out.problems, &[&name, &pin_sha, &other_sha]),
+                "{:?}",
+                out.problems
             );
         }
     }
 
     #[test]
-    fn a_guard_of_none_is_never_said_to_be_evaluated_by_code() {
-        let study = Loaded::read();
-        let unguarded: Vec<&crate::model::Transition> = study
-            .model
-            .transitions
-            .iter()
-            .filter(|t| t.guard.as_deref() == Some("none"))
-            .collect();
-        assert!(!unguarded.is_empty());
-        for t in unguarded {
-            assert_ne!(t.guard_evaluated_by, EvaluatedBy::Code, "{}", t.id);
-            assert!(t.guard_counters.is_empty(), "{}", t.id);
+    fn the_word_unresolved_in_prose_is_not_a_placeholder() {
+        let src = first_study();
+        let name = dir_name(&src);
+        let l = Loaded::read(&src).unwrap();
+        let claim = l.claims[0].id.clone();
+        let card = l.rationales[0].id.clone();
+        let finding = l.findings[0].id.clone();
+
+        // The ordinary word in prose is fine.
+        let (_k, dir) = copy_study(&src, &name);
+        edit(&dir, "claims.json", |v| {
+            v[0]["text"] = json!("[mechanism] Conflicts are left unresolved.");
+        });
+        let out = check_study(&dir, None, None);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+
+        // The placeholder in prose is not, and the message names the owner.
+        let (_k, dir) = copy_study(&src, &name);
+        edit(&dir, "claims.json", |v| {
+            v[0]["text"] = json!("[mechanism] The base is UNRESOLVED.");
+        });
+        let out = check_study(&dir, None, None);
+        assert!(
+            mentions(&out.problems, &[&claim, "UNRESOLVED"]),
+            "{:?}",
+            out.problems
+        );
+
+        let (_k, dir) = copy_study(&src, &name);
+        edit(&dir, "findings.json", |v| {
+            v[0]["detail"] = json!("The tree was Not Examined.");
+        });
+        let out = check_study(&dir, None, None);
+        assert!(
+            mentions(&out.problems, &[&finding, "not examined"]),
+            "{:?}",
+            out.problems
+        );
+
+        let (_k, dir) = copy_study(&src, &name);
+        edit(&dir, "rationales.json", |v| {
+            v[0]["authors_say"] = json!("UNRESOLVED");
+        });
+        let out = check_study(&dir, None, None);
+        assert!(
+            mentions(&out.problems, &[&card, "UNRESOLVED"]),
+            "{:?}",
+            out.problems
+        );
+
+        // The same words inside a source quote are the studied system's own text, and pass.
+        let (_k, dir) = copy_study(&src, &name);
+        let quoted = "the tree is UNRESOLVED and Not Examined";
+        edit(&dir, "claims.json", |v| {
+            v[0]["sources"][0]["quote"] = json!(quoted);
+        });
+        edit(&dir, "rationales.json", |v| {
+            v[0]["sources"] = json!([{
+                "schema": "study.source/1", "kind": "file", "path": "a.md", "start_line": 1,
+                "end_line": 1, "sha": l.pin.sha, "quote": quoted
+            }]);
+        });
+        let out = check_study(&dir, None, None);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+    }
+
+    #[test]
+    fn a_second_study_directory_is_checked_too() {
+        let src = first_study();
+        let l = Loaded::read(&src).unwrap();
+        let claim = l.claims[0].id.clone();
+        let root = TempDir::new().unwrap();
+        for name in ["alpha-study", "beta-study", "gamma-study"] {
+            let target = root.path().join(name);
+            copy_files(&src, &target);
+            // Only beta keeps its ids in step with its directory name.
+            if name != "gamma-study" {
+                for file in ["pin.json", "validation.json"] {
+                    edit(&target, file, |v| v["study_id"] = json!(name));
+                }
+            }
         }
+        edit(&root.path().join("beta-study"), "claims.json", |v| {
+            v[0]["text"] = json!("Spawning refuses unknown work.");
+        });
+
+        let results = check_studies(root.path(), None, None);
+        let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["alpha-study", "beta-study", "gamma-study"]);
+        let problems = |n: &str| &results.iter().find(|(m, _)| m == n).unwrap().1.problems;
+        assert!(problems("alpha-study").is_empty());
+        assert!(mentions(problems("beta-study"), &[&claim, "enforcement"]));
+        assert!(mentions(
+            problems("gamma-study"),
+            &["gamma-study", "study_id"]
+        ));
+        // No study directory at all is an empty answer, which the kept test refuses.
+        assert!(check_studies(&root.path().join("missing"), None, None).is_empty());
+    }
+
+    #[test]
+    fn the_mounted_tree_warning_appears_only_when_no_study_was_validated() {
+        let (full, conv) = (Route::FullyValidated, Route::ConventionsOnly);
+        assert!(degradation_warning(&[conv, conv], true).is_some());
+        assert!(degradation_warning(&[], true).is_some());
+        assert!(degradation_warning(&[conv, full], true).is_none());
+        assert!(degradation_warning(&[conv], false).is_none());
+        let line = degradation_warning(&[conv], true).unwrap();
+        assert!(line.starts_with("WARNING: mounted tree present"));
+    }
+
+    #[test]
+    fn a_wrong_sha_a_changed_quote_or_a_changed_range_fails_the_study() {
+        let dir = first_study();
+        let study = Loaded::read(&dir).unwrap();
+        let tree = synthetic_tree(&study);
+        let tree = MountedTree::new(&study.pin.sha, tree.path());
+        let claim = study.claims[0].id.clone();
+        let card_at = study
+            .rationales
+            .iter()
+            .position(|r| !r.sources.is_empty())
+            .expect("a card with a source");
+        let card = study.rationales[card_at].id.clone();
+        assert!(study.violations(&tree, "wrong-sha").is_empty());
+        assert!(study.violations(&tree, "quote-mismatch").is_empty());
+
+        let mut other_sha = study.clone();
+        other_sha.claims[0].sources[0].sha = Some(OTHER.into());
+        assert_eq!(other_sha.violations(&tree, "wrong-sha"), [claim.as_str()]);
+
+        let mut other_pin = study.clone();
+        other_pin.pin.sha = OTHER.into();
+        assert!(other_pin.violations(&tree, "wrong-sha").contains(&claim));
+        assert!(other_pin.violations(&tree, "bad-citation").contains(&claim));
+
+        let mut other_quote = study.clone();
+        other_quote.claims[0].sources[0].quote = Some("text that is not in the file".into());
+        assert_eq!(
+            other_quote.violations(&tree, "quote-mismatch"),
+            [claim.as_str()]
+        );
+
+        let mut other_card_quote = study.clone();
+        other_card_quote.rationales[card_at].sources[0].quote =
+            Some("text that is not there".into());
+        assert_eq!(other_card_quote.violations(&tree, "quote-mismatch"), [card]);
+
+        let mut other_lines = study;
+        other_lines.claims[0].sources[0].end_line = Some(999_999);
+        assert_eq!(other_lines.violations(&tree, "bad-citation"), [claim]);
     }
 }

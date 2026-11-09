@@ -9,6 +9,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Every study is validated against its own pin, so a second study can be checked at all. The kept test in
+  `crates/athena-cap-study/src/rules.rs` no longer hard-codes firstmate. It checks the conventions of every
+  `studies/<id>/` (a 40-hex pin, a study id equal to the directory name, a quote on every file source, every
+  claim text starting `[mechanism]` or `[prose-only]`, no guard of `none` said to be checked by code, and no
+  `UNRESOLVED` or "not examined" placeholder in any study JSON file) and names the offending id in each
+  failure. The placeholder check skips only a `sources[].quote`, because a studied system's own text may use
+  those words and quotes must stay verbatim. It runs the full validation against `pinned-source/` only for
+  the study whose `pin.json` URL and SHA equal `ATHENA_PIN_URL` and `ATHENA_PIN_SHA`, and compares the
+  computed result with that study's `validation.json`. A `pin.json` with the same URL and a different SHA
+  fails, naming the study. Precondition: the pinning change must set those two variables for the study's
+  checks. With them unset the kept test checks conventions only and, when `pinned-source/` is mounted, prints
+  a `WARNING` line; until the pinning change lands, the study verifier prompt's line that code already ran the
+  validation rules does not hold. Several studies of one repository URL share that pair, which carries no
+  study id, so the other studies of the URL fail the kept test with a different SHA; whether to skip them
+  instead is open. Tests on rebuilt trees and temporary copies cover the matching, mismatching and tampered
+  cases. The conventions are stated in the study producer prompt (the study set stays within the recorded
+  producer budget). Study admission now refuses a change that spans more than one `studies/<id>/` directory
+  (`study-one-directory`) and any path outside one study directory and `CHANGELOG.md`
+  (`study-outside-directory`), beside the existing `build-output` refusal. In `xtask/tests/policy.rs` the
+  boundary scan exempts only a source quote in `studies/<id>/claims.json` from its word list, never a study's
+  own prose, and still scans machine-path fragments everywhere. Rationale-card quotes are not exempt. No
+  file under `studies/firstmate-work-handling/` changes.
 - The reader prompt gains one rule under "Reading the request". Root cause of a repeated misreading: "Athena
   knows X" is ambiguous between documentation for readers and behavior built into the agents, and nothing made
   the reader ask which, or list the rules that bound the affected role. Now, when a request says Athena or its
