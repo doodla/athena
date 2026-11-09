@@ -18,12 +18,12 @@ whole. Each fact names its source. Where the source is a request and not code, t
   these sets. A test (`system_facts_budgets_match_computed`) fails when a line below differs from the computed
   value; update the line, never the budget, to fix it. Line form: `- budget <set>: <size> of <budget>`.
   Source: `BudgetSet::budget` in `crates/athena-context/src/lib.rs`; `crates/athena-cli/tests/budgets.rs`.
-  - budget contract: 326 of 350
-  - budget reader: 1997 of 2000
-  - budget producer: 1257 of 1300
-  - budget verifier: 1298 of 1300
-  - budget planner: 1217 of 1300
-  - budget critic: 974 of 1300
+  - budget contract: 310 of 350
+  - budget reader: 1929 of 2000
+  - budget producer: 1018 of 1200
+  - budget verifier: 1233 of 1300
+  - budget planner: 1105 of 1200
+  - budget critic: 955 of 1300
 - **Banned words.** The boundary scan fails any tracked file naming who runs Athena or the machine it runs
   on. The list is not repeated here, so this file passes the scan. Source: `boundary_words()` in
   `xtask/tests/policy.rs`. Email-like text is checked by the `[personal_data]` allow-list in `athena.toml`;
