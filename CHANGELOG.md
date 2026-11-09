@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The boundary word scan and plain-text rewrite moved out of `crates/athena-context/src/briefs.rs` into the
+  new submodule `briefs/boundary.rs`, which brings `briefs.rs` under the code-health limit of 1500 production
+  lines for a file with 5 or more landings in a week. Root cause: the file mixed brief rendering with a
+  separate scanning responsibility. Code moved unchanged and every public name is re-exported, so
+  `athena_context::briefs::` paths and behavior stay the same.
+
 ### Fixed
 
 - A request's title in `athena plan` and `athena status` skips leading `Priority:` lines and blank lines, so a
