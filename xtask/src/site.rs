@@ -1004,6 +1004,88 @@ mod tests {
             .collect()
     }
 
+    /// Terms from `TERMS_NEEDING_AN_ENTRY` that a transition card uses but the glossary lacks.
+    fn card_terms_without_a_glossary_entry(html: &str) -> Vec<&'static str> {
+        let start = html.find("<div class=\"cards\">").unwrap();
+        let end = html.find("<h2>Why it is built this way</h2>").unwrap();
+        let cards = html[start..end].to_lowercase();
+        let glossary = glossary_terms(html);
+        TERMS_NEEDING_AN_ENTRY
+            .iter()
+            .copied()
+            .filter(|t| {
+                contains_whole_word(&cards, t) && !glossary.iter().any(|g| g.to_lowercase() == *t)
+            })
+            .collect()
+    }
+
+    /// True when `term` appears in `text` not inside a longer word ("awake" does not hold "wake").
+    fn contains_whole_word(text: &str, term: &str) -> bool {
+        text.match_indices(term).any(|(i, m)| {
+            let before = text[..i].chars().next_back();
+            let after = text[i + m.len()..].chars().next();
+            !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+        })
+    }
+
+    #[test]
+    fn whole_word_matching_ignores_longer_words() {
+        assert!(!contains_whole_word("an awake worker", "wake"));
+        assert!(contains_whole_word("a stale wake.", "wake"));
+    }
+
+    const TERMS_NEEDING_AN_ENTRY: [&str; 5] = [
+        "wake",
+        "endpoint",
+        "captain call",
+        "heartbeat",
+        "durable record",
+    ];
+
+    #[test]
+    fn the_real_cards_use_no_term_that_the_glossary_leaves_undefined() {
+        let html = render(&real_study()).unwrap();
+        assert_eq!(
+            card_terms_without_a_glossary_entry(&html),
+            Vec::<&str>::new()
+        );
+        for term in TERMS_NEEDING_AN_ENTRY {
+            assert!(
+                glossary_terms(&html).iter().any(|g| g == term),
+                "no glossary entry for {term}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_card_term_with_no_glossary_entry_is_found() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let model = serde_json::json!({
+            "states": [{"id": "queued", "kind": "initial", "claims": ["c1"]}],
+            "counters": [{"id": "places", "start": 0, "changed_by": ["t1"], "claims": ["c1"]}],
+            "transitions": [{
+                "id": "t1", "from": "queued", "to": "queued",
+                "trigger": "a Heartbeat arrives", "trigger_evaluated_by": "agent",
+                "guard": "the durable record exists", "guard_evaluated_by": "code",
+                "failure": null, "claims": ["c1"]
+            }]
+        });
+        write(dir.path(), "model.json", &model.to_string());
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        assert_eq!(
+            card_terms_without_a_glossary_entry(&html),
+            vec!["heartbeat", "durable record"]
+        );
+    }
+
+    #[test]
+    fn the_ship_entry_opens_by_saying_what_a_ship_is() {
+        let html = render(&real_study()).unwrap();
+        let at = html.find("<dt id=\"term-ship\">ship</dt><dd>").unwrap();
+        let dd = html[at..].find("<dd>").unwrap() + at;
+        assert!(html[dd..].starts_with("<dd>A task that changes a project"));
+    }
+
     #[test]
     fn the_glossary_is_sorted_alphabetically_whatever_the_data_order() {
         let dir = study_dir("[mechanism] A thing happens.", "c1");
