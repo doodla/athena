@@ -20,7 +20,7 @@ whole. Each fact names its source. Where the source is a request and not code, t
   Source: `BudgetSet::budget` in `crates/athena-context/src/lib.rs`; `crates/athena-cli/tests/budgets.rs`.
   - budget contract: 310 of 350
   - budget reader: 1929 of 2000
-  - budget producer: 1018 of 1200
+  - budget producer: 1043 of 1200
   - budget verifier: 1233 of 1300
   - budget planner: 1105 of 1200
   - budget critic: 955 of 1300

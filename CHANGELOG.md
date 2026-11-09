@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The change producer prompt gains one sentence, and `docs/conventions/study-claim-support.md` explains it:
+  when a job's files are under `studies/`, the producer opens each claim id a new or reworded statement cites,
+  checks the claim text supports the sentence (including who acts), and lists each statement with its claim
+  text in the change description. An unsupported statement gets a sourced claim or is dropped. Prose-only.
 - README.md gains a section, "What can be changed", saying that no part of Athena's design is fixed and that a
   design change is an ordinary request recorded as a new entry in `docs/decisions.md`. It lists the
   paths admission refuses, from `admission.rs` and `.gitattributes`: `records/` (D06), `athena-readonly`
