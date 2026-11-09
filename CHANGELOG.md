@@ -9,6 +9,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- A failed source check of the explainer now queues one fix request, so a contradiction is no longer reported on
+  every drain and never fixed. Root cause: `Drain::rate` stored the check's detail in `held_back` and queued
+  nothing. The checker's report now also carries `SourceReport.findings` (`athena-core`, `pin.rs`): one
+  `SourceProblem` per contradicted, omitted or behavior statement, with the file normalized to a name in the
+  study (the checker's `page-text/` spelling is stripped, and a name outside the study becomes study-level, so no
+  invented path is queued); `problems` is unchanged. `steward::source_fix_request` builds the request through
+  `StewardRequest::new` at high priority, citing each statement and its source (at most 10), and drain queues
+  it with `Athena::queue` through two new `Steps` hooks, `open_requests` and `queue_request` (both inert by
+  default). A finding counts as cited when a request that is not closed holds the marker line `Source finding:
+  studies/<name>/<file> (<kind>)`; the statement's wording is never compared, because the checker words the
+  same fault differently each run. The floor's `model.json` contradictions are queued the same way; a model
+  that is not valid JSON, a file the checker did not read, and a check that could not run have no statement to
+  cite and are only held back. A skipped finding is noted with the id and state of the request that cites it.
+  The request is on the queue channel, so the next wave of the same run reads it and works it within the
+  budget. The firstmate study's reopened state was already corrected in an earlier change (a waiting state with
+  t12 back to Queued, and intro text saying only Done ends the task); a drain test now pins that
+  `model.json` shows `reopened` as not terminal, t9 ready to reopened and t12 reopened to queued. Claim c45
+  still cites lines 3894-3896 of `bin/fm-teardown.sh`; it was not re-cited, because the pinned source was not
+  readable in this change, so the citation is unchecked here and the cap-study validation with the source
+  mounted is still to be run.
 - Records-history step 7b (D111), first slice: readers can now read the current records from the `athena/records`
   worktree. `athena_data::paths::records_worktree(state_dir)` is the one place that builds the worktree path
   (`<state>/records-worktree`). `Records::load_current` (`athena-core`, `store.rs`) and `RecordSet::load_current`

@@ -282,8 +282,41 @@ pub struct StudyText {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SourceReport {
     pub problems: Vec<String>,
+    /// The statements the checker named, one per contradicted, omitted or behavior problem, in the order it
+    /// reported them. Problems about the check itself (a file it did not read, a check that could not run)
+    /// are in `problems` only: they have no page statement to cite.
+    pub findings: Vec<SourceProblem>,
     /// What the model call cost, even when the check failed.
     pub cost_usd: f64,
+}
+
+/// One statement of the page text that the checker found wrong or incomplete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceProblem {
+    /// The page-text file the statement is in, by its name in the study. `None` when the checker named a file
+    /// that is not one of the study's page-text files, so no invented path is passed on.
+    pub file: Option<String>,
+    /// `contradicted`, `omitted` or `behavior`.
+    pub kind: String,
+    pub statement: String,
+    /// What the source says, with its path and lines.
+    pub evidence: String,
+}
+
+/// The study's page-text name for a file spelling the checker reported: the name as listed, with or without
+/// the leading `./` and the `page-text/` directory of the prompt. `None` for a name outside the study.
+pub fn page_file(study: &StudyText, reported: &str) -> Option<String> {
+    let name = reported.trim();
+    let name = name.strip_prefix("./").unwrap_or(name);
+    let name = name
+        .strip_prefix(PAGE_TEXT_DIR)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .unwrap_or(name);
+    study
+        .files
+        .iter()
+        .find(|f| f.name == name)
+        .map(|f| f.name.clone())
 }
 
 /// The checker's report: the files it read and what it found.
@@ -380,7 +413,10 @@ impl crate::Athena {
     pub fn check_study_text(&self, study: &StudyText) -> SourceReport {
         let mut report = SourceReport::default();
         match self.check_study_text_inner(study, &mut report.cost_usd) {
-            Ok(problems) => report.problems = problems,
+            Ok((problems, findings)) => {
+                report.problems = problems;
+                report.findings = findings;
+            }
             Err(error) => report.problems.push(format!(
                 "{}: the text could not be checked against the source: {error:#}",
                 study.name
@@ -389,7 +425,11 @@ impl crate::Athena {
         report
     }
 
-    fn check_study_text_inner(&self, study: &StudyText, cost: &mut f64) -> Result<Vec<String>> {
+    fn check_study_text_inner(
+        &self,
+        study: &StudyText,
+        cost: &mut f64,
+    ) -> Result<(Vec<String>, Vec<SourceProblem>)> {
         use crate::capability::{JobConfig, ToolGrant};
         use athena_agent::env::Side;
         use athena_context::{Component, compose};
@@ -500,13 +540,76 @@ impl crate::Athena {
                 ));
             }
         }
-        Ok(problems)
+        let findings = found
+            .problems
+            .iter()
+            .map(|p| SourceProblem {
+                file: page_file(study, &p.file),
+                kind: p.kind.clone(),
+                statement: p.statement.clone(),
+                evidence: p.evidence.clone(),
+            })
+            .collect();
+        Ok((problems, findings))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn study_with(names: &[&str]) -> StudyText {
+        StudyText {
+            name: "demo".into(),
+            repository_url: "https://example.com/r.git".into(),
+            sha: "a".repeat(40),
+            files: names
+                .iter()
+                .map(|n| TextFile {
+                    name: (*n).into(),
+                    text: "{}".into(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn page_file_maps_every_spelling_of_a_study_file_to_its_name() {
+        let study = study_with(&["model.json", "extra/more.json"]);
+        for reported in [
+            "model.json",
+            " model.json ",
+            "page-text/model.json",
+            "./page-text/model.json",
+            "./model.json",
+        ] {
+            assert_eq!(
+                page_file(&study, reported).as_deref(),
+                Some("model.json"),
+                "{reported}"
+            );
+        }
+        assert_eq!(
+            page_file(&study, "page-text/extra/more.json").as_deref(),
+            Some("extra/more.json")
+        );
+    }
+
+    #[test]
+    fn page_file_gives_none_for_a_name_outside_the_study() {
+        let study = study_with(&["model.json"]);
+        for reported in [
+            "nope.json",
+            "../model.json",
+            "../x",
+            "",
+            "page-text/",
+            "page-text/page-text/model.json",
+            "page-textmodel.json",
+        ] {
+            assert_eq!(page_file(&study, reported), None, "{reported:?}");
+        }
+    }
 
     #[test]
     fn only_the_pin_and_the_rule_results_are_exempt_from_the_source_check() {

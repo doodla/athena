@@ -204,6 +204,11 @@
 //!      (a reopened backlog item shown as finished although the source returns it to Queued, a counter
 //!      that missed a failed close freeing the place, a red-PR rule contradicting a waiver on the same page).
 //!      When it fails, drain keeps running and the report names the statement ([`Report::held_back`]).
+//!      It also queues one fix request for the statements the check named, built by
+//!      [`athena_core::steward::source_fix_request`] and queued like `athena ask --later`, unless an open
+//!      request already cites the same file and kind ([`athena_core::steward::citing_request`]); so the
+//!      contradiction is not reported on every drain and never fixed. The request is on the queue channel, so
+//!      the next wave of the same run reads it and works it within the budget.
 //!
 //!   The source check is a model call per study, so it is guarded like the others: the reserve is
 //!   [`Steps::check_cap`] (the verifier's cap times the number of studies), it must fit the budget or drain
@@ -275,6 +280,7 @@ use athena_core::plan::{JobEnd, Plan, PlanEntry, Refusal, shared_path};
 use athena_core::pr::LinkState;
 use athena_core::state::{Stage, StageSink};
 pub use athena_core::status::{BUILD_PATHS, touches_build};
+use athena_core::steward::{OpenRequest, SourceFinding};
 use athena_core::store::Records;
 use athena_core::{Athena, Ui, steward, work_decisions};
 use athena_data::JobId;
@@ -552,6 +558,9 @@ pub struct Check {
     pub detail: String,
     /// What the check's model calls cost, in US dollars; zero for a check that made none.
     pub cost: f64,
+    /// The statements a failed check found wrong or incomplete, each with its file and kind. A failure with
+    /// none (the check could not run, or a text was not valid JSON) has no statement to cite and queues no fix.
+    pub findings: Vec<SourceFinding>,
 }
 
 impl Check {
@@ -560,6 +569,7 @@ impl Check {
             passed: true,
             detail: detail.into(),
             cost: 0.0,
+            findings: Vec::new(),
         }
     }
 
@@ -568,12 +578,18 @@ impl Check {
             passed: false,
             detail: detail.into(),
             cost: 0.0,
+            findings: Vec::new(),
         }
     }
 
     /// The same check, with what its model calls cost.
     pub fn costing(self, cost: f64) -> Check {
         Check { cost, ..self }
+    }
+
+    /// The same check, with the statements it found wrong.
+    pub fn with_findings(self, findings: Vec<SourceFinding>) -> Check {
+        Check { findings, ..self }
     }
 }
 
@@ -604,6 +620,16 @@ pub trait Steps {
     /// only when a rating reaches the target after a landing that changed the outcome, and the target is met
     /// only if it passes. It reports what it cost in [`Check::cost`].
     fn check_page(&self) -> Check;
+    /// The requests that are not closed, which a failed source check reads to see whether a fix for a
+    /// statement is already open. The default is none, as for steps with no records.
+    fn open_requests(&self) -> Result<Vec<OpenRequest>, String> {
+        Ok(Vec::new())
+    }
+    /// Queues one request (the text of a [`StewardRequest`]) to be read and run later, as `athena ask --later`
+    /// does, and returns its job id. The default queues nothing, as for steps with no records.
+    fn queue_request(&self, _text: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
     /// The most [`Steps::check_page`] may cost: the cap of one call times the number of studies it checks. The
     /// loop asks the budget for this much before it calls the check.
     fn check_cap(&self) -> f64;
@@ -2459,6 +2485,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                         "drain      rating {value} reached the target but the source check failed: {}",
                         check.detail
                     ));
+                    self.queue_source_fix(&check.findings);
                     self.st().held_back = Some(check.detail);
                     return None;
                 }
@@ -2481,6 +2508,64 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
 }
 
 impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
+    /// Queues one request to fix the statements a failed source check named, so the same contradiction is not
+    /// reported on every drain and never fixed. A finding that an open request already cites (the same file and
+    /// kind, see [`steward::citing_request`]) is left out and noted with that request; the rest go into one
+    /// request built by [`steward::source_fix_request`]. Nothing is queued when the check named no statement
+    /// (it could not run, or a text was not valid JSON), or when the open requests cannot be read.
+    fn queue_source_fix(&self, findings: &[SourceFinding]) {
+        if findings.is_empty() {
+            return;
+        }
+        let open = match self.steps.open_requests() {
+            Ok(open) => open,
+            Err(error) => {
+                self.note(format!(
+                    "no fix request was queued for the source check's findings: the open requests could not be read: {error}"
+                ));
+                return;
+            }
+        };
+        let mut uncited: Vec<SourceFinding> = Vec::new();
+        for finding in findings {
+            match steward::citing_request(&open, finding) {
+                Some(holder) => self.note(format!(
+                    "request {} ({}) already cites the source check finding in {}",
+                    holder.job,
+                    holder.state,
+                    finding
+                        .file
+                        .as_deref()
+                        .map(|f| format!("{}/{f}", finding.study))
+                        .unwrap_or_else(|| finding.study.clone())
+                )),
+                None => uncited.push(finding.clone()),
+            }
+        }
+        if uncited.is_empty() {
+            return;
+        }
+        let request = match steward::source_fix_request(&uncited) {
+            Ok(request) => request,
+            Err(error) => {
+                self.note(format!(
+                    "no fix request was queued for the source check's findings: {error}"
+                ));
+                return;
+            }
+        };
+        match self.steps.queue_request(&request.render()) {
+            Ok(Some(job)) => self.note(format!(
+                "queued request {job} to fix {} statement(s) the source check found wrong",
+                uncited.len().min(steward::MAX_SOURCE_FINDINGS)
+            )),
+            Ok(None) => {}
+            Err(error) => self.note(format!(
+                "the fix request for the source check's findings could not be queued: {error}"
+            )),
+        }
+    }
+
     fn new<'a>(steps: &'a S, ui: &'a U, caps: Caps, limits: Limits) -> Drain<'a, S, U> {
         Drain {
             steps,
@@ -3493,6 +3578,53 @@ pub fn study_files(
 /// A study's page text and pin, from its files. Every file but those in `athena_core::pin::STRUCTURAL_FILES`
 /// is page text, so a text file added to a study is checked without anyone listing it. Errs, saying why, when
 /// the study has no usable pin or a page file is not text.
+/// The model floor of the source check: each study's `model.json` must be consistent with itself
+/// ([`model_contradictions`]). Returns the problems for the report and, for each contradiction, the finding a
+/// fix request cites (file `model.json`, kind `model-contradiction`). A model that is not valid JSON is a
+/// problem with no statement to cite, so it has no finding.
+fn model_floor(studies: &[(String, StudyFiles)]) -> (Vec<String>, Vec<SourceFinding>) {
+    let mut problems = Vec::new();
+    let mut findings = Vec::new();
+    for (name, files) in studies {
+        let Some((_, bytes)) = files.iter().find(|(f, _)| f == "model.json") else {
+            continue;
+        };
+        match serde_json::from_slice::<serde_json::Value>(bytes) {
+            Ok(model) => {
+                for contradiction in model_contradictions(&model) {
+                    problems.push(format!("studies/{name}/model.json: {contradiction}"));
+                    findings.push(SourceFinding {
+                        study: name.clone(),
+                        file: Some("model.json".into()),
+                        kind: "model-contradiction".into(),
+                        text: format!("statement \"{contradiction}\""),
+                    });
+                }
+            }
+            Err(error) => problems.push(format!(
+                "studies/{name}/model.json: not valid JSON: {error}"
+            )),
+        }
+    }
+    (problems, findings)
+}
+
+/// The findings a fix request cites from one study's source report: the checker's contradicted, omitted and
+/// behavior problems, each as the statement it quoted and the evidence it gave. A problem about the check
+/// itself (a file it did not report reading, a check that could not run) is not in `findings`, so it has none.
+fn report_findings(study: &str, report: &athena_core::pin::SourceReport) -> Vec<SourceFinding> {
+    report
+        .findings
+        .iter()
+        .map(|p| SourceFinding {
+            study: study.to_string(),
+            file: p.file.clone(),
+            kind: p.kind.clone(),
+            text: format!("statement \"{}\" ({})", p.statement, p.evidence),
+        })
+        .collect()
+}
+
 pub fn study_text(
     name: &str,
     files: &[(String, Vec<u8>)],
@@ -4678,23 +4810,9 @@ impl Steps for RealSteps<'_> {
             );
         }
         // The floor: each model must be consistent with itself. It costs nothing, so it goes first.
-        let mut problems = Vec::new();
-        for (name, files) in &studies {
-            if let Some((_, bytes)) = files.iter().find(|(f, _)| f == "model.json") {
-                match serde_json::from_slice::<serde_json::Value>(bytes) {
-                    Ok(model) => problems.extend(
-                        model_contradictions(&model)
-                            .into_iter()
-                            .map(|p| format!("studies/{name}/model.json: {p}")),
-                    ),
-                    Err(error) => problems.push(format!(
-                        "studies/{name}/model.json: not valid JSON: {error}"
-                    )),
-                }
-            }
-        }
+        let (mut problems, mut findings) = model_floor(&studies);
         if !problems.is_empty() {
-            return Check::fail(problems.join("; "));
+            return Check::fail(problems.join("; ")).with_findings(findings);
         }
         // The source check: every page text file of every study, against that study's pinned source.
         let mut cost = 0.0;
@@ -4710,6 +4828,7 @@ impl Steps for RealSteps<'_> {
             files_checked += study.files.len();
             let report = self.athena.check_study_text(&study);
             cost += report.cost_usd;
+            findings.extend(report_findings(name, &report));
             problems.extend(report.problems);
         }
         if problems.is_empty() {
@@ -4719,8 +4838,24 @@ impl Steps for RealSteps<'_> {
             ))
             .costing(cost)
         } else {
-            Check::fail(problems.join("; ")).costing(cost)
+            Check::fail(problems.join("; "))
+                .costing(cost)
+                .with_findings(findings)
         }
+    }
+
+    fn open_requests(&self) -> Result<Vec<OpenRequest>, String> {
+        let records = self
+            .records()
+            .map_err(|error| format!("the records could not be read: {error:#}"))?;
+        Ok(steward::open_requests(&records))
+    }
+
+    fn queue_request(&self, text: &str) -> Result<Option<String>, String> {
+        self.athena
+            .queue(text)
+            .map(|(job, _)| Some(job.as_str().to_string()))
+            .map_err(|error| format!("{error:#}"))
     }
 
     fn rate(&self) -> Rate {
@@ -5141,6 +5276,41 @@ mod tests {
         let text = include_str!("../../../studies/firstmate-work-handling/model.json");
         let model: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(model_contradictions(&model), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_firstmate_model_returns_a_reopened_item_to_the_queue() {
+        let text = include_str!("../../../studies/firstmate-work-handling/model.json");
+        let model: serde_json::Value = serde_json::from_str(text).unwrap();
+        let states = model["states"].as_array().unwrap();
+        let reopened = states.iter().find(|s| s["id"] == "reopened").unwrap();
+        assert_ne!(reopened["kind"], "terminal-success", "{reopened}");
+        let terminal: Vec<&str> = states
+            .iter()
+            .filter(|s| s["kind"] == "terminal-success")
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(terminal, ["done"], "only done ends the task");
+        let transition = |id: &str| {
+            let t = model["transitions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["id"] == id)
+                .unwrap_or_else(|| panic!("no transition {id}"));
+            (
+                t["from"].as_str().unwrap().to_string(),
+                t["to"].as_str().unwrap().to_string(),
+            )
+        };
+        assert_eq!(transition("t9"), ("ready".into(), "reopened".into()));
+        assert_eq!(transition("t12"), ("reopened".into(), "queued".into()));
+        assert!(
+            include_str!("../../../studies/firstmate-work-handling/claims.json")
+                .contains("\"id\": \"c45\""),
+            "the return to Queued has a claim"
+        );
+        assert!(model_contradictions(&model).is_empty());
     }
 
     #[test]
@@ -7317,5 +7487,379 @@ mod landing_queue_tests {
             ["land a", "b waits in the landing queue", "land a", "land b"]
         );
         assert_eq!(landed, 1);
+    }
+}
+
+/// The fix request a failed source check queues.
+#[cfg(test)]
+mod source_fix_tests {
+    use super::*;
+    use athena_core::Quiet;
+    use std::cell::RefCell;
+
+    fn limits(budget: f64) -> Limits {
+        Limits {
+            budget_usd: budget,
+            target_rating: 4,
+            max_jobs: 10,
+        }
+    }
+
+    fn model(changed_by: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "counters": [{"id": "places-held", "changed_by": changed_by}],
+            "transitions": [
+                {"id": "t1", "retry": null},
+                {"id": "t2", "retry": {"changes": ["places-held falls when another worker records its ready PR or is cleaned up"]}}
+            ]
+        })
+    }
+
+    /// A finding of kind `contradicted` in `file` of the study `demo`.
+    fn contradicted(file: &str, statement: &str) -> SourceFinding {
+        SourceFinding {
+            study: "demo".into(),
+            file: Some(file.into()),
+            kind: "contradicted".into(),
+            text: format!("statement \"{statement}\" (bin/a.sh:3 says otherwise)"),
+        }
+    }
+
+    /// Steps whose source check is a fake that fails with the findings the test sets, and whose request store
+    /// keeps the text of what is queued. Only storage is faked: the queueing and the duplicate check are the
+    /// drain's own.
+    struct FixStub {
+        findings: RefCell<Vec<SourceFinding>>,
+        stored: RefCell<Vec<OpenRequest>>,
+        /// Whether `queue()` lists the stored requests, as the real queue does.
+        listed: bool,
+        runs: RefCell<Vec<String>>,
+    }
+
+    impl FixStub {
+        fn new(findings: Vec<SourceFinding>, listed: bool) -> FixStub {
+            FixStub {
+                findings: RefCell::new(findings),
+                stored: RefCell::new(Vec::new()),
+                listed,
+                runs: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn texts(&self) -> Vec<String> {
+            self.stored
+                .borrow()
+                .iter()
+                .map(|r| r.text.clone())
+                .collect()
+        }
+    }
+
+    impl Steps for FixStub {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Ok(Caps {
+                read: 0.5,
+                run: 1.0,
+                rate: 0.5,
+            })
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            let mut items = vec![Item::queued("j1", "t")];
+            if self.listed {
+                items.extend(
+                    self.stored
+                        .borrow()
+                        .iter()
+                        .map(|r| Item::queued(&r.job, "fix")),
+                );
+            }
+            Ok(QueueView {
+                items,
+                ..QueueView::default()
+            })
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn read(&self, what: ReadOf<'_>) -> Read {
+            let (ReadOf::Queued(id) | ReadOf::Retry(id)) = what;
+            Read {
+                job: Some(id.into()),
+                cost: 0.1,
+                runnable: true,
+                error: None,
+                held: false,
+            }
+        }
+        fn run(&self, job: &str) -> Run {
+            self.runs.borrow_mut().push(job.to_string());
+            Run {
+                outcome: Some(OutcomeState::Landed),
+                reason: String::new(),
+                cost: 0.1,
+                ..Run::default()
+            }
+        }
+        fn land(&self, _: &str) -> Landing {
+            Landing::Landed {
+                changed: vec!["studies/s/claims.json".into()],
+            }
+        }
+        fn check_page(&self) -> Check {
+            Check::fail("demo/claims.json: contradicted statement")
+                .with_findings(self.findings.borrow().clone())
+        }
+        fn check_cap(&self) -> f64 {
+            0.5
+        }
+        fn rate(&self) -> Rate {
+            Rate {
+                rating: Some(4),
+                cost: 0.1,
+                error: None,
+            }
+        }
+        fn open_requests(&self) -> Result<Vec<OpenRequest>, String> {
+            Ok(self.stored.borrow().clone())
+        }
+        fn queue_request(&self, text: &str) -> Result<Option<String>, String> {
+            let job = format!("fix-{}", self.stored.borrow().len() + 1);
+            self.stored.borrow_mut().push(OpenRequest {
+                job: job.clone(),
+                state: "queued".into(),
+                text: text.to_string(),
+            });
+            Ok(Some(job))
+        }
+    }
+
+    #[test]
+    fn source_check_fix_queues_one_request_then_none_while_it_is_open() {
+        let stub = FixStub::new(
+            vec![contradicted("claims.json", "reopened is final")],
+            false,
+        );
+        let report = drain(&stub, limits(10.0), &Quiet).unwrap();
+        assert_ne!(
+            report.stop,
+            Stop::TargetMet,
+            "the failed check holds the target back"
+        );
+        assert!(
+            report
+                .held_back
+                .as_deref()
+                .is_some_and(|d| d.contains("contradicted statement")),
+            "{:?}",
+            report.held_back
+        );
+        let texts = stub.texts();
+        assert_eq!(texts.len(), 1, "one fix request: {texts:?}");
+        let text = &texts[0];
+        assert!(text.starts_with("Priority: high\n"), "{text}");
+        assert!(
+            text.contains("reopened is final"),
+            "the contradicted statement: {text}"
+        );
+        assert!(text.contains("bin/a.sh:3"), "its source: {text}");
+        assert!(
+            text.lines()
+                .any(|l| l == "Source finding: studies/demo/claims.json (contradicted)"),
+            "{text}"
+        );
+        assert!(text.contains("Files: studies/demo/claims.json"), "{text}");
+        assert!(
+            !athena_core::reading::request_text_acceptance(text).is_empty(),
+            "{text}"
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("queued request fix-1")),
+            "{:?}",
+            report.notes
+        );
+
+        // Second run, the request still open: nothing more is queued, and the note names the request.
+        let second = drain(&stub, limits(10.0), &Quiet).unwrap();
+        assert_eq!(stub.texts().len(), 1, "none while it is open");
+        assert!(
+            second
+                .notes
+                .iter()
+                .any(|n| n.contains("fix-1 (queued) already cites")),
+            "{:?}",
+            second.notes
+        );
+        assert!(second.held_back.is_some(), "the failure is still reported");
+
+        // The check words the same fault differently: still the same file and kind, still cited.
+        *stub.findings.borrow_mut() = vec![contradicted("claims.json", "the item is finished")];
+        drain(&stub, limits(10.0), &Quiet).unwrap();
+        assert_eq!(
+            stub.texts().len(),
+            1,
+            "a reworded statement is not a new finding"
+        );
+
+        // A finding in another file is not cited by it: one more request, citing only that file.
+        *stub.findings.borrow_mut() = vec![
+            contradicted("claims.json", "the item is finished"),
+            contradicted("intro.json", "done is not final"),
+        ];
+        drain(&stub, limits(10.0), &Quiet).unwrap();
+        let texts = stub.texts();
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(
+            texts[1].contains("studies/demo/intro.json (contradicted)"),
+            "{}",
+            texts[1]
+        );
+        assert!(
+            !texts[1].contains("studies/demo/claims.json"),
+            "{}",
+            texts[1]
+        );
+    }
+
+    #[test]
+    fn source_check_fix_queues_nothing_without_a_finding() {
+        let stub = FixStub::new(vec![], false);
+        drain(&stub, limits(10.0), &Quiet).unwrap();
+        assert!(
+            stub.texts().is_empty(),
+            "a failure with no statement has nothing to cite"
+        );
+    }
+
+    #[test]
+    fn source_check_fix_is_visible_to_the_next_wave() {
+        let stub = FixStub::new(vec![contradicted("claims.json", "reopened is final")], true);
+        let report = drain(&stub, limits(10.0), &Quiet).unwrap();
+        assert_eq!(
+            *stub.runs.borrow(),
+            ["j1", "fix-1"],
+            "the fix is read and worked in the same run: {:?}",
+            report.notes
+        );
+        assert_eq!(
+            stub.texts().len(),
+            1,
+            "and the check failing again queues no second one"
+        );
+    }
+
+    #[test]
+    fn source_check_fix_notes_a_request_it_could_not_queue() {
+        struct Refuses(FixStub);
+        impl Steps for Refuses {
+            fn caps(&self) -> anyhow::Result<Caps> {
+                self.0.caps()
+            }
+            fn queue(&self) -> anyhow::Result<QueueView> {
+                self.0.queue()
+            }
+            fn approve(&self, p: &str) -> Approval {
+                self.0.approve(p)
+            }
+            fn previous_rating(&self) -> Option<u8> {
+                None
+            }
+            fn read(&self, what: ReadOf<'_>) -> Read {
+                self.0.read(what)
+            }
+            fn run(&self, job: &str) -> Run {
+                self.0.run(job)
+            }
+            fn land(&self, job: &str) -> Landing {
+                self.0.land(job)
+            }
+            fn check_page(&self) -> Check {
+                self.0.check_page()
+            }
+            fn check_cap(&self) -> f64 {
+                0.5
+            }
+            fn rate(&self) -> Rate {
+                self.0.rate()
+            }
+            fn queue_request(&self, _: &str) -> Result<Option<String>, String> {
+                Err("the records are locked".into())
+            }
+        }
+        let steps = Refuses(FixStub::new(vec![contradicted("claims.json", "x")], false));
+        let report = drain(&steps, limits(10.0), &Quiet).unwrap();
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("could not be queued: the records are locked")),
+            "{:?}",
+            report.notes
+        );
+        assert!(report.held_back.is_some());
+    }
+
+    #[test]
+    fn a_model_contradiction_becomes_a_finding_at_the_model_file_and_bad_json_has_none() {
+        let bad = serde_json::to_vec(&model(&["t1", "t3"])).unwrap();
+        let studies = vec![
+            ("demo".to_string(), vec![("model.json".to_string(), bad)]),
+            (
+                "broken".to_string(),
+                vec![("model.json".to_string(), b"{not json".to_vec())],
+            ),
+        ];
+        let (problems, findings) = model_floor(&studies);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].study, "demo");
+        assert_eq!(findings[0].file.as_deref(), Some("model.json"));
+        assert_eq!(findings[0].kind, "model-contradiction");
+        assert!(
+            findings[0].text.contains("places-held"),
+            "{}",
+            findings[0].text
+        );
+    }
+
+    #[test]
+    fn the_checker_report_becomes_findings_and_a_check_problem_becomes_none() {
+        use athena_core::pin::{SourceProblem, SourceReport};
+        let report = SourceReport {
+            problems: vec![
+                "demo/claims.json: contradicted statement \"s\" (e)".into(),
+                "demo/intro.json: the checker did not report reading this file".into(),
+            ],
+            findings: vec![
+                SourceProblem {
+                    file: Some("claims.json".into()),
+                    kind: "contradicted".into(),
+                    statement: "s".into(),
+                    evidence: "bin/a.sh:3".into(),
+                },
+                SourceProblem {
+                    file: None,
+                    kind: "omitted".into(),
+                    statement: "t".into(),
+                    evidence: "bin/b.sh:4".into(),
+                },
+            ],
+            cost_usd: 0.0,
+        };
+        let found = report_findings("demo", &report);
+        assert_eq!(
+            found.len(),
+            2,
+            "the unread file is a problem, not a finding: {found:?}"
+        );
+        assert_eq!(found[0].file.as_deref(), Some("claims.json"));
+        assert_eq!(found[0].text, "statement \"s\" (bin/a.sh:3)");
+        assert_eq!(found[1].file, None, "an unknown file is study-level");
+        assert_eq!(found[1].kind, "omitted");
     }
 }
