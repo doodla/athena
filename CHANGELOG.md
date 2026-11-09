@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `xtask/src/site.rs`: `render` was 333 lines, over the 200-line function limit. Each page section (start here,
+  states, counters, transitions, rationales, glossary, findings, next steps, claims, and the about/footer/wrapper
+  tail) is now a private helper that `render` calls in the same order. The page is byte-for-byte unchanged and
+  validation errors keep their order and messages.
 - A change whose candidate leaves out `CHANGELOG.md` is refused at admission, and the producer is sent back for
   it first. The root cause of jobs 20261108-183842-fsaz and 20261028-000831-rkv5, which were failed only by the
   final verdict: `ensure_changelog` adds `CHANGELOG.md` and the `changelog` default to every change reading, but
