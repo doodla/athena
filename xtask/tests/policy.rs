@@ -131,18 +131,14 @@ fn boundary_fragments() -> Vec<String> {
     .collect()
 }
 
-/// The boundary violations in one text: (line number, term).
-fn boundary_scan(text: &str) -> Vec<(usize, String)> {
+/// The banned words in one text: (line number, term).
+fn scan_words(text: &str) -> Vec<(usize, String)> {
     let words: Vec<(String, Regex)> = boundary_words()
         .into_iter()
         .map(|w| {
             let re = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&w))).unwrap();
             (w, re)
         })
-        .collect();
-    let fragments: Vec<String> = boundary_fragments()
-        .into_iter()
-        .map(|f| f.to_lowercase())
         .collect();
     let mut found = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -151,6 +147,18 @@ fn boundary_scan(text: &str) -> Vec<(usize, String)> {
                 found.push((i + 1, word.clone()));
             }
         }
+    }
+    found
+}
+
+/// The machine-path fragments in one text: (line number, fragment).
+fn scan_fragments(text: &str) -> Vec<(usize, String)> {
+    let fragments: Vec<String> = boundary_fragments()
+        .into_iter()
+        .map(|f| f.to_lowercase())
+        .collect();
+    let mut found = Vec::new();
+    for (i, line) in text.lines().enumerate() {
         let lower = line.to_lowercase();
         for fragment in &fragments {
             if lower.contains(fragment.as_str()) {
@@ -158,6 +166,61 @@ fn boundary_scan(text: &str) -> Vec<(usize, String)> {
             }
         }
     }
+    found
+}
+
+/// The boundary violations in one text: (line number, term).
+fn boundary_scan(text: &str) -> Vec<(usize, String)> {
+    let mut found = scan_words(text);
+    found.extend(scan_fragments(text));
+    found
+}
+
+/// True for exactly `studies/<one id>/claims.json`, the one file whose source quotes are text of a studied
+/// system and not Athena's own words.
+fn claim_quote_exempt(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    matches!(parts.as_slice(), ["studies", id, "claims.json"] if !matches!(*id, "" | "." | ".."))
+}
+
+/// A claims file with every source quote blanked: the `quote` field of each source of each claim. A quote
+/// literal is found in the raw text and blanked only when its decoded value equals a source quote of the
+/// parsed claims, so how the file escapes a string does not matter, and one line stays one line. A file
+/// that does not parse as JSON blanks nothing.
+fn without_claim_quotes(text: &str) -> String {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) else {
+        return text.to_string();
+    };
+    let quotes: BTreeSet<String> = parsed
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|claim| claim["sources"].as_array())
+        .flatten()
+        .filter_map(|source| source["quote"].as_str())
+        .map(String::from)
+        .collect();
+    let literal = Regex::new(r#""quote"\s*:\s*("(?:[^"\\]|\\.)*")"#).unwrap();
+    literal
+        .replace_all(text, |caps: &regex::Captures| {
+            match serde_json::from_str::<String>(&caps[1]) {
+                Ok(decoded) if quotes.contains(&decoded) => r#""quote": """#.to_string(),
+                _ => caps[0].to_string(),
+            }
+        })
+        .into_owned()
+}
+
+/// The boundary violations in one tracked file. Banned words are not looked for in a claim's quote of the
+/// studied system's source (`studies/<id>/claims.json` only); machine-path fragments are looked for in
+/// the raw text of every file.
+fn boundary_scan_file(path: &str, text: &str) -> Vec<(usize, String)> {
+    let mut found = if claim_quote_exempt(path) {
+        scan_words(&without_claim_quotes(text))
+    } else {
+        scan_words(text)
+    };
+    found.extend(scan_fragments(text));
     found
 }
 
@@ -172,7 +235,7 @@ fn athena_refers_to_no_one_who_runs_it_or_where() {
         let Ok(text) = std::fs::read_to_string(root().join(&path)) else {
             continue;
         };
-        for (line, term) in boundary_scan(&text) {
+        for (line, term) in boundary_scan_file(&path, &text) {
             violations.push(format!("{path}:{line}: {term}"));
         }
     }
@@ -212,6 +275,101 @@ fn the_boundary_scanner_flags_a_planted_term() {
         boundary_scan("The release hands off to cargo.").is_empty(),
         "whole words only"
     );
+}
+
+/// A claims file with one claim of the given text and one file source of the given quote.
+fn claims_json(text: &str, quote: &str) -> String {
+    serde_json::to_string_pretty(&serde_json::json!([{
+        "schema": "study.claim/1",
+        "id": "c1",
+        "text": text,
+        "sources": [{"schema": "study.source/1", "kind": "file", "quote": quote}]
+    }]))
+    .unwrap()
+}
+
+#[test]
+fn a_banned_word_in_a_claims_quote_of_studied_source_is_not_flagged() {
+    // M19 (allows): the studied system's own words, in a claim's quote field, are not Athena's.
+    let word = ["oper", "ator"].concat();
+    let claims = claims_json(
+        "[mechanism] A plain claim.",
+        &format!("ask the {word} first"),
+    );
+    assert!(boundary_scan_file("studies/s/claims.json", &claims).is_empty());
+    // The same words in the same text elsewhere are flagged, so the exemption is the path and the field.
+    assert!(!boundary_scan(&claims).is_empty());
+}
+
+#[test]
+fn a_banned_word_in_a_study_s_own_prose_or_outside_studies_is_flagged() {
+    // M19 (blocks): only the quote field is exempt; a claim's own text, other study files and any file
+    // outside studies/<id>/claims.json are scanned.
+    let word = ["sand", "box"].concat();
+    let in_text = claims_json(&format!("[mechanism] It runs in a {word}."), "plain quote");
+    let line = in_text
+        .lines()
+        .position(|l| l.contains(&word))
+        .map(|i| i + 1)
+        .unwrap();
+    assert_eq!(
+        boundary_scan_file("studies/s/claims.json", &in_text),
+        [(line, word.clone())]
+    );
+    for path in [
+        "studies/s/findings.json",
+        "studies/s/notes.md",
+        "studies/s/rationales.json",
+    ] {
+        let found = boundary_scan_file(path, &claims_json("[mechanism] ok", &word));
+        assert_eq!(found.len(), 1, "{path}");
+    }
+    let quoted = claims_json("[mechanism] ok", &word);
+    for path in [
+        "docs/x/claims.json",
+        "crates/x/claims.json",
+        "claims.json",
+        "studies/claims.json",
+        "studies/a/b/claims.json",
+        "studies/a/claims.json.bak",
+    ] {
+        assert_eq!(boundary_scan_file(path, &quoted).len(), 1, "{path}");
+    }
+}
+
+#[test]
+fn a_machine_path_fragment_is_flagged_even_inside_a_claims_quote() {
+    // M19 (blocks): fragments are matched on the raw text of every file, quotes included.
+    let fragment = ["/home", "/user/x"].concat();
+    let claims = claims_json("[mechanism] ok", &format!("see {fragment}"));
+    let found = boundary_scan_file("studies/s/claims.json", &claims);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(boundary_scan_file("studies/s/notes.md", &fragment).len(), 1);
+}
+
+#[test]
+fn only_a_source_quote_of_a_claim_is_blanked() {
+    // M19 (blocks): a `quote` key that is not a claim's source quote keeps its scan, and a file that is not
+    // claims JSON is scanned whole.
+    let word = ["oper", "ator"].concat();
+    let other = format!(r#"[{{"id":"c1","note":{{"quote":"the {word}"}},"sources":[]}}]"#);
+    assert_eq!(boundary_scan_file("studies/s/claims.json", &other).len(), 1);
+    let unclosed = format!(r#"[{{"sources":[{{"quote": "the {word}"}}]"#);
+    assert_eq!(
+        boundary_scan_file("studies/s/claims.json", &unclosed).len(),
+        1
+    );
+}
+
+#[test]
+fn a_quote_with_escaped_characters_is_still_exempt() {
+    // M19 (allows): the literal is decoded before it is compared, so an escaped slash, an escaped quote and
+    // an accented letter (raw or escaped) around the word do not defeat the exemption.
+    let word = ["oper", "ator"].concat();
+    let claims =
+        format!(r#"[{{"id":"c1","text":"ok","sources":[{{"quote":"a\/b \"{word}\" café é"}}]}}]"#);
+    assert!(boundary_scan_file("studies/s/claims.json", &claims).is_empty());
+    assert_eq!(boundary_scan(&claims).len(), 1);
 }
 
 #[test]
