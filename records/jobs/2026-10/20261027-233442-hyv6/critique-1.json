@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-233442-hyv6",
+  "round": 1,
+  "at": "2026-11-09T22:02:25.990723827Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/pin.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/pin.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/tests/refusal_corpus.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/tests/refusal_corpus.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Matching on the exact statement text breaks for findings whose statement the model writes itself, so the same finding gets a new request on every drain.",
+      "evidence": "pin.rs:346-347 tells the checker that for kind `omitted`, `statement` names the fact, which is the model's own wording rather than a quote of the page. pin.rs:352 says a `behavior` statement quotes 'the model entry or the conflicting statements', and the span it picks can vary. Decision 2 claims 'The statement quote is stable', but nothing in the code supports that. A key that changes from run to run means a new request each drain, which is the defect the request asks to fix. The third-drain test only varies the evidence text, so it would not catch this. Fix: Base the match on things that stay the same. For example: treat a finding as cited when an open source-fix request already names the same study file and kind, and compare statements only after normalizing them (case, punctuation, whitespace). Or, for `omitted` and `behavior` findings, treat any open source-fix request for that study/file as covering them. Add a unit test where the same omitted fact is reworded on the second run and no second request is queued.",
+      "location": "Decision 2 (dedupe key) and steward.rs `finding_key`/`cites_finding`",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The 'source check passes' half of criterion 3 is not shown, and the plan overlooks an existing check that could verify claim c45's citation without a model call.",
+      "evidence": "claims.json:348 cites bin/fm-teardown.sh lines 3894-3896 with the quote 'Queued'. Every other citation of that file is at line 184 or earlier (claims.json:95-341), so these lines likely do not exist. The plan says 'the site build never checks cited lines' and that the live model check is the only check. But crates/athena-cap-study/src/rules.rs:1840 `every_study_follows_the_conventions_and_the_matching_one_validates` fully validates citations ('bad-citation', 'quote-mismatch') when ATHENA_PIN_URL and ATHENA_PIN_SHA are set and pinned-source/ is mounted at the study's pin. Fix: Name this test as the deterministic check for the source half of criterion 3. Add a host step that mounts the firstmate source at 6407052f in pinned-source/, sets ATHENA_PIN_URL and ATHENA_PIN_SHA, runs `cargo test -p athena-cap-study every_study_follows_the_conventions_and_the_matching_one_validates`, and confirms the output says 'fully validated'. If c45 fails, correct its path, lines and quote, citing the source lines as part (1) of the request requires. State plainly which part of criterion 3 still needs the live drain run.",
+      "location": "Criterion 3 demonstration; Open question (c45); Risk 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new queue helper does not redact the text, unlike Athena::queue, yet it commits model-written statement and evidence text.",
+      "evidence": "reading.rs:919-938 (`Athena::queue`) calls refuse_banned_input and then `redactor.redact(text)` before writing the Request. The plan's helper builds the Request directly and only calls commit_records. Fix: Run the rendered text through `self.redactor(&jc.config, Some(&job))?.redact(..)` as Athena::queue does, or have the helper reuse that path with the steward channel. Add a unit test.",
+      "location": "steward.rs `queue_steward_request` (Files list, step 2)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After step 4, the existing drain tests that use WithRealCheck will commit real fix requests, but the dependents list names only the new test.",
+      "evidence": "tests/drain.rs:6955-6964 and 7036-7045 run `drain::drain` over WithRealCheck with a failing real check. Once open_requests and queue_request are delegated to RealSteps, those runs will commit a request on the steward channel and add a line to notes. Fix: List these two tests as dependents and either assert the queued request there or confirm their assertions (held_back, stop, display text) are unaffected.",
+      "location": "Dependents: `Check` / WithRealCheck entries",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A request that cannot run blocks any new request for its finding indefinitely, and the plan's mitigation does not cover that case.",
+      "evidence": "store.rs:49-61: Declined and Proposed-but-refused jobs are not Closed, so they count as open. Refusals for structural terms in generated text exist (refusal_corpus.rs:1425 'structural-term-approve-request-title-use-is-refused'). A statement that contains such a term would produce a request that never runs and keeps blocking re-queueing. Fix: Put quoted statements inside quotation marks so the 'structural-term-quoted-or-cited' path applies, and add a corpus case whose statement holds a structural term. When a finding is skipped because an open request cites it, have the drain note give that request's id and state, so a stuck request is visible.",
+      "location": "Decision 4 / Risk 4 (open = not Closed)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A CLI unit test that reads study data overlaps the xtask site test and ties drain.rs to the content of one study.",
+      "evidence": "xtask/src/site.rs:1019 already asserts the 'waiting' tag and the reopened explanation. Fix: Consider putting the model_contradictions/intro assertions next to the existing site test, or keep the drain.rs test small (only `model_contradictions` returning empty).",
+      "location": "Step 3 test `the_firstmate_study_returns_a_reopened_item_to_the_queue`",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the base correctly. The study fix was already made in commit 30642c0 (HISTORY.txt:633). model.json:10 marks reopened as 'waiting', model.json:110 has t12 reopened -> queued, intro.json:115 says the item goes back to Queued, and in intro.json 'final state' appears only in the 'done' entry (line 83). Leaving those files alone and pinning them with a test is reasonable. The drain half matches the code. The rate step at drain.rs:2457-2464 stores only check.detail. CheckerProblem at pin.rs:299-304 already has separate file, kind, statement and evidence fields. StewardRequest::new at steward.rs:535-595 rewords boundary words and rejects text that would parse as extra acceptance. The new Steps methods have default bodies, so existing stubs keep compiling. Two problems need a revision. (1) Duplicates are detected by an exact substring match on the statement text the model returns. For 'omitted' findings, the checker writes its own description of the missing fact rather than quoting the page (pin.rs:346-347), and 'behavior' statements may quote different spans on each run. Those findings would get a new request on every drain, which is the defect the request asks to fix. (2) Criterion 3 asks that drain's source check passes. The plan shows only the model-free floor. It also says nothing but the live model check can test claim c45's cited lines (bin/fm-teardown.sh 3894-3896; every other citation of that file is at line 184 or earlier). In fact the study kept test in athena-cap-study (rules.rs:1840) checks citations and quotes against pinned-source/ without a model call. The plan neither names nor uses that check. Lesser points: queued requests are not redacted, the existing tests that use WithRealCheck will now commit requests, and a request that cannot run blocks any later request for its finding."
+}

@@ -9,6 +9,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Scope guard: a stored line pause is re-evaluated before it refuses a job. `Athena::line_pause`
+  (`athena-core`, `scope_guard.rs`) recomputes the line's signals from its attempt records under the current
+  rules (`evaluate_before_attempt`, so an environment stop is not counted). A pause that no longer trips is
+  deleted and one line is appended to `<state root>/scope/cleared.log` (append-only: time, line id, "pause
+  cleared", what the pause was based on and what the line shows now). A pause that still trips is kept as it
+  is. Only records that hold the pause's decision (the job it names has a finished attempt) can lift it, so
+  records loaded before the pause was written change nothing. Each pause file now records its basis, the stop
+  reasons (signal, level, detail) and the numbers they came from; a pause with no signals or with all-zero
+  numbers (`LineMark::has_basis`) is stale and is recomputed: cleared when the line no longer trips, and
+  rewritten with its basis when it still does. Old pause files without those keys now load, instead of being
+  ignored, and are recomputed. Until the next check rewrites it, `athena status` shows such a pause with its
+  header line and no signal lines. Marks are written through a temporary file and a rename, so a reader never
+  sees a partial file. A pause cleared while the line still shows a flag leaves no flag file until the line's
+  next attempt, since the watcher writes flags. `docs/design/scope-guard.md` (Lifting) still says nothing
+  lifts a pause automatically and is out of date.
+
 - Records-history step 7b (D111), first slice: readers can now read the current records from the `athena/records`
   worktree. `athena_data::paths::records_worktree(state_dir)` is the one place that builds the worktree path
   (`<state>/records-worktree`). `Records::load_current` (`athena-core`, `store.rs`) and `RecordSet::load_current`

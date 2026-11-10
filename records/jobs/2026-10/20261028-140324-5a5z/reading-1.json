@@ -1,0 +1,127 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261028-140324-5a5z",
+  "n": 1,
+  "at": "2026-11-10T00:29:46.741151825Z",
+  "invocation_seq": 1,
+  "base_commit": "b26c22707a6baa4225f017ec85a34ec92691f5ab",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Re-evaluate stored line pauses and clear them when stale",
+  "summary": "Athena::line_pause already recomputes signals and hides a pause that no longer trips, but it never deletes the file or logs it, and it trusts any pause file. Change it so a pause that no longer trips is deleted and logged, a pause with no recorded basis is re-evaluated, and a pause that still trips is kept with its stop reasons and signal numbers. Audience: the operator, who should not have to delete pause files by hand.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests for the clear, keep and no-basis cases; fmt, clippy and test pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that check the pause file is removed or kept."
+    },
+    {
+      "id": "small",
+      "how": "One file, one focused change."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/scope_guard.rs. Entry points are Athena::line_pause (called from crates/athena-core/src/run/mod.rs:1014, crates/athena-core/src/reading.rs:1146 and crates/athena-cli/src/drain.rs:4305), line_state, evaluate_before_attempt, try_watch_line, LineMark, SignalFact and MarkNumbers. verdict_of already maps environment stops to Verdict::Environment, so the counting rule is already current. line_pause currently recomputes the line but only hides a stale pause; it neither deletes the file nor logs. Resolution order: request_records, group_lines, then the pause file keyed by the line's first id, then line_state. No records or data file is added, so check_record_file / AnyRecord do not apply. The property is measured directly via line_pause on a stored pause plus a filesystem check on the pause file.",
+    "Term basis: a pause file's recorded basis is its non-empty `signals` (stop reasons: signal, level, detail) and its `numbers` (MarkNumbers). LineMark already stores both, so no new schema is needed beyond treating a pause with empty signals as stale. If the on-disk format must change, serde defaults keep old files loadable so they are re-evaluated rather than ignored.",
+    "line_pause takes &self, so deleting the file and logging needs no new Ui argument. Logging goes through eprintln/tracing or a small log helper, whichever the crate already uses. Callers keep their signature.",
+    "A line with no finished attempts cannot be recomputed. It keeps the existing behavior from live_marks (shown as stored) and is not cleared.",
+    "Where a pause is hidden but the line still trips at flag level, the pause file is removed and the existing flag handling is left to the watcher. The pause is not rewritten as a flag by line_pause.",
+    "Environment: none beyond the local state directory under <state root>/scope/. No CI workflow, push or history read is involved, and no governance file changes."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-core/src/scope_guard.rs writes a pause file for a line whose attempts all ended on environment stops. A single line_pause call returns None and the pause file no longer exists. Run `cargo test -p athena-core scope_guard`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test shows a line that still trips under the current rules (for example two rejections for the same criterion) stays paused: line_pause returns Some and the pause file still exists. Run `cargo test -p athena-core scope_guard`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test shows a pause file with no recorded basis (empty signals) is re-evaluated, not trusted. It is cleared when the line no longer trips and kept, with the basis rewritten, when it still trips. Run `cargo test -p athena-core scope_guard`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The diff to crates/athena-core/src/scope_guard.rs shows line_pause (or a helper it calls) calling line_state / evaluate_before_attempt before returning a stored pause. It removes the pause file when the overall level is no longer Pause, and it emits a log line saying the pause was cleared and why.",
+      "kind": "content"
+    },
+    {
+      "text": "The pause file written by try_watch_line carries the stop reasons (the SignalFact signal, level and detail) and the MarkNumbers it was computed from. The diff defines the basis check, 'a pause with no signals or no numbers is stale', in one place. The module doc comment that says 'nothing lifts a pause: the owner deletes the pause file' is updated to match.",
+      "kind": "content"
+    },
+    {
+      "text": "The change refuses fewer readings, not more: only pauses that no longer hold under the current rules are lifted. No refusal rule is tightened, so no newly-refused-readings percentage applies (expected 0% of newly refused readings).",
+      "kind": "content"
+    },
+    {
+      "text": "No unrelated behavior changes: the existing scope_guard tests, including a_stored_pause_that_no_longer_holds_is_not_returned_and_does_not_block_a_retry, pass or are updated only to expect the file's removal. `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test` pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Changing the thresholds T1 to T5 or the StopCause classifier",
+    "Changing live_marks or status output beyond sharing the staleness helper",
+    "Changes to drain.rs, run/mod.rs or reading.rs call sites"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6813627254509018,
+      "p_user_intervenes": 0.07210144927536231,
+      "cost_usd": {
+        "p10": 0.5691927293010134,
+        "p50": 1.5164948072931013,
+        "p90": 5.042337748980144
+      },
+      "wall_time_s": {
+        "p10": 571.1736084301111,
+        "p50": 2120.547459108001,
+        "p90": 4347.724188075184
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass rate than the reference: the change touches a refusal path and needs three new tests in a large file.",
+  "hard_reason": "This changes a rule that can refuse or hold work: the scope guard's pause check, which decides whether a job is refused.",
+  "producer_effort": "high"
+}

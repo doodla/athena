@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261109-231857-tpgp",
+  "round": 2,
+  "at": "2026-11-09T23:31:03.841936514Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "A fix request is worked in the same run and re-queued after it closes, so its own landing can queue the next fix, in a loop bounded only by the budget.",
+      "evidence": "A landing that changes a path under studies/ adds to outcome_landings (drain.rs:1814-1815, OUTCOME_PATHS at 462). After that, every rating that meets the target runs check_page (2432-2451). citing_request skips only jobs that are not closed, and the run loop's `tried` set (3078) holds job ids, which are new for each request. So a source-fix job that lands without removing the contradiction leads to this sequence: rating, then check_page, then the same finding, then the old job closed, then a new request, then steps.queue() lists it, then it is worked, then it lands, and so on. The plan's mitigation ('a re-queue happens only after another landing') does not hold, because the fix's own landing is that landing. The plan itself expects c45 may still be flagged ('may flag c45 and queue one fix request on the next drain'), so this is the likely first case. Fix: Queue a marker at most once per drain run. One way is a per-run set of queued markers on RealSteps or in drain state (a Mutex, since check_page takes &self). Another is to treat a request with the same marker created during this run as open even after it closes. Also consider not re-queuing when a closed request with the same marker landed since the last change to the cited file. Add a drain-level test: a fix job lands and the fake checker still reports the contradiction, so no second request is queued in that run. Update the CHANGELOG and the module doc to match.",
+      "location": "Decision 3 and the 'Re-queue after close' dependent; drain.rs Drain::rate 2398-2464, landing counter 1809-1815, OUTCOME_PATHS 462",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The demo study's claims.json has only c1, so a c2 statement would match no entry and fall back to the hash anchor. The expected first line ending ' c2' would then fail.",
+      "evidence": "tests/drain.rs:6792 writes `json!([{ \"id\": \"c1\", \"text\": self.claim }])`. The plan says the test uses the demo study as is ('claims.json is `[{id: c1, text: ...}]`'). Fix: Commit a claims.json with c1 and c2, each with distinct text of at least 12 characters, in the new test, through commit_study with its own files rather than the shared Texts.",
+      "location": "Criterion 4 demonstration, run 3 ('a second one quoting a different claim c2 in the same file')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Only direct fields are matched, so a statement that quotes a nested entry with no id is anchored by hash, not by the entry that holds it.",
+      "evidence": "In model.json, transitions keep text in a nested `retry` object (for example t2's `retry.changes`, model.json:28-30), and failures sit in `unhandled.failures` entries keyed by `name`, not `id` or `term` (model.json:119). A behavior statement that quotes those texts falls back to the hash. That is the case the CHANGELOG limit says may be queued again. Fix: When matching, include string fields of descendant objects that have no id or term in the nearest ancestor that has an id or term. Optionally accept `name` as an anchor key where it is short and word-safe, or hash it.",
+      "location": "Plan step 3, finding_anchor ('take its direct string fields and arrays of strings')",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Truncating to the first 3 sorted ids is arbitrary. A statement that touches 4 or more entries gets a key that omits some of them.",
+      "evidence": "The plan joins the sorted, de-duplicated ids and keeps 3 with no rationale. Different subsets would collide only rarely, but the rule is a guess. Fix: Use the hash fallback when more than 3 entries match. Or keep the 3 and state the rule in the doc comment.",
+      "location": "Decision 1 ('at most 3' ids joined with '+')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read pin.rs, drain.rs (study_text, check_page, Drain::rate, the run loop and the landing counter), steward.rs (StewardRequest::new, queued_work, the channels), reading.rs (Athena::queue), the study files and the drain test fixtures. The plan matches the request and the accepted reading. The files and functions it names exist at the lines it gives. The only readers of SourceReport and check_study_text are in pin.rs and drain.rs, as its dependents list says. It is honest that the pinned source is absent, so criterion 3's source-check half goes unshown. The fallback re-citation for c45, with a CHANGELOG note, is the one the reading allows. One design fault needs a revision. The plan chooses to work a fix request in the same run that queued it, and it re-queues a request once its earlier one is closed. Together these let fix requests feed themselves within one run. A fix job edits studies/, so its landing counts as an outcome landing. That landing triggers a rating and then check_page. If the contradiction is still there, the earlier request is now closed (landed), so a new one is queued and worked, and so on until the budget runs out. The plan itself expects c45 may still be flagged, so this is likely on the first real drain. Smaller points: the criterion 4 test needs a c2 claim in its fixture, and the anchor matching skips nested entries."
+}
