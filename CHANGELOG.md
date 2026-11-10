@@ -14,6 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `feedback_dimension_counts` in `crates/athena-core/src/introspect.rs` reports how many hypotheses or work items
+  an introspection record holds for each feedback dimension (OLY-3-06); list fields count one per entry.
 - The drain holds a line of work after two attempts that did not land, and does not retry it. A line is the
   scope guard's grouping (a request, its retries and its re-asks of the same words). It is held when none of its
   attempts was accepted and two did not land: a job rejected or failed (an environment stop is not counted, as
