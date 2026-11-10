@@ -12,9 +12,16 @@
 //! [`t3_cost`] is `forecasts.reader.cost_usd.p90()` of the latest reading of the newest request of the line
 //! that has a finished attempt.
 //! `Athena::go` (dispatch) and `Athena::retry` refuse a paused line ([`Athena::line_pause`]). Nothing here
-//! stops or signals a running process, and nothing lifts a pause: the owner deletes the pause file. A flag
-//! dispatches as usual; the drain asks [`Athena::line_flag`] only after an item's last failed attempt, to pass
-//! the item over instead of stopping the batch.
+//! stops or signals a running process. A pause is re-checked each time it is asked for: when the line no
+//! longer reaches a pause under the current rules, [`Athena::line_pause`] deletes the pause file and appends
+//! one line to `<state root>/scope/cleared.log` (append-only). A pause that still holds is lifted only by the
+//! owner deleting the pause file. A flag dispatches as usual; the drain asks [`Athena::line_flag`] only after
+//! an item's last failed attempt, to pass the item over instead of stopping the batch.
+//!
+//! Each pause file records its basis: the stop reasons (the signal, level and detail of each [`SignalFact`])
+//! and the [`MarkNumbers`] they were computed from. A pause with no signals or with all-zero numbers has no
+//! basis ([`LineMark::has_basis`], the one place that states the rule): it is stale, so it is recomputed
+//! instead of trusted and its basis is written back when it still holds.
 //!
 //! Why an attempt stopped decides whether it counts. The reason comes from one classifier,
 //! [`crate::disk::StopCause`], which also decides what `athena retry` may resume; this module keeps no list of
@@ -423,7 +430,7 @@ pub struct SignalFact {
 }
 
 /// The numbers a mark was computed from.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MarkNumbers {
     /// Finished attempts on the line.
     pub attempts: usize,
@@ -450,9 +457,12 @@ pub struct LineMark {
     pub job: String,
     /// When the mark was written.
     pub at: String,
-    /// The signals that hold.
+    /// The signals that hold: the stop reasons the mark was based on. A file without them loads as empty and
+    /// has no basis ([`LineMark::has_basis`]).
+    #[serde(default)]
     pub signals: Vec<SignalFact>,
-    /// The numbers behind them.
+    /// The numbers behind them. A file without them loads as all zero and has no basis.
+    #[serde(default)]
     pub numbers: MarkNumbers,
     /// Why, in one sentence.
     pub reason: String,
@@ -473,6 +483,24 @@ impl LineMark {
     /// Whether this is a pause.
     pub fn is_pause(&self) -> bool {
         self.level == "pause"
+    }
+
+    /// Whether the mark records what it was based on: at least one signal fact and numbers that are not all
+    /// zero. A mark without a basis is stale and is recomputed instead of trusted. This is the one place that
+    /// states the rule. `numbers.attempts` is deliberately not the test: a T3 pause built from the spend of
+    /// environment-stopped attempts has no counted attempts, but its forecast p90 is not zero. Every mark the
+    /// watcher writes has some non-zero number (T1 and T2 need counted attempts, T4 two rejections, T5 minutes,
+    /// T3 a forecast above zero).
+    pub fn has_basis(&self) -> bool {
+        !self.signals.is_empty() && self.numbers != MarkNumbers::default()
+    }
+
+    /// Whether `requests` hold the decision this mark records: `self.job` is a request of `line` and has a
+    /// finished attempt. Records older than the mark do not, and must not lift it.
+    fn decided_in(&self, requests: &[RequestRecord], line: &[usize]) -> bool {
+        line.iter()
+            .map(|&i| &requests[i])
+            .any(|r| r.id == self.job && !r.attempts.is_empty())
     }
 }
 
@@ -495,10 +523,24 @@ fn read_mark(path: &std::path::Path) -> Option<LineMark> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
+/// Writes a mark so that a reader sees the old file or the new one, never a partial one: the text goes to
+/// `<file>.<pid>.tmp` in the same directory (neither a `.pause.json` nor a `.flag.json` name, so the listings
+/// skip it) and is renamed over the target.
 fn write_mark(path: PathBuf, mark: &LineMark) -> Result<()> {
-    std::fs::create_dir_all(path.parent().expect("a mark file has a directory"))?;
+    let dir = path.parent().expect("a mark file has a directory");
+    std::fs::create_dir_all(dir)?;
     let text = serde_json::to_string_pretty(mark)?;
-    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    let name = path.file_name().expect("a mark file has a name");
+    let temp = dir.join(format!(
+        "{}.{}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let result = std::fs::write(&temp, text).and_then(|()| std::fs::rename(&temp, &path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result.with_context(|| format!("writing {}", path.display()))
 }
 
 /// Every mark in the state directory, pauses first. A flag is not listed for a line that is paused.
@@ -773,22 +815,143 @@ fn facts(signals: &Signals, attempts: &[AttemptRecord], numbers: &MarkNumbers) -
     out
 }
 
+/// The mark for a line from its signals, or `None` when no signal holds. The mark carries the stop reasons
+/// ([`SignalFact`]s) and the [`MarkNumbers`] they were computed from, which is its basis
+/// ([`LineMark::has_basis`]). The watcher and [`Athena::line_pause`] both build marks here.
+///
+/// The numbers are those the signals used: environment stops are not counted, and a resumed retry is shown
+/// against the forecast of its remaining stages. `job` is the job whose finish triggered the evaluation and
+/// `pause_file` the file a pause is stored in (named in the text that says how to lift it).
+fn build_mark(
+    first: &str,
+    job: &str,
+    pause_file: &std::path::Path,
+    signals: &Signals,
+    attempts: &[AttemptRecord],
+    p90: f64,
+) -> Option<LineMark> {
+    let level = signals.overall();
+    if level == Level::None {
+        return None;
+    }
+    let counted_attempts = counted(attempts);
+    let rejected: Vec<&AttemptRecord> = counted_attempts
+        .iter()
+        .copied()
+        .filter(|a| a.verdict == Verdict::Rejected)
+        .collect();
+    let (spend_usd, forecast_p90_usd) = t3_basis(attempts, p90);
+    let numbers = MarkNumbers {
+        attempts: counted_attempts.len(),
+        rejections: rejected.len(),
+        spend_usd,
+        forecast_p90_usd,
+        agent_minutes: counted_attempts.iter().map(|a| a.agent_minutes).sum(),
+        matched_criterion: rejected.last().and_then(|a| a.unmet_criterion.clone()),
+    };
+    let facts = facts(signals, attempts, &numbers);
+    let paused = level == Level::Pause;
+    let reason = facts
+        .iter()
+        .filter(|f| f.level == if paused { "pause" } else { "flag" })
+        .map(|f| format!("{}: {}", f.signal, f.detail))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let lift = if paused && signals.t4 == Level::Pause {
+        "narrow the request so it asks for less than the criterion that was rejected twice, or add a measurement of what fails".to_string()
+    } else if paused {
+        "a measurement of cost or progress that shows the next attempt will not repeat the spend"
+            .to_string()
+    } else {
+        "no action needed; the line is still dispatched".to_string()
+    };
+    Some(LineMark {
+        level: if paused { "pause" } else { "flag" }.to_string(),
+        line: first.to_string(),
+        job: job.to_string(),
+        at: crate::now().to_string(),
+        signals: facts,
+        numbers,
+        reason,
+        lift: if paused {
+            format!("{lift}. Then delete {}", pause_file.display())
+        } else {
+            lift
+        },
+    })
+}
+
+/// Appends one line to `<state root>/scope/cleared.log` saying a pause was cleared. Errors are ignored: the
+/// log is a record for the owner and must not change the result of a check.
+fn log_cleared(state: &StateDir, line: &str, why: &str) {
+    use std::io::Write;
+    let text = format!("{} line {line}: pause cleared: {why}\n", crate::now());
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(scope_dir(state).join("cleared.log"))
+    {
+        let _ = file.write_all(text.as_bytes());
+    }
+}
+
 impl Athena {
     /// The pause on the line that `job_id` belongs to, if there is one. Rebuilds the [`RequestRecord`]s from
     /// `records`, groups them with [`group_lines`], and looks the pause file up by the line's first request id.
     ///
-    /// The stored pause is a record of what the watcher decided, not the decision: it is returned only while
-    /// the line's attempts, read under the current rule for which stops count, still reach a pause. A pause
-    /// written when an environment stop was counted as spend stops blocking the line once the rule no longer
-    /// counts it. The file is left as it is; this never creates a pause.
+    /// The stored pause is a record of what the watcher decided, not the decision, so it is recomputed from the
+    /// line's attempts under the current rule for which stops count ([`line_state`]):
+    ///
+    /// - The line still reaches a pause: the stored pause is returned and the file is kept. If the file has no
+    ///   recorded basis ([`LineMark::has_basis`]) it is rewritten with the stop reasons and numbers first.
+    /// - The line no longer reaches a pause: the file is deleted, one line is appended to
+    ///   `<state root>/scope/cleared.log` saying so and why, and `None` is returned. A pause written when an
+    ///   environment stop was counted as spend stops blocking the line this way, with no step by the owner. A
+    ///   line that still shows a flag keeps no flag file from this: the watcher writes flags.
+    ///
+    /// Only records that hold the pause's decision (the job it names is a request of the line with a finished
+    /// attempt) can lift or rewrite it. With older records, or a line with no finished attempt, nothing
+    /// is deleted or written, and `None` is returned only when the recomputed level is below a pause. This
+    /// never creates a pause.
     pub fn line_pause(&self, records: &Records, job_id: &str) -> Option<LineMark> {
         let requests = request_records(records);
         let at = requests.iter().position(|r| r.id == job_id)?;
         let lines = group_lines(&requests);
         let line = lines.iter().find(|l| l.contains(&at))?;
         let first = &requests[line[0]].id;
-        let mark = read_mark(&pause_path(&self.state, first)).filter(LineMark::is_pause)?;
-        (line_state(records, &requests, line).2.overall() == Level::Pause).then_some(mark)
+        let path = pause_path(&self.state, first);
+        let mark = read_mark(&path).filter(LineMark::is_pause)?;
+        let (attempts, p90, signals) = line_state(records, &requests, line);
+        let current = mark.decided_in(&requests, line);
+        if signals.overall() == Level::Pause {
+            if mark.has_basis() || !current {
+                return Some(mark);
+            }
+            // No recorded basis: write the stop reasons and numbers the pause holds on, keeping its job.
+            let rebuilt = build_mark(first, &mark.job, &path, &signals, &attempts, p90)
+                .filter(LineMark::is_pause)?;
+            return Some(match write_mark(path, &rebuilt) {
+                Ok(()) => rebuilt,
+                Err(_) => mark,
+            });
+        }
+        if current && std::fs::remove_file(&path).is_ok() {
+            let was = if mark.has_basis() {
+                format!("it was based on {}", mark.signal_names())
+            } else {
+                "it recorded no basis".to_string()
+            };
+            let now = match build_mark(first, &mark.job, &path, &signals, &attempts, p90) {
+                Some(m) => format!("the line now shows {} at flag level", m.signal_names()),
+                None => format!(
+                    "the line shows no signal: {} attempts, {} counted, environment stops are not counted",
+                    attempts.len(),
+                    counted(&attempts).len()
+                ),
+            };
+            log_cleared(&self.state, first, &format!("{was}; {now}"));
+        }
+        None
     }
 
     /// The flag on the line that `job_id` belongs to, if there is one: the stored flag, returned only while the
@@ -878,61 +1041,16 @@ impl Athena {
         };
         let first = requests[line[0]].id.clone();
         let (attempts, p90, signals) = line_state(&records, &requests, line);
-        // The mark shows the numbers the signals used: environment stops are not counted, and a resumed retry
-        // is shown against the forecast of its remaining stages.
-        let counted_attempts = counted(&attempts);
-        let rejected: Vec<&AttemptRecord> = counted_attempts
-            .iter()
-            .copied()
-            .filter(|a| a.verdict == Verdict::Rejected)
-            .collect();
-        let (spend_usd, forecast_p90_usd) = t3_basis(&attempts, p90);
-        let numbers = MarkNumbers {
-            attempts: counted_attempts.len(),
-            rejections: rejected.len(),
-            spend_usd,
-            forecast_p90_usd,
-            agent_minutes: counted_attempts.iter().map(|a| a.agent_minutes).sum(),
-            matched_criterion: rejected.last().and_then(|a| a.unmet_criterion.clone()),
-        };
         let (flag_file, pause_file) = (
             flag_path(&self.state, &first),
             pause_path(&self.state, &first),
         );
-        let level = signals.overall();
-        if level == Level::None {
+        let Some(mark) = build_mark(&first, job.as_str(), &pause_file, &signals, &attempts, p90)
+        else {
             let _ = std::fs::remove_file(&flag_file);
             return Ok(());
-        }
-        let facts = facts(&signals, &attempts, &numbers);
-        let paused = level == Level::Pause;
-        let reason = facts
-            .iter()
-            .filter(|f| f.level == if paused { "pause" } else { "flag" })
-            .map(|f| format!("{}: {}", f.signal, f.detail))
-            .collect::<Vec<_>>()
-            .join("; ");
-        let lift = if paused && signals.t4 == Level::Pause {
-            "narrow the request so it asks for less than the criterion that was rejected twice, or add a measurement of what fails".to_string()
-        } else if paused {
-            "a measurement of cost or progress that shows the next attempt will not repeat the spend".to_string()
-        } else {
-            "no action needed; the line is still dispatched".to_string()
         };
-        let mark = LineMark {
-            level: if paused { "pause" } else { "flag" }.to_string(),
-            line: first.clone(),
-            job: job.as_str().to_string(),
-            at: crate::now().to_string(),
-            signals: facts,
-            numbers,
-            reason,
-            lift: if paused {
-                format!("{lift}. Then delete {}", pause_file.display())
-            } else {
-                lift
-            },
-        };
+        let paused = mark.is_pause();
         let names = mark.signal_names();
         if paused {
             write_mark(pause_file, &mark)?;
@@ -962,7 +1080,7 @@ mod watcher_tests {
     use athena_agent::fake::{FakeAgentDriver, FakeTurn};
     use athena_agent::{AgentInvocation, Usage};
     use athena_context::{PRODUCER_FRAME, PromptAsset, VERIFIER_FRAME};
-    use athena_data::records::{AcceptedBy, Build, PolicyViolation, Role};
+    use athena_data::records::{AcceptedBy, Build, InvocationOutcome, PolicyViolation, Role};
     use athena_git::Git;
     use serde_json::json;
     use std::collections::{BTreeMap, VecDeque};
@@ -1027,12 +1145,15 @@ mod watcher_tests {
         cost: f64,
         /// One entry per verifier call: the index of the criterion to fail, or `None` to pass.
         verdicts: Mutex<VecDeque<Option<usize>>>,
+        /// How many of the next producer calls stop on an API error that is an environment stop (a 429).
+        env_stops: Mutex<usize>,
     }
 
     struct Rig {
         _dir: tempfile::TempDir,
         _state: tempfile::TempDir,
         athena: Athena,
+        plan: Arc<Plan>,
     }
 
     fn rig(p90: f64, cost: f64, verdicts: &[Option<usize>]) -> Rig {
@@ -1090,7 +1211,9 @@ mod watcher_tests {
             p90,
             cost,
             verdicts: Mutex::new(verdicts.iter().copied().collect()),
+            env_stops: Mutex::new(0),
         });
+        let rig_plan = Arc::clone(&plan);
         let script = Box::new(move |spec: &AgentInvocation| {
             // A reading of a retry must name the earlier job whose result the brief carries.
             let earlier: String = spec
@@ -1138,6 +1261,14 @@ mod watcher_tests {
                         "open_issues": [], "mistakes": [], "learnings": [], "desires": []
                     }));
                     t.edits = vec![("README.md".into(), Some("# Demo\n\nA demo.\n".into()))];
+                    let mut env_stops = plan.env_stops.lock().unwrap();
+                    if *env_stops > 0 {
+                        *env_stops -= 1;
+                        t.outcome = InvocationOutcome::Error;
+                        t.structured = None;
+                        t.edits = vec![];
+                        t.detail = Some("success: API Error: 429 {\"type\":\"error\"}".into());
+                    }
                     t
                 }
                 Role::Verifier => {
@@ -1191,6 +1322,7 @@ mod watcher_tests {
             _dir: dir,
             _state: state_dir,
             athena,
+            plan: rig_plan,
         }
     }
 
@@ -1216,6 +1348,36 @@ mod watcher_tests {
 
         fn flag(&self, first: &JobId) -> PathBuf {
             flag_path(&self.athena.state, first.as_str())
+        }
+
+        /// The next `n` producer calls stop on an API 429, which the guard reads as an environment stop.
+        fn fail_next_producers(&self, n: usize) {
+            *self.plan.env_stops.lock().unwrap() = n;
+        }
+
+        /// The lines of `<state root>/scope/cleared.log`; none when the file does not exist.
+        fn cleared_log(&self) -> Vec<String> {
+            std::fs::read_to_string(scope_dir(&self.athena.state).join("cleared.log"))
+                .map(|t| t.lines().map(str::to_string).collect())
+                .unwrap_or_default()
+        }
+
+        /// Two asks of the same words, each stopped by an environment stop: one line, two attempts.
+        fn two_environment_stops(&self) -> (JobId, JobId) {
+            self.fail_next_producers(2);
+            let a = self.ask("describe the demo in the readme");
+            assert_eq!(self.go(&a).unwrap(), OutcomeState::Failed);
+            let a2 = self.ask("describe the demo in the readme");
+            assert_eq!(self.go(&a2).unwrap(), OutcomeState::Failed);
+            let requests = request_records(&self.records());
+            assert_eq!(group_lines(&requests), vec![vec![0, 1]], "one line");
+            let attempts = line_attempts(&requests, &[0, 1]);
+            assert_eq!(attempts.len(), 2);
+            assert!(
+                attempts.iter().all(|x| x.verdict == Verdict::Environment),
+                "{attempts:?}"
+            );
+            (a, a2)
         }
 
         /// Two attempts rejected for the same criterion, through `ask` and `go`.
@@ -1460,7 +1622,10 @@ mod watcher_tests {
         let records = r.records();
         assert_eq!(r.athena.line_pause(&records, b.as_str()), None);
         assert_eq!(r.athena.line_pause(&records, a.as_str()), None);
-        assert!(r.pause(&a).exists(), "the stored file is left as it is");
+        assert!(
+            !r.pause(&a).exists(),
+            "the stale file is deleted by the check"
+        );
         r.athena
             .retry(b.as_str(), &Quiet)
             .expect("a pause that no longer holds does not refuse the retry");
@@ -1710,6 +1875,20 @@ mod watcher_tests {
         assert_eq!(v["signals"][1]["level"], "pause");
         assert_eq!(v["numbers"]["rejections"], 2);
         assert_eq!(v["numbers"]["matched_criterion"], CRITERIA[1]);
+        // The basis: the stop reasons (signal, level, detail) and the numbers they were computed from.
+        let basis = |v: &serde_json::Value| {
+            let signals = v["signals"].as_array().unwrap();
+            assert!(!signals.is_empty());
+            for s in signals {
+                for key in ["signal", "level", "detail"] {
+                    assert!(s[key].as_str().is_some_and(|t| !t.is_empty()), "{s}");
+                }
+            }
+            assert!(v["numbers"]["attempts"].as_u64().unwrap() >= 1, "{v}");
+            let mark: LineMark = serde_json::from_value(v.clone()).unwrap();
+            assert!(mark.has_basis(), "{mark:?}");
+        };
+        basis(&v);
         let lift = v["lift"].as_str().unwrap();
         assert!(lift.contains("narrow the request"), "{lift}");
         assert!(lift.contains(&format!("{a}.pause.json")), "{lift}");
@@ -1721,9 +1900,243 @@ mod watcher_tests {
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(r.pause(&a)).unwrap()).unwrap();
         assert_eq!(v["signals"][0]["signal"], "T3");
+        basis(&v);
         assert!((v["numbers"]["spend_usd"].as_f64().unwrap() - 1.6).abs() < 1e-9);
         assert_eq!(v["numbers"]["forecast_p90_usd"], 1.0);
         assert!(v["lift"].as_str().unwrap().contains("measurement"));
+    }
+
+    /// `mark` with its basis taken out.
+    fn without_basis(mut mark: LineMark) -> LineMark {
+        mark.signals = Vec::new();
+        mark.numbers = MarkNumbers::default();
+        mark
+    }
+
+    /// Writes `mark` as an older file has it: with no `signals` and no `numbers` key at all.
+    fn write_old_format(path: PathBuf, mark: &LineMark) {
+        let mut v = serde_json::to_value(mark).unwrap();
+        let keys = v.as_object_mut().unwrap();
+        keys.remove("signals");
+        keys.remove("numbers");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    }
+
+    /// Whether the `T4` pause is among the facts of `mark`.
+    fn has_t4_pause(mark: &LineMark) -> bool {
+        mark.signals
+            .iter()
+            .any(|s| s.signal == "T4" && s.level == "pause")
+    }
+
+    #[test]
+    fn a_pause_on_a_line_of_environment_stops_is_cleared_on_the_next_check() {
+        let r = rig(0.8, 0.01, &[]);
+        let (a, a2) = r.two_environment_stops();
+        assert!(
+            !r.pause(&a).exists() && !r.flag(&a).exists(),
+            "environment stops raise no signal"
+        );
+        // A pause written under an earlier rule, which counted the environment stops.
+        write_mark(r.pause(&a), &mark("pause", a.as_str(), "T4")).unwrap();
+        assert!(r.pause(&a).exists());
+        assert!(r.cleared_log().is_empty());
+
+        // No step by the owner in between: the next check clears it.
+        assert_eq!(r.athena.line_pause(&r.records(), a2.as_str()), None);
+        assert!(!r.pause(&a).exists(), "the pause file is deleted");
+        let log = r.cleared_log();
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(
+            log[0].contains(a.as_str())
+                && log[0].contains("pause cleared")
+                && log[0].contains("based on T4")
+                && log[0].contains("environment stops are not counted"),
+            "{log:?}"
+        );
+
+        // A second check finds nothing to clear and logs nothing more.
+        assert_eq!(r.athena.line_pause(&r.records(), a.as_str()), None);
+        assert_eq!(r.cleared_log().len(), 1);
+        // The line dispatches.
+        r.athena
+            .retry(a2.as_str(), &Quiet)
+            .expect("a cleared pause does not refuse the retry");
+    }
+
+    #[test]
+    fn a_pause_that_still_trips_stays_paused() {
+        let r = rig(0.8, 0.01, &[Some(0), Some(0)]);
+        let (a, b) = r.two_rejections();
+        let stored = read_mark(&r.pause(&a)).expect("the watcher paused the line");
+        assert!(stored.has_basis() && has_t4_pause(&stored), "{stored:?}");
+        let bytes = std::fs::read(r.pause(&a)).unwrap();
+        let later = r.ask(&format!("try again on {b}"));
+        let records = r.records();
+        for id in [&a, &b, &later] {
+            assert_eq!(
+                r.athena.line_pause(&records, id.as_str()),
+                Some(stored.clone()),
+                "{id}"
+            );
+        }
+        assert_eq!(std::fs::read(r.pause(&a)).unwrap(), bytes, "file untouched");
+        assert!(r.cleared_log().is_empty());
+        let err = r.athena.retry(b.as_str(), &Quiet).unwrap_err().to_string();
+        assert!(err.contains("T4") && err.contains("paused"), "{err}");
+        let err = r.go(&later).unwrap_err().to_string();
+        assert!(err.contains("T4") && err.contains("paused"), "{err}");
+        assert!(r.pause(&a).exists());
+    }
+
+    #[test]
+    fn a_pause_is_not_lifted_on_records_older_than_the_pause() {
+        let r = rig(0.8, 0.01, &[Some(0), Some(0)]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Rejected);
+        let b = r.ask(&format!("try again on {a}"));
+        let behind = r.records();
+        assert_eq!(r.go(&b).unwrap(), OutcomeState::Rejected);
+        let stored = read_mark(&r.pause(&a)).expect("the second rejection paused the line");
+        let bytes = std::fs::read(r.pause(&a)).unwrap();
+
+        // The records were loaded before the attempt that made the pause: one rejection shows no pause, but
+        // they do not hold the pause's decision, so nothing is deleted.
+        assert_eq!(r.athena.line_pause(&behind, b.as_str()), None);
+        assert_eq!(std::fs::read(r.pause(&a)).unwrap(), bytes);
+        assert!(r.cleared_log().is_empty());
+        assert_eq!(
+            r.athena.line_pause(&r.records(), b.as_str()),
+            Some(stored),
+            "with current records the pause holds"
+        );
+        assert_eq!(std::fs::read(r.pause(&a)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_t3_pause_from_environment_spend_is_trusted_and_not_rewritten() {
+        // Each producer call costs 2.0 against a p90 of 0.8. The first attempt was redone from scratch, so its
+        // spend stays; the last attempt's is dropped as kept work. No attempt is counted, yet T3 pauses.
+        let r = rig(0.8, 2.0, &[]);
+        let (a, a2) = r.two_environment_stops();
+        let records = r.records();
+        let requests = request_records(&records);
+        let (attempts, p90, signals) = line_state(&records, &requests, &[0, 1]);
+        assert_eq!(signals.t3, Level::Pause, "{signals:?}");
+        assert_eq!(counted(&attempts).len(), 0);
+        let mark = build_mark(
+            a.as_str(),
+            a2.as_str(),
+            &r.pause(&a),
+            &signals,
+            &attempts,
+            p90,
+        )
+        .expect("T3 holds");
+        assert_eq!(mark.numbers.attempts, 0);
+        assert!(mark.has_basis(), "{mark:?}");
+        write_mark(r.pause(&a), &mark).unwrap();
+        let bytes = std::fs::read(r.pause(&a)).unwrap();
+        let modified = std::fs::metadata(r.pause(&a)).unwrap().modified().unwrap();
+        for id in [&a2, &a, &a2] {
+            assert_eq!(
+                r.athena.line_pause(&records, id.as_str()),
+                Some(mark.clone())
+            );
+        }
+        assert_eq!(std::fs::read(r.pause(&a)).unwrap(), bytes);
+        assert_eq!(
+            std::fs::metadata(r.pause(&a)).unwrap().modified().unwrap(),
+            modified,
+            "a pause with a basis is not rewritten"
+        );
+        assert!(r.cleared_log().is_empty());
+    }
+
+    #[test]
+    fn a_pause_with_no_recorded_basis_is_re_evaluated() {
+        for old_format in [false, true] {
+            let store = |path: PathBuf, stale: &LineMark| {
+                if old_format {
+                    write_old_format(path, stale);
+                } else {
+                    write_mark(path, &without_basis(stale.clone())).unwrap();
+                }
+            };
+
+            // The line no longer trips: the pause is cleared, not trusted.
+            let r = rig(0.8, 0.01, &[]);
+            let (a, a2) = r.two_environment_stops();
+            store(r.pause(&a), &mark("pause", a.as_str(), "T4"));
+            let stored = read_mark(&r.pause(&a)).expect("the file loads");
+            assert!(!stored.has_basis(), "{stored:?}");
+            assert_eq!(r.athena.line_pause(&r.records(), a2.as_str()), None);
+            assert!(!r.pause(&a).exists());
+            let log = r.cleared_log();
+            assert_eq!(log.len(), 1, "{log:?}");
+            assert!(log[0].contains("recorded no basis"), "{log:?}");
+
+            // The line still trips: the pause is kept and its basis written back, with its job.
+            let r = rig(0.8, 0.01, &[Some(0), Some(0)]);
+            let (a, b) = r.two_rejections();
+            let mut stale = mark("pause", a.as_str(), "T4");
+            stale.job = b.as_str().to_string();
+            store(r.pause(&a), &stale);
+            assert!(!read_mark(&r.pause(&a)).unwrap().has_basis());
+            let got = r
+                .athena
+                .line_pause(&r.records(), b.as_str())
+                .expect("the line still trips");
+            assert!(got.has_basis() && has_t4_pause(&got), "{got:?}");
+            assert_eq!(got.numbers.rejections, 2);
+            assert_eq!(got.job, b.as_str(), "the stored job is kept");
+            assert_eq!(read_mark(&r.pause(&a)), Some(got.clone()));
+            let bytes = std::fs::read(r.pause(&a)).unwrap();
+            assert_eq!(r.athena.line_pause(&r.records(), a.as_str()), Some(got));
+            assert_eq!(std::fs::read(r.pause(&a)).unwrap(), bytes);
+            assert!(r.cleared_log().is_empty());
+        }
+    }
+
+    #[test]
+    fn status_shows_a_held_pause_without_basis_until_rechecked() {
+        let r = rig(0.8, 0.01, &[Some(0), Some(0)]);
+        let (a, b) = r.two_rejections();
+        let mut stale = mark("pause", a.as_str(), "T4");
+        stale.job = b.as_str().to_string();
+        write_mark(r.pause(&a), &without_basis(stale)).unwrap();
+        let shown = r.athena.live_marks(&r.records());
+        assert_eq!(shown.len(), 1);
+        assert!(
+            shown[0].is_pause() && shown[0].signals.is_empty(),
+            "{shown:?}"
+        );
+        r.athena.line_pause(&r.records(), b.as_str()).unwrap();
+        let shown = r.athena.live_marks(&r.records());
+        assert_eq!(shown.len(), 1);
+        assert!(has_t4_pause(&shown[0]), "{shown:?}");
+    }
+
+    #[test]
+    fn a_written_mark_leaves_no_temp_file() {
+        let r = rig(0.8, 0.01, &[Some(0), Some(0)]);
+        let (a, b) = r.two_rejections();
+        let mut stale = mark("pause", a.as_str(), "T4");
+        stale.job = b.as_str().to_string();
+        write_mark(r.pause(&a), &without_basis(stale)).unwrap();
+        r.athena.line_pause(&r.records(), b.as_str()).unwrap();
+        let names: Vec<String> = std::fs::read_dir(scope_dir(&r.athena.state))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(!names.is_empty());
+        assert!(
+            names
+                .iter()
+                .all(|n| n.ends_with(".pause.json") || n.ends_with(".flag.json")),
+            "{names:?}"
+        );
     }
 
     #[test]
@@ -1793,6 +2206,108 @@ mod tests {
             same_text_as: None,
             attempts: Vec::new(),
         }
+    }
+
+    fn full_mark() -> LineMark {
+        LineMark {
+            level: "pause".into(),
+            line: "a".into(),
+            job: "b".into(),
+            at: "2026-10-26T00:00:00Z".into(),
+            signals: vec![SignalFact {
+                signal: "T4".into(),
+                level: "pause".into(),
+                detail: "2 rejections".into(),
+            }],
+            numbers: MarkNumbers {
+                attempts: 2,
+                rejections: 2,
+                ..MarkNumbers::default()
+            },
+            reason: "T4: 2 rejections".into(),
+            lift: "narrow the request".into(),
+        }
+    }
+
+    #[test]
+    fn a_mark_without_signals_or_numbers_has_no_basis() {
+        let full = full_mark();
+        assert!(full.has_basis());
+        let mut no_signals = full.clone();
+        no_signals.signals.clear();
+        assert!(!no_signals.has_basis());
+        let mut no_numbers = full.clone();
+        no_numbers.numbers = MarkNumbers::default();
+        assert!(!no_numbers.has_basis());
+        // Spend alone is a number: no counted attempt is needed.
+        let mut spend_only = full.clone();
+        spend_only.numbers = MarkNumbers {
+            spend_usd: 2.0,
+            forecast_p90_usd: 0.8,
+            ..MarkNumbers::default()
+        };
+        assert!(spend_only.has_basis());
+
+        // A file from before the basis was kept loads, and has none.
+        let mut v = serde_json::to_value(&full).unwrap();
+        let keys = v.as_object_mut().unwrap();
+        keys.remove("signals");
+        keys.remove("numbers");
+        let old: LineMark = serde_json::from_value(v).unwrap();
+        assert!(!old.has_basis());
+        assert_eq!(old.job, "b");
+    }
+
+    #[test]
+    fn a_mark_is_decided_in_records_that_hold_its_job_with_an_attempt() {
+        let mark = full_mark();
+        let mut held = req("b", Some("a"));
+        held.attempts
+            .push(att(Verdict::Rejected, Some("x"), 0.1, 1));
+        let line = [0, 1];
+        let with_attempt = vec![req("a", None), held];
+        assert!(mark.decided_in(&with_attempt, &line));
+        let no_attempt = vec![req("a", None), req("b", Some("a"))];
+        assert!(!mark.decided_in(&no_attempt, &line));
+        let absent = vec![req("a", None), req("c", Some("a"))];
+        assert!(!mark.decided_in(&absent, &line));
+    }
+
+    #[test]
+    fn a_t3_mark_built_from_environment_spend_has_a_basis() {
+        // The first attempt was redone from scratch, so its spend stays; the last is kept work and drops out.
+        let attempts = vec![
+            att(Verdict::Environment, None, 2.0, 0),
+            att(Verdict::Environment, None, 0.01, 0),
+        ];
+        let signals = evaluate_before_attempt(&attempts, 0.8);
+        assert_eq!(signals.overall(), Level::Pause);
+        let mark = build_mark(
+            "a",
+            "b",
+            std::path::Path::new("/x/a.pause.json"),
+            &signals,
+            &attempts,
+            0.8,
+        )
+        .expect("T3 pauses");
+        assert!(mark.is_pause());
+        assert_eq!(mark.numbers.attempts, 0);
+        assert_eq!(mark.signal_names(), "T3");
+        assert!(mark.has_basis(), "{mark:?}");
+        assert!(mark.lift.ends_with("/x/a.pause.json"), "{}", mark.lift);
+        let none = evaluate_before_attempt(&attempts[..1], 0.8);
+        assert!(
+            build_mark(
+                "a",
+                "b",
+                std::path::Path::new("/x"),
+                &none,
+                &attempts[..1],
+                0.8
+            )
+            .is_none()
+        );
     }
 
     #[test]
