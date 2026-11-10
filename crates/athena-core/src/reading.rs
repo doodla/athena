@@ -56,6 +56,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 mod checks;
+mod coverage;
 mod outcome;
 mod replay;
 mod retry;
@@ -64,6 +65,7 @@ mod terms;
 mod topics;
 
 pub use checks::*;
+pub use coverage::*;
 pub use outcome::*;
 pub use replay::*;
 pub use retry::*;
@@ -1495,6 +1497,7 @@ mod tests {
                 include_str!("reading/retry.rs"),
                 include_str!("reading/topics.rs"),
                 include_str!("reading/checks.rs"),
+                include_str!("reading/coverage.rs"),
                 include_str!("reading/outcome.rs"),
                 include_str!("reading/terms.rs"),
                 include_str!("reading/surveys.rs"),
@@ -8558,6 +8561,435 @@ mod tests {
         ] {
             assert!(d166.contains(needle), "D166 lacks {needle:?}");
         }
+    }
+
+    /// The request of the job that asked for the request-coverage check, as it was given.
+    const COVERAGE_JOB_REQUEST: &str = "Priority: high\n\
+        A reading may drop one of the request's acceptance items into a follow-up (under the small-job default), \
+        and nothing catches it until the final verdict marks the reading a misread, after the full job has run: \
+        on 2026-10-29 a job passed its checks and the verifier and was then rejected for a split the reading \
+        itself chose. Check at reading acceptance that every acceptance bullet of the request is covered by the \
+        reading's criteria; a reading that leaves one out is refused at once with the missing bullet named, \
+        unless the request itself allows a split. The small-job default may propose a split only as a question \
+        back to the request, never by dropping a bullet.\n\
+        Acceptance:\n\
+        - A test shows a reading that omits one of the request's acceptance bullets is refused at reading time \
+        naming the bullet, and one that covers them all is accepted.\n\
+        - fmt, clippy with -D warnings and the test suite pass; CHANGELOG.md has an entry.\n\
+        Files: crates/athena-core/src/reading.rs, CHANGELOG.md";
+
+    const COVERAGE_BULLET_ONE: &str = "A test shows a reading that omits one of the request's acceptance bullets \
+        is refused at reading time naming the bullet, and one that covers them all is accepted.";
+
+    const COVERAGE_BULLET_TWO: &str =
+        "fmt, clippy with -D warnings and the test suite pass; CHANGELOG.md has an entry.";
+
+    /// The result of the whole acceptance gate for a reading with these criteria against `request`.
+    fn coverage_gate(request: &str, criteria: &[&str]) -> Result<()> {
+        let reading = governed_reading(&["docs/guide.md"], criteria, &[]);
+        check_reading_acceptance(&reading, request, None, &[], None)
+    }
+
+    /// The error of the gate, which must refuse.
+    fn coverage_error(request: &str, criteria: &[&str]) -> String {
+        coverage_gate(request, criteria).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn request_coverage_refuses_an_omitted_bullet_and_accepts_full_coverage() {
+        // Case A: distinct wording; the second criterion is a paraphrase of the second bullet.
+        let request = "Make the change.\n\nAcceptance:\n\
+            - A reading that omits a bullet is refused naming the bullet\n\
+            - CHANGELOG.md has an Unreleased entry\n\nFiles: crates/x.rs";
+        let first = "A reading that leaves out a bullet is refused, naming the omitted bullet";
+        let error = coverage_error(request, &[first]);
+        assert!(
+            error.starts_with("the reading was refused because"),
+            "{error}"
+        );
+        assert!(
+            error.contains("\"CHANGELOG.md has an Unreleased entry\""),
+            "{error}"
+        );
+        assert!(!error.contains("\"A reading that omits"), "{error}");
+        let reading = governed_reading(&["docs/guide.md"], &[first], &[]);
+        let refused = refusing_check(&reading, request, None, &[], None).unwrap();
+        assert_eq!(refused.0, "check_request_coverage");
+        coverage_gate(
+            request,
+            &[first, "CHANGELOG.md gains an entry under Unreleased"],
+        )
+        .unwrap();
+        // Case B: near-identical sibling bullets, told apart by their object words.
+        let request = "Fix the parser.\n\nAcceptance:\n- A test shows a star bullet is refused\n\
+            - A test shows a numbered part is refused";
+        let error = coverage_error(request, &["A test shows a star bullet is refused"]);
+        assert!(
+            error.contains("\"A test shows a numbered part is refused\""),
+            "{error}"
+        );
+        coverage_gate(
+            request,
+            &[
+                "A test shows a star bullet is refused",
+                "A test shows a numbered part is refused",
+            ],
+        )
+        .unwrap();
+        // Case C: two bullets that differ only in a path.
+        let request = "Write the docs.\n\nAcceptance:\n- docs/guide.md is documented\n\
+            - docs/notes.md is documented";
+        let error = coverage_error(request, &["docs/guide.md is documented"]);
+        assert!(error.contains("\"docs/notes.md is documented\""), "{error}");
+        assert!(!error.contains("\"docs/guide.md"), "{error}");
+        coverage_gate(
+            request,
+            &["docs/guide.md is documented", "docs/notes.md is documented"],
+        )
+        .unwrap();
+        // One criterion may cover two bullets.
+        coverage_gate(request, &["docs/guide.md and docs/notes.md are documented"]).unwrap();
+    }
+
+    #[test]
+    fn request_coverage_names_every_omitted_bullet_of_the_job_that_asked_for_it() {
+        let kept = "A test shows a reading that omits an acceptance bullet is refused at reading time naming \
+                    the bullet, and a reading that covers them all is accepted";
+        let error = coverage_error(COVERAGE_JOB_REQUEST, &[kept]);
+        assert!(error.contains(COVERAGE_BULLET_TWO), "{error}");
+        assert!(!error.contains(COVERAGE_BULLET_ONE), "{error}");
+        let none = coverage_error(COVERAGE_JOB_REQUEST, &["The output is tidy"]);
+        assert!(none.contains(COVERAGE_BULLET_ONE), "{none}");
+        assert!(none.contains(COVERAGE_BULLET_TWO), "{none}");
+        assert!(none.contains("leave out 2 of the request's 2"), "{none}");
+        coverage_gate(
+            COVERAGE_JOB_REQUEST,
+            &[kept, "CHANGELOG.md has an Unreleased entry"],
+        )
+        .unwrap();
+        // The bullets repeated as criteria are always covered.
+        coverage_gate(
+            COVERAGE_JOB_REQUEST,
+            &[COVERAGE_BULLET_ONE, COVERAGE_BULLET_TWO],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn request_coverage_leaves_a_bullet_to_a_wrapped_second_line() {
+        let request = "Do it.\n\nAcceptance:\n- The guide is complete and\n  docs/second.md holds the rest\n\
+            - The index lists the guide";
+        let error = coverage_error(
+            request,
+            &["The guide is complete", "The index lists the guide"],
+        );
+        assert!(
+            error.contains("\"The guide is complete and docs/second.md holds the rest\""),
+            "{error}"
+        );
+        coverage_gate(
+            request,
+            &[
+                "The guide is complete and docs/second.md holds the rest",
+                "The index lists the guide",
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn request_coverage_falls_back_when_every_word_is_shared() {
+        let request = "Do it.\n\nAcceptance:\n- The output is whole\n- The output is whole";
+        coverage_gate(request, &["The output is whole"]).unwrap();
+        let error = coverage_error(request, &["Something unrelated entirely"]);
+        assert!(error.contains("\"The output is whole\""), "{error}");
+    }
+
+    #[test]
+    fn request_coverage_lets_a_request_that_allows_a_split_through() {
+        let kept = "A test shows a reading that omits an acceptance bullet is refused at reading time naming \
+                    the bullet, and a reading that covers them all is accepted";
+        let with = |extra: &str| format!("{COVERAGE_JOB_REQUEST}\n{extra}");
+        for allowed in [
+            "You may split this job into parts.",
+            "The work can be split into follow-ups.",
+        ] {
+            coverage_gate(&with(allowed), &[kept]).unwrap_or_else(|e| panic!("{allowed}: {e}"));
+        }
+        for refused in [
+            "Do not split this job.",
+            "The log is read in parts and the parser may split into tokens.",
+            "If it is large you may split this job.",
+            "Never split the work.",
+            "You can't split this job.",
+        ] {
+            let error = coverage_error(&with(refused), &[kept]);
+            assert!(error.contains(COVERAGE_BULLET_TWO), "{refused}: {error}");
+        }
+        // The request that asked for the check mentions a split and a follow-up and allows neither.
+        let error = coverage_error(COVERAGE_JOB_REQUEST, &[kept]);
+        assert!(error.contains(COVERAGE_BULLET_TWO), "{error}");
+        // A reading that asks the split as a question, or declines, is not refused for the bullet.
+        let mut asking = governed_reading(&["docs/guide.md"], &[kept], &[]);
+        asking.question = Some("May I split the change log entry into a follow-up job?".into());
+        check_request_coverage(&asking, COVERAGE_JOB_REQUEST).unwrap();
+        let mut declining = governed_reading(&["docs/guide.md"], &[kept], &[]);
+        declining.capability = None;
+        check_request_coverage(&declining, COVERAGE_JOB_REQUEST).unwrap();
+        // A request with no `Acceptance` heading is not checked.
+        coverage_gate("Fix it.\n- one thing\n- another thing", &["Something else"]).unwrap();
+    }
+
+    #[test]
+    fn coverage_parser_reads_dash_star_and_numbered_bullets() {
+        let parsed = parse_request(
+            "Intro.\nAcceptance:\n- one thing\n* two thing\n1. three thing\n\nFiles: x",
+        );
+        assert_eq!(parsed.bullets, ["one thing", "two thing", "three thing"]);
+        assert!(parsed.outside.contains(&"Intro.".to_string()));
+        let indented = parse_request("Acceptance:\n  - indented thing\n    * deeper thing");
+        assert_eq!(indented.bullets, ["indented thing", "deeper thing"]);
+    }
+
+    #[test]
+    fn coverage_parser_joins_a_wrapped_bullet() {
+        let parsed = parse_request("Acceptance:\n- first line\n  second line\n- next one");
+        assert_eq!(parsed.bullets, ["first line second line", "next one"]);
+    }
+
+    #[test]
+    fn coverage_parser_reads_the_heading_forms() {
+        for heading in [
+            "Acceptance:",
+            "Acceptance criteria:",
+            "## Acceptance",
+            "**Acceptance:**",
+            "  acceptance  ",
+        ] {
+            let parsed = parse_request(&format!("Intro\n{heading}\n- a bullet here"));
+            assert_eq!(parsed.bullets, ["a bullet here"], "{heading}");
+        }
+    }
+
+    #[test]
+    fn coverage_parser_stops_at_a_blank_line_and_at_files() {
+        let parsed = parse_request("Acceptance:\n- a bullet\n\n- a list after it");
+        assert_eq!(parsed.bullets, ["a bullet"]);
+        assert!(!parsed.outside.iter().any(|l| l.contains("list after")));
+        let files = parse_request("Acceptance:\n- a bullet\nFiles: x.rs\n- not acceptance");
+        assert_eq!(files.bullets, ["a bullet"]);
+        let gap = parse_request("Acceptance:\n\n- first after a gap\n- second");
+        assert_eq!(gap.bullets, ["first after a gap", "second"]);
+    }
+
+    #[test]
+    fn coverage_parser_ignores_other_part_markers_and_a_missing_heading() {
+        assert!(
+            parse_request("Acceptance:\n1) first\n2) second")
+                .bullets
+                .is_empty()
+        );
+        assert!(
+            parse_request("- a thing\n- another thing")
+                .bullets
+                .is_empty()
+        );
+        assert!(parse_request("").bullets.is_empty());
+    }
+
+    #[test]
+    fn coverage_stems_match_inflections_of_one_word() {
+        let stem = |w: &str| stems_of(w, &[]).pop().unwrap();
+        let forms: Vec<String> = ["name", "names", "naming", "named"].map(stem).to_vec();
+        for a in &forms {
+            for b in &forms {
+                assert!(related(a, b), "{a} {b}");
+            }
+        }
+        for (a, b) in [
+            ("omit", "omitted"),
+            ("accept", "acceptance"),
+            ("cover", "coverage"),
+            ("refuse", "refused"),
+        ] {
+            assert!(related(&stem(a), &stem(b)), "{a} {b}");
+        }
+        for (a, b) in [("part", "number"), ("test", "text"), ("bullet", "bullock")] {
+            assert!(!related(&stem(a), &stem(b)), "{a} {b}");
+        }
+    }
+
+    #[test]
+    fn coverage_stems_leave_out_stop_words_and_file_name_parts() {
+        let body = "CHANGELOG.md has an Unreleased entry";
+        let tokens = distinctive_tokens(body);
+        assert_eq!(tokens, ["changelog.md"]);
+        let stems = stems_of(body, &tokens);
+        assert_eq!(stems, ["unreleas", "entry"]);
+        let path = "crates/athena-core/src/reading.rs holds the check";
+        let tokens = distinctive_tokens(path);
+        assert_eq!(tokens, ["crates/athena-core/src/reading.rs"]);
+        assert_eq!(stems_of(path, &tokens), ["hold", "check"]);
+    }
+
+    #[test]
+    fn coverage_tokens_are_paths_flags_and_file_names() {
+        assert_eq!(
+            distinctive_tokens(
+                "Run `cargo run -p xtask -- site` with --locked; edit (docs/a.md), e.g. x."
+            ),
+            ["--locked", "docs/a.md"]
+        );
+        assert!(distinctive_tokens("read and/or write, i.e. both, v1.2 and 3.5").is_empty());
+        assert_eq!(
+            distinctive_tokens("see crates/ and README.md."),
+            ["crates/", "readme.md"]
+        );
+    }
+
+    #[test]
+    fn request_coverage_has_one_step_line() {
+        let source = reading_source();
+        let body = source
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        let steps: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("step!(check_"))
+            .collect();
+        let line = "step!(check_request_coverage(reading, request));";
+        assert_eq!(steps.iter().filter(|l| **l == line).count(), 1, "{steps:?}");
+        let references = steps
+            .iter()
+            .position(|l| *l == "step!(check_reading_references(reading, repo_files));")
+            .unwrap();
+        assert_eq!(steps[references + 1], line);
+        let acceptance_doc = source
+            .split("pub fn check_reading_acceptance(")
+            .next()
+            .unwrap();
+        assert!(acceptance_doc.contains("[`check_request_coverage`]"));
+        assert!(
+            !body.contains("= check_request_coverage("),
+            "called directly"
+        );
+    }
+
+    /// The doc comment above `pub fn check_request_coverage(`, white space collapsed.
+    fn coverage_doc() -> String {
+        let before = reading_source()
+            .split("pub fn check_request_coverage(")
+            .next()
+            .unwrap();
+        let mut doc_lines: Vec<&str> = before
+            .lines()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("///"))
+            .map(|l| l.trim_start().trim_start_matches('/'))
+            .collect();
+        doc_lines.reverse();
+        doc_lines
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The Unreleased changelog item that names the check, white space collapsed.
+    fn coverage_changelog_item() -> String {
+        let changelog = include_str!("../../../CHANGELOG.md");
+        let unreleased = changelog
+            .split("## [Unreleased]")
+            .nth(1)
+            .unwrap()
+            .split("\n## [")
+            .next()
+            .unwrap();
+        let mut items: Vec<String> = Vec::new();
+        for line in unreleased.lines() {
+            if line.starts_with("- ") {
+                items.push(line.to_string());
+            } else if let Some(last) = items.last_mut() {
+                last.push(' ');
+                last.push_str(line);
+            }
+        }
+        items
+            .iter()
+            .map(|i| i.split_whitespace().collect::<Vec<_>>().join(" "))
+            .find(|i| i.contains("reading::check_request_coverage"))
+            .expect("a changelog item names the check")
+    }
+
+    #[test]
+    fn request_coverage_refusal_is_declared_intended() {
+        let doc = coverage_doc();
+        let item = coverage_changelog_item();
+        for (label, text) in [("doc comment", &doc), ("changelog item", &item)] {
+            assert_eq!(declared_percent(&normalised(text)), Some(10), "the {label}");
+            for needle in [
+                "refuses more readings",
+                "the higher refusal rate is intended",
+            ] {
+                assert!(text.contains(needle), "the {label} lacks {needle:?}");
+            }
+        }
+        // The same reading is accepted without an `Acceptance` heading and refused by this check alone with one.
+        let reading = governed_reading(
+            &["docs/guide.md"],
+            &["A reading that leaves out a bullet is refused"],
+            &[],
+        );
+        let plain = "Make the change to the reading rules.";
+        assert!(refusing_check(&reading, plain, None, &[], None).is_none());
+        let headed = format!(
+            "{plain}\n\nAcceptance:\n- A reading that omits a bullet is refused\n- The docs list the rule"
+        );
+        let refused = refusing_check(&reading, &headed, None, &[], None).unwrap();
+        assert_eq!(refused.0, "check_request_coverage");
+    }
+
+    #[test]
+    fn request_coverage_doc_and_changelog_name_the_cause() {
+        let doc = coverage_doc();
+        let item = coverage_changelog_item();
+        for needle in [
+            "2026-10-29",
+            "rejected for a split the reading chose",
+            "only as a question, never by dropping a bullet",
+            "This check refuses more readings; the higher refusal rate is intended.",
+            "expected 10% of newly refused readings",
+            "estimate",
+        ] {
+            assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+        }
+        for needle in [
+            "refuses more readings",
+            "the higher refusal rate is intended",
+            "expected 10% of newly refused readings",
+            "estimate",
+            "step!",
+            "question",
+        ] {
+            assert!(item.contains(needle), "the changelog item lacks {needle:?}");
+        }
+        let source = reading_source();
+        let doc_start = source
+            .split("pub fn check_request_coverage(")
+            .next()
+            .unwrap();
+        let last_lines: Vec<&str> = doc_start
+            .lines()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("///"))
+            .collect();
+        assert!(
+            last_lines.iter().all(|l| l.trim() != "///"),
+            "the doc is one paragraph"
+        );
     }
 
     const EXISTING: &str =

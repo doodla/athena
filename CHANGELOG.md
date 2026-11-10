@@ -14,6 +14,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A reading whose acceptance criteria leave out an acceptance bullet of the request is now refused at reading
+  acceptance, with the omitted bullet named, before any producer run. The new check is
+  `reading::check_request_coverage` in `crates/athena-core/src/reading/coverage.rs`, one `step!` line at the end of
+  `refusing_check`. Root cause: on 2026-10-29 a job passed its checks and the verifier and was then rejected for a
+  split the reading chose, because the small-job default let a reading drop a bullet into a follow-up and nothing
+  compared the criteria with the request's bullets until the final verdict. A bullet is a `-`, `*` or `N.` line under
+  the request's `Acceptance` heading (up to a blank line or a `Files:` line, a wrapped line joined to it). It is
+  covered when every path, `--flag` and file name in it occurs in the criteria, or, when it has none, when a word that
+  tells it from the other bullets and the request's other text shares a stem with a criterion word. Not checked: a
+  reading that asks a question or declines (a split may be proposed only as a question, never by dropping a bullet),
+  a request with no `Acceptance` heading, and a request whose own text outside the bullets affirmatively allows
+  splitting the job. This check refuses more readings; the higher refusal rate is intended: expected 10% of newly
+  refused readings (an estimate, not a measurement). A paraphrase that shares no specific word with its bullet is
+  refused, and the reader learns of the rule from the refusal, its one correction. The deterministic fake reader
+  (`crates/athena-agent/src/fake.rs`) now repeats the request's bullets in its one criterion, so a nested run of a
+  request with an `Acceptance` section is not refused by the new check.
 - Hestia's sweep now owns Athena's recurring duties and schedules them, so none depends on a person remembering.
   `DUTIES` in `crates/athena-core/src/hestia.rs` and one table in `docs/design/hestia.md` (section 13, compared by a
   test) list six: the error-review backlog pass and the evidence-label derivation (every drain start), the

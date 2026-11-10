@@ -216,7 +216,7 @@ pub(super) fn path_exists_in(files: &BTreeSet<String>, path: &str) -> bool {
 /// word list or its deliverables with the repository's files at the base commit. A reading that named a
 /// banned word, a path that does not exist, or a `create` of a file that already exists was accepted, and the
 /// fault showed up only later, in the producer's run or at verification. The check is deterministic and
-/// calls no model; it runs last in [`check_reading_acceptance`], so a refusal reaches the reader as its one
+/// calls no model; it runs second to last in [`check_reading_acceptance`], so a refusal reaches the reader as its one
 /// correction, as the other refusals do.
 ///
 /// Only the places a word can reach a tracked file go through `athena_context::briefs::boundary_scan`: every
@@ -485,7 +485,8 @@ pub fn check_reading_references(
 /// deliverable paths and `content` criteria against the boundary
 /// words and the deliverables against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
 /// there is no repository to compare with), then the repo paths its text relies on against the same files
-/// ([`check_reading_references`]). It applies to a first attempt as well as a retry. It runs
+/// ([`check_reading_references`]), then the acceptance bullets of the request that the criteria leave out
+/// ([`check_request_coverage`]). It applies to a first attempt as well as a retry. It runs
 /// [`refusing_check`] and drops the name of the check that refused.
 pub fn check_reading_acceptance(
     reading: &Reading,
@@ -544,6 +545,7 @@ pub fn refusing_check(
     step!(check_scope_limit(reading));
     step!(check_boundary_and_repo_files(reading, repo_files));
     step!(check_reading_references(reading, repo_files));
+    step!(check_request_coverage(reading, request));
     None
 }
 
