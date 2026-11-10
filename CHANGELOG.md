@@ -7,6 +7,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- The reader brief now resolves the job ids that a retry's introspection cites to those jobs' recorded shape.
+  Root cause: those ids were never resolved to the deliverables recorded for the jobs, so readings built their
+  test fixtures and thresholds from an assumed shape that was invented. Instances: jobs 20261109-075120-7zqw,
+  20261029-111121-fzx0 and 20261110-124307-bn3c; their candidates (a size check, an acceptance-bullet coverage
+  check and its retry) are dropped. `referenced_jobs` in `crates/athena-core/src/reading/topics.rs` takes the
+  retried job's attempt, carries the jobs the request names first (at most `MAX_REFERENCED_JOBS`), then the jobs
+  the introspection cites (at most `MAX_CITED_JOBS`, 4), through the same `carry()` that redacts and bounds them.
+  The "Referenced jobs" section prints each job's recorded acceptance criteria and deliverables and tells the
+  reader to take fixtures, sizes and thresholds from them. Only the retried job and the jobs the request says it
+  follows up must still be accounted for. No refusal rule is added, so 0% of past accepted readings are newly
+  refused. Limit: ids that the reader itself introduces in its reading are not resolved here; that stays a
+  follow-up.
+
 ### Changed
 
 - `planning_round` in `crates/athena-core/src/run/planning.rs` is split into smaller private methods

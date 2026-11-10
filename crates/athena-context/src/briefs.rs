@@ -3988,6 +3988,107 @@ mod tests {
         assert!(entry.contains("> test: failed (exit code 101, 7 tests ran)"));
     }
 
+    /// A past job with its own recorded criteria, deliverables and changed files.
+    fn recorded_job(job: &str, deliverables: &[&str]) -> EarlierAttempt {
+        EarlierAttempt {
+            job: job.into(),
+            request: format!("request of {job}"),
+            end_state: "rejected".into(),
+            verdict: Some("fail".into()),
+            reading_criteria: vec![format!("[behavior] criterion of {job}")],
+            reading_deliverables: deliverables.iter().map(|d| d.to_string()).collect(),
+            changed_files: vec![format!("modified file-of-{job}.rs")],
+            ..Default::default()
+        }
+    }
+
+    /// The part of the brief under the `# Referenced jobs` heading, up to the next heading.
+    fn referenced_section(brief: &str) -> &str {
+        let start = brief.find("# Referenced jobs").expect("section");
+        let rest = &brief[start + 2..];
+        &rest[..rest.find("\n# ").unwrap_or(rest.len())]
+    }
+
+    #[test]
+    fn a_retry_brief_shows_the_recorded_shape_of_a_job_only_its_introspection_cites() {
+        let cited = "20260901-000000-dddd";
+        let mut inputs = reader_inputs(&reading());
+        inputs.earlier_attempt = Some(EarlierAttempt {
+            job: "20261010-153012-k7q2".into(),
+            introspection: Some(RetryCause {
+                introspection: "20261010-160000-intr".into(),
+                earlier_cases: vec![EarlierCase {
+                    id: "i1".into(),
+                    job: Some(cited.into()),
+                    what: "fixtures invented".into(),
+                    prevention: None,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        inputs.referenced_jobs = vec![recorded_job(
+            cited,
+            &["modify crates/a.rs", "create crates/b.rs"],
+        )];
+        let brief = reader_brief(&inputs);
+        let section = referenced_section(&brief);
+        assert!(
+            section.contains(&format!("Job {cited}. Its request")),
+            "{section}"
+        );
+        assert!(section.contains("Deliverables it listed"), "{section}");
+        assert!(section.contains("\n> modify crates/a.rs\n"), "{section}");
+        assert!(section.contains("\n> create crates/b.rs\n"), "{section}");
+        assert!(section.contains("> [behavior] criterion of 20260901-000000-dddd"));
+        // The changed files are in the prior-result entry; only one `Job ` line per job there.
+        let prior = &brief[brief.find(PRIOR_RESULT_HEADING).expect("section")..];
+        let entry = entry_of(prior, cited);
+        assert!(
+            entry.contains("\n> modified file-of-20260901-000000-dddd.rs\n"),
+            "{entry}"
+        );
+        let job_lines = prior.lines().filter(|l| l.starts_with("Job ")).count();
+        assert_eq!(job_lines, 2, "{prior}");
+        assert!(prior.contains("the other jobs in the Referenced jobs section are evidence"));
+    }
+
+    #[test]
+    fn two_cited_jobs_each_show_their_own_recorded_deliverables_in_order() {
+        let (first, second) = ("20260901-000000-dddd", "20260902-000000-eeee");
+        let mut inputs = reader_inputs(&reading());
+        inputs.referenced_jobs = vec![
+            recorded_job(first, &["modify crates/one.rs"]),
+            recorded_job(second, &["create crates/two.rs", "delete crates/three.rs"]),
+        ];
+        let brief = reader_brief(&inputs);
+        let section = referenced_section(&brief);
+        let at_first = section.find(&format!("Job {first}.")).expect("first");
+        let at_second = section.find(&format!("Job {second}.")).expect("second");
+        assert!(at_first < at_second);
+        let first_part = &section[at_first..at_second];
+        let second_part = &section[at_second..];
+        assert!(first_part.contains("> modify crates/one.rs"));
+        assert!(!first_part.contains("crates/two.rs"));
+        assert!(second_part.contains("> create crates/two.rs"));
+        assert!(second_part.contains("> delete crates/three.rs"));
+        assert!(!second_part.contains("crates/one.rs"));
+    }
+
+    #[test]
+    fn a_cited_job_without_a_recorded_reading_says_none_recorded() {
+        let mut inputs = reader_inputs(&reading());
+        inputs.referenced_jobs = vec![EarlierAttempt {
+            job: "20260901-000000-dddd".into(),
+            request: "r".into(),
+            ..Default::default()
+        }];
+        let brief = reader_brief(&inputs);
+        let section = referenced_section(&brief);
+        assert!(section.contains("Acceptance criteria it set: none recorded for it."));
+        assert!(section.contains("Deliverables it listed: none recorded for it."));
+    }
+
     #[test]
     fn a_prior_without_a_candidate_says_none_recorded() {
         let bare = EarlierAttempt {

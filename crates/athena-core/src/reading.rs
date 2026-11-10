@@ -600,12 +600,7 @@ impl Athena {
         let (global_reference, basis) =
             crate::scoring::reference(&jc.config.forecast.reference, "", records);
         let composed = reader_system_prompt(self, jc);
-        let referenced_jobs = referenced_jobs(
-            records,
-            &request.text,
-            attempt.map(|a| a.job.as_str()),
-            redactor,
-        )?;
+        let referenced_jobs = referenced_jobs(records, &request.text, attempt, redactor)?;
         let prompt = reader_brief(&ReaderInputs {
             request: request.text.clone(),
             earlier_attempt: attempt.cloned(),
@@ -3668,7 +3663,7 @@ mod tests {
     const PRIOR_JOB: &str = "20261012-084936-n1p0";
 
     /// A reading of a retry: summary and scope are the parts under test.
-    fn scoped_reading(
+    pub(super) fn scoped_reading(
         summary: &str,
         deliverables: &[&str],
         out_of_scope: &[&str],
