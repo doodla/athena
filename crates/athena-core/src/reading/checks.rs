@@ -482,6 +482,7 @@ pub fn check_reading_references(
 /// assigns ([`check_environment_reach`]), then the structural terms the request uses and the reading leaves
 /// undefined ([`check_defined_terms`]), then the files a criterion that limits which files may change leaves
 /// out, those Athena always writes and the readers of a changed config ([`check_scope_limit`]), then the
+/// request's `Acceptance:` bullets that no criterion covers ([`check_reading_coverage`]), then the
 /// deliverable paths and `content` criteria against the boundary
 /// words and the deliverables against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
 /// there is no repository to compare with), then the repo paths its text relies on against the same files
@@ -542,6 +543,7 @@ pub fn refusing_check(
     step!(check_environment_reach(reading));
     step!(check_defined_terms(reading, request));
     step!(check_scope_limit(reading));
+    step!(check_reading_coverage(reading, request));
     step!(check_boundary_and_repo_files(reading, repo_files));
     step!(check_reading_references(reading, repo_files));
     None

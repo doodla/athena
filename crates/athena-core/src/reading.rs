@@ -56,6 +56,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 mod checks;
+mod coverage;
 mod outcome;
 mod replay;
 mod retry;
@@ -64,6 +65,7 @@ mod terms;
 mod topics;
 
 pub use checks::*;
+pub use coverage::*;
 pub use outcome::*;
 pub use replay::*;
 pub use retry::*;
@@ -1499,6 +1501,7 @@ mod tests {
                 include_str!("reading/terms.rs"),
                 include_str!("reading/surveys.rs"),
                 include_str!("reading/replay.rs"),
+                include_str!("reading/coverage.rs"),
                 include_str!("reading.rs"),
             ]
             .join("\n")

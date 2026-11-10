@@ -2570,7 +2570,13 @@ impl Lander for RecordingLander {
 }
 
 /// Commits a request on the steward's channel, as the steward's queue does, and returns its job id.
+///
+/// A request given as bare words would get the steward's stock acceptance bullets, which the scripted readers
+/// do not repeat, and a reading that leaves out a bullet is refused (`check_reading_coverage`). So the request
+/// carries one bullet of its own, `the tests still pass`, which every scripted reading in this file repeats as
+/// a criterion (`common::default_reading` and `rated_scenario`).
 fn queue_steward_request(athena: &Athena, text: &str) -> String {
+    let text = format!("{text}\n- the tests still pass");
     let change = ProposedChange {
         kind: WorkItemKind::RepeatedFailure,
         key: "repeated-failure:docs".into(),
@@ -2578,7 +2584,7 @@ fn queue_steward_request(athena: &Athena, text: &str) -> String {
         rung: Ladder::Implementation,
         source: Reference::path("records/jobs"),
         evidence: Vec::new(),
-        request: text.into(),
+        request: text,
         brief: None,
     };
     let queued =
