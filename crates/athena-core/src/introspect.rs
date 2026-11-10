@@ -49,9 +49,10 @@ use athena_agent::{AgentInvocation, NoSink};
 use athena_context::briefs::plain_boundary_text;
 use athena_data::records::{
     AnyRecord, CONTEXT_PREVENTION_OUTCOMES, ClassStatus, FailureClass, HostError,
-    INTROSPECTION_PROSE_FIELDS, INTROSPECTION_SCHEMA, InterventionCategory, IntrospectionEvidence,
-    IntrospectionJev, IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger,
-    JevClassAnswer, JevContextAnswer, OutcomeState, PreventionKind, ProposalRecord, Role,
+    INTROSPECTION_LIST_CAP, INTROSPECTION_PROSE_FIELDS, INTROSPECTION_SCHEMA, InterventionCategory,
+    IntrospectionEvidence, IntrospectionJev, IntrospectionRecord, IntrospectionStatus,
+    IntrospectionTrigger, JevClassAnswer, JevContextAnswer, OutcomeState, PreventionKind,
+    ProposalRecord, Role,
 };
 use athena_data::records::{
     CheckRun, CriterionResult, Finding as VerificationFinding, Severity, Verdict, Verification,
@@ -868,6 +869,28 @@ fn withheld_if_unclean(text: &str) -> String {
     plain_boundary_text(text).unwrap_or_else(|_| "[text withheld]".to_string())
 }
 
+/// Redacts every text, then rewords any word the admission scan rejects, in place. The first text that cannot
+/// be cleaned stops the pass and gives the reason the introspection is recorded as failed. `reword` is the
+/// boundary rewording of production code; it is a parameter so its refusal can be tested.
+fn clean_texts(
+    texts: &mut [String],
+    redactor: &athena_gate::redact::Redactor,
+    reword: impl Fn(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    if redactor.redact_all(texts).is_err() {
+        return Err("the answer could not be redacted".into());
+    }
+    // The fields become a record, and the proposed request becomes a request, so a word the admission
+    // scan rejects is reworded here, after redaction (which can add none) and before anything is kept.
+    for field in texts.iter_mut() {
+        match reword(field) {
+            Ok(plain) => *field = plain,
+            Err(why) => return Err(format!("the answer could not be reworded: {why}")),
+        }
+    }
+    Ok(())
+}
+
 /// The model's answer, before code checks it.
 #[derive(Debug, Deserialize)]
 struct Answer {
@@ -877,6 +900,13 @@ struct Answer {
     earlier_cases: Vec<String>,
     decisions_matched: Vec<String>,
     cause: String,
+    /// Other contributing causes, open hypotheses and contradicting facts; empty when there are none.
+    #[serde(default)]
+    other_causes: Vec<String>,
+    #[serde(default)]
+    open_hypotheses: Vec<String>,
+    #[serde(default)]
+    contradictions: Vec<String>,
     prevention_kind: String,
     /// The gate a `relax` or `remove` answer is about; null for every other kind.
     #[serde(default)]
@@ -1023,7 +1053,10 @@ check was wrong. A rule or check can be wrong. The input lists `gate_counts`: fo
 ended (`ends`) and the times a later try landed the same change it had ended (`disagreements`). Choose \
 relax or remove only for a gate whose disagreements are 1 or more, name that gate in `gate`, and cite its \
 counts in `prevention`; for every other kind set `gate` to null. Say exactly what would have prevented the \
-whole class, and write a complete next request, ready to submit.";
+whole class, and write a complete next request, ready to submit. Put the main cause in `cause`. List each \
+other contributing cause in `other_causes`, each hypothesis the given fields cannot confirm or rule out in \
+`open_hypotheses`, and each input fact that points against the cause in `contradictions`. Use an empty list \
+when there is none, and do not invent entries.";
 
 fn answer_schema() -> serde_json::Value {
     let text = json!({ "type": "string" });
@@ -1031,7 +1064,8 @@ fn answer_schema() -> serde_json::Value {
         "type": "object",
         "additionalProperties": false,
         "required": ["what_happened", "failure_class", "new_class", "earlier_cases", "decisions_matched",
-            "cause", "prevention_kind", "gate", "prevention", "proposed_request"],
+            "cause", "other_causes", "open_hypotheses", "contradictions", "prevention_kind", "gate",
+            "prevention", "proposed_request"],
         "properties": {
             "what_happened": text,
             "failure_class": text,
@@ -1044,6 +1078,9 @@ fn answer_schema() -> serde_json::Value {
             "earlier_cases": { "type": "array", "items": text },
             "decisions_matched": { "type": "array", "items": text },
             "cause": text,
+            "other_causes": { "type": "array", "items": text },
+            "open_hypotheses": { "type": "array", "items": text },
+            "contradictions": { "type": "array", "items": text },
             "prevention_kind": { "type": "string", "enum": ["default", "code-check", "design-change", "relax", "remove"] },
             "gate": { "type": ["string", "null"] },
             "prevention": text,
@@ -1365,6 +1402,9 @@ impl Athena {
             earlier_cases: Vec::new(),
             decisions_matched: Vec::new(),
             cause: None,
+            other_causes: Vec::new(),
+            open_hypotheses: Vec::new(),
+            contradictions: Vec::new(),
             prevention_kind: None,
             prevention: None,
             proposed_request: None,
@@ -1482,21 +1522,38 @@ impl Athena {
             answer.prevention.trim().to_string(),
             answer.proposed_request.trim().to_string(),
         ];
-        if redactor.redact_all(&mut text).is_err() {
-            record.failure = Some("the answer could not be redacted".into());
-            return None;
-        }
-        // The fields become a record, and the proposed request becomes a request, so a word the admission
-        // scan rejects is reworded here, after redaction (which can add none) and before anything is kept.
-        for field in &mut text {
-            match plain_boundary_text(field) {
-                Ok(plain) => *field = plain,
-                Err(why) => {
-                    record.failure = Some(format!("the answer could not be reworded: {why}"));
-                    return None;
-                }
+        // The three lists follow the four prose fields so one redaction and one reword pass cover them all.
+        // Blank entries are dropped and each list is cut to the cap.
+        let mut kept = [0usize; 3];
+        for (i, list) in [
+            &answer.other_causes,
+            &answer.open_hypotheses,
+            &answer.contradictions,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let entries: Vec<&str> = list
+                .iter()
+                .map(|e| e.trim())
+                .filter(|e| !e.is_empty())
+                .collect();
+            if entries.len() > INTROSPECTION_LIST_CAP {
+                ui.line(&format!(
+                    "introspect kept the first {INTROSPECTION_LIST_CAP} of {} entries in a list",
+                    entries.len()
+                ));
+            }
+            for entry in entries.into_iter().take(INTROSPECTION_LIST_CAP) {
+                text.push(entry.to_string());
+                kept[i] += 1;
             }
         }
+        if let Err(why) = clean_texts(&mut text, redactor, plain_boundary_text) {
+            record.failure = Some(why);
+            return None;
+        }
+        let list_entries = text.split_off(4);
         let Some(kind) = PreventionKind::parse(&answer.prevention_kind) else {
             record.failure = Some(format!(
                 "the model chose prevention_kind {:?}, which is not default, code-check, design-change, relax or remove",
@@ -1540,6 +1597,10 @@ impl Athena {
         }
         record.what_happened = Some(text[0].clone());
         record.cause = Some(text[1].clone());
+        let mut entries = list_entries.into_iter();
+        record.other_causes = entries.by_ref().take(kept[0]).collect();
+        record.open_hypotheses = entries.by_ref().take(kept[1]).collect();
+        record.contradictions = entries.by_ref().take(kept[2]).collect();
         record.prevention = Some(text[2].clone());
         record.proposed_request = Some(text[3].clone());
         record.prevention_kind = Some(kind);
@@ -1927,6 +1988,9 @@ mod tests {
             earlier_cases: Vec::new(),
             decisions_matched: Vec::new(),
             cause: None,
+            other_causes: Vec::new(),
+            open_hypotheses: Vec::new(),
+            contradictions: Vec::new(),
             prevention_kind: None,
             prevention: None,
             proposed_request: None,
@@ -1998,6 +2062,9 @@ mod tests {
             earlier_cases: Vec::new(),
             decisions_matched: Vec::new(),
             cause: format!("The {word}'s request was never read."),
+            other_causes: Vec::new(),
+            open_hypotheses: Vec::new(),
+            contradictions: Vec::new(),
             prevention_kind: "code-check".into(),
             gate: None,
             prevention: format!("Add a check that reads what the {word} asked."),
@@ -2056,6 +2123,159 @@ mod tests {
         // The whole record, as it is committed, holds none either.
         let json = AnyRecord::Introspection(Box::new(record)).to_json();
         assert!(athena_context::briefs::boundary_scan(&json).is_empty());
+    }
+
+    fn apply_plain(answer: Answer) -> IntrospectionRecord {
+        let (_dir, _state, athena) = athena_with(None);
+        let config = athena_data::Config::parse(include_str!("../../../athena.toml")).unwrap();
+        let redactor = athena.redactor(&config, None).unwrap();
+        let mut record = blank_record();
+        athena.apply_answer(
+            &mut record,
+            answer,
+            &Records::default(),
+            &[],
+            &[],
+            &[],
+            &redactor,
+            &crate::Quiet,
+        );
+        record
+    }
+
+    #[test]
+    fn several_causes_hypotheses_and_contradictions_are_recorded() {
+        let mut answer = boundary_answer("reviewer");
+        answer.other_causes = vec![
+            "No check reads the diff size.".into(),
+            "The brief was vague.".into(),
+        ];
+        answer.open_hypotheses = vec!["The model may have run out of time.".into()];
+        answer.contradictions = vec!["The same change passed on an earlier try.".into()];
+        let record = apply_plain(answer);
+        assert_eq!(
+            record.status,
+            IntrospectionStatus::Recorded,
+            "{:?}",
+            record.failure
+        );
+        assert_eq!(
+            record.other_causes,
+            ["No check reads the diff size.", "The brief was vague."]
+        );
+        assert_eq!(
+            record.open_hypotheses,
+            ["The model may have run out of time."]
+        );
+        assert_eq!(
+            record.contradictions,
+            ["The same change passed on an earlier try."]
+        );
+        assert_eq!(
+            record.cause.as_deref(),
+            Some("The reviewer's request was never read.")
+        );
+        assert!(record.validate().is_ok());
+        let json = AnyRecord::Introspection(Box::new(record.clone())).to_json();
+        assert_eq!(
+            AnyRecord::parse("x", json.as_bytes()).unwrap(),
+            AnyRecord::Introspection(Box::new(record))
+        );
+
+        // With nothing to list, the record holds empty lists and writes none of the keys.
+        let control = apply_plain(boundary_answer("reviewer"));
+        assert_eq!(control.status, IntrospectionStatus::Recorded);
+        assert!(control.other_causes.is_empty() && control.open_hypotheses.is_empty());
+        assert!(control.contradictions.is_empty());
+        let json = AnyRecord::Introspection(Box::new(control)).to_json();
+        assert!(!json.contains("other_causes") && !json.contains("contradictions"));
+    }
+
+    #[test]
+    fn new_list_entries_are_reworded_blanks_dropped_and_lists_capped() {
+        let word = ["oper", "ator"].concat();
+        let mut answer = boundary_answer("reviewer");
+        answer.other_causes = (0..7).map(|i| format!("Cause {i}.")).collect();
+        answer.open_hypotheses = vec!["  ".into(), format!("The {word} may have waited.")];
+        answer.contradictions = vec![format!("The {word} approved it.")];
+        assert!(!crate::reading::scan_request_input(&answer.contradictions[0]).is_empty());
+        let record = apply_plain(answer);
+        assert_eq!(
+            record.status,
+            IntrospectionStatus::Recorded,
+            "{:?}",
+            record.failure
+        );
+        assert_eq!(record.other_causes.len(), INTROSPECTION_LIST_CAP);
+        assert_eq!(record.open_hypotheses.len(), 1);
+        assert_eq!(record.contradictions.len(), 1);
+        for text in record.open_hypotheses.iter().chain(&record.contradictions) {
+            assert!(
+                athena_context::briefs::boundary_scan(text).is_empty(),
+                "{text}"
+            );
+            assert!(
+                crate::reading::scan_request_input(text).is_empty(),
+                "{text}"
+            );
+            assert!(text.contains("the person running Athena"), "{text}");
+        }
+        assert!(record.validate().is_ok());
+    }
+
+    #[test]
+    fn a_list_entry_that_cannot_be_cleaned_fails_the_answer() {
+        let (_dir, _state, athena) = athena_with(None);
+        let config = athena_data::Config::parse(include_str!("../../../athena.toml")).unwrap();
+        let redactor = athena.redactor(&config, None).unwrap();
+        let fresh = || -> Vec<String> {
+            [
+                "what",
+                "cause",
+                "prevention",
+                "request",
+                "another cause",
+                "BAD entry",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+        };
+        let mut texts = fresh();
+        let err = clean_texts(&mut texts, &redactor, |t| {
+            if t.contains("BAD") {
+                Err("cannot be reworded".into())
+            } else {
+                Ok(t.to_string())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(err, "the answer could not be reworded: cannot be reworded");
+        let mut texts = fresh();
+        assert!(clean_texts(&mut texts, &redactor, |t| Ok(t.to_uppercase())).is_ok());
+        assert_eq!(texts[4], "ANOTHER CAUSE");
+    }
+
+    #[test]
+    fn the_schema_and_prompt_ask_for_the_three_lists() {
+        let schema = answer_schema();
+        for key in ["other_causes", "open_hypotheses", "contradictions"] {
+            assert_eq!(schema["properties"][key]["type"], "array", "{key}");
+            assert!(schema["required"].as_array().unwrap().contains(&json!(key)));
+            assert!(SYSTEM_PROMPT.contains(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn an_answer_without_the_three_lists_still_parses() {
+        let answer: Answer = serde_json::from_value(json!({
+            "what_happened": "w", "failure_class": "new", "new_class": null,
+            "earlier_cases": [], "decisions_matched": [], "cause": "c",
+            "prevention_kind": "default", "prevention": "p", "proposed_request": "r"
+        }))
+        .unwrap();
+        assert!(answer.other_causes.is_empty() && answer.open_hypotheses.is_empty());
+        assert!(answer.contradictions.is_empty());
     }
 
     fn gate(name: &str, ends: u32, disagreements: u32) -> GateCount {

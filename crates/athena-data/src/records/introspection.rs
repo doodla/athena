@@ -175,6 +175,9 @@ pub struct IntrospectionJev {
     pub error: Option<String>,
 }
 
+/// The most entries one of the cause, hypothesis or contradiction lists of an introspection may hold.
+pub const INTROSPECTION_LIST_CAP: usize = 5;
+
 /// `athena.introspection/1`: why one event happened and what would have stopped its class, not only this
 /// instance. One per triggering event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -199,6 +202,15 @@ pub struct IntrospectionRecord {
     /// Typed decisions whose signals the event matched, by code.
     pub decisions_matched: Vec<String>,
     pub cause: Option<String>,
+    /// Other causes that contributed besides `cause`. Absent on older records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_causes: Vec<String>,
+    /// Hypotheses the given facts cannot confirm or rule out. Absent on older records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_hypotheses: Vec<String>,
+    /// Input facts that point against `cause`. Absent on older records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contradictions: Vec<String>,
     pub prevention_kind: Option<PreventionKind>,
     pub prevention: Option<String>,
     pub proposed_request: Option<String>,
@@ -225,6 +237,20 @@ pub struct IntrospectionRecord {
 impl IntrospectionRecord {
     /// Why this record is not acceptable, if it is not.
     pub fn validate(&self) -> Result<(), String> {
+        for list in [
+            &self.other_causes,
+            &self.open_hypotheses,
+            &self.contradictions,
+        ] {
+            if list.len() > INTROSPECTION_LIST_CAP {
+                return Err(format!(
+                    "an introspection list holds at most {INTROSPECTION_LIST_CAP} entries"
+                ));
+            }
+            if list.iter().any(|entry| entry.trim().is_empty()) {
+                return Err("an introspection list holds no blank entry".into());
+            }
+        }
         match self.status {
             IntrospectionStatus::Failed if self.failure.is_none() => {
                 Err("a failed introspection says why".into())
