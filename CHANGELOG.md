@@ -14,6 +14,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The drain holds a line of work after two attempts that did not land, and does not retry it. A line is the
+  scope guard's grouping (a request, its retries and its re-asks of the same words). It is held when none of its
+  attempts was accepted and two did not land: a job rejected or failed (an environment stop is not counted, as
+  for signal T1), or a job that closed landed locally but that the host did not take. A job counts as not taken
+  when its pull-request link (its own, else the one opened early) has a state other than `landed` and no landing
+  record names it; a link whose state is `landed`, or a landing record, takes the job out of that count. A job
+  with no pull-request link at all is treated as landed, so it is retried as before, and a waiting pull request
+  counts as not landed until it is seen merged. Held items are passed over as "awaiting diagnosis", not counted
+  as failures, and `athena plan` lists them as held; nothing is written, so the hold lifts when a pull request
+  lands or the request words change. The check never runs between an item's verified job and its landing, so
+  an item's own landing retry still happens. Only the drain stops: `athena go` and `athena retry` are
+  unchanged, as are signals T1 to T5. Not done here: the diagnosis job, its role brief and output schema, a
+  line field on every job, and the `athena status` display of open lines.
+
 - `filled_feedback_dimensions` in `crates/athena-core/src/introspect.rs`: reports which of the ten feedback
   dimensions (OLY-3-05) an introspection record fills. Recorded as the requirement's mechanism in
   `docs/spec.toml`.
