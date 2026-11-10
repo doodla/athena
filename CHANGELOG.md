@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `verify::judge` is split to meet the 200-line function limit: the seen-running computation
+  (`commands_seen_running`), the failing-check loop (`note_failed_checks`) and the replay-hold finding
+  (`note_replay_hold`) are now private helpers in `crates/athena-core/src/verify.rs`, with no behavior change.
 - New design note `docs/design/direct-main-landing.md` for throughput review `20261110-024838-mch9`: build each
   verified job's landing commit on host main (`Git::merge_tree`, then `Git::commit_tree`) and push it, instead of
   staging it on the local landing branch. Predicts 5.0 minutes saved per landed job and says how the next review

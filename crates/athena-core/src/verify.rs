@@ -399,15 +399,8 @@ fn skipped_for_docs_only(check: &CheckRun) -> bool {
             .is_some_and(|n| n.starts_with(SKIP_NOTE_PREFIX))
 }
 
-/// Computes the final verdict.
-///
-/// A cited command is seen running when the core saw the verifier run it, or Athena recorded it in `checks`
-/// on the judged tree and it passed with exit code 0 or was reused from a green CI run. On a docs-only
-/// change (every changed path matches `docs/` or `*.md`, see [`VerdictInputs::changed_paths`]) a check
-/// Athena skipped by the docs-only path rule also counts as seen: it had nothing to run on that change.
-pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
-    let mut findings = Vec::new();
-    let mut reasons = Vec::new();
+/// The simple commands seen running, and the recorded revert runs, for [`judge`].
+fn commands_seen_running<'a>(inputs: &VerdictInputs<'a>) -> (Vec<String>, Vec<&'a CheckRun>) {
     let mut ran: Vec<String> = inputs
         .commands_run
         .iter()
@@ -443,8 +436,16 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
                 .filter(|c| !c.revert_for.is_empty() && c.exit_code.is_some()),
         );
     }
+    (ran, revert_runs)
+}
 
-    let blocking_checks = |c: &&CheckRun| !c.passed && !is_pre_existing(c, inputs.baseline);
+/// Adds a reason for each failing check that blocks the verdict, and a finding that splits the failing tests.
+fn note_failed_checks(
+    inputs: &VerdictInputs<'_>,
+    blocking_checks: impl Fn(&&CheckRun) -> bool,
+    reasons: &mut Vec<String>,
+    findings: &mut Vec<Finding>,
+) {
     for check in inputs.checks.iter().filter(blocking_checks) {
         reasons.push(format!("check {} failed", check.name));
         // The check already fails the verdict; this finding only shows which failures are the job's own, so
@@ -470,33 +471,14 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
             ));
         }
     }
-    match &inputs.verifier_failure {
-        Some(VerifierFailure::Incomplete(failure)) => {
-            reasons.push(format!("the verifier did not complete: {failure}"));
-        }
-        Some(VerifierFailure::TimedOut(failure)) => {
-            reasons.push(format!("{UNJUDGED_REASON_PREFIX}: {failure}"));
-        }
-        None => {}
-    }
-    let unjudged = matches!(inputs.verifier_failure, Some(VerifierFailure::TimedOut(_)));
-    if let Some(change) = &inputs.system_fault {
-        findings.push(athena_finding(
-            Severity::Minor,
-            format!("{SYSTEM_FAULT_PREFIX}: the verifier changed its snapshot; its verdict was discarded and verification reran"),
-            change.clone(),
-        ));
-    }
+}
 
-    for id in rows_newly_covered(inputs.map_base, inputs.map_candidate) {
-        reasons.push(format!("the change marked requirement row {id} Covered"));
-        findings.push(athena_finding(
-            Severity::Major,
-            format!("The change marked requirement row {id} Covered; a job may not mark its own rows covered"),
-            format!("{id} is Covered in docs/design/requirements-map.md at the candidate and was not Covered at the base"),
-        ));
-    }
-
+/// Adds the reason and the blocker finding when the replay of accepted readings held the change.
+fn note_replay_hold(
+    inputs: &VerdictInputs<'_>,
+    reasons: &mut Vec<String>,
+    findings: &mut Vec<Finding>,
+) {
     if let Some(replay) = inputs.replay.filter(|r| r.held) {
         let list: Vec<String> = replay
             .newly_refused
@@ -528,6 +510,49 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
             ),
         ));
     }
+}
+
+/// Computes the final verdict.
+///
+/// A cited command is seen running when the core saw the verifier run it, or Athena recorded it in `checks`
+/// on the judged tree and it passed with exit code 0 or was reused from a green CI run. On a docs-only
+/// change (every changed path matches `docs/` or `*.md`, see [`VerdictInputs::changed_paths`]) a check
+/// Athena skipped by the docs-only path rule also counts as seen: it had nothing to run on that change.
+pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
+    let mut findings = Vec::new();
+    let mut reasons = Vec::new();
+    let (ran, revert_runs) = commands_seen_running(inputs);
+
+    let blocking_checks = |c: &&CheckRun| !c.passed && !is_pre_existing(c, inputs.baseline);
+    note_failed_checks(inputs, blocking_checks, &mut reasons, &mut findings);
+    match &inputs.verifier_failure {
+        Some(VerifierFailure::Incomplete(failure)) => {
+            reasons.push(format!("the verifier did not complete: {failure}"));
+        }
+        Some(VerifierFailure::TimedOut(failure)) => {
+            reasons.push(format!("{UNJUDGED_REASON_PREFIX}: {failure}"));
+        }
+        None => {}
+    }
+    let unjudged = matches!(inputs.verifier_failure, Some(VerifierFailure::TimedOut(_)));
+    if let Some(change) = &inputs.system_fault {
+        findings.push(athena_finding(
+            Severity::Minor,
+            format!("{SYSTEM_FAULT_PREFIX}: the verifier changed its snapshot; its verdict was discarded and verification reran"),
+            change.clone(),
+        ));
+    }
+
+    for id in rows_newly_covered(inputs.map_base, inputs.map_candidate) {
+        reasons.push(format!("the change marked requirement row {id} Covered"));
+        findings.push(athena_finding(
+            Severity::Major,
+            format!("The change marked requirement row {id} Covered; a job may not mark its own rows covered"),
+            format!("{id} is Covered in docs/design/requirements-map.md at the candidate and was not Covered at the base"),
+        ));
+    }
+
+    note_replay_hold(inputs, &mut reasons, &mut findings);
 
     let mut criteria = Vec::new();
     for (i, criterion) in inputs.criteria.iter().enumerate() {
