@@ -62,6 +62,14 @@ pub struct PrLink {
     pub base_jobs: Vec<String>,
 }
 
+impl PrLink {
+    /// Whether the host took the job: the link's `state` is [`LinkState::Landed`]. This is the one definition
+    /// of "the host took it"; an open link, or one merged with other content, is not.
+    pub fn taken_by_host(&self) -> bool {
+        self.state == LinkState::Landed
+    }
+}
+
 /// The file that holds a job's link, under the job's state directory.
 pub fn link_path(state: &StateDir, job: &JobId) -> PathBuf {
     state.job_dir(job).join("pr-link.json")
@@ -474,6 +482,16 @@ mod tests {
             merged_commit: None,
             base_jobs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn only_a_link_in_the_landed_state_is_taken_by_the_host() {
+        let mut l = link("bootstrap");
+        assert!(!l.taken_by_host(), "an open link is not taken");
+        l.state = LinkState::MergedUnverified;
+        assert!(!l.taken_by_host(), "merged with other content is not taken");
+        l.state = LinkState::Landed;
+        assert!(l.taken_by_host());
     }
 
     #[test]

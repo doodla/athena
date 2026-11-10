@@ -9178,6 +9178,328 @@ fn per_job_worktree_a_rejected_job_leaves_neither_directory() {
     run.assert_both_gone();
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// A line with two attempts that did not land is held, through the real drain on real records. Only the lander
+// and the fake agent are doubled: the hold reads the jobs' records and their pull-request link files.
+
+mod line_hold {
+    use super::*;
+    use athena_core::pr::{LinkState, PrLink, store_link};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const WORDS: &str = "Add a greeting to the README.";
+
+    /// A land step that answers from a script (not landed when the script runs out) and leaves the pull-request
+    /// link a real landing leaves: open when the host did not take the job, landed when it did. It counts
+    /// nothing about lines; the hold is computed by the production code from the files it writes.
+    struct ScriptedLander {
+        answers: Mutex<VecDeque<bool>>,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl ScriptedLander {
+        fn new(answers: &[bool]) -> ScriptedLander {
+            ScriptedLander {
+                answers: Mutex::new(answers.iter().copied().collect()),
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.asked.lock().unwrap().len()
+        }
+    }
+
+    impl Lander for ScriptedLander {
+        fn land(&self, athena: &Athena, job: &str, _: &dyn athena_core::Ui) -> Landing {
+            let landed = self.answers.lock().unwrap().pop_front().unwrap_or(false);
+            let number = {
+                let mut asked = self.asked.lock().unwrap();
+                asked.push(job.to_string());
+                100 + asked.len() as u64
+            };
+            let id = athena_data::JobId::parse(job).unwrap();
+            let link = PrLink {
+                pr_number: number,
+                host: "github.com".into(),
+                repository: "example/project".into(),
+                head: "a".repeat(40),
+                job: job.to_string(),
+                state: if landed {
+                    LinkState::Landed
+                } else {
+                    LinkState::Open
+                },
+                merged_commit: None,
+                base_jobs: Vec::new(),
+            };
+            store_link(&athena.state, &id, &link).unwrap();
+            if landed {
+                Landing::Landed {
+                    changed: Vec::new(),
+                }
+            } else {
+                Landing::NotLanded("another landing changed the same lines".into())
+            }
+        }
+    }
+
+    /// The script with each producer run writing its own README text and changelog line, so every job has a
+    /// diff of its own and passes verification instead of ending as a no-op.
+    fn numbered(inner: Script) -> Script {
+        let runs = AtomicUsize::new(0);
+        Box::new(move |spec| {
+            let mut turn = inner(spec);
+            if spec.role == Role::Producer {
+                let n = runs.fetch_add(1, Ordering::SeqCst);
+                for (path, text) in turn.edits.iter_mut() {
+                    if path == "README.md" {
+                        *text = Some(format!("# Demo\n\nHello, reader {n}.\n"));
+                    } else if path == "CHANGELOG.md" {
+                        let mut base = std::fs::read_to_string(spec.workdir.join("CHANGELOG.md"))
+                            .unwrap_or_default();
+                        if !base.is_empty() && !base.ends_with('\n') {
+                            base.push('\n');
+                        }
+                        *text = Some(format!("{base}- Entry {n}.\n"));
+                    }
+                }
+            }
+            turn
+        })
+    }
+
+    /// A UI that keeps every line.
+    #[derive(Default)]
+    struct Lines(Mutex<Vec<String>>);
+
+    impl Lines {
+        fn all(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+
+        /// The "passed over" line of `item`, if one was printed.
+        fn passed_over(&self, item: &str) -> Option<String> {
+            let start = format!("plan       {item} passed over: ");
+            self.all().into_iter().find(|l| l.starts_with(&start))
+        }
+    }
+
+    impl athena_core::Ui for Lines {
+        fn line(&self, text: &str) {
+            self.0.lock().unwrap().push(text.to_string());
+        }
+    }
+
+    fn producer_runs(invocations: &Arc<Mutex<Vec<Role>>>) -> usize {
+        invocations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| **r == Role::Producer)
+            .count()
+    }
+
+    #[test]
+    fn a_line_with_two_attempts_that_did_not_land_is_held_and_not_retried() {
+        let fx = Fixture::new();
+        let scenario = Scenario::default();
+        let invocations = scenario.invocations.clone();
+        let athena = fx.athena(numbered(scenario.script()));
+        // Three requests with the same words: one line. A and C are worked; D is queued behind them.
+        let ids: Vec<String> = (0..3)
+            .map(|_| queue_steward_request(&athena, WORDS))
+            .collect();
+        let lander = ScriptedLander::new(&[]);
+        let ui = Lines::default();
+        let steps = RealSteps {
+            athena: &athena,
+            ui: &ui,
+            page: &StubPage,
+            lander: &lander,
+        };
+        assert_eq!(
+            steps.queue().unwrap().items.len(),
+            3,
+            "the queue holds the three requests as three items"
+        );
+
+        let report = drain::drain(&steps, work_everything(), &ui).unwrap();
+        let shown = || format!("{}\n{}", display::drain(&report), ui.all().join("\n"));
+
+        // A: its job passed, the lander said no twice (the free landing retry), and the line has one attempt
+        // that did not land, so it is failed twice. C joins A's line: its landing fails twice and now the
+        // line has two, so C is awaiting diagnosis. D is never started.
+        assert_eq!(report.stop, Stop::QueueEmpty, "{}", shown());
+        assert_eq!(report.landed, 0);
+        assert_eq!(lander.calls(), 4, "A and C asked twice each: {}", shown());
+        assert_eq!(producer_runs(&invocations), 2, "no producer for D");
+        let a = ui.passed_over(&ids[0]).expect("A is passed over");
+        assert!(a.contains("failed twice"), "{a}");
+        for held in [&ids[1], &ids[2]] {
+            let line = ui.passed_over(held).expect("the item is passed over");
+            assert!(
+                line.contains("awaiting diagnosis") && !line.contains("failed twice"),
+                "{line}"
+            );
+        }
+        assert!(
+            report.jobs.iter().all(|j| j.item != ids[2]),
+            "D was never started: {:?}",
+            report.jobs
+        );
+        let records = Records::load(&fx.git, &fx.head()).unwrap();
+        assert!(
+            records.jobs[&ids[2]].job.is_none(),
+            "D was never dispatched"
+        );
+
+        // The plan lists D as held, with the reason, and orders nothing.
+        let planned = drain::plan(&steps, 10.0, &Quiet).unwrap();
+        let refusal = planned
+            .plan
+            .refused
+            .iter()
+            .find(|r| r.id == ids[2])
+            .unwrap_or_else(|| panic!("D is held: {:?}", planned.plan.refused));
+        assert!(
+            refusal.reason.contains("awaiting diagnosis"),
+            "{}",
+            refusal.reason
+        );
+        assert!(!planned.plan.order.contains(&ids[2]), "{:?}", planned.plan);
+    }
+
+    #[test]
+    fn a_line_that_was_rejected_once_and_not_landed_once_is_held() {
+        let fx = Fixture::new();
+        let mut first = Scenario::default();
+        first.verdict = rejecting_verdict();
+        let athena = fx.athena(numbered(phased(first, Scenario::default())));
+        let item = queue_steward_request(&athena, WORDS);
+        let lander = ScriptedLander::new(&[]);
+        let ui = Lines::default();
+        let steps = RealSteps {
+            athena: &athena,
+            ui: &ui,
+            page: &StubPage,
+            lander: &lander,
+        };
+        let report = drain::drain(&steps, work_everything(), &ui).unwrap();
+        // The first job was rejected; the retry passed but the host did not take it: two attempts.
+        assert_eq!(report.landed, 0);
+        assert_eq!(lander.calls(), 1, "no landing retry for a held line");
+        let line = ui.passed_over(&item).expect("the item is passed over");
+        assert!(
+            line.contains("awaiting diagnosis") && line.contains("#101"),
+            "{line}"
+        );
+        assert_eq!(report.stop, Stop::QueueEmpty);
+    }
+
+    #[test]
+    fn a_line_with_one_failed_attempt_is_still_retried() {
+        let fx = Fixture::new();
+        let mut first = Scenario::default();
+        first.verdict = rejecting_verdict();
+        let athena = fx.athena(phased(first, Scenario::default()));
+        let item = queue_steward_request(&athena, WORDS);
+        let lander = RecordingLander::default();
+        let ui = Lines::default();
+        let steps = RealSteps {
+            athena: &athena,
+            ui: &ui,
+            page: &StubPage,
+            lander: &lander,
+        };
+        let report = drain::drain(&steps, work_everything(), &ui).unwrap();
+        assert_eq!(report.landed, 1, "{}", display::drain(&report));
+        let jobs: Vec<&drain::JobLine> = report.jobs.iter().filter(|j| j.item == item).collect();
+        assert_eq!(jobs.len(), 2, "the rejected job and its retry: {jobs:?}");
+        assert_eq!(jobs[0].outcome, "rejected");
+        assert_eq!(jobs[1].outcome, "passed");
+        assert!(
+            ui.all().iter().all(|l| !l.contains("awaiting diagnosis")),
+            "{:?}",
+            ui.all()
+        );
+    }
+
+    #[test]
+    fn an_items_own_blocked_landing_still_gets_its_free_retry_when_the_line_is_at_the_hold() {
+        let fx = Fixture::new();
+        let athena = fx.athena(numbered(Scenario::default().script()));
+        let ids: Vec<String> = (0..2)
+            .map(|_| queue_steward_request(&athena, WORDS))
+            .collect();
+        // A: not landed, not landed. B: not landed (the line now has two attempts that did not land), then the
+        // free landing retry lands it.
+        let lander = ScriptedLander::new(&[false, false, false, true]);
+        let ui = Lines::default();
+        let steps = RealSteps {
+            athena: &athena,
+            ui: &ui,
+            page: &StubPage,
+            lander: &lander,
+        };
+        let report = drain::drain(&steps, work_everything(), &ui).unwrap();
+        let shown = || format!("{}\n{}", display::drain(&report), ui.all().join("\n"));
+        assert_eq!(lander.calls(), 4, "{}", shown());
+        assert_eq!(report.landed, 1, "{}", shown());
+        assert!(
+            ui.all().iter().all(|l| !l.contains("awaiting diagnosis")),
+            "{}",
+            shown()
+        );
+        assert!(
+            ui.passed_over(&ids[0])
+                .is_some_and(|l| l.contains("failed twice")),
+            "{}",
+            shown()
+        );
+        assert!(ui.passed_over(&ids[1]).is_none(), "{}", shown());
+    }
+
+    #[test]
+    fn a_hold_lifts_when_the_host_takes_the_pull_request() {
+        let fx = Fixture::new();
+        let athena = fx.athena(numbered(Scenario::default().script()));
+        let ids: Vec<String> = (0..2)
+            .map(|_| queue_steward_request(&athena, WORDS))
+            .collect();
+        let lander = ScriptedLander::new(&[]);
+        let steps = RealSteps {
+            athena: &athena,
+            ui: &Quiet,
+            page: &StubPage,
+            lander: &lander,
+        };
+        drain::drain(&steps, work_everything(), &Quiet).unwrap();
+        assert_eq!(steps.held(&ids[1..]).len(), 1, "the line is held");
+        // The host merges the first pull request after all: the link says so, and the hold lifts with it.
+        let first = athena_data::JobId::parse(&ids[0]).unwrap();
+        let mut link = athena_core::pr::load_link(&athena.state, &first)
+            .unwrap()
+            .unwrap();
+        link.state = LinkState::Landed;
+        store_link(&athena.state, &first, &link).unwrap();
+        assert!(steps.held(&ids[1..]).is_empty(), "the hold lifted itself");
+    }
+
+    #[test]
+    fn drain_help_says_a_line_with_two_attempts_that_did_not_land_is_held() {
+        let out = Command::new(env!("CARGO_BIN_EXE_athena"))
+            .args(["drain", "--help"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let help = String::from_utf8_lossy(&out.stdout);
+        assert!(help.contains("awaiting diagnosis"), "{help}");
+    }
+}
+
 #[test]
 fn per_job_worktree_a_failed_job_leaves_neither_directory() {
     let fx = Fixture::new();

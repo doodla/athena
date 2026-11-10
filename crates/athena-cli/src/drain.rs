@@ -43,7 +43,17 @@
 //!   T5, not a pause) is still dispatched, so its item gets both attempts. [`Steps::flagged`] is asked only
 //!   after the last failed attempt, when no pause was found ([`ItemEnd::Flagged`]): the item is then passed
 //!   over for the rest of the batch with the flag signals as the reason, and the batch goes on to the next
-//!   queued item. Nothing is written.
+//!   queued item. Nothing is written. A flag alone does not stop the next item, but a flagged line that also
+//!   has two attempts that did not land is held (next bullet).
+//! - **A line with two attempts that did not land is held, awaiting diagnosis.** [`Steps::held`] says which
+//!   queued items are on such a line: none of its attempts was accepted and two did not land (rejected,
+//!   failed, or verified but not taken by the host: a job whose pull-request link state is not landed and that
+//!   has no landing record). `Drain::prepare` holds those items back like a paused line's, and
+//!   [`Drain::attempts`] asks before each attempt that has no passed job yet, and again after the item's last
+//!   failed attempt ([`ItemEnd::Awaiting`]). It is never asked between a passed job and its landing, so an
+//!   item's own landing retry is not refused. Not a failed attempt; the batch goes on. Nothing is written
+//!   and no diagnosis job is queued (the diagnosis job is not built yet); the hold is derived from the
+//!   records each time and lifts when a pull request lands or the request words change.
 //! - **An item that fails twice is passed over, not a reason to stop.** An item whose line is neither flagged
 //!   nor paused and whose second attempt fails ([`ItemEnd::Failed`]) is passed over for the rest of the batch
 //!   with the reason `failed twice; left for the scope guard and Hestia: <last reason>`, and the batch goes
@@ -725,8 +735,20 @@ pub trait Steps {
     /// show: the line, the signals and why. Only a flag that still holds counts. Unlike [`Steps::paused`] this
     /// is asked only after an item's last failed attempt and never before a read, so a flagged line is still
     /// dispatched; an item that failed twice on such a line is passed over ([`ItemEnd::Flagged`]) instead of
-    /// stopping the batch. The default has no flagged line, as for steps that have no scope guard.
+    /// stopping the batch. A flag alone does not stop the next item, but a flagged line that also has two
+    /// attempts that did not land is held ([`Steps::held`]) and its next item is not dispatched. The default
+    /// has no flagged line, as for steps that have no scope guard.
     fn flagged(&self, _jobs: &[String]) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// Which of `jobs` are on a line the drain must stop retrying, each with the reason to show: the line has
+    /// two attempts that did not land (rejected, failed, or verified but not taken by the host) and none
+    /// accepted. Asked before an item is read or run, and after its last failed attempt (after the paused and
+    /// flagged checks), but never between an item's verified job and its landing, so an item's own landing
+    /// retry is not refused. The item is passed over as awaiting diagnosis ([`ItemEnd::Awaiting`]); it is not
+    /// a failure. The diagnosis job is not built yet. The default holds nothing, as for steps that have no scope
+    /// guard.
+    fn held(&self, _jobs: &[String]) -> Vec<(String, String)> {
         Vec::new()
     }
 }
@@ -1411,6 +1433,10 @@ enum ItemEnd {
     /// The item failed twice on a line the scope guard has flagged but not paused, with the flag reason. It is
     /// passed over for the rest of the batch, and the batch goes on to the next item.
     Flagged(String),
+    /// The item's line has two attempts that did not land and none accepted ([`Steps::held`]), with the reason.
+    /// It is passed over, unread and unrun when the hold was found before an attempt, and when its own second
+    /// failed attempt made the hold. Not a failed attempt; the batch goes on to the next item.
+    Awaiting(String),
 }
 
 /// What one call of [`Drain::land`] came to.
@@ -1919,6 +1945,12 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 if let Some(reason) = self.paused_reason(item) {
                     return ItemEnd::Paused(reason);
                 }
+                // A line with two attempts that did not land is held, not retried. This is checked only here,
+                // while no job of this item has passed: once one has, the loop skips this block, so the
+                // item's own landing retry is never refused.
+                if let Some(reason) = self.held_reason(item) {
+                    return ItemEnd::Awaiting(reason);
+                }
                 let from = if retry {
                     ReadOf::Retry(last_job.as_str())
                 } else {
@@ -1992,12 +2024,26 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 if let Some(reason) = self.paused_reason(item) {
                     return ItemEnd::Paused(reason);
                 }
-                return match self.flagged_reason(item) {
-                    Some(reason) => ItemEnd::Flagged(reason),
+                if let Some(reason) = self.flagged_reason(item) {
+                    return ItemEnd::Flagged(reason);
+                }
+                // The item's own second failure may have made the hold: it is then awaiting diagnosis and
+                // not "failed twice".
+                return match self.held_reason(item) {
+                    Some(reason) => ItemEnd::Awaiting(reason),
                     None => ItemEnd::Failed,
                 };
             }
         }
+    }
+
+    /// The reason the line of `item` is held for two attempts that did not land, if it is.
+    fn held_reason(&self, item: &Item) -> Option<String> {
+        self.steps
+            .held(std::slice::from_ref(&item.job))
+            .into_iter()
+            .next()
+            .map(|(_, reason)| reason)
     }
 
     /// The reason the scope guard has only flagged the line of `item`, if it has.
@@ -2171,13 +2217,23 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             let ids: Vec<String> = view.items.iter().map(|i| i.job.clone()).collect();
             self.steps.paused(&ids).into_iter().collect()
         };
+        // Items on a line with two attempts that did not land are held the same way, unless the line is also
+        // paused (the pause reason wins).
+        let awaiting: BTreeMap<String, String> = {
+            let ids: Vec<String> = view.items.iter().map(|i| i.job.clone()).collect();
+            self.steps
+                .held(&ids)
+                .into_iter()
+                .filter(|(id, _)| !paused.contains_key(id))
+                .collect()
+        };
         for idx in 0..view.items.len() {
             // An interrupted job was read before it ran; its retry reads the request again.
             if view.items[idx].read || view.items[idx].interrupted {
                 continue;
             }
             let id = view.items[idx].job.clone();
-            if paused.contains_key(&id) {
+            if paused.contains_key(&id) || awaiting.contains_key(&id) {
                 continue;
             }
             // Read by an earlier plan of this run: not read or paid for again.
@@ -2245,25 +2301,41 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         // dependents of an item it holds: a dependency on an id outside the entries would count as met.
         let mut held: BTreeMap<String, String> = paused
             .into_iter()
+            .chain(awaiting.iter().map(|(id, r)| (id.clone(), r.clone())))
             .filter(|(id, _)| !forced.iter().any(|f| &f.id == id))
             .collect();
+        // The held items, and what depends on them, whose line is held for the hold and not paused.
+        let mut awaiting_ids: BTreeSet<String> = awaiting
+            .keys()
+            .filter(|id| held.contains_key(*id))
+            .cloned()
+            .collect();
         loop {
-            let more: Vec<(String, String)> = view
+            // (item, the item it waits on, whether that one is awaiting diagnosis)
+            let more: Vec<(String, String, bool)> = view
                 .plan
                 .iter()
                 .filter(|e| !held.contains_key(&e.id) && !forced.iter().any(|f| f.id == e.id))
                 .filter_map(|e| {
                     let on = e.depends_on.iter().find(|d| held.contains_key(*d))?;
-                    Some((
-                        e.id.clone(),
-                        format!("depends on {on}, which is held back: its line is paused"),
-                    ))
+                    Some((e.id.clone(), on.clone(), awaiting_ids.contains(on)))
                 })
                 .collect();
             if more.is_empty() {
                 break;
             }
-            held.extend(more);
+            for (id, on, awaiting) in more {
+                let why = if awaiting {
+                    awaiting_ids.insert(id.clone());
+                    "awaiting diagnosis"
+                } else {
+                    "paused"
+                };
+                held.insert(
+                    id,
+                    format!("depends on {on}, which is held back: its line is {why}"),
+                );
+            }
         }
         let entries: Vec<PlanEntry> = view
             .plan
@@ -2671,7 +2743,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 ),
             ),
             ItemEnd::Waiting => self.pass_over(&item.job, &self.last_landing(&item.job)),
-            ItemEnd::Paused(reason) | ItemEnd::Flagged(reason) => {
+            ItemEnd::Paused(reason) | ItemEnd::Flagged(reason) | ItemEnd::Awaiting(reason) => {
                 self.pass_over(&item.job, &reason)
             }
             ItemEnd::Skipped => self.pass_over(
@@ -4347,6 +4419,38 @@ impl Steps for RealSteps<'_> {
             .filter_map(|job| {
                 let mark = self.athena.line_flag(&records, job)?;
                 Some((job.clone(), self.athena.flag_note(&mark)))
+            })
+            .collect()
+    }
+
+    /// Asks [`Athena::line_holds`], which derives the hold from the records and the pull-request links each
+    /// time: a line with two attempts that did not land (a job whose link state is not landed and that has no
+    /// landing record counts) and none accepted. Nothing is stored, so the hold lifts when a link turns landed.
+    /// Records that cannot be loaded report nothing held.
+    fn held(&self, jobs: &[String]) -> Vec<(String, String)> {
+        let Ok(records) = self.records() else {
+            return Vec::new();
+        };
+        self.athena
+            .line_holds(&records, jobs)
+            .into_iter()
+            .map(|(job, hold)| {
+                let pull_requests: Vec<String> = hold
+                    .unlanded
+                    .iter()
+                    .map(|(job, number, state)| {
+                        // The host took a job only when the link's state is landed (never listed here).
+                        let state = match state {
+                            LinkState::Open => "open, not seen merged",
+                            LinkState::MergedUnverified => {
+                                "merged, but not with the verified content"
+                            }
+                            LinkState::Landed => "landed",
+                        };
+                        format!("job {job} pull request #{number} ({state})")
+                    })
+                    .collect();
+                (job, self.athena.hold_note(&hold, &pull_requests))
             })
             .collect()
     }

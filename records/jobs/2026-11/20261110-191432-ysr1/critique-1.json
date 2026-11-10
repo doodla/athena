@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261110-191432-ysr1",
+  "round": 1,
+  "at": "2026-11-10T19:26:53.129019324Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Changing the shared watcher-test fake producer to write a different edit per job breaks an existing test that depends on identical edits. The Dependents list says that test is unaffected.",
+      "evidence": "crates/athena-core/src/scope_guard.rs:1377-1387, `asking_the_words_of_a_landed_request_again_starts_a_new_line`: the comment at 1382 says 'The fake producer writes the same file again, so this job does not land', and line 1383 asserts `assert_ne!(r.go(&b).unwrap(), OutcomeState::Landed)`. With a counter in the shared rig's edit, B changes README and lands, so the assertion fails. The plan lists this test as a dependent whose results 'do not change' and says in criterion 7 that 'No test outside the new ones changes its expectation'. Fix: Keep the existing rig's producer as it is. Add a new rig constructor or script option (for example `rig_counting`) that writes a different edit per job, used only by the new criterion-3 tests. Otherwise, change the existing test's expectation on purpose, list it in Dependents and say why. Check the other watcher_tests that call `go` twice for the same dependency.",
+      "location": "Step 6 / Demonstration criterion 3 ('the producer edit is made to include a call counter'); Dependents 'request_records / attempt_of'; criterion 7",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A risk wrongly says an off-branch NotLanded leaves no link. Athena opens the pull request early and stores an early link, which `load_link_any` reads.",
+      "evidence": "pr.rs:105-119 `store_early_link` and pr.rs:151-156 `load_link_any`, which falls back to the early link. System facts: 'Athena opens the pull request early, at verification start'. So an off-branch refusal in a pull-request setup has an Open early link and is counted as not landed, which is the right count but not what the risk says. Fix: Correct the risk text, and the CHANGELOG wording if it repeats it: jobs with an early link are counted; only jobs with no link at all (no pull request opened) are treated as landed.",
+      "location": "Risks, second bullet ('A NotLanded that wrote no pull-request link...')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The item whose own second failure starts the hold ends as 'failed twice; left for the scope guard and Hestia', not 'awaiting diagnosis'. The hold appears only for the next item on the line.",
+      "evidence": "drain.rs:1985-1998: once `failures >= ATTEMPTS`, the drain checks `paused_reason` and `flagged_reason`, then returns `ItemEnd::Failed`, which `finish` reports as 'failed twice' (drain.rs:2620-2632). The new `held_reason` is not checked there. Fix: In the `failures >= ATTEMPTS` branch, after `paused_reason`, return `ItemEnd::Awaiting(reason)` when `held_reason` is Some, so the drain says the line is now held. Keep the environment-stop check for `Failed` working, for example by checking the hold only when the last reason is not an environment cause.",
+      "location": "Step 7 (hold check only at the top of the `passed.is_none()` block)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Soundness: a job whose pull request is still waiting on checks counts as not landed, so one rejection plus one merging job holds the line.",
+      "evidence": "landing_from_report (drain.rs:3432-3439) returns Waiting for an Open link with checks pending. The link file stores no checks state, so the hold predicate cannot tell a waiting job from a collision. The plan accepts this and relies on the link turning Landed, which needs a later `land`. Fix: Use the drain's own landing result for the job: a job whose last landing was Waiting should not count until a later landing says NotLanded. Otherwise, at least name the waiting pull request in the hold message, as planned, and say in the CHANGELOG that a waiting pull request counts until it is seen merged.",
+      "location": "Decision 1 / Risks first bullet",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. I read the code it names, and it holds. `go` writes a local Landed outcome before the drain's lander pushes the pull request (run/close.rs:326-376, drain.rs:4607-4642). The link `state` field is what says whether the host took the job (pr.rs:27-48, landing_from_report at drain.rs:3426-3445). The free landing retry runs after the `if passed.is_none()` block (drain.rs:1912-1983), so putting the hold check after `paused_reason` inside that block keeps it. Only scope_guard.rs calls `request_records`, so the wrapper keeps the T1-T5 signals unchanged. The demonstrations drive the production `drain::drain` and `drain::plan` through `RealSteps` on real records, and the doubles only write link files and return landing results. One design flaw needs revising: step 6 changes the shared watcher-test fake producer so every job writes a different README edit. That breaks the existing test `asking_the_words_of_a_landed_request_again_starts_a_new_line`, which asserts that the second identical edit does not land. The plan's Dependents entry and criterion 7 both claim no existing test changes. There are three minor points: a risk that wrongly says an off-branch refusal leaves no link; the item whose own failure starts the hold ends as 'failed twice' instead of 'awaiting diagnosis'; and a job whose pull request is still waiting on checks counts as not landed until it is seen merged."
+}

@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261110-191432-ysr1",
+  "round": 2,
+  "at": "2026-11-10T19:34:04.758953091Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "`Drain::prepare` can read D before A has run, so 'no reader call for D' may be false even when the hold works. A and C may also be gone from the queue by the time the plan runs.",
+      "evidence": "drain.rs:2170–2243: the first `prepare` asks `paused`/`held` once for the whole queue, then reads every underspecified item that is not paused. At that point the line has 0 non-landed attempts, so D can be read up front. The new check at the top of D's attempt (where `ahead` is ignored) then stops only the run, not the read. A and C each have a job closed Landed locally, so they may not be queue items when `drain::plan` runs. Fix: For D, assert on what the hold controls: no producer or verifier call, no dispatched job for D, and a lander call count still at 4. Either drop the reader-call claim or first confirm that the steward request is not read in `prepare`. In the plan check, assert only on D, plus on A and C only if they are still queue items.",
+      "location": "Demonstrations, criterion 1 ('no reader, producer or verifier call for D, records.jobs[D].job is None'; 'plan.refused lists D (and A and C)')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A job whose pull request was closed as carried by a later job keeps an Open link. Unless a landing record names it, it counts as not landed, even though its content landed.",
+      "evidence": "gh/landing.rs:380–425 (`close_carried_prs`) closes the earlier pull requests listed in `base_jobs` but does not set their links to Landed. pr.rs:52–56 documents `base_jobs`. The plan's predicate treats any link that is not Landed and has no landing record as unlanded. Fix: Treat a job as taken when it appears in the `base_jobs` of a link whose state is Landed (`load_all_links`/`load_link_any`). Otherwise, name this case in Risks and in the CHANGELOG entry.",
+      "location": "Decision 1 / Step 4 (`job_unlanded_by_host`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A pull request still waiting on checks counts as a failed attempt, so a line with one rejection and one waiting job is held even though nothing has failed twice. The plan documents this but does not limit it.",
+      "evidence": "drain.rs:135–142: a waiting pull request is explicitly not a failure, and `athena land --pr` merges it later. The plan counts any link that is Open and has no landing record. Fix: Keep this as the documented fallback. Also make the hold note tell the person to run `athena land --pr <job>` for a pull request that is still Open, so the hold has a clear way out.",
+      "location": "Risks: 'A job whose pull request is waiting on checks...' / Decision 8",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code behind the plan's claims; I ran nothing. The plan fits the accepted reading and fixes every finding raised against z26k and r96w. The functions it names exist where it says: `group_lines` at 122, `line_attempts` at 161, `verdict_of` at 544, `attempt_of` at 560, `request_records` at 616, `line_pause` at 784, the attempts loop at 1899–2001 with `paused_reason` at 1919 and the failures branch at 1986, `prepare` at 2128, `LinkState`/`PrLink.state` at pr.rs:27–48 and `load_link_any` at pr.rs:151. Every caller of `request_records` is inside scope_guard.rs, so keeping the old function as a wrapper leaves T1 to T5 unchanged. I confirmed the claims the design rests on. A job that passes is closed Landed locally before landing (drain.rs:1684–1687, 4607–4638). Its free landing retry runs only while `passed` is Some (1971–1984), so a hold check inside `if passed.is_none()` cannot refuse it. The shared test rig's fixed README edit (scope_guard.rs:1140) is what keeps the test at 1377–1387 passing, so adding a separate `rig_counting` is correct. The new `Steps::held` has a default, which covers all six `impl Steps` blocks in tests/drain.rs. The plan decides 'taken by the host' from the link's state field together with landing records, using the same check as `landing_record_time` (throughput.rs:391–403). That is the authoritative source, not a guess. The demonstrations run the production `drain::drain`, `drain::plan` and `Athena::line_holds` on real records. The doubles only script the land answer and write link files, so each test fails without the behavior. I found three minor problems and no blocker or major ones."
+}
