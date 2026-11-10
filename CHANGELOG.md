@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- `planning_round` in `crates/athena-core/src/run/planning.rs` is split into smaller private methods
+  (`critic_round`, `stop_on_mechanical_limit`) so no function exceeds the 200-line limit. Behavior is unchanged.
+
 ### Added
 
 - Hestia's sweep now owns Athena's recurring duties and schedules them, so none depends on a person remembering.
