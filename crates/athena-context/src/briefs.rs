@@ -4022,6 +4022,118 @@ mod tests {
         assert!(!reader_brief(&inputs).contains(PRIOR_RESULT_HEADING));
     }
 
+    /// The Referenced jobs section of a brief, up to the next top-level heading.
+    fn referenced_section(brief: &str) -> &str {
+        let start = brief.find("# Referenced jobs").expect("section");
+        let rest = &brief[start + 1..];
+        let end = rest.find("\n# ").map_or(brief.len(), |i| start + 1 + i);
+        &brief[start..end]
+    }
+
+    #[test]
+    fn referenced_jobs_list_recorded_deliverables_with_a_count() {
+        let mut inputs = reader_inputs(&reading());
+        inputs.referenced_jobs = vec![EarlierAttempt {
+            job: "20261011-000000-abcd".into(),
+            request: "add a size rule".into(),
+            reading_summary: Some("Split the work in two groups.".into()),
+            reading_criteria: vec!["[content] one".into(), "[behavior] two".into()],
+            reading_deliverables: vec![
+                "crates/a/src/x.rs (modify)".into(),
+                "crates/b/src/y.rs (modify)".into(),
+                "CHANGELOG.md (modify)".into(),
+            ],
+            ..Default::default()
+        }];
+        let brief = reader_brief(&inputs);
+        let section = referenced_section(&brief);
+        assert!(
+            section.contains("> Split the work in two groups."),
+            "{section}"
+        );
+        assert!(section.contains("Recorded criteria (2):"), "{section}");
+        assert!(section.contains("Recorded deliverables (3):"), "{section}");
+        for d in [
+            "> crates/a/src/x.rs (modify)",
+            "> crates/b/src/y.rs (modify)",
+            "> CHANGELOG.md (modify)",
+        ] {
+            assert!(section.contains(d), "{d}\n{section}");
+        }
+        assert!(
+            section.contains("sizes, thresholds and test fixtures"),
+            "{section}"
+        );
+        assert!(!section.contains("no reading recorded"), "{section}");
+    }
+
+    #[test]
+    fn referenced_jobs_without_a_reading_say_so() {
+        let mut inputs = reader_inputs(&reading());
+        inputs.referenced_jobs = vec![
+            EarlierAttempt {
+                job: "20261010-153012-k7q2".into(),
+                request: "a".into(),
+                ..Default::default()
+            },
+            EarlierAttempt {
+                job: "20261011-000000-abcd".into(),
+                request: "b".into(),
+                ..Default::default()
+            },
+        ];
+        let brief = reader_brief(&inputs);
+        let section = referenced_section(&brief);
+        assert_eq!(
+            section.matches("no reading recorded").count(),
+            2,
+            "{section}"
+        );
+        assert!(!section.contains("Recorded deliverables"), "{section}");
+    }
+
+    #[test]
+    fn referenced_job_deliverables_are_not_repeated_for_the_retried_job() {
+        let retried = EarlierAttempt {
+            job: "20261010-153012-k7q2".into(),
+            request: "r".into(),
+            reading_summary: Some("s".into()),
+            reading_deliverables: vec!["only-retried.rs (modify)".into()],
+            ..Default::default()
+        };
+        let cited = EarlierAttempt {
+            job: "20261011-000000-abcd".into(),
+            request: "c".into(),
+            reading_summary: Some("s".into()),
+            reading_deliverables: vec!["only-cited.rs (modify)".into()],
+            ..Default::default()
+        };
+        let mut inputs = reader_inputs(&reading());
+        inputs.earlier_attempt = Some(retried);
+        inputs.referenced_jobs = vec![cited];
+        let brief = reader_brief(&inputs);
+        let earlier = &brief[brief.find("# Earlier attempt").expect("earlier")..];
+        let earlier = &earlier[..earlier.find("# Referenced jobs").expect("next")];
+        assert_eq!(
+            earlier.matches("> only-retried.rs (modify)").count(),
+            1,
+            "{earlier}"
+        );
+        let section = referenced_section(&brief);
+        assert_eq!(
+            section.matches("> only-cited.rs (modify)").count(),
+            1,
+            "{section}"
+        );
+        assert!(!section.contains("only-retried.rs"), "{section}");
+        // One `Job ` line per job in this section.
+        assert_eq!(
+            section.lines().filter(|l| l.starts_with("Job ")).count(),
+            1,
+            "{section}"
+        );
+    }
+
     #[test]
     fn reader_briefs_carry_referenced_jobs_only_when_set() {
         let mut inputs = reader_inputs(&reading());
