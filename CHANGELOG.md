@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The reader brief's "Referenced jobs" section now prints each cited job's recorded reading: summary, criteria and
+  deliverables, each with a count, or "no reading recorded". Cause: cited job ids were resolved only to the job's
+  request and findings, so readings invented the shape of the cited jobs for their size thresholds and test fixtures.
+  The brief tells the reader to take those from the listed deliverables.
 - `planning_round` in `crates/athena-core/src/run/planning.rs` is split into smaller private methods
   (`critic_round`, `stop_on_mechanical_limit`) so no function exceeds the 200-line limit. Behavior is unchanged.
 
