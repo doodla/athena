@@ -1,0 +1,167 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261029-002753-n9hq",
+  "base_commit": "4135517e280080e1d5ef915c691729d7e0eea6dc",
+  "base_fingerprint": "sha256:8a6777d70cfeeb60db514461d47be42469052a1774a07695e8bd1a4b24fb87dd",
+  "previous_job": "20261028-233235-jwp0",
+  "candidate_commit": "9ce90c6183c9720d7a41820fe96d7edce34bb8a4",
+  "candidate_tree": "20923214821b2fc6010f548dd23c2cf3067a5159",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 414948
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 60339
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 317626
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 78035
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 350505
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 91128
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 320346
+    }
+  ],
+  "fingerprint": "sha256:e84f33960eb8007c0d9d8c1b620bab5ad7d51150183bc6381b50b32fd597f8b3",
+  "violations": [],
+  "producer_report": {
+    "summary": "A weekly or session limit reply (\"You've hit your weekly limit · resets Nov 12, 3pm\") is now classified as a usage-limit environment stop, and `athena drain` stops on the first such job with the reason \"usage limit\" and the reset time. The fix is in the shared classifier. Before it, only \"API Error: 429\" counted as a usage limit, so this text closed the job as \"the producer did not complete\" and counted against its line. `usage_limit_hit` in claude.rs reads the reply. It matches only an error result of subtype success or error whose text starts with the sentence, so a model's own prose, or the same words under error_max_turns, stays a work failure. disk.rs's `producer_stop_reason` and `StopCause::of` call it through a new `is_usage_limit`. The reset time stays inside the existing reason string (`usage_limit_reset` reads it back), so no record kind is added. In drain.rs, `Stop::UsageLimit` (label \"usage limit\") is set in `run_job` at the first failed job with that cause, with no second attempt, plus a note \"usage limit reached; it resets <time>\". main.rs help gets the new stop line. CHANGELOG.md has an entry. Behaviour change beyond the brief: a bare 429 now also stops the drain at its first job, not after the item fails twice, so the old drain test for 429 was narrowed to low disk. producer.rs, display.rs, resumable_stop, keeps_unfinished_work and retry are untouched. Follow-up: a limit hit in a reader, verifier or planner call keeps its current handling, as a 429 does today.",
+    "files": [
+      "CHANGELOG.md",
+      "crates/athena-agent/src/claude.rs",
+      "crates/athena-core/src/disk.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/tests/drain.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-agent (whole crate)",
+        "result": "pass",
+        "note": "76 passed, 2 ignored. Includes the new tests: a_weekly_or_session_limit_reply_is_a_usage_limit_with_its_reset_time, usage_limit_hit_reads_the_wording_variants, not_a_usage_limit_in_a_models_own_words_or_a_normal_reply."
+      },
+      {
+        "command": "cargo test -p athena-core --lib disk::",
+        "result": "pass",
+        "note": "34 passed, including usage_limit_text_is_an_environment_stop_with_its_reset_time and not_a_usage_limit_in_a_models_own_words_or_a_normal_reply."
+      },
+      {
+        "command": "cargo test -p athena-core --lib weekly_limit_reply",
+        "result": "pass",
+        "note": "1 passed."
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "I ran the formatter, not `--check`; the first clippy run came after it. Left to Athena's `cargo fmt --all --check`."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "The first run flagged a single-element loop in tests/drain.rs. I fixed it and the rerun was clean."
+      },
+      {
+        "command": "cargo test --locked -q --workspace --no-fail-fast",
+        "result": "pass",
+        "note": "Every test result line showed 0 failed. This includes the drain integration suite, the drain help test, the mirrors test and the Stop::ALL tests. Run twice: the first run's output was too large to read, so the second run is the evidence."
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "22 passed; no banned words."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new unit test in crates/athena-agent/src/claude.rs (fake driver script emitting an is_error result with 'You've hit your weekly limit · resets <time>') passes under `cargo test -p athena-agent`, and shows the classifier reports a usage limit with the reset time. A 'session limit' reply is covered too.",
+        "status": "met",
+        "evidence": "The stand-in script in claude.rs has `weekly_limit` and `session_limit` modes. The test a_weekly_or_session_limit_reply_is_a_usage_limit_with_its_reset_time invokes the driver once per mode and asserts one call, outcome Error, and `usage_limit_hit` giving resets Some(\"Nov 12, 3pm\"). `cargo test -p athena-agent` passed (76 passed)."
+      },
+      {
+        "criterion": "A test in crates/athena-core/src/disk.rs shows producer_stop_reason on the limit text gives a reason starting with disk::USAGE_LIMIT that includes the reset time, and that is_environment_reason is true and StopCause::of gives UsageLimit. Run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "usage_limit_text_is_an_environment_stop_with_its_reset_time asserts starts_with(USAGE_LIMIT), contains \"resets Nov 12, 3pm\", StopCause::UsageLimit, is_environment_reason, usage_limit_reset, and the stored unprefixed form. It also asserts resumable_stop is true and keeps_unfinished_work is false. Passed in `cargo test -p athena-core --lib disk::` and in the full workspace run."
+      },
+      {
+        "criterion": "A run-level test with a fake driver reply carrying the limit text (beside the existing usage-limit test in crates/athena-core/src/run/tests.rs, or an equivalent in a file listed as a deliverable) shows the job closes as an environment stop, not a counted failure, and keeps nothing. Run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "weekly_limit_reply_closes_as_an_environment_stop_and_keeps_nothing in run/tests.rs sits beside the existing usage-limit test. For weekly and session texts it asserts the Failed outcome with a reason starting with USAGE_LIMIT and containing the reset time, an environment reason (the scope guard skips these, so it is not counted), no candidate and no progress-note. A control with subtype error_max_turns is not an environment reason. Passed."
+      },
+      {
+        "criterion": "A drain test in crates/athena-cli (drain.rs unit test or tests/drain.rs) shows the run stops after the first job whose reply says the limit was hit, with the stop reason 'usage limit' and the reset time in the output. Run `cargo test -p athena-cli`.",
+        "status": "met",
+        "evidence": "a_usage_limit_reply_stops_the_drain_at_once_with_its_reset_time in tests/drain.rs covers weekly, session, no-reset-time and a bare 429. It asserts Stop::UsageLimit, log == [\"read a\",\"run a\"] (no retry, b not read), `stopped     usage limit: ` in display::drain and the note with the reset time. Passed in the workspace run."
+      },
+      {
+        "criterion": "Controls: text that only mentions a limit in a model's own prose (under a subtype other than success/error) and a normal success reply are not classified as usage limits. Existing 429 and 401 tests still pass.",
+        "status": "met",
+        "evidence": "The not_a_usage_limit_* tests in claude.rs and disk.rs cover error_max_turns, error_during_execution, mid-sentence prose and an empty string. A claude.rs test checks a normal stand-in success has no detail, and a drain test checks a prose-limit reason does not stop with UsageLimit. The existing 401/429 tests (a_usage_limit_is_not_retried, two_login_expiries_make_two_calls_and_return_the_error, the disk 401/429 tests) passed unchanged."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` (clean after one fix) and `cargo test --locked --workspace --no-fail-fast` (every result line ok, 0 failed)."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry, in the file's existing format, describing the usage-limit environment stop and the drain stop with reset time. `git diff` shows it.",
+        "status": "met",
+        "evidence": "One new bullet at the top of `## [Unreleased]` / `### Added`, in the existing wrapped-bullet style. It names `usage_limit_hit`, `StopCause::UsageLimit`, `Stop::UsageLimit` and the note with the reset time. `git diff --stat` shows CHANGELOG.md with 11 added lines."
+      },
+      {
+        "criterion": "The diff limits itself to the deliverables: no status display, no new record kind and no change to retry or resume logic (the resumable_stop and keeps_unfinished_work behaviour is unchanged). Checked with `git diff --stat`.",
+        "status": "met",
+        "evidence": "`git diff --stat` lists CHANGELOG.md, claude.rs, drain.rs, main.rs, tests/drain.rs, disk.rs and run/tests.rs, with no added files. display.rs, the records crates and run/producer.rs are untouched. In disk.rs, `resumable_stop` and `keeps_unfinished_work` bodies are not edited; only the classifier input changed."
+      }
+    ],
+    "open_issues": [
+      "Host: the exact wording and subtype the real Claude Code CLI emits for a weekly or session limit are not visible in the repository. I assumed an is_error result with subtype `success` whose text starts \"You've hit your weekly|session limit · resets <time>\". If the live CLI differs, only `usage_limit_hit` needs adjusting; a captured real reply would settle it.",
+      "Deliberate behaviour change: a bare 429 now also ends the drain at its first failed job with the new `usage limit` stop, not as `Stop::Environment` after the item failed twice. The old drain test was narrowed to low disk.",
+      "Only the producer stage maps a limit reply to an environment stop; a limit hit in a reader, verifier or planner call keeps its current handling, which is the existing 429 scope. Follow-up if wanted.",
+      "With max_concurrency above 1, jobs already running finish, and each worker that hits the limit adds its own note; `set_stop` keeps the first stop."
+    ],
+    "mistakes": [
+      "My first stand-in script used a literal apostrophe inside single quotes. That broke the shell script and failed two tests; I fixed it by splicing the apostrophe.",
+      "The first clippy run flagged `single_element_loop` in the narrowed low-disk drain test; fixed by removing the loop."
+    ],
+    "learnings": [
+      "`disk.rs` is the single classifier of environment reasons. The scope guard and `athena retry` read it, and `drain` reads it through `StopCause::of`, so one change there reaches all of them.",
+      "`scope_guard::counted` is private and keyed on the attempt verdict, so a run-level test can assert only `is_environment_reason` as the proof that the guard does not count the job.",
+      "In the claude.rs stand-in script, an apostrophe inside a shell single-quoted JSON line breaks the script; splice it as `'\\''`. The tool also turned a `'` escape I typed in that script into a literal apostrophe.",
+      "Bash hooks here deny pipes, `git -C`, and double-quoted expansions; use `--manifest-path` and the `-q` flag to keep cargo output small.",
+      "`Stop::ALL`, `label`, `meaning`, and the drain `after_help` text in main.rs must all list a new `Stop`; the test `drain_help_documents_the_flags_and_lists_every_stop_reason` enforces it."
+    ],
+    "desires": [
+      "A captured real weekly/session-limit reply from the live CLI to confirm the subtype and wording.",
+      "A way to read long cargo output files from the tool-results directory; the policy blocks reads outside the working directory."
+    ]
+  }
+}

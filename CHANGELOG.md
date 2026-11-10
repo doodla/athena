@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A producer reply that says the weekly or session usage limit was hit (`You've hit your weekly limit · resets
+  Nov 12, 3pm`) is now an environment stop, not a failure of the work. Before, only an `API Error: 429` was read as
+  a usage limit, so this reply closed the job as `the producer did not complete` and counted against its line.
+  `usage_limit_hit` in `crates/athena-agent/src/claude.rs` reads the reply (only an error result of subtype
+  `success` or `error` whose text starts with the sentence; a model's own prose about a limit stays a failure of the
+  work), and `producer_stop_reason` and `StopCause::of` in `crates/athena-core/src/disk.rs` close it as
+  `StopCause::UsageLimit` with the reset time kept in the reason (`usage_limit_reset` reads it back). No record kind
+  is added, and retry and resume read the cause as they do for a 429. `athena drain` now ends at the first job
+  whose reply hit a usage limit, without a second attempt, with the new stop reason `usage limit` (`Stop::UsageLimit`)
+  and a note `usage limit reached; it resets <time>`. A 429 now stops the drain the same way, at its first job, not
+  after the item failed twice.
 - `athena status` now shows, for each reading rule, how many first readings it refused and how many second
   readings (the reading made again with the refusal as a correction) it refused, over the last 50 first readings
   (`READING_WINDOW`, `ReadingRuleStats` in `crates/athena-core/src/status.rs`). A rule is named by its check

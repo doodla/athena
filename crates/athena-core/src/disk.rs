@@ -90,7 +90,7 @@ use crate::commits::{NewFile, message};
 use crate::state::{StateDir, format_bytes};
 use crate::store::{JobState, Records};
 use crate::{Athena, Ui};
-use athena_agent::claude::api_error_status;
+use athena_agent::claude::{api_error_status, usage_limit_hit};
 use athena_data::records::{
     AnyRecord, BuildMeasurement, BuildPeak, OutcomeState, SccacheCounts, SccacheFigures,
 };
@@ -409,7 +409,8 @@ pub const ENVIRONMENT_PREFIX: &str = "environment:";
 /// The closing reason of a producer that stopped because its login expired (an API error 401).
 pub const PRODUCER_AUTH: &str = "environment: producer login expired";
 
-/// The closing reason of a producer that stopped on a usage limit (an API error 429).
+/// The closing reason of a producer that stopped on a usage limit (an API error 429, or a reply that says the
+/// weekly or session limit was hit). The detail, with the reset time, follows it.
 pub const USAGE_LIMIT: &str = "environment: usage limit reached";
 
 /// The start of the closing reason of a producer that stopped without a report.
@@ -433,7 +434,7 @@ pub enum StopCause {
     /// The producer's login expired: an API error 401 ([`PRODUCER_AUTH`]). The producer's edits are kept
     /// ([`keeps_unfinished_work`]).
     ProducerAuth,
-    /// A usage limit was reached: an API error 429 ([`USAGE_LIMIT`]).
+    /// A usage limit was reached: an API error 429 or a weekly or session limit reply ([`USAGE_LIMIT`]).
     UsageLimit,
     /// Another reason that starts with [`ENVIRONMENT_PREFIX`].
     OtherEnvironment,
@@ -444,7 +445,7 @@ pub enum StopCause {
 impl StopCause {
     /// The cause recorded by a closing `reason`. A reason that starts with [`ENVIRONMENT_PREFIX`] is read by
     /// its text. A producer stop (`the producer did not complete: <detail>`) is an environment stop when its
-    /// detail is an API error 401 or 429 (see [`producer_stop_reason`], which writes such stops with the
+    /// detail is an API error 401 or 429, or a usage limit reply (see [`producer_stop_reason`], which writes such stops with the
     /// prefix; older records carry the unprefixed form).
     pub fn of(reason: &str) -> StopCause {
         if reason.starts_with(ENVIRONMENT_PREFIX) {
@@ -460,12 +461,12 @@ impl StopCause {
                 StopCause::OtherEnvironment
             };
         }
-        match reason
-            .strip_prefix(PRODUCER_STOPPED)
-            .and_then(api_error_status)
-        {
+        let Some(detail) = reason.strip_prefix(PRODUCER_STOPPED) else {
+            return StopCause::Work;
+        };
+        match api_error_status(detail) {
             Some(401) => StopCause::ProducerAuth,
-            Some(429) => StopCause::UsageLimit,
+            _ if is_usage_limit(detail) => StopCause::UsageLimit,
             _ => StopCause::Work,
         }
     }
@@ -477,16 +478,36 @@ impl StopCause {
 }
 
 /// The closing reason for a producer that did not complete, from the detail of its invocation. An API error
-/// 401 (expired login) or 429 (usage limit) is an environment stop and gets the matching reason with the
+/// 401 (expired login), or a 429 or a weekly or session limit reply (usage limit), is an environment stop and gets the matching reason with the
 /// detail after it; anything else is `the producer did not complete: <detail>`. [`StopCause::of`] reads both.
 /// The run keeps the edits of a producer that stopped on a 401 as a candidate, as it does for a deadline, and
 /// appends `; its edits are kept as candidate <commit>` to the reason it gets here.
 pub fn producer_stop_reason(detail: &str) -> String {
     match api_error_status(detail) {
         Some(401) => format!("{PRODUCER_AUTH}: {detail}"),
-        Some(429) => format!("{USAGE_LIMIT}: {detail}"),
+        _ if is_usage_limit(detail) => format!("{USAGE_LIMIT}: {detail}"),
         _ => format!("{PRODUCER_STOPPED}{detail}"),
     }
+}
+
+/// Whether the detail of a stopped producer says a usage limit was reached: an API error 429, or a reply that
+/// says the weekly or session limit was hit ([`usage_limit_hit`]).
+fn is_usage_limit(detail: &str) -> bool {
+    api_error_status(detail) == Some(429) || usage_limit_hit(detail).is_some()
+}
+
+/// When the usage limit of a closing `reason` resets, as the reply worded it (`Nov 12, 3pm`). `None` when the
+/// reason is not a usage limit or the reply gave no time. It reads the detail that [`producer_stop_reason`]
+/// kept in the reason, so no record carries the time apart from the reason.
+pub fn usage_limit_reset(reason: &str) -> Option<String> {
+    if StopCause::of(reason) != StopCause::UsageLimit {
+        return None;
+    }
+    let detail = reason
+        .strip_prefix(USAGE_LIMIT)
+        .map(|rest| rest.strip_prefix(": ").unwrap_or(rest))
+        .or_else(|| reason.strip_prefix(PRODUCER_STOPPED))?;
+    usage_limit_hit(detail)?.resets
 }
 
 /// True when a job's closing `reason` records a failure of the environment (low disk, an unwritable
@@ -1453,6 +1474,71 @@ mod tests {
             "",
         ] {
             assert_eq!(StopCause::of(reason), StopCause::Work, "{reason}");
+        }
+    }
+
+    #[test]
+    fn usage_limit_text_is_an_environment_stop_with_its_reset_time() {
+        let failed = JobState::Closed(OutcomeState::Failed);
+        for kind in ["weekly", "session"] {
+            let text = format!("You've hit your {kind} limit · resets Nov 12, 3pm");
+            let detail = driver_detail(&result_line("success", &text));
+            let written = producer_stop_reason(&detail);
+            assert!(written.starts_with(USAGE_LIMIT), "{written}");
+            assert!(written.contains("resets Nov 12, 3pm"), "{written}");
+            assert_eq!(StopCause::of(&written), StopCause::UsageLimit);
+            assert!(is_environment_reason(&written));
+            assert_eq!(usage_limit_reset(&written).as_deref(), Some("Nov 12, 3pm"));
+            // The unprefixed form that older records carry is read the same way.
+            let stored = format!("the producer did not complete: {detail}");
+            assert_eq!(StopCause::of(&stored), StopCause::UsageLimit);
+            assert!(is_environment_reason(&stored));
+            assert_eq!(usage_limit_reset(&stored).as_deref(), Some("Nov 12, 3pm"));
+            // Retry and resume read the cause as they do for a 429: resumable, and nothing kept.
+            assert!(resumable_stop(failed, Some(&written)));
+            assert!(!keeps_unfinished_work(failed, Some(&written)));
+            assert!(!keeps_unfinished_work(failed, Some(&stored)));
+        }
+        // A reply without a time is still a usage limit; a bare 429 has no time either.
+        let no_time = producer_stop_reason(&driver_detail(&result_line(
+            "success",
+            "You've hit your weekly limit",
+        )));
+        assert_eq!(StopCause::of(&no_time), StopCause::UsageLimit);
+        assert_eq!(usage_limit_reset(&no_time), None);
+        let too_many = producer_stop_reason("success: API Error: 429 slow down");
+        assert_eq!(StopCause::of(&too_many), StopCause::UsageLimit);
+        assert_eq!(usage_limit_reset(&too_many), None);
+        // Other reasons have no reset time.
+        assert_eq!(
+            usage_limit_reset("the producer returned no valid report"),
+            None
+        );
+        assert_eq!(
+            usage_limit_reset(&producer_stop_reason(&expired_login_detail())),
+            None
+        );
+    }
+
+    #[test]
+    fn not_a_usage_limit_in_a_models_own_words_or_a_normal_reply() {
+        let limit = "You've hit your weekly limit · resets Nov 12, 3pm";
+        // The same words under a subtype that carries a model's closing prose.
+        for subtype in ["error_max_turns", "error_during_execution"] {
+            let reason = producer_stop_reason(&driver_detail(&result_line(subtype, limit)));
+            assert_eq!(StopCause::of(&reason), StopCause::Work, "{reason}");
+            assert!(!is_environment_reason(&reason), "{reason}");
+            assert_eq!(usage_limit_reset(&reason), None);
+        }
+        // Prose that only mentions a limit.
+        for prose in [
+            "I fixed the weekly limit handler",
+            "Note: you've hit your weekly limit earlier, resets Nov 12",
+            "The session limit is five hours and it resets daily",
+        ] {
+            let reason = producer_stop_reason(&driver_detail(&result_line("success", prose)));
+            assert_eq!(StopCause::of(&reason), StopCause::Work, "{reason}");
+            assert!(!is_environment_reason(&reason), "{reason}");
         }
     }
 
