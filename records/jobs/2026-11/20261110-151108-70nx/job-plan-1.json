@@ -1,0 +1,272 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261110-151108-70nx",
+  "round": 1,
+  "at": "2026-11-10T15:17:01.630746288Z",
+  "invocation_seq": 2,
+  "approach": "Fix it where the reader's inputs are built. `referenced_jobs` in crates/athena-core/src/reading/topics.rs resolves only ids written in the request text. Make it also resolve the ids the retried job's introspection cites: the `job` of each earlier case, plus job ids in the cause, prevention, proposed request and case texts. These are carried through the existing `carry()` path, so they are redacted and carry recorded deliverables, criteria and changed files. Request-named jobs keep the existing `MAX_REFERENCED_JOBS` cap and come first. Introspection-cited jobs follow under their own cap, `MAX_CITED_JOBS`, so the cap never drops a request-named job. The reader brief's \"Referenced jobs\" section prints each job's recorded criteria and deliverables and tells the reader to take fixtures, sizes and thresholds from them. The \"Previous result and change scope\" intro gains one sentence saying only the retried and followed-up jobs must be accounted for. `continued_jobs`, `check_prior_result_and_scope` and `refusing_check` are untouched, so nothing new is refused and no refusal share applies. `ReaderInputs` keeps its shape and no prompt file changes.",
+  "decisions": [
+    {
+      "choice": "Extend `referenced_jobs` to take the retried `Option<&EarlierAttempt>` instead of `skip: Option<&str>`, and read the ids from `attempt.introspection` (RetryCause) via a new pure helper `introspection_cited_ids`.",
+      "reason": "The ids are lost exactly there. `RetryCause.earlier_cases[].job` already holds them (retry.rs:171-181) and `read_once` already has `attempt` (reading.rs:579). The one resolver and the one `carry()` path (redaction, bounds) are reused, and nothing new is stored.",
+      "rejected": [
+        {
+          "option": "A new resolver or a new `ReaderInputs` field for cited jobs",
+          "why": "Duplicates `carry()`. Adds a second construction site to keep in step (reading.rs:609, briefs.rs:3430). The accepted reading says to extend the existing path."
+        },
+        {
+          "option": "A refusal rule that rejects readings whose fixtures differ from recorded jobs",
+          "why": "The request prefers giving the stage the information. The recorded shape is now in the reader's brief, so no rule is needed. A rule would also need a stated refused share and a corpus case."
+        }
+      ]
+    },
+    {
+      "choice": "Cap request-named jobs at `MAX_REFERENCED_JOBS` (3) as today and add `MAX_CITED_JOBS = 4` for introspection-cited jobs, listed after the request-named ones.",
+      "reason": "A real retry cites 1 job in the request and 3 earlier cases in the introspection (this very failure class). One shared cap of 3 would drop a recorded shape. Listing request-named jobs first and counting them separately means the cap never drops a request-named job, which criterion 3 requires.",
+      "rejected": [
+        {
+          "option": "One shared cap of 3, introspection ids last",
+          "why": "Drops cited jobs in the common case of 1 request id plus 3 earlier cases."
+        },
+        {
+          "option": "No cap on introspection-cited jobs",
+          "why": "Bloats the reader brief, because each carried job brings findings and up to 30 changed files."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the cited jobs in the same `referenced_jobs` vector and let `continued_jobs` (filter by `followed_up_ids`) decide which must be accounted for. Add one sentence to the \"Previous result and change scope\" intro saying so.",
+      "reason": "This keeps `check_prior_result_and_scope` and `refusing_check` unchanged, with no new refusal. The sentence stops the brief from implying the reader must account for every cited job, which `continued_jobs` (topics.rs:512-526) does not require.",
+      "rejected": [
+        {
+          "option": "Leave the intro unchanged",
+          "why": "It says the reading is refused unless it accounts for each job below, which is false for cited-only jobs and would push readers to restate unrelated work."
+        }
+      ]
+    },
+    {
+      "choice": "Print the recorded criteria and deliverables inside \"Referenced jobs\". Changed files stay in the existing carried_work block of the \"Previous result and change scope\" entry for the same job.",
+      "reason": "Today \"Referenced jobs\" prints only request and findings (reader.rs:436-461). The deliverables already print in the prior-result section (reader.rs:168-178). Adding criteria and deliverables beside the request gives the reader the shape under the cited-jobs heading. Not repeating the up-to-30 changed files keeps the brief small. No line starting `Job ` is added in `carried_work`, which the fake reader at fake.rs:243 parses.",
+      "rejected": [
+        {
+          "option": "Copy the changed files into the Referenced jobs section too",
+          "why": "Duplicates up to 30 lines per job for no new information."
+        }
+      ]
+    },
+    {
+      "choice": "Put the new unit tests in a `#[cfg(test)] mod tests` in topics.rs. Reuse the helpers of the reading.rs test module (`job_with_checks`, `scoped_reading`, `records_with`) by changing them from private to `pub(super)`.",
+      "reason": "Criterion 1 names topics.rs, and the helpers already build real `Records`, `JobRecords` and `Reading` values, so the test uses the real `carry()` and not a hand-made job.",
+      "rejected": [
+        {
+          "option": "Copy the Reading builder into topics.rs",
+          "why": "About 40 lines of duplicated fixture code that can drift from the record type."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/topics.rs",
+      "action": "modify",
+      "purpose": "Add `MAX_CITED_JOBS` and the pure helper `introspection_cited_ids(&RetryCause)`. Change `referenced_jobs` to take `attempt: Option<&EarlierAttempt>` and resolve request-named ids first, then introspection-cited ids under the second cap. Write the root-cause doc comment. Add `mod tests` with the criteria 1, 3 and 4 tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "In `read_once`, pass `attempt` to `referenced_jobs`. In the test module change `job_with_checks`, `scoped_reading` and `records_with` to `pub(super)` so topics.rs tests can build records. Leave the line `enabled_roles: jc.config.enabled_roles(),` as is, since a source-scanning test searches for it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs/reader.rs",
+      "action": "modify",
+      "purpose": "`referenced_jobs_section`: say the request or the retried job's introspection names these jobs, tell the reader to take fixtures, sizes and thresholds from their recorded criteria and deliverables, and print `Acceptance criteria it set` and `Deliverables it listed` per job, or say none recorded. Add the one sentence to the `prior_result_section` intro about which jobs must be accounted for. No `Job ` line in `carried_work`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add the criterion 2, 3 and 6 tests to the test module: a retry brief with a cited-only job, two cited jobs with their own deliverables, and the job-line count.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add the case `introspection-cited-job-carried-but-not-relied-on` (Accept), forms `retry-complaint` and `cites-job-without-relying`, no new INPUT_FORMS entry. Import `RetryCause` and `EarlierCase` from `athena_context::briefs`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry (Changed or Fixed) that names the root cause and lists jobs 20261109-075120-7zqw, 20261029-111121-fzx0 and 20261110-124307-bn3c as the instances. It says the fix gives the reader the cited jobs' recorded shape, adds no refusal rule, and refuses 0% of past readings.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-core/src/reading.rs `mod tests`, change `job_with_checks`, `scoped_reading` and `records_with` from private to `pub(super)`. Check that `scoped_reading` is visible with its `Forecast`, `Quantiles`, `Criterion` and `Deliverable` imports.",
+    "In crates/athena-core/src/reading/topics.rs add `pub const MAX_CITED_JOBS: usize = 4;` and `pub fn introspection_cited_ids(cause: &RetryCause) -> Vec<RecordId>`. It returns, without repeats and in this order: `earlier_cases[].job` (parsed with `RecordId::parse`), then `job_ids_in` over `cause.cause`, `cause.prevention`, `cause.proposed_request`, then each case's `what` and `prevention`. Change `referenced_jobs(records, request, attempt: Option<&EarlierAttempt>, redactor)`. Skip is `attempt.map(|a| a.job.as_str())`. Request-named ids (`followed_up_ids` then `job_ids_in`) are carried first under `MAX_REFERENCED_JOBS`. Cited ids not already considered follow under `MAX_CITED_JOBS`, counting carried jobs. Ids in no record, ids with no request and the retried job are ignored. Write the doc comment: the root cause is that ids cited by an introspection were never resolved to recorded deliverables, so fixtures and thresholds were invented. Avoid the strings `pub fn refusing_check(` and `step!(check_`.",
+    "In crates/athena-core/src/reading.rs `read_once`, change the call at line 603 to pass `attempt` instead of `attempt.map(|a| a.job.as_str())`. Leave the `ReaderInputs` fields as they are.",
+    "In crates/athena-context/src/briefs/reader.rs, update `referenced_jobs_section`: intro text says the request or the retried job's introspection names the jobs, with the instruction to take fixtures, sizes and thresholds from their recorded criteria and deliverables and not from an assumed shape. Print `Acceptance criteria it set:` (quoted `reading_criteria`) and `Deliverables it listed:` (quoted `reading_deliverables`), or a `none recorded for it` line, after the request and before the findings. Append to the `prior_result_section` intro one sentence: only the retried job and the jobs the request says it follows up must be accounted for, and the others are evidence. Do not touch `carried_work`.",
+    "Add tests. In topics.rs: `referenced_jobs_returns_a_job_cited_only_by_the_introspection` (criteria 1, case job, cause text and prevention text variants), `referenced_jobs_lists_request_named_jobs_first_and_never_drops_one` (criterion 3 cap, order, dedupe, `MAX_CITED_JOBS`), `referenced_jobs_skips_the_retried_job_and_unknown_ids`, and `referenced_jobs_doc_and_changelog_name_the_cause` (criterion 4, using `include_str!` of topics.rs and CHANGELOG.md). In briefs.rs: the criterion 2 test, the two-cited-jobs test and the one-`Job `-line-per-job test. In refusal_corpus.rs: the case `introspection-cited-job-carried-but-not-relied-on` (Accept) built from `earlier(RETRIED_JOB, ..)` with `introspection: Some(RetryCause{ earlier_cases: vec![EarlierCase{ job: Some(OTHER_JOB.into()), .. }], .. })`, `referenced: vec![earlier(OTHER_JOB, ..)]`, the retry-complaint request, and a reading that names only the retried job and lists reading.rs as its deliverable.",
+    "Add the Unreleased entry in CHANGELOG.md under `### Changed` (or `### Fixed`): the root cause (ids cited by an introspection were never resolved to recorded deliverables before the reading was accepted, so fixtures and thresholds were invented), the fix (the reader brief now resolves those ids, under `MAX_CITED_JOBS`, listed after request-named jobs), the three instances (20261109-075120-7zqw, 20261029-111121-fzx0, 20261110-124307-bn3c), that the dropped candidates of those jobs are not kept, and that no refusal rule is added so 0% of past accepted readings are newly refused.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`. Run `cargo test -p athena-core --test refusal_corpus` and `cargo test -p athena-cli --test budgets` separately. Check `git diff --stat` lists none of checks.rs, coverage.rs, fake.rs, drain.rs or crates/athena-context/prompts."
+  ],
+  "risks": [
+    {
+      "risk": "The reader brief grows. Each extra carried job adds its request, findings (failed-check tails are bounded to 1024 bytes each), up to 30 changed files and the new criteria and deliverables lists. With up to 3 request-named and 4 cited jobs, the brief could reach 7 jobs.",
+      "mitigation": "`MAX_CITED_JOBS = 4` bounds the addition. Every field goes through `carry()`, which already bounds and redacts. Changed files are not repeated in the new section. The brief sits outside the prompt-set budgets (docs/system-facts.md)."
+    },
+    {
+      "risk": "A reader reading \"Previous result and change scope\" might think it must account for each cited job and restate unrelated work, which would raise refusals by the existing check.",
+      "mitigation": "The added intro sentence says only the retried job and the jobs the request says it follows up must be accounted for. `continued_jobs` still filters by `followed_up_ids`, and the new corpus case and the existing follow-up case pin both outcomes."
+    },
+    {
+      "risk": "Job ids in introspection prose may name jobs that are unrelated, such as a job mentioned in passing in the cause text. They would be carried but never accounted for.",
+      "mitigation": "Ids in `earlier_cases[].job` go first, then ids in the cause, prevention and proposed request, then ids in case texts. Ids in no record are ignored, and `MAX_CITED_JOBS` stops the list at 4."
+    },
+    {
+      "risk": "The new topics.rs tests depend on helpers in the reading.rs test module, which couples two test modules.",
+      "mitigation": "The helpers become `pub(super)` inside `#[cfg(test)]` only. Production visibility does not change."
+    },
+    {
+      "risk": "The README still says \"At most three jobs are carried\" (README.md:72), which is no longer the whole story, because up to four more may be carried when an introspection cites them. README.md is not a deliverable of this reading.",
+      "mitigation": "The CHANGELOG entry states the second cap. The README sentence stays true for request-named jobs. Nothing reads it in a test."
+    },
+    {
+      "risk": "The criterion 1 test does not compile against the base `referenced_jobs` signature, so \"fails without the change\" is shown by a compile error, not an assertion.",
+      "mitigation": "Criteria 2 and 3(ii) are behavior tests that compile on the base and fail on it by assertion. The verifier's revert run covers criterion 1."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`referenced_jobs` signature and result (now includes introspection-cited jobs)",
+      "dependent": "crates/athena-core/src/reading.rs:603 (`read_once`), the only caller of `referenced_jobs`. `read_once` is reached from reading.rs:528 (first read) and 539 (second read with the refusal as correction). The state it reads is `records.jobs` and `attempt.introspection`.",
+      "kind": "code",
+      "test": "Both read paths build their brief through `read_once`. The new topics.rs tests cover resolution. The cli test crates/athena-cli/tests/retry.rs `a_retry_starts_from_the_introspection_and_shows_earlier_cases_and_tried_preventions` drives `read_once` with a real earlier case and `cargo test --locked` runs it.",
+      "reason": null
+    },
+    {
+      "name": "`continued_jobs` / `check_prior_result_and_scope` input (`referenced` may now hold cited-only jobs)",
+      "dependent": "crates/athena-core/src/reading/checks.rs:522-534 (`refusing_check` calls `continued_jobs(request, attempt, referenced)`). `continued_jobs` is in topics.rs:512. `check_prior_result_and_scope` takes only that result.",
+      "kind": "rule",
+      "test": "`continued_jobs` keeps only jobs whose id `followed_up_ids(request)` names. The tests at reading.rs:4300-4387 pass cited-only `referenced` jobs and expect them not to be accounted for. The new corpus case `introspection-cited-job-carried-but-not-relied-on` and `follow-up-on-a-job-the-reading-ignores` run through `cargo test -p athena-core --test refusal_corpus`.",
+      "reason": null
+    },
+    {
+      "name": "The `# Previous result and change scope` section entries (now also for cited-only jobs) and the intro sentence",
+      "dependent": "crates/athena-agent/src/fake.rs:240-246, the fake reader. It reads `Job ` lines of the `# Previous result and change scope` section as job ids and names each in its reading summary.",
+      "kind": "code",
+      "test": "The fake reader accepts any number of jobs there. The cli tests that use it, retry.rs (the retry tests at lines 161, 218 and 231) and lifecycle.rs, run under `cargo test --locked`. No line starting `Job ` is added in `carried_work`, which the briefs.rs test counts.",
+      "reason": null
+    },
+    {
+      "name": "Reader brief text of the `# Referenced jobs` and prior-result sections",
+      "dependent": "crates/athena-context/src/briefs.rs tests at 3896, 3974, 4026 and 3938 (`a_follow_up_brief_carries_the_result_and_scope_of_each_named_job`, `a_referenced_job_brief_prints_files_approach_and_checks`, `reader_briefs_carry_referenced_jobs_only_when_set`, `a_retry_brief_prints_files_approach_and_checks_of_the_earlier_job`), and crates/athena-cli/tests/lifecycle.rs:766 and 786 (`# Referenced jobs` present or absent)",
+      "kind": "code",
+      "test": "`cargo test -p athena-context brief`. The existing assertions are substring checks and the change only adds lines, so they still hold. The heading is printed only when `referenced_jobs` is non-empty, as before. `cargo test -p athena-cli --test lifecycle`.",
+      "reason": null
+    },
+    {
+      "name": "The text of topics.rs (read by source-scanning tests)",
+      "dependent": "crates/athena-core/src/reading.rs:1491-1506 and crates/athena-core/tests/refusal_corpus.rs:2670-2685. Both `include_str!` topics.rs, reader.rs is not included, and tests such as `environment_reach_has_one_step_line` split the joined text on `pub fn refusing_check(` and `pub fn check_*` strings.",
+      "kind": "code",
+      "test": "New doc and test text in topics.rs avoids those split strings and adds no `step!(check_` line. `cargo test -p athena-core` (reading.rs source tests) and `cargo test -p athena-core --test refusal_corpus` (`every_acceptance_check_has_a_refusing_corpus_case`, `an_extra_check_with_no_case_is_reported`) run them.",
+      "reason": null
+    },
+    {
+      "name": "Reader prompt-set token budget (reader 1998 of 2000)",
+      "dependent": "docs/system-facts.md budget lines, `BudgetSet::budget` in crates/athena-context/src/lib.rs and crates/athena-cli/tests/budgets.rs (`system_facts_budgets_match_computed`)",
+      "kind": "rule",
+      "test": "`cargo test -p athena-cli --test budgets`",
+      "reason": "No prompt file under crates/athena-context/prompts changes. The reader brief is built by code at run time and sits outside the budgeted sets, per docs/system-facts.md."
+    },
+    {
+      "name": "`RetryCause` / `EarlierCase` records and `carry()` output",
+      "dependent": "crates/athena-core/src/reading/retry.rs:111-192 (`retry_cause`) and 714-839 (`carry`)",
+      "kind": "code",
+      "test": "reading.rs tests at 1863 (`carry_adds_only_failed_checks_after_the_reasons_redacted_and_bounded`) and 3895 (`carry_includes_changed_files_approach_and_measured_checks_redacted_and_bounded`) stay green.",
+      "reason": "Neither is changed. `referenced_jobs` only reads `RetryCause.earlier_cases[].job` and the text fields, and calls `carry()` as before. `carry()` redacts the text and the changed files and bounds them (30 files, 800 chars of approach, 20 checks). No stored record or data file changes, so `check_record_file` and `AnyRecord` are unaffected."
+    },
+    {
+      "name": "Documented cap and description of \"Referenced jobs\"",
+      "dependent": "README.md line 70-73 and docs/decisions.md line 1826 describe the \"Referenced jobs\" section and the three-job cap",
+      "kind": "rule",
+      "test": null,
+      "reason": "Request-named jobs are still capped at three and still shown. The new introspection-cited jobs are an addition that the CHANGELOG entry states. Neither document is a deliverable of the reading and neither has a test reading it."
+    },
+    {
+      "name": "`job_ids_in`, `dependency_ids_in`, `followed_up_ids` (read, not changed)",
+      "dependent": "crates/athena-core/src/plan.rs and crates/athena-cli/src/drain.rs:4256, which read `job_ids_in` and the dependency parsers",
+      "kind": "code",
+      "test": "The existing drain.rs tests (`the_plan_of_an_unread_request_names_a_missing_path_and_an_unresolved_referenced_job`) run under `cargo test --locked`.",
+      "reason": "The plan reuses `job_ids_in` over introspection text and changes none of these functions. Dependencies, planning order and flagging of an unresolved referenced job (topics.rs:457) read the request text only."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in crates/athena-core/src/reading/topics.rs, `mod tests`. The names start with `referenced_jobs_` so the filter matches. The tests build `Records` with job A (id differing from the request ids, carrying a reading with deliverables `modify crates/x/a.rs` and `create crates/x/b.rs`). The retried attempt is `EarlierAttempt{job: B, introspection: Some(RetryCause{earlier_cases: [EarlierCase{job: Some(A), ..}], ..})}`, and the request text does not contain A's id. A second variant puts A's id only in `RetryCause.cause` or `prevention` text and leaves `earlier_cases` empty. Each calls `referenced_jobs(&records, request, Some(&attempt), &redactor)` and asserts that A is returned with `reading_deliverables == [\"modify crates/x/a.rs\", \"create crates/x/b.rs\"]`. A third variant: B is never returned, and an id in no record is ignored.",
+      "command": "cargo test -p athena-core referenced",
+      "observes": "The tests pass and show A, cited only by the introspection, comes back with its recorded deliverables.",
+      "fails_without": "The base `referenced_jobs` reads only `followed_up_ids(request)` and `job_ids_in(request)` (topics.rs:540-545), so it never returns A. The tests also do not compile against the base signature. The verifier's revert run of topics.rs shows the failure.",
+      "seam": "Production entry point `referenced_jobs` (exists, pub, topics.rs:533), called directly. Fixtures: `Records::default()` with `JobRecords` inserted by `records_with`, `job_with_checks`, `scoped_reading` and `Redactor::new(&athena_gate::builtin_config())`, all existing in the reading.rs test module (reading.rs:1831, 1917, 3671). Step 1 makes them `pub(super)`. The introspection is a plain `RetryCause` value, so the logic under test, id resolution, is not in the double. The parameter change on `referenced_jobs` is added in step 2."
+    },
+    {
+      "criterion": 2,
+      "method": "A test in crates/athena-context/src/briefs.rs, next to `a_referenced_job_brief_prints_files_approach_and_checks` (briefs.rs:3974). It builds `reader_inputs(&reading())` with `earlier_attempt` set to an `EarlierAttempt` whose `introspection` is `Some(RetryCause)` with `earlier_cases[0].job = Some(\"20260901-000000-dddd\")`. `referenced_jobs` holds an `EarlierAttempt` for that id with `reading_criteria`, `reading_deliverables` and `changed_files` set, as `carry()` would produce. It calls `reader_brief` and asserts: (a) under `# Referenced jobs`, the entry `Job 20260901-000000-dddd.` contains the quoted `[behavior] ...` criterion and the quoted deliverable lines; (b) in the `PRIOR_RESULT_HEADING` entry for the same job, the changed files are quoted. This is a pure rendering check of the brief the reader receives.",
+      "command": "cargo test -p athena-context brief",
+      "observes": "The brief for a retry that cites a past job only by id contains that job's recorded criteria, deliverables and changed files.",
+      "fails_without": "The base `referenced_jobs_section` prints only the request and findings (reader.rs:442-458), so the criteria and deliverables assertions fail. This test compiles on the base, so it is a plain behavioral failure.",
+      "seam": "Production entry point `reader_brief` (exists, reader.rs:318). Fixtures: `reader_inputs`, `reading()` and `EarlierAttempt` struct literals in the briefs.rs test module (exist, briefs.rs:3430, 3898). Step 3 adds the rendering of criteria and deliverables. The data in the double is input, and the rendering is the code under test."
+    },
+    {
+      "criterion": 3,
+      "method": "Two tests. (i) In topics.rs: the request names 3 jobs (`MAX_REFERENCED_JOBS`), each with its own deliverables; the introspection cites 2 other jobs (D1, D2) with different deliverable lists and a 5th, 6th and so on beyond `MAX_CITED_JOBS`. Assert the result order is the request-named ids first, then D1, D2. Assert all 3 request-named jobs are present even though 3 cited jobs follow. Assert each job carries its own deliverables (D1's list differs from D2's). Assert cited jobs past `MAX_CITED_JOBS` are dropped and an id found in both request and introspection appears once. (ii) In briefs.rs: two cited `EarlierAttempt`s with different ids and deliverable lists both appear in the brief, each with its own list, in the given order.",
+      "command": "cargo test -p athena-core -p athena-context",
+      "observes": "All tests in both crates pass, including the cap-and-order test and the two-cited-jobs brief test.",
+      "fails_without": "The base code returns only request-named jobs, so D1 and D2 are absent. A naive fix with one shared cap of 3 fails the test that a cited job after 3 request-named jobs is kept. A fix that put cited ids first fails the order assertion.",
+      "seam": "`referenced_jobs` (exists) and `reader_brief` (exists), called directly with the same existing fixtures as criteria 1 and 2. No new seam beyond the signature change in step 2."
+    },
+    {
+      "criterion": 4,
+      "method": "Grep both files for the root-cause sentence and the three job ids. The `referenced_jobs` doc comment and the CHANGELOG Unreleased entry (under `### Changed` or `### Fixed`) say: ids cited by an introspection were never resolved to recorded deliverables, so fixtures and thresholds were invented. The entry lists 20261109-075120-7zqw, 20261029-111121-fzx0 and 20261110-124307-bn3c as the instances. The doc comment avoids the strings the source-scanning tests split on (`pub fn refusing_check(` and others).",
+      "command": "cargo test -p athena-core referenced_jobs_doc",
+      "observes": "A small test in topics.rs `mod tests` reads `include_str!(\"../../../../CHANGELOG.md\")`, finds the Unreleased section and checks it names the three job ids. It reads the `referenced_jobs` doc through `include_str!(\"topics.rs\")` and checks it contains \"never resolved\" and \"invented\". The verifier also runs Grep for \"20261109-075120-7zqw\" in CHANGELOG.md and \"never resolved\" in topics.rs.",
+      "fails_without": "Without the doc comment and the changelog entry the test fails. Existing tests already read CHANGELOG.md the same way (corpus tests such as `delivery_verb_replay_over_the_cited_jobs` at refusal_corpus.rs:976).",
+      "seam": "Plain Grep and `include_str!` of two repository files. No double. Step 7 and step 6 write the text."
+    },
+    {
+      "criterion": 5,
+      "method": "`git diff` shows refusing_check in crates/athena-core/src/reading/checks.rs unchanged: no new `step!` line and no new `check_` function. The existing prior-result tests still pass (reading.rs:4288-4387 and the `check_prior_result_and_scope` tests at 3764-3837). The corpus gets one new case, `introspection-cited-job-carried-but-not-relied-on`, with Expected::Accept: the retried job is `attempt` with an introspection citing OTHER_JOB, `referenced` holds that job, and the reading names only the retried job. Existing corpus cases cited: root-cause-cites-two-jobs-without-relying (Accept), follow-up-on-a-job-the-reading-ignores (Refuse check_prior_result_and_scope), retry-complaint-reading-names-the-job (Accept), retry-complaint-reading-omits-the-job (Refuse check_prior_result_and_scope). These show cited jobs are not accounted for and followed-up jobs still are.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "All corpus cases keep their outcomes and the new case is accepted. The change adds no newly refused reading, so the refused share is 0%. The verifier also runs `git diff --stat` and checks that checks.rs is not in it. I cannot run the corpus test here and have only read the case ids.",
+      "fails_without": "A change that turned `referenced` jobs into jobs to account for would make the new case refuse and fail it. Any new `step!` makes `every_acceptance_check_has_a_refusing_corpus_case` demand a refusing case and a stat that shows checks.rs.",
+      "seam": "`refusing_check` (exists) driven by the corpus `Case` and `run` (exist, refusal_corpus.rs:72, 2595). Step 5 adds the case. The `RetryCause` and `EarlierCase` types are already exported from `athena_context::briefs`."
+    },
+    {
+      "criterion": 6,
+      "method": "A briefs.rs test with a cited-only job whose `reading_deliverables` is set. It asserts the deliverables are quoted under both `# Referenced jobs` and the `PRIOR_RESULT_HEADING` entry. It asserts the `PRIOR_RESULT_HEADING` section has exactly one line starting `Job ` per job, as in the test at briefs.rs:3969-3970. It asserts the new intro sentence is present. `git diff --stat` must show no file under crates/athena-context/prompts.",
+      "command": "cargo test -p athena-cli --test budgets",
+      "observes": "The prompt-set budgets still hold: reader 1998 of 2000, as in docs/system-facts.md, because no prompt file changes. The briefs.rs test from criterion 2 and `a_retry_brief_prints_files_approach_and_checks_of_the_earlier_job` pass. `git diff --stat` lists no prompt file.",
+      "fails_without": "A line starting `Job ` added in `carried_work` fails the job-line count in the briefs.rs test. A prompt edit changes the computed budget line and fails `system_facts_budgets_match_computed`.",
+      "seam": "`reader_brief` and `carried_work` (exist, reader.rs:199) plus the budgets test (exists, crates/athena-cli/tests/budgets.rs). No new seam."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three whole-workspace checks.",
+      "command": "cargo fmt --all --check",
+      "observes": "fmt, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`, all exit 0. This includes the cli tests that drive the real brief: retry.rs `a_retry_starts_from_the_introspection_and_shows_earlier_cases_and_tried_preventions`, which now also carries the earlier case's job, and lifecycle.rs:766-786.",
+      "fails_without": "A compile error, a clippy warning (for example an unused `skip` parameter) or a changed brief that breaks an existing needle would fail one of the three commands.",
+      "seam": "The checks Athena runs on the result. No double."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "16d5123a759205896976ba2427db8d657fef7cf7e655c6017d760f2f51651c59"
+}
