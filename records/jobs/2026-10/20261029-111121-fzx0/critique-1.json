@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-111121-fzx0",
+  "round": 1,
+  "at": "2026-11-10T11:06:12.307383692Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The coverage rule passes a dropped bullet whenever it shares words with the bullets that were kept, which is the usual shape of a split.",
+      "evidence": "A bullet counts as covered when (a) all its distinctive tokens appear, OR (b) at least half (rounded up) of its stems appear in the stems of all criteria combined. Bullets that get split into a follow-up usually share wording with the bullets that stay, for example 'A test shows X is refused' and 'A test shows Y is refused'. Once X's criterion is present, the words test, show and refus already make up half of Y's stems, so Y counts as covered. Because (a) and (b) are joined by OR, a bullet whose path or file token is missing from every criterion can still pass on shared common words. Short bullets of the kind Hestia generates (hestia.rs:4764 'The output is whole') have about two stems, so one shared word covers them. The plan accepts this 'by design', but the only demonstrations use bullets with very different wording (criterion 1's example, and the corpus case that drops this job's 'fmt, clippy... CHANGELOG.md' bullet). The hard case is never tested, so criterion 1 passes even though the check misses the realistic split. Fix: Count only the stems that belong to this bullet: drop stems that also appear in another bullet of the same request, or in the request's non-bullet lines. Then require a share of those bullet-specific stems, still measured over all criteria combined. When a bullet has distinctive tokens, require them (AND, not OR). Add a unit test and a corpus case with two bullets of near-identical wording that differ only in their object, where the reading drops one, and show it is refused. A bullet that ends up with no specific stems falls back to the current rule.",
+      "location": "Plan approach, 'covered' rule; Decision 3; step 1 `is_covered`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Some allow-split phrases are common in requests that allow no split, so they would turn the check off silently.",
+      "evidence": "The list includes 'in parts', 'separate jobs' and 'split into'. These match unrelated sentences such as 'the log is read in parts', 'CI runs separate jobs' or 'the parser will split into tokens'. The check then returns Ok and says nothing. The negation guard only stops negated uses, not unrelated ones. Fix: Only match phrases that permit something about this job or work (for example 'may/can split this job|the work', 'split it into separate jobs', 'in parts' only together with job, work or request). Add a corpus case where a non-permitting 'in parts' sentence still leaves the request checked.",
+      "location": "Plan approach, `allows_split` phrase list",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`is_bullet` does not trim, so the parser has to trim lines itself to catch indented bullets.",
+      "evidence": "topics.rs:266 checks `starts_with(\"- \")` on the raw line. `request_text_acceptance` (topics.rs:278) trims before calling it. The plan's parser description does not say it trims. Fix: Trim each line before calling `is_bullet` and before matching the heading or `Files:`. Add an indented-bullet case to the parser unit tests.",
+      "location": "Step 1 `acceptance_bullets`",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan needs revision for one major problem: the rule for deciding that a bullet is covered lets a dropped bullet through when it shares wording with the bullets that were kept, and no test tries that case. The rest checks out against the code. The functions and fixtures it names exist: `refusing_check` with its step! list at checks.rs:532-546, `is_bullet` at topics.rs:266, `request_words` at outcome.rs:141, `governed_reading` at reading.rs:4527, the two `reading_source()` helpers, and `INPUT_FORMS` with 52 entries at refusal_corpus.rs:90. Putting the step last instead of after `check_outcome_state` is justified by the existing tests that check which steps sit next to each other. Limiting the parse to bullets under the `Acceptance:` heading matches the shape of the request; the only files with that heading are refusal_corpus.rs, code_health.rs, steward.rs, hestia.rs and reading.rs. The dependents list covers every caller I found by grep (drain.rs has only a doc mention). Each demonstration runs the real `check_reading_acceptance` or `refusing_check` with real request strings and would fail without the change. The fix is to count only the words specific to each bullet, require its path or file tokens when it has them, and add a test where two near-identical bullets differ by one object and the reading drops one. Two smaller issues: some allow-split phrases ('in parts', 'separate jobs', 'split into') are common enough to switch the check off silently, and the bullet parser has to trim lines itself."
+}

@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261110-151108-70nx",
+  "round": 1,
+  "at": "2026-11-10T15:19:24.54156778Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "No test shows that ids cited by an introspection reach the reader brief through the real read path; the brief test feeds the referenced jobs by hand.",
+      "evidence": "The criterion 2 test builds ReaderInputs with `referenced_jobs` already holding the cited job, as carry() would produce, and then calls reader_brief. On the base code, the prior-result section already prints deliverables and changed files for any referenced job (reader.rs:168-178, 190). So this test only covers the new 'Referenced jobs' printing and would pass if referenced_jobs were never extended. Criterion 1 fails on the base code only because it does not compile against the old signature (Risks, last bullet). The plan lists retry.rs `a_retry_starts_from_the_introspection_and_shows_earlier_cases_and_tried_preventions` as a dependent test but adds no assertion there. That test retries `second`, whose introspection has `first` as an earlier case with a recorded reading (retry.rs:161-216). Fix: Add an assertion to that retry.rs test, or a new test beside it: the reader brief's `# Referenced jobs` section contains `Job {first}.` and first's recorded deliverable line(s) under 'Deliverables it listed'. This drives read_once → referenced_jobs → carry → reader_brief, compiles on the base code and fails there by assertion. Add crates/athena-cli/tests/retry.rs to the files, or put an equivalent read_once-level test in reading.rs.",
+      "location": "Demonstrations, criteria 1 and 2; Dependents entry for referenced_jobs",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The doc-comment check passes without the doc comment, because the test's own strings are in the file it searches.",
+      "evidence": "The test reads `include_str!(\"topics.rs\")` and checks that it contains \"never resolved\" and \"invented\". The test itself lives in topics.rs `mod tests`, so those literals are always in the included text. The verifier's Grep for \"never resolved\" in topics.rs matches the test literal in the same way. Fix: Take only the `///` lines just above `pub fn referenced_jobs(` and assert on those. Or build the search strings from pieces (for example `concat!(\"never \", \"resolved\")`) so they never appear whole in topics.rs. Tell the verifier to grep the doc block, not the whole file.",
+      "location": "Demonstrations, criterion 4 (`referenced_jobs_doc_and_changelog_name_the_cause`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The named helpers build a single job with a fixed id, but the tests need five or more distinct jobs, each with its own reading.",
+      "evidence": "job_with_checks always uses JobId \"20261012-084936-n1p0\" (reading.rs:1831-1860). records_with inserts exactly one job (reading.rs:1917-1921). scoped_reading always uses job \"20261027-054151-ace0\" and sets every deliverable to Modify (reading.rs:3671-3724). The criterion 3 test needs three request-named jobs and at least five cited jobs with different deliverable lists, and the criterion 1 demonstration expects a `create` deliverable. Fix: Name a small pub(super) helper, for example `job_with_reading(id, deliverables: &[(&str, DeliverableAction)])`. It sets the id, request.job and the reading, and the jobs are inserted into `records.jobs` directly. Or say how each fixture overrides those fields.",
+      "location": "Decision 5 and step 1 (reusing job_with_checks, scoped_reading, records_with)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Ids that the reader introduces in its own reading, outside the request and the introspection, are still not resolved, but the change description implies the whole class is closed.",
+      "evidence": "The failure-class cause says 'The reading cited past jobs by id but nothing resolved those ids'. The plan resolves only ids in the request text and in RetryCause fields. An id the reader adds itself, in assumptions or fixtures, still reaches acceptance unresolved. Fix: Say this limit in the CHANGELOG entry and the plan's out-of-scope list, or name it as a follow-up, so the root-cause claim matches what the change covers.",
+      "location": "Approach / CHANGELOG step 6",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A request-named id dropped by the request cap is also skipped when the introspection cites it.",
+      "evidence": "With four request-named jobs, the fourth is past MAX_REFERENCED_JOBS. Because it was 'considered', it is excluded from the cited ids too, although the introspection cites it. Fix: Dedupe the cited ids against the jobs actually carried, not against every id considered.",
+      "location": "Step 2 (\"Cited ids not already considered\")",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes the fault where it starts: referenced_jobs (topics.rs:533-560) resolves only ids in the request text, and read_once (reading.rs:603) already has the retried attempt, whose RetryCause.earlier_cases[].job carries the cited ids (retry.rs:171-181). Reusing carry() keeps redaction and size limits. No refusal rule is added: refusing_check passes `referenced` only to continued_jobs (checks.rs:534), which keeps only followed-up ids, so cited-only jobs are not accounted for. No prompt file changes. The listed dependents check out: lifecycle.rs:766/786, the retry.rs needles, the fake reader's `Job ` parsing at fake.rs:240-246, and the include_str source scans. There are two major gaps in the tests. First, no test exercises the new resolution through the real read path. The criterion 2 brief test hand-fills referenced_jobs, and the criterion 1 test fails on the base code only by compile error. Second, the criterion 4 doc check reads the whole of topics.rs, which contains the test's own search strings, so it passes without the doc comment. Both are fixable, so the verdict is revise."
+}

@@ -14,6 +14,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The homepage built by `cargo run -p xtask -- site` has a "Check it on a real job" section under the header.
+  For one named landed job it shows the producer model, the verifier model, the verdict and each stage's
+  recorded cost, all read from that job's records on the records branch, with links to the source records. It
+  backs the header's claims that a different model checks the work and that each step's cost is recorded. When
+  the records branch is not in the checkout, the section says so and shows no values.
 - Hestia's sweep now owns Athena's recurring duties and schedules them, so none depends on a person remembering.
   `DUTIES` in `crates/athena-core/src/hestia.rs` and one table in `docs/design/hestia.md` (section 13, compared by a
   test) list six: the error-review backlog pass and the evidence-label derivation (every drain start), the
