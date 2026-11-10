@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The critic role prompt now tells the critic to search for counterexamples, fragile assumptions, failure modes and
+  regressions; `docs/spec.toml` records it as the mechanism for OLY-2-07, with a test in `athena-context`.
 - `planning_round` in `crates/athena-core/src/run/planning.rs` is split into smaller private methods
   (`critic_round`, `stop_on_mechanical_limit`) so no function exceeds the 200-line limit. Behavior is unchanged.
 

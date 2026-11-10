@@ -504,6 +504,21 @@ mod tests {
     }
 
     #[test]
+    fn the_critic_prompt_carries_the_adversarial_duties() {
+        // OLY-2-07: the critic role is the mechanism for adversarial challenge.
+        let composed = compose(&[CRITIC_FRAME.into()]);
+        let text = composed.text.to_lowercase();
+        for duty in [
+            "counterexamples",
+            "fragile assumptions",
+            "failure modes",
+            "regressions",
+        ] {
+            assert!(text.contains(duty), "critic prompt lacks the duty: {duty}");
+        }
+    }
+
+    #[test]
     fn landing_rules_need_a_commit_shape_table_and_a_realistic_fixture() {
         // Guidance only: the frames make the planner derive history rules from every commit shape and the
         // critic raise a major finding when the plan does not.
