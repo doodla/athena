@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- New design note `docs/design/direct-main-landing.md` for throughput review `20261110-024838-mch9`: build each
+  verified job's landing commit on host main (`Git::merge_tree`, then `Git::commit_tree`) and push it, instead of
+  staging it on the local landing branch. Predicts 5.0 minutes saved per landed job and says how the next review
+  measures it. Design only; no code changes.
 - Records-history step 7b (D111), first slice: readers can now read the current records from the `athena/records`
   worktree. `athena_data::paths::records_worktree(state_dir)` is the one place that builds the worktree path
   (`<state>/records-worktree`). `Records::load_current` (`athena-core`, `store.rs`) and `RecordSet::load_current`
