@@ -14,6 +14,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A new reading check, `check_reading_coverage` (`crates/athena-core/src/reading/coverage.rs`, one `step!` line in
+  `refusing_check` after `check_scope_limit`), refuses a reading that leaves out a bullet under the request's
+  `Acceptance:` heading, and names the bullet. Root cause: job 20261029-084645-sza7, the 2026-10-29 job rejected
+  for a split the reading chose, moved its third part (the status report) to a follow-up by dropping that bullet,
+  and nothing compared the request's bullets with the reading's criteria. The rule: a split may be proposed only as
+  a question, never by dropping a bullet; a request that affirmatively says so (`You may split this job`) allows it,
+  and `Do not split this job` does not. Each bullet is scored by the share of its own content words (word forms
+  reduced, so `flagged` and `flags` agree) that its best-matching criterion holds, and a word the request's prose
+  repeats still counts. The score must reach 25%; a criterion written for a sibling bullet that shares only the
+  framing words is not counted for this one. A reading that asks a question or declines, and a request with no
+  `Acceptance:` heading, are not checked. This check refuses more readings; the higher refusal rate is intended.
+  The share was first estimated at 10% (an estimate, expected 10% of newly refused readings). Measured by running
+  the check over the 793 accepted readings in the records snapshot at the time of the change: 8 are newly refused
+  (1%), none of the newest 50 (the verification replay measures its own window and holds the job above 15%).
+  Of the 8, jobs 20261105-093606-199q and 20261102-001719-1fva were read in full: each reading leaves out a bullet
+  of its request, the first the effect the next throughput review should show and the second the bare-origin
+  test. The threshold is tuned on the recorded readings of jobs 20261029-084645-sza7 (the omitted bullet scores
+  22%, its covered bullets 42% or more), 20261107-031902-ttnw and 20261109-161505-bp5e (accepted; their lowest
+  bullets score 60% and 50%). The corpus replay (`coverage_replay_over_the_corpus_and_recorded_shapes`) is over a
+  chosen sample, not history. The drain tests' steward request helper in `crates/athena-cli/tests/drain.rs` now
+  carries one bullet of its own that their scripted readings repeat, since the stock bullets were not repeated.
 - Hestia's sweep now owns Athena's recurring duties and schedules them, so none depends on a person remembering.
   `DUTIES` in `crates/athena-core/src/hestia.rs` and one table in `docs/design/hestia.md` (section 13, compared by a
   test) list six: the error-review backlog pass and the evidence-label derivation (every drain start), the

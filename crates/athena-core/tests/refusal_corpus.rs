@@ -31,6 +31,12 @@
 //! reading restates the name in a `Term Hermes:` assumption, and requests that only quote it or carry it in a
 //! path, an identifier or Athena-generated text, which are accepted.
 //!
+//! Omitted acceptance bullets (`check_reading_coverage`): the `coverage-*` cases hold readings that leave out a
+//! bullet under the request's `Acceptance:` heading (refused), readings that cover every bullet in words of their
+//! own, including the recorded criteria of jobs 20261107-031902-ttnw and 20261109-161505-bp5e (accepted), and the
+//! requests that allow a split, readings that ask or decline and requests with no heading (not checked).
+//! `coverage_replay_over_the_corpus_and_recorded_shapes` runs them through the check alone.
+//!
 //! What the mechanism covers, and what it does not:
 //! - Every `check_*` step in `refusing_check` must have a case in which that check refuses
 //!   (`every_acceptance_check_has_a_refusing_corpus_case`), so a new reading check cannot land without a case.
@@ -87,7 +93,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 52] = [
+const INPUT_FORMS: [&str; 62] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -140,6 +146,16 @@ const INPUT_FORMS: [&str; 52] = [
     "scope-limit-consumer-not-a-deliverable",
     "scope-limit-proposal-apply",
     "scope-limit-bare-form",
+    "coverage-bullet-omitted",
+    "coverage-sibling-framing",
+    "coverage-bullet-paraphrased",
+    "coverage-prose-repeated-words",
+    "coverage-split-allowed",
+    "coverage-split-negated",
+    "coverage-split-lookalike-prose",
+    "coverage-wrapped-bullet",
+    "coverage-no-acceptance-heading",
+    "coverage-reading-asks-or-declines",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -296,6 +312,7 @@ fn cases() -> Vec<Case> {
     out.extend(delivery_cases());
     out.extend(defined_terms_cases());
     out.extend(scope_limit_cases());
+    out.extend(coverage_cases());
     out
 }
 
@@ -2568,6 +2585,321 @@ fn boundary_word_cases() -> Vec<Case> {
     out
 }
 
+/// The Acceptance bullets of job 20261107-031902-ttnw, verbatim from its recorded request.
+const TTNW_BULLETS: [&str; 5] = [
+    "a test: with six person-filed urgent requests and two Steward requests queued, the first three dispatches include at least one Steward request",
+    "a test: a Hestia request whose failure class appears in three distinct jobs is ordered as urgent",
+    "a test: with no improvement requests queued, ordering is unchanged",
+    "athena plan prints which items take the improvement turn",
+    "all tests pass; CHANGELOG states only what the diff does",
+];
+
+/// The criteria of the recorded reading of job 20261107-031902-ttnw, verbatim. Each bullet is covered in
+/// the reading's own words, for example `ordering is unchanged` as `the plan order is identical`.
+const TTNW_CRITERIA: [&str; 8] = [
+    "Run `cargo test -p athena-core`: a new test queues six person-filed urgent requests and two Steward requests, builds the plan, and asserts the first three dispatched items include at least one Steward request.",
+    "Run `cargo test -p athena-core`: a new test gives a Hestia request whose failure class appears in introspections of three distinct jobs and asserts it is ordered as urgent; a companion case with two distinct jobs asserts it is not promoted.",
+    "Run `cargo test`: a new test with no Steward or Hestia requests queued asserts the plan order is identical to the order before the change, and the existing plan tests still pass.",
+    "Run `cargo test -p athena-cli`: a test of the `athena plan` output (display::plan or the CLI drain test) asserts it names each item that takes the improvement turn, and that the drain report lists them.",
+    "An improvement request whose reading fails (missing goal, rung or acceptance) or whose dependency is unmet is not given a turn; a test or the diff in plan.rs shows the turn is taken only from ready, passing entries.",
+    "Run `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` and `cargo test`: all pass.",
+    "CHANGELOG.md has an entry for the guaranteed improvement turn, the three-job urgent promotion and the plan and report display, and each claim matches the diff, with nothing claimed beyond it.",
+    "The changed files are limited to the ordering and planning code, the plan display, tests and CHANGELOG.md, with no change to athena.toml or defaults.toml.",
+];
+
+/// The Acceptance bullets of job 20261109-161505-bp5e, verbatim from its recorded request.
+const BP5E_BULLETS: [&str; 3] = [
+    "The root cause is named in the change description and fixed where it originates, not at one instance",
+    "A test fails without the change and passes with it, for the cause and not only for one job",
+    "fmt, clippy and test pass",
+];
+
+/// The criteria of the recorded reading of job 20261109-161505-bp5e, verbatim.
+const BP5E_CRITERIA: [&str; 6] = [
+    "crates/athena-core/src/admission.rs contains a rule that emits a PolicyViolation naming CHANGELOG.md when the reading's deliverables list it, defaults_applied has id `changelog`, and no change in input.changes has path CHANGELOG.md; its doc comment names the root cause (the default was a rule the producer must remember, with no code comparing the diff to the deliverables).",
+    "Run `cargo test -p athena-core admission`: new tests show a candidate that changes only docs/ files with a change reading carrying the changelog default yields a violation naming CHANGELOG.md; the same candidate plus a CHANGELOG.md change yields none; a non-change reading or a reading without the default yields none. The first test fails when the new rule is removed.",
+    "Run `cargo test -p athena-core` : a test with a docs-only design reading built through ensure_changelog (the path both failed jobs took) is refused by admit before verification, showing the check is for the class and not one job.",
+    "Existing tests that run admit or the run pipeline with a change reading still pass (cargo test) after fixtures are updated where they omitted CHANGELOG.md.",
+    "cargo fmt --check, cargo clippy --all-targets and cargo test pass.",
+    "CHANGELOG.md has an entry for this change naming the cause and the new admission rule.",
+];
+
+/// A request whose acceptance bullets are `bullets` under an `Acceptance:` heading, after the `head` lines.
+fn acceptance_request(head: &[&str], marker: &str, bullets: &[&str]) -> String {
+    let mut text: Vec<String> = head.iter().map(|l| l.to_string()).collect();
+    text.push(String::new());
+    text.push("Acceptance:".into());
+    text.extend(bullets.iter().map(|b| format!("{marker}{b}")));
+    text.join("\n")
+}
+
+/// Sets the criteria of `c`'s reading to `texts`, all `content` criteria.
+fn set_criteria(c: &mut Case, texts: &[&str]) {
+    c.reading.acceptance_criteria = texts
+        .iter()
+        .map(|text| Criterion {
+            text: text.to_string(),
+            kind: CriterionKind::Content,
+        })
+        .collect();
+}
+
+/// Removes the criterion at `index`, so the reading leaves out the request's bullet that it copied.
+fn drop_criterion(c: &mut Case, index: usize) {
+    c.reading.acceptance_criteria.remove(index);
+}
+
+/// Readings whose criteria leave out a bullet under the request's `Acceptance:` heading
+/// (`check_reading_coverage`), and the readings that cover every bullet or are not checked. The bullet and
+/// criterion texts of the accepted recorded jobs are verbatim; the requests around them are rebuilt, and
+/// each case says which.
+fn coverage_cases() -> Vec<Case> {
+    const SZA7: &str = "job 20261029-084645-sza7, the status bullet dropped as a split; bullets rebuilt from the recorded request";
+    const SIBLING: &str =
+        "job 20261029-084645-sza7 shape, bullets that share framing; rebuilt from the job brief";
+    const SPLIT: &str = "job 20261029-084645-sza7 shape, a request that says something about a split; rebuilt from the job brief";
+    let sza7_bullets = [
+        "A test with a fake check runner that exceeds its time limit shows the job ends as an environment stop, not a rejection, and a real test failure is still a failed check.",
+        "A test shows status reports the median and slowest test-check durations and flags one over 80% of the limit.",
+        "The guide says the check limit is 1800 seconds and the config test passes.",
+    ];
+    let sza7_head = [
+        "The test check is cut off at random.",
+        "Fix: (1) raise the limit; (2) record a killed check as an environment stop; (3) report the median and slowest durations in athena status.",
+    ];
+    let sibling_bullets = [
+        "The status list shows each job's state",
+        "The status list shows each job's owner",
+        "The status list shows each job's duration in seconds",
+    ];
+    let mut out = Vec::new();
+
+    let mut c = case(
+        "coverage-omitted-bullet-sza7-refused",
+        SZA7,
+        &["coverage-bullet-omitted", "dash-bullet"],
+        &acceptance_request(&sza7_head, "- ", &sza7_bullets),
+        3,
+        Expected::Refuse("check_reading_coverage"),
+    );
+    drop_criterion(&mut c, 1);
+    out.push(c);
+
+    let mut c = case(
+        "coverage-sibling-framing-refused",
+        SIBLING,
+        &["coverage-sibling-framing"],
+        &acceptance_request(&["Make the status list richer."], "- ", &sibling_bullets),
+        3,
+        Expected::Refuse("check_reading_coverage"),
+    );
+    set_criteria(&mut c, &[sibling_bullets[0], sibling_bullets[1]]);
+    out.push(c);
+
+    let mut c = case(
+        "coverage-star-bullet-omitted-refused",
+        SIBLING,
+        &["star-bullet", "coverage-bullet-omitted"],
+        &acceptance_request(&["Make the status list richer."], "* ", &sibling_bullets),
+        3,
+        Expected::Refuse("check_reading_coverage"),
+    );
+    drop_criterion(&mut c, 2);
+    out.push(c);
+
+    let mut c = case(
+        "coverage-number-dot-omitted-refused",
+        SIBLING,
+        &["number-dot-parts", "coverage-bullet-omitted"],
+        &lines(&[
+            "Make the status list richer.",
+            "",
+            "Acceptance:",
+            "1. The status list shows each job's state",
+            "2. The status list shows each job's owner",
+            "3. The status list shows each job's duration in seconds",
+        ]),
+        3,
+        Expected::Refuse("check_reading_coverage"),
+    );
+    drop_criterion(&mut c, 2);
+    out.push(c);
+
+    let mut c = case(
+        "coverage-wrapped-bullet-omitted-refused",
+        SIBLING,
+        &["coverage-wrapped-bullet", "coverage-bullet-omitted"],
+        &lines(&[
+            "Make the status list richer.",
+            "",
+            "Acceptance:",
+            "- The status list shows each job's state, and a job that has no",
+            "  state yet shows a dash",
+            "- The status list shows each job's owner",
+            "- The status list shows each job's duration in seconds",
+        ]),
+        3,
+        Expected::Refuse("check_reading_coverage"),
+    );
+    set_criteria(
+        &mut c,
+        &[
+            "The status list shows each job's state, and a job that has no state yet shows a dash",
+            "The status list shows each job's owner",
+        ],
+    );
+    out.push(c);
+
+    // The prose says 'measured duration' and 'message' as the first bullet does.
+    let repeated = lines(&[
+        "Print the measured duration. The message must name the measured duration with the limit, and the limit is the one in the message.",
+        "",
+        "Acceptance:",
+        "- The message names the measured duration and the limit",
+        "- the guide says 1800 seconds",
+    ]);
+    let mut c = case(
+        "coverage-prose-repeated-words-refused",
+        SPLIT,
+        &["coverage-prose-repeated-words"],
+        &repeated,
+        2,
+        Expected::Refuse("check_reading_coverage"),
+    );
+    set_criteria(&mut c, &["the guide says the value is 1800 seconds"]);
+    out.push(c);
+    let mut c = case(
+        "coverage-prose-repeated-words-covered-accepted",
+        SPLIT,
+        &["coverage-prose-repeated-words"],
+        &repeated,
+        2,
+        Expected::Accept,
+    );
+    set_criteria(
+        &mut c,
+        &[
+            "the guide says the value is 1800 seconds",
+            "The stop message names the measured duration against the limit",
+        ],
+    );
+    out.push(c);
+
+    let splits: [(&'static str, &'static [&'static str], &str, Expected); 3] = [
+        (
+            "coverage-split-negated-refused",
+            &["coverage-split-negated"],
+            "Do not split this job.",
+            Expected::Refuse("check_reading_coverage"),
+        ),
+        (
+            "coverage-split-lookalike-prose-refused",
+            &["coverage-split-lookalike-prose"],
+            "Split the output into two columns.",
+            Expected::Refuse("check_reading_coverage"),
+        ),
+        (
+            "coverage-split-allowed-accepted",
+            &["coverage-split-allowed"],
+            "You may split this job.",
+            Expected::Accept,
+        ),
+    ];
+    for (id, forms, line, expected) in splits {
+        let mut c = case(
+            id,
+            SPLIT,
+            forms,
+            &acceptance_request(
+                &[line, "Make the status list richer."],
+                "- ",
+                &sibling_bullets,
+            ),
+            3,
+            expected,
+        );
+        drop_criterion(&mut c, 2);
+        out.push(c);
+    }
+
+    // The recorded readings of jobs ttnw and bp5e cover each bullet in words of their own.
+    let mut c = case(
+        "coverage-paraphrased-ttnw-accepted",
+        "job 20261107-031902-ttnw; Acceptance bullets and the reading's criteria verbatim, the rest of the request left out",
+        &["coverage-bullet-paraphrased", "dash-bullet"],
+        &acceptance_request(
+            &["Give Athena's own improvement requests a guaranteed turn in the drain."],
+            "- ",
+            &TTNW_BULLETS,
+        ),
+        5,
+        Expected::Accept,
+    );
+    set_criteria(&mut c, &TTNW_CRITERIA);
+    out.push(c);
+    let mut c = case(
+        "coverage-paraphrased-bp5e-accepted",
+        "job 20261109-161505-bp5e; Acceptance bullets and the reading's criteria verbatim, the rest of the request left out",
+        &["coverage-bullet-paraphrased"],
+        &acceptance_request(
+            &["Fix the root cause of a repeated failure."],
+            "- ",
+            &BP5E_BULLETS,
+        ),
+        3,
+        Expected::Accept,
+    );
+    set_criteria(&mut c, &BP5E_CRITERIA);
+    // The recorded first criterion names the file the job changed, which is in the repository at its base.
+    c.repo_files
+        .as_mut()
+        .unwrap()
+        .extend(["crates/athena-core/src/admission.rs", "CHANGELOG.md"].map(String::from));
+    out.push(c);
+
+    let mut c = case(
+        "coverage-reading-asks-a-question-accepted",
+        SPLIT,
+        &["coverage-reading-asks-or-declines"],
+        &acceptance_request(&["Make the status list richer."], "- ", &sibling_bullets),
+        3,
+        Expected::Accept,
+    );
+    set_criteria(&mut c, &[sibling_bullets[0]]);
+    c.reading.question = Some("May I split this job into the state part and the rest?".into());
+    out.push(c);
+    let mut c = case(
+        "coverage-declined-reading-accepted",
+        SPLIT,
+        &["coverage-reading-asks-or-declines"],
+        &acceptance_request(&["Make the status list richer."], "- ", &sibling_bullets),
+        3,
+        Expected::Accept,
+    );
+    c.reading.capability = None;
+    c.reading.decline_reason = Some("no capability fits this request".into());
+    c.reading.acceptance_criteria.clear();
+    c.reading.deliverables.clear();
+    out.push(c);
+
+    let mut c = case(
+        "coverage-bullets-without-heading-accepted",
+        SIBLING,
+        &["coverage-no-acceptance-heading"],
+        &lines(&[
+            "Make the status list richer:",
+            "- The status list shows each job's state",
+            "- The status list shows each job's owner",
+            "- The status list shows each job's duration in seconds",
+        ]),
+        3,
+        Expected::Accept,
+    );
+    drop_criterion(&mut c, 2);
+    out.push(c);
+    out
+}
+
 /// The cases that fail their expectation, each as a line naming the case and its source.
 fn mismatches(cases: &[Case]) -> Vec<String> {
     let mut found = Vec::new();
@@ -2678,6 +3010,7 @@ fn reading_source() -> &'static str {
             include_str!("../src/reading/terms.rs"),
             include_str!("../src/reading/surveys.rs"),
             include_str!("../src/reading/replay.rs"),
+            include_str!("../src/reading/coverage.rs"),
             include_str!("../src/reading.rs"),
         ]
         .join("\n")
@@ -2957,6 +3290,107 @@ fn history_fixture_refusal_is_declared_intended() {
     assert!(changelog.contains("check_history_fixture"));
     assert!(changelog.contains("higher refusal rate is intended"));
     assert!(changelog.contains("expected 4% of newly refused readings"));
+}
+
+#[test]
+fn coverage_replay_over_the_corpus_and_recorded_shapes() {
+    // Every corpus reading goes through `check_reading_coverage` alone. A refusal must be a case that expects
+    // it, so no reading that covers every bullet is refused; and a case that expects it must be refused.
+    let cases = cases();
+    let mut refused = 0;
+    let mut covered_but_refused = Vec::new();
+    for c in &cases {
+        let got = athena_core::reading::check_reading_coverage(&c.reading, &c.request);
+        let expected = c.expected == Expected::Refuse("check_reading_coverage");
+        match (got.is_err(), expected) {
+            (true, true) => refused += 1,
+            (false, false) => {}
+            (true, false) => covered_but_refused.push(c.id),
+            (false, true) => panic!("{} ({}): expected a coverage refusal", c.id, c.source),
+        }
+    }
+    assert!(
+        covered_but_refused.is_empty(),
+        "refused by check_reading_coverage though not expected to be: {covered_but_refused:?}"
+    );
+    // Of the readings the corpus held before this check, which `base_reading` builds with every bullet as a
+    // criterion, none is newly refused; that figure is a property of the sample and not the history rate.
+    let before: Vec<&Case> = cases
+        .iter()
+        .filter(|c| !c.id.starts_with("coverage-") && c.expected == Expected::Accept)
+        .collect();
+    let newly = before
+        .iter()
+        .filter(|c| athena_core::reading::check_reading_coverage(&c.reading, &c.request).is_err())
+        .count();
+    println!(
+        "coverage replay: {} readings, {refused} refused by check_reading_coverage, 0 readings that cover every bullet refused; \
+         of the {} corpus readings accepted before this check, {newly} are newly refused (a chosen sample, not the history rate)",
+        cases.len(),
+        before.len()
+    );
+    assert_eq!(newly, 0);
+    // The three recorded jobs: sza7 is refused and ttnw and bp5e are accepted.
+    let by_id = |id: &str| cases.iter().find(|c| c.id == id).unwrap();
+    for id in [
+        "coverage-paraphrased-ttnw-accepted",
+        "coverage-paraphrased-bp5e-accepted",
+    ] {
+        assert!(run(by_id(id)).is_none(), "{id}");
+    }
+    let (name, error) = run(by_id("coverage-omitted-bullet-sza7-refused")).unwrap();
+    assert_eq!(name, "check_reading_coverage");
+    assert!(
+        error.to_string().contains("A test shows status reports"),
+        "{error}"
+    );
+}
+
+#[test]
+fn reading_coverage_refusal_is_declared_intended() {
+    // The step line is in refusing_check, and the doc comment names the cause, the job and the estimate.
+    assert!(
+        acceptance_check_names(reading_source()).contains(&"check_reading_coverage".to_string())
+    );
+    let doc = reading_source()
+        .split("pub fn check_reading_coverage(")
+        .next()
+        .unwrap()
+        .lines()
+        .rev()
+        .take_while(|l| l.starts_with("///"))
+        .map(|l| l.trim_start_matches('/').trim())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "20261029-084645-sza7",
+        "the 2026-10-29 job rejected for a split the reading chose",
+        "[`check_reading_acceptance`]",
+        "a split may be proposed only as a question, never by dropping a bullet",
+        "This check refuses more readings; the higher refusal rate is intended.",
+        "estimate",
+    ] {
+        assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+    }
+    let changelog = include_str!("../../../CHANGELOG.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "check_reading_coverage",
+        "refuses more readings",
+        "higher refusal rate is intended",
+        "expected 10% of newly refused readings",
+        "an estimate",
+        "20261029-084645-sza7",
+        "a split may be proposed only as a question, never by dropping a bullet",
+        "the verification replay",
+    ] {
+        assert!(changelog.contains(needle), "the changelog lacks {needle:?}");
+    }
 }
 
 #[test]
