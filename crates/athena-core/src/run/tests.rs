@@ -5445,6 +5445,76 @@ mod produce_and_verify_order_tests {
     }
 
     #[test]
+    fn weekly_limit_reply_closes_as_an_environment_stop_and_keeps_nothing() {
+        // The driver's reply says the weekly or session limit was hit (no API error 429): the job is an
+        // environment stop with the reset time in its reason, not a failure of the work.
+        for kind in ["weekly", "session"] {
+            let repo = repo();
+            let state = tempfile::tempdir().unwrap();
+            let limit = crate::disk::driver_detail(&crate::disk::result_line(
+                "success",
+                &format!("You've hit your {kind} limit · resets Nov 12, 3pm"),
+            ));
+            let athena = athena_with(
+                &repo,
+                &state,
+                PASSES,
+                crate::test_support::plenty_of_space,
+                producer_ending(InvocationOutcome::Error, &limit, true, Arc::default()),
+            );
+            let (first, done) = finished_job(&athena);
+            assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+            assert!(
+                done.reason.starts_with(crate::disk::USAGE_LIMIT),
+                "{}",
+                done.reason
+            );
+            assert!(
+                done.reason.contains("resets Nov 12, 3pm"),
+                "{}",
+                done.reason
+            );
+            // An environment stop: the scope guard does not count it, and it says nothing of the work.
+            assert!(crate::disk::is_environment_reason(&done.reason));
+            assert_eq!(
+                crate::disk::usage_limit_reset(&done.reason).as_deref(),
+                Some("Nov 12, 3pm")
+            );
+            assert!(
+                !done.reason.contains("kept as candidate"),
+                "{}",
+                done.reason
+            );
+            let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+            let job = &records.jobs[first.as_str()];
+            assert!(job.candidate.is_none());
+            assert!(!job.briefs.contains_key("progress-note"));
+        }
+
+        // A model's own prose that names the limit, under another subtype, stays a failure of the work.
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let prose = crate::disk::driver_detail(&crate::disk::result_line(
+            "error_max_turns",
+            "You've hit your weekly limit · resets Nov 12, 3pm",
+        ));
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            producer_ending(InvocationOutcome::Error, &prose, true, Arc::default()),
+        );
+        let (_, done) = finished_job(&athena);
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            !crate::disk::is_environment_reason(&done.reason),
+            "{}",
+            done.reason
+        );
+    }
+
+    #[test]
     fn timeout_seed_resumes_a_login_expiry_stop_but_not_other_failures() {
         let cases = [
             (

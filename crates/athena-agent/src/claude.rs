@@ -312,6 +312,53 @@ pub fn api_error_status(detail: &str) -> Option<u16> {
     digits[..end].parse().ok()
 }
 
+/// A reply that says the weekly or session usage limit was reached (see [`usage_limit_hit`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageLimit {
+    /// When the limit resets, as the reply words it (`Nov 12, 3pm`), or `None` when the reply gave no time.
+    pub resets: Option<String>,
+}
+
+/// Whether the detail of a stopped agent says its weekly or session usage limit was reached, and when it
+/// resets.
+///
+/// The CLI reports it as an error result whose text starts `You've hit your weekly limit · resets Nov 12, 3pm`
+/// (or `session limit`). The detail is built by [`output_from_result`] as `<subtype>: <text>`. As for
+/// [`api_error_status`], only a subtype of `success` or `error` counts, and the text must start with the
+/// sentence: a model's own closing words under another subtype, or prose that merely mentions a limit, are
+/// never read. The reset time is the rest of the first line after `resets`; a reply without one is still a
+/// usage limit.
+///
+/// The core classifies a stopped producer with this beside [`api_error_status`] (a 429), so a limit reply and a
+/// 429 are one kind of stop. The driver does not retry it: waiting a few seconds does not lift a limit.
+pub fn usage_limit_hit(detail: &str) -> Option<UsageLimit> {
+    let text = ["success: ", "error: "]
+        .iter()
+        .find_map(|subtype| detail.strip_prefix(subtype))
+        .unwrap_or(detail)
+        .trim_start()
+        .replace('\u{2019}', "'");
+    let lower = text.to_ascii_lowercase();
+    // ASCII lowering keeps every byte offset, so the reset time is cut from `text` at the offset found in `lower`.
+    if !["weekly", "session"]
+        .iter()
+        .any(|kind| lower.starts_with(&format!("you've hit your {kind} limit")))
+    {
+        return None;
+    }
+    let resets = lower.find("resets").and_then(|at| {
+        let time = text[at + "resets".len()..]
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches(':')
+            .trim();
+        (!time.is_empty()).then(|| time.to_string())
+    });
+    Some(UsageLimit { resets })
+}
+
 /// How long the driver waits before it calls again after an expired login. The login normally refreshes by
 /// itself within minutes; this is the short wait of one retry, not a wait for that refresh.
 const AUTH_RETRY_WAIT: Duration = Duration::from_secs(30);
@@ -824,6 +871,11 @@ if [ "$MODE" = "limit" ]; then
   echo '{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0.01,"result":"API Error: 429 usage limit reached","permission_denials":[]}'
   exit 0
 fi
+if [ "$MODE" = "weekly_limit" ] || [ "$MODE" = "session_limit" ]; then
+  kind=${MODE%_limit}
+  printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0.01,"result":"You'\''ve hit your KIND limit · resets Nov 12, 3pm","permission_denials":[]}' | sed "s/KIND/$kind/"
+  exit 0
+fi
 echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_api_ms":900,"total_cost_usd":0.002,"usage":{"input_tokens":5,"cache_creation_input_tokens":120,"cache_read_input_tokens":40,"output_tokens":60},"modelUsage":{"claude-haiku-5-5":{"inputTokens":5,"outputTokens":60,"cacheReadInputTokens":40,"cacheCreationInputTokens":120,"costUSD":0.002}},"permission_denials":[],"structured_output":{"answer":42}}'
 "#;
 
@@ -1085,6 +1137,93 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
         assert_eq!(calls(&count), 1);
         assert_eq!(out.outcome, InvocationOutcome::Error);
         assert_eq!(api_error_status(&out.detail.unwrap()), Some(429));
+    }
+
+    #[test]
+    fn a_weekly_or_session_limit_reply_is_a_usage_limit_with_its_reset_time() {
+        for (mode, text) in [("weekly_limit", "weekly"), ("session_limit", "session")] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = tempfile::tempdir().unwrap();
+            let mut driver = driver(stand_in(dir.path()), Registry::new(state.path()));
+            driver.auth_retry_wait = Duration::from_millis(300);
+            let (invocation, count, _) = counted(dir.path(), mode, Duration::from_secs(30));
+            let out = driver
+                .invoke(&invocation, &mut Recorder::default())
+                .unwrap();
+            // One call: waiting does not lift a limit, so the driver does not retry it.
+            assert_eq!(calls(&count), 1, "{mode}");
+            assert_eq!(out.outcome, InvocationOutcome::Error, "{mode}");
+            let detail = out.detail.unwrap();
+            assert_eq!(
+                detail,
+                format!("success: You've hit your {text} limit · resets Nov 12, 3pm")
+            );
+            assert_eq!(
+                usage_limit_hit(&detail),
+                Some(UsageLimit {
+                    resets: Some("Nov 12, 3pm".into())
+                }),
+                "{mode}"
+            );
+            // It is not an API error, so the 401 and 429 reading is unaffected.
+            assert_eq!(api_error_status(&detail), None, "{mode}");
+        }
+    }
+
+    #[test]
+    fn a_normal_reply_from_the_stand_in_is_not_a_usage_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let driver = driver(stand_in(dir.path()), Registry::new(state.path()));
+        let out = driver
+            .invoke(
+                &spec(dir.path(), "complete", Duration::from_secs(30)),
+                &mut Recorder::default(),
+            )
+            .unwrap();
+        assert_eq!(out.outcome, InvocationOutcome::Success);
+        assert_eq!(out.detail, None);
+    }
+
+    #[test]
+    fn usage_limit_hit_reads_the_wording_variants() {
+        let resets = |detail: &str| usage_limit_hit(detail).map(|limit| limit.resets);
+        // No reset time: still a usage limit.
+        assert_eq!(resets("success: You've hit your weekly limit"), Some(None));
+        assert_eq!(
+            resets("error: You've hit your session limit · resets"),
+            Some(None)
+        );
+        // A curly apostrophe, other letter case, no subtype prefix and a time with a zone.
+        assert_eq!(
+            resets("success: You\u{2019}ve hit your Session limit · resets 3pm (UTC)"),
+            Some(Some("3pm (UTC)".into()))
+        );
+        assert_eq!(
+            resets("you've hit your weekly limit - resets: Nov 12\nmore text"),
+            Some(Some("Nov 12".into()))
+        );
+    }
+
+    #[test]
+    fn not_a_usage_limit_in_a_models_own_words_or_a_normal_reply() {
+        let limit = "You've hit your weekly limit · resets Nov 12, 3pm";
+        // The same words under a subtype that carries a model's closing prose.
+        for subtype in ["error_max_turns", "error_during_execution"] {
+            assert_eq!(usage_limit_hit(&format!("{subtype}: {limit}")), None);
+        }
+        // Prose that mentions a limit, not at the start of the text.
+        for prose in [
+            "success: I fixed the weekly limit handler",
+            "success: Note: you've hit your weekly limit earlier, resets Nov 12",
+            "success: The session limit is 5 hours; it resets daily",
+            "success: You've hit your own limit of patience",
+            "success: Done. You've hit your weekly limit · resets 3pm",
+            "success: done",
+            "",
+        ] {
+            assert_eq!(usage_limit_hit(prose), None, "{prose}");
+        }
     }
 
     #[test]

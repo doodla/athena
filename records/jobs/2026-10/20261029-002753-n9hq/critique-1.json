@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-002753-n9hq",
+  "round": 1,
+  "at": "2026-11-10T07:00:28.400471605Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The 'not a counted failure' check names `scope_guard::counted`, which is private and does not take a reason.",
+      "evidence": "scope_guard.rs:228 has `fn counted(attempts: &[AttemptRecord])`, which is private to the scope_guard module, so run/tests.rs cannot call it. Line 549 is inside `pub(crate) fn verdict_of(state, reason)`, which is the function that maps an environment reason to `Verdict::Environment`. Fix: In the run-level test, assert `crate::scope_guard::verdict_of(JobState::Closed(OutcomeState::Failed), Some(&done.reason)) == Some(Verdict::Environment)`, and name `verdict_of` in the dependents entry.",
+      "location": "Demonstrations, criterion 3; Dependents, first entry ('scope_guard.rs:549 (`counted`)')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Matching on a lowercased copy with the curly apostrophe replaced, then cutting the reset time by position, can split the original string at the wrong byte.",
+      "evidence": "The plan replaces ’ (3 bytes) with ' (1 byte) and lowercases a local copy, then takes 'the text after the first `resets`'. The test expects `Some(\"Nov 12, 3pm\")` with its original case, so the time must come from the original string. A byte index found in the copy is shifted by 2 for each curly apostrophe, which can return wrong text or panic when the slice does not fall on a character boundary. Fix: Match the prefix on the copy, but find 'resets' in the original string (for example with a case-insensitive search there). Add a test that uses a curly apostrophe and checks the exact reset time.",
+      "location": "Step 1 (usage_limit_hit)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After the new stop, the item that hit the limit is passed over as 'another job ended the run'.",
+      "evidence": "In `attempts`, the next loop calls `run_job`, which returns `RunStep::Ended` because `st.stop` is set. That becomes `ItemEnd::Idle`, and `finish` (drain.rs:2628-2629) passes the item over with \"run ended first: another job ended the run\". For item a, which caused the stop, that is wrong. Fix: Have `attempts` return a dedicated end after a usage-limit failure, or add an `ItemEnd` arm whose pass-over text gives the usage-limit reason. Have the criterion 4 test assert the pass-over line of item a.",
+      "location": "Step 6 (drain.rs run_job) / Criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A bare 429 loses the drain's second attempt. That is a behaviour change to the existing 429 path, and the change description should say so.",
+      "evidence": "Today a 429 is retried once and then stops with Environment (tests/drain.rs:1214-1228). The plan stops at the first failure with the new UsageLimit stop. The accepted reading allows this ('It ends the run on the first such job'), but the request says 'no changes to retry'. Fix: In the CHANGELOG entry and the change description, say that a 429 now stops the drain after one attempt with 'usage limit' instead of 'environment', and why. Keep the bare-429 case in the new drain test.",
+      "location": "Decision 5 / Risks (a 429 also stops at the first failure now)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code paths the plan names: claude.rs (`api_error_status`, `output_from_result`, the stand-in script), disk.rs (`StopCause::of`, `producer_stop_reason`, `resumable_stop`, `keeps_unfinished_work`, `result_line`, `driver_detail`), run/producer.rs:391-410, scope_guard.rs (`verdict_of`, `counted`), and drain.rs (`Stop`, `run_job`, `attempts`, `finish`). I also read main.rs's drain help and tests/drain.rs:1181-1248. They match what the plan says. The fault is fixed where it starts: the one classifier in disk.rs, which the producer, the scope guard, `athena retry` and the drain all read. producer.rs already sends a UsageLimit cause to `self.failure`, so leaving it unchanged is right. In the drain, setting the stop in `run_job`'s `other =>` arm works: on the next loop, `run_job` sees `st.stop` set and returns `Ended` before any reread, so the log `[\"read a\",\"run a\"]` is what the code would produce. Removing UsageLimit from the \"failed twice\" arm and narrowing the test at tests/drain.rs:1214 follows from that. The readers I found by grep are all in the dependents list. Each demonstration names a seam that exists and would fail without the change. The text match is anchored and limited by subtype the same way `api_error_status` is, so it is not a loose keyword rule. It uses the wording the request gave, and the plan records the real CLI wording as an open question. I have four minor findings: the plan names a scope-guard function the test cannot reach, a byte-offset trap in how the reset time is extracted, a misleading pass-over line for the item that hit the limit, and a change to how a bare 429 is handled that should be stated plainly. None blocks the plan."
+}
