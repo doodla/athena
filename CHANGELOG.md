@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `deterministic_turn` in `crates/athena-agent/src/fake.rs` now hands the reader, producer, verifier and planner
+  turns to separate private functions, so no function there exceeds the code-health limit. No behavior change.
 - The root-cause request Hestia queues now asks first that the information the failing stage lacked be given to
   it (in its brief, the system facts it is shown, or its reader's inputs), and allows a refusal rule only when
   giving that information cannot prevent the failure, with the expected share of past accepted readings it would
