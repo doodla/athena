@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The mistake report splits each class of work's mistakes before and after the earliest recorded
+  introspection with a prevention, and counts them per month (`mistake_trends` in
+  `crates/athena-core/src/status.rs`). `athena status` prints a `mistakes trend <class>` line per class, or
+  `no improvement recorded`. This gives requirement OLY-1-07 its mechanism in `docs/spec.toml`.
+
 ### Changed
 
 - `planning_round` in `crates/athena-core/src/run/planning.rs` is split into smaller private methods

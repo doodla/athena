@@ -1,0 +1,387 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261110-124307-bn3c",
+  "round": 2,
+  "at": "2026-11-10T12:57:01.12911701Z",
+  "invocation_seq": 4,
+  "approach": "Add one module, crates/athena-core/src/reading/coverage.rs, with `check_reading_coverage(reading, request)`, wired as one `step!` line in `refusing_check` after `check_scope_limit`. It reads the request's `Acceptance:` section into bullets (a wrapped bullet's continuation lines join it). It reduces each bullet and each criterion to content stems, with no prose-word stripping. A bullet's score against a criterion is the lower of two shares: (A) the share of its stems found, each stem weighted 1/df, where df is the number of the request's bullets containing it; and (B) the share of its distinguishing stems found, meaning its lowest-df stems. A bullet's best criterion is the one with the highest such score. A bullet below the threshold (initially 40 percent, tuned on the fixtures) is omitted. This answers finding 2: a criterion that covers a sibling bullet and shares only its framing words scores 0 on (B), so it cannot cover the dropped bullet. For a one-bullet request, or a bullet whose stems all have the same df, (A) and (B) both equal the plain share, so nothing is discarded or made vacuous. An omitted bullet refuses the reading, naming it, unless the non-bullet text affirmatively allows a split. Split permission now needs a phrase that names the job, request or work being split (finding 1); bare 'split into' and 'split it' are dropped. Readings that ask a question or decline, and requests with no Acceptance heading, are not checked. Tests: unit tests in coverage.rs, the new refusal_corpus cases, the CHANGELOG entry and the doc comment. The fake reader (fake.rs) is expected to need one criterion per Acceptance bullet (finding 4), decided after running the athena-core and athena-agent suites. drain.rs changes only if a cli test fails. The 10% figure stays a labelled estimate. The verification replay over recorded readings measures the real rate against the 15% hold limit, and the CHANGELOG says so (finding 5).",
+  "decisions": [
+    {
+      "choice": "Score each bullet by min(A,B) against each criterion and take the best criterion. Stems: lowercase alphanumeric runs, a fixed stop list, tokens under 2 characters dropped, then suffix stripping (ing, ed, es, s; only when 3 or more characters remain and the word does not end in ss), then a trailing e dropped and a doubled final consonant after ed/ing collapsed (not l, s, z). (A) = sum of weights of the bullet's stems found in the criterion divided by the sum of weights of all the bullet's stems, with weight = 2520/df using integer division. (B) = the number of the bullet's lowest-df stems found in the criterion divided by the number of those stems. Covered when best*100 >= total*COVERAGE_MIN_PERCENT, in integer math (u64), initial value 40.",
+      "reason": "Answers finding 2 without discarding any word. Take sibling bullets 'The status list shows each job's state' and '...shows each job's duration'. The criterion for the first shares the framing stems with the second, but not 'duration', its only df=1 stem. (B) is then 0, so the dropped bullet is refused. A bullet whose stems all share one df gets a plain share, so no bullet becomes empty or vacuously covered, which was the rejection of 20261029-111121-fzx0. The recorded ttnw pair ('a new test with no Steward or Hestia requests queued asserts the plan order is identical' for 'a test: with no improvement requests queued, ordering is unchanged') and the bp5e pair ('its doc comment names the root cause' for 'The root cause is named in the change description...') are paraphrases. Stemming meets queued/queue, ordering/order, names/named. The tuning test prints every bullet's A, B and score and asserts min covered score >= COVERAGE_MIN_PERCENT > max omitted score. The threshold is set from those numbers, not fixed in advance.",
+      "rejected": [
+        {
+          "option": "Strip words the request prose repeats and require stem uniqueness",
+          "why": "The rejected design of 20261029-111121-fzx0: a bullet whose distinguishing words are repeated in the prose becomes empty and is vacuously covered."
+        },
+        {
+          "option": "Raw-count share against the best single criterion (the round-1 plan)",
+          "why": "A sibling's criterion shares the framing words and covers the dropped bullet (finding 2)."
+        },
+        {
+          "option": "idf weights alone with a steeper exponent (1/df^3)",
+          "why": "It still fails open once a bullet has about six framing stems against one distinguishing stem. The separate distinguishing-stem share does not depend on how many framing words there are."
+        },
+        {
+          "option": "One-to-one assignment of criteria to bullets",
+          "why": "A single legitimate criterion that covers two bullets would leave one of them uncovered, which wrongly refuses readings that cover every bullet."
+        },
+        {
+          "option": "A model call to judge coverage",
+          "why": "Reading checks are deterministic and call no model (checks.rs doc comments)."
+        }
+      ]
+    },
+    {
+      "choice": "Parse the Acceptance section line by line, untrimmed. The section starts after a line that is 'Acceptance:' or 'Acceptance criteria:' (trimmed, case-insensitive, leading # or * ignored). A line whose trimmed text passes `is_bullet` starts a bullet. A non-empty non-bullet line directly after a bullet or its continuation (no blank line between) is joined to that bullet when it is indented, or when the previous line does not end in '.', '!', '?' or ':' and the line is not a heading (a line ending in ':' or starting 'Files:' or 'Priority:'). Blank lines are skipped. The section ends at a heading line, or at a non-bullet line that follows a blank line.",
+      "reason": "Answers finding 3. A hard-wrapped bullet is scored on its whole text and the bullets after it are still checked. Requests with no Acceptance heading are not checked. Many existing requests and tests carry bare bullets (job_plan.rs:166; the corpus cases star-bullets and numbered-dot-parts), and checking them would refuse lists the owner never marked as acceptance. `is_bullet` (topics.rs:266) is reused read-only, so `request_text_acceptance` and `athena plan` do not change.",
+      "rejected": [
+        {
+          "option": "End the section at the first non-bullet line (the round-1 design)",
+          "why": "A wrapped bullet's continuation ends the section and the later bullets go unchecked."
+        },
+        {
+          "option": "Treat every bullet in the request as acceptance, as `request_text_acceptance` does",
+          "why": "It widens the refusal rate far past the estimate and refuses plain lists."
+        }
+      ]
+    },
+    {
+      "choice": "A request allows a split only when a sentence of its non-bullet text (split by the existing `sentences`, lowercased, curly apostrophes made straight) both (a) has a whole-phrase match (`has_phrase`) on a phrase that names what is split, and (b) has no negation token and no '?'. The phrases are the modals ('may', 'can', 'could', 'free to', 'allowed to', 'ok to', 'okay to', 'is allowed to') followed by 'split' and a job object ('this job', 'the job', 'this request', 'the request', 'this work', 'the work', 'it into jobs', 'it into parts', 'it into follow-ups', 'it into separate jobs', 'into separate jobs', 'into follow-up jobs', 'into follow-ups'). The imperative 'split this job', 'split the job', 'split this request' and 'split the request' also count. Negation tokens: not, never, no, cannot, without, avoid, forbid, forbidden, instead of, and any word ending in n't (and 'dont'). 'must' is not a negation.",
+      "reason": "Answers finding 1. Ordinary code prose ('Split the log line into fields', 'split it on commas', 'Split the output into two columns') names no job, request or work, so it matches no phrase and the check stays on. 'Do not split this job' has a negation and allows nothing. 'Should we split this job?' is a question and allows nothing. The phrase table in the unit test has false-positive rows as well as negations. A corpus case puts 'Split the output into two columns.' in the prose with a dropped bullet and expects a refusal.",
+      "rejected": [
+        {
+          "option": "Keep bare 'split into' and 'split it' and the bare 'split is fine' forms",
+          "why": "They match code-prose and turn the check off for the whole request (finding 1)."
+        },
+        {
+          "option": "Any occurrence of the word 'split' allows a split",
+          "why": "'Do not split this job' would disable the check, the sza7 failure."
+        }
+      ]
+    },
+    {
+      "choice": "Insert `step!(check_reading_coverage(reading, request));` after `step!(check_scope_limit(reading));` and before `check_boundary_and_repo_files`. `check_reading_references` stays the last step.",
+      "reason": "Every existing refusal still comes first, so earlier corpus expectations are unchanged. docs/decisions.md says `check_reading_references` runs last. The order tests in reading.rs assert only the relative position of other steps.",
+      "rejected": [
+        {
+          "option": "Append the step after check_reading_references",
+          "why": "It contradicts the 'runs last' statement and the doc of check_boundary_and_repo_files."
+        }
+      ]
+    },
+    {
+      "choice": "The refusal names each omitted bullet (first 120 characters, marker removed), its score and the threshold. It tells the reader to cover the bullet in a criterion in the bullet's own words, or to ask the split as a question. Out-of-scope items never count as coverage. A reading with `question` set is not checked.",
+      "reason": "A split may be proposed only as a question, never by dropping a bullet. The refusal feeds the existing one-correction flow in reading.rs (around lines 722-731).",
+      "rejected": [
+        {
+          "option": "Count out_of_scope items as coverage",
+          "why": "Listing a bullet as out of scope is the split sza7 was rejected for."
+        }
+      ]
+    },
+    {
+      "choice": "Keep 'expected 10% of newly refused readings' in criterion 7 and the CHANGELOG, labelled an estimate. State beside it that the fixture replay prints its own figure over fixtures only. Also state that the verification replay (replay.rs `check_reading_text`, which calls `check_reading_acceptance`) measures the real rate over recorded readings against the hold limit of 15% (`replay_limit_percent(Some(10))`), and that the job is held above it. If the producer's loop replay reports a figure, the producer replaces 10 with it before finishing.",
+      "reason": "Answers finding 5. `declared_percent` needs the exact form 'N% of newly refused readings'. A fixture rate is not a sample of history, because the fixtures include the deliberately omitted shapes.",
+      "rejected": [
+        {
+          "option": "Present the fixture rate as the expected share",
+          "why": "The fixture set is chosen, so its rate misleads about history."
+        }
+      ]
+    },
+    {
+      "choice": "Decide the fake.rs change from the suite, and expect it to be needed. After the check is wired, run `cargo test -p athena-agent` and `cargo test -p athena-core` and then `cargo test --locked`. If a reading from the deterministic fake is refused, `reader_turn` in fake.rs also emits one content criterion per bullet under an 'Acceptance:' heading in the request, keeping the stock criterion. The fake keeps its own small parse because athena-agent cannot depend on athena-core. drain.rs gets a helper change only if a cli test still fails.",
+      "reason": "Answers finding 4. `FakeAgentDriver::deterministic()` is used in athena-core (hestia.rs:3552, code_health.rs:978, invocation.rs:366 and run/tests.rs). Hestia and steward requests carry 'Acceptance:' followed by bullets, so they reach the new check. Criterion 10 allows fake.rs and drain.rs to change only when the suite needs it.",
+      "rejected": [
+        {
+          "option": "Always change fake.rs and drain.rs",
+          "why": "It adds unneeded diff, and a test may pin the single stock criterion."
+        },
+        {
+          "option": "Skip the check for fake-reader requests",
+          "why": "It adds a test-only branch to production code."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/coverage.rs",
+      "action": "create",
+      "purpose": "The check `check_reading_coverage` with its doc comment, plus `COVERAGE_MIN_PERCENT`, the stop list, the stemmer, `request_acceptance_bullets` (with wrapped-bullet joining), `request_allows_split`, the pure scorer `coverage_gaps` with its A, B and best score, and the unit tests (criteria 1-4 and 7, the tuning table, the replay).",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `mod coverage;` and `pub use coverage::*;`, and add `include_str!(\"reading/coverage.rs\")` to the test `reading_source()` list.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "purpose": "Add `step!(check_reading_coverage(reading, request));` after `check_scope_limit` in `refusing_check`, and add a clause linking [`check_reading_coverage`] to the `check_reading_acceptance` doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add the new input-form tags to INPUT_FORMS (length 52 to 62), a `coverage_cases()` group, coverage.rs in `reading_source()`, and the test `reading_coverage_refusal_is_declared_intended`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One Unreleased Added entry: the check, that it refuses more readings, that the higher refusal rate is intended, 'expected 10% of newly refused readings' labelled an estimate, the fixture replay figure, and that the verification replay measures the real rate against the 15% hold.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "Expected to be needed: `reader_turn` also emits one content criterion per bullet under an 'Acceptance:' heading in the request, keeping the stock criterion. Left unchanged if all suites pass without it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Only if a cli test still fails after the fake.rs change: a request-text helper that repeats its bullets. Otherwise unchanged.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/src/reading/surveys.rs `has_phrase` (line 39), topics.rs `is_bullet` (line 266) and checks.rs `sentences` (line 332). All three are pub(super) and reachable through `use super::*`.",
+    "Create coverage.rs with `use super::*;`. Add: (a) `COVERAGE_MIN_PERCENT: u64 = 40`. (b) A stop list of function words. (c) `stems(text) -> BTreeSet<String>`: lowercase, drop a leading '[tag]', split on non-alphanumerics, drop stop words and 1-character tokens, apply the stemmer. (d) `request_acceptance_bullets(request) -> Vec<String>`: the line parser of Decision 2, each bullet with its marker removed. (e) `request_allows_split(request) -> bool`: sentences of the non-bullet lines, the modal-and-object phrase list and the negation and '?' guard of Decision 3, using `has_phrase` and `sentences`. (f) `coverage_gaps(request, criteria: &[&str]) -> Vec<Gap>`: compute df over the bullets, weights 2520/df, share (A), the lowest-df stems and share (B), score = min(A,B) per criterion, best over criteria, and a Gap with the bullet and best score when best*100 < 100*COVERAGE_MIN_PERCENT cross-multiplied in u64. A bullet with no stems after the stop list is covered. (g) `check_reading_coverage(reading, request) -> Result<()>`: Ok when capability is None, question is Some, there is no heading or no bullets, a split is allowed, or there are no gaps; otherwise `bail!` naming each omitted bullet, its score and the threshold. The doc comment gives the root cause, names job 20261029-084645-sza7 as the 2026-10-29 job rejected for a split the reading chose, links [`check_reading_acceptance`], says 'a split may be proposed only as a question, never by dropping a bullet', says 'This check refuses more readings; the higher refusal rate is intended.', and says the 10% share is an estimate.",
+    "In reading.rs add `mod coverage;` after `mod checks;` and `pub use coverage::*;` after `pub use checks::*;`. Add `include_str!(\"reading/coverage.rs\"),` to the test `reading_source()` list before `include_str!(\"reading.rs\")`.",
+    "In checks.rs add `step!(check_reading_coverage(reading, request));` after `step!(check_scope_limit(reading));`. Add to the `check_reading_acceptance` doc: 'then the request's Acceptance bullets that no criterion covers ([`check_reading_coverage`])'. Keep [`check_reading_references`] last.",
+    "In the coverage.rs tests add `fn reading(criteria: &[&str]) -> Reading`, built as the corpus `base_reading` does. Add fixtures: sza7 rebuilt with three bullets sharing the framing 'The status list shows each job's ...' (the third about duration, source 'rebuilt, records absent'); a sibling-framing request; the ttnw and bp5e bullet and criterion strings verbatim from the brief; a prose-repeated-words request; and a wrapped-bullet request with a bullet after the wrapped one. Write the tests `coverage_names_the_omitted_bullet_and_accepts_full_cover`, `coverage_sibling_bullet_is_not_covered_by_shared_framing`, `coverage_accepts_the_recorded_ttnw_and_bp5e_paraphrases`, `coverage_judges_words_the_prose_repeats`, `coverage_a_split_is_allowed_only_when_affirmed` (with the phrase table), `coverage_wrapped_bullet_is_one_bullet_and_later_bullets_are_checked`, `coverage_threshold_is_tuned_on_the_recorded_shapes` (prints A, B and score per bullet and asserts min covered >= COVERAGE_MIN_PERCENT > max omitted) and `coverage_replay_over_the_recorded_shapes`. Also cover a reading with a question, a declined reading, a request with no heading, a bullet with only stop words, a '[tag]' prefix, '1.' bullets and star bullets.",
+    "Run `cargo test -p athena-core coverage -- --nocapture` and read the printed scores. If a recorded shape lands near the threshold, tune the stop list, the stemmer or COVERAGE_MIN_PERCENT from the printed table. Never edit the expected outcomes.",
+    "In refusal_corpus.rs add the tags coverage-bullet-omitted, coverage-sibling-framing, coverage-bullet-paraphrased, coverage-prose-repeated-words, coverage-split-allowed, coverage-split-negated, coverage-split-lookalike-prose, coverage-wrapped-bullet, coverage-no-acceptance-heading and coverage-reading-asks-or-declines to INPUT_FORMS, and change `[&str; 52]` to `[&str; 62]`. Add `coverage_cases()` to `cases()`. Cases: coverage-omitted-bullet-sza7-refused, coverage-sibling-framing-refused, coverage-star-bullet-omitted-refused, coverage-number-dot-omitted-refused, coverage-wrapped-bullet-omitted-refused, coverage-paraphrased-ttnw-accepted, coverage-paraphrased-bp5e-accepted, coverage-prose-repeated-words-refused, coverage-prose-repeated-words-covered-accepted, coverage-split-allowed-accepted, coverage-split-negated-refused, coverage-split-lookalike-prose-refused, coverage-reading-asks-a-question-accepted, coverage-declined-reading-accepted and coverage-bullets-without-heading-accepted. Each uses `case()` and, for the refusing ones, removes a criterion from `case.reading`. The refusing ones expect `Expected::Refuse(\"check_reading_coverage\")`. Existing cases stay unchanged. Add `include_str!(\"../src/reading/coverage.rs\")` to `reading_source()`. Add `reading_coverage_refusal_is_declared_intended`.",
+    "Add the CHANGELOG entry under `### Added` in `[Unreleased]`: the check and where it runs; what it refuses and the split-as-question rule; job 20261029-084645-sza7; 'it refuses more readings'; 'the higher refusal rate is intended, expected 10% of newly refused readings (an estimate)'; the fixture replay figure step 6 printed, labelled as covering fixtures only; and that the verification replay measures the real rate over recorded readings and holds the job above 15%. Wrap lines, because the corpus test collapses white space. If the producer's loop replay reports a measured figure, use it in place of 10 in the CHANGELOG and the criterion text.",
+    "Run `cargo test -p athena-core` and `cargo test -p athena-agent`, then `cargo test --locked`. If a deterministic-fake reading from a hestia, steward, code_health or cli test is refused by `check_reading_coverage`, edit fake.rs `reader_turn` to add a content criterion per bullet under an 'Acceptance:' heading in the request (a small local parse, because athena-agent cannot depend on athena-core), keep the stock criterion, and add a fake.rs test for it. Edit the drain.rs helper only as far as a still-failing cli test needs. If nothing fails, leave both files unchanged and say so in the output.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` and `cargo test -p athena-core --test refusal_corpus`."
+  ],
+  "risks": [
+    {
+      "risk": "The two-share score refuses a reading that covers a bullet by paraphrase. This happens when the bullet shares most stems with siblings and its few distinguishing stems are reworded, for example 'duration' written as 'elapsed time'. That would raise the refusal rate above the 10% estimate.",
+      "mitigation": "The refusal names the bullet and its score, so the reader's one correction is to use the bullet's words. The tuning table prints A, B and the score for every recorded shape, and the ttnw and bp5e paraphrases must pass. The verification replay over recorded readings measures the real rate against the 15% hold limit. If it is exceeded the job is held, and the producer's loop replay figure, if available, replaces 10."
+    },
+    {
+      "risk": "A criterion that covers two bullets at once, or a reading that merges bullets, is refused because the distinguishing-stem share of one bullet is low.",
+      "mitigation": "Scoring is per criterion, so a merged criterion that contains both bullets' distinguishing stems scores high for both. A reading that wants fewer, larger criteria can still ask the split or merge as a question, which is not checked."
+    },
+    {
+      "risk": "A closing sentence directly under the last bullet, with no blank line, is joined to that bullet and lowers its score.",
+      "mitigation": "Joining stops at a blank line, a heading, or a previous line that ends a sentence. The wrapped-bullet test pins both the join and the stop. The refusal text shows the bullet text it scored."
+    },
+    {
+      "risk": "The recorded sza7, ttnw and bp5e texts are not available, because records/ is absent. The fixtures use only the brief's quoted fragments and rebuilt framing, so the tuned threshold rests on a small sample.",
+      "mitigation": "Each fixture is labelled 'rebuilt, records absent', as the corpus does. The sibling fixture is deliberately realistic, with shared framing. The verification replay runs the real rule over recorded readings and holds the job above 15%."
+    },
+    {
+      "risk": "The phrase list misses some affirmative split wordings and refuses a request whose owner allowed a split.",
+      "mitigation": "A refused reading can ask the split as a question, which is not checked. The phrase table pins the accepted and refused forms, including the code-prose lookalikes."
+    },
+    {
+      "risk": "The corpus INPUT_FORMS array is fixed-size. A forgotten length bump or an unused tag fails `corpus_covers_the_listed_input_forms`.",
+      "mitigation": "Step 7 sets the length to 62 for ten new tags, and each tag is carried by a case named in the plan. The demonstration for criterion 5 runs the corpus test."
+    },
+    {
+      "risk": "The fake reader and hestia, steward or cli tests fail after the check is wired.",
+      "mitigation": "Step 10 runs the athena-agent, athena-core and workspace suites and applies the per-bullet fake criteria. Criterion 10 limits the diff to fake.rs and drain.rs."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusing_check step list; new refusal rule name `check_reading_coverage`",
+      "dependent": "crates/athena-core/src/reading.rs (around line 722, the reader flow calling `refusing_check` and recording a `ReadingRefusal` whose rule is the check name)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus (coverage cases) and the coverage.rs unit tests. The refused-once path is the existing one-correction flow.",
+      "reason": null
+    },
+    {
+      "name": "gate result for a reading plus request (now also refuses an omitted Acceptance bullet)",
+      "dependent": "crates/athena-core/src/reading/replay.rs:54 `check_reading_text`, used by crates/athena-cli/src/main.rs `athena check-reading`, steward.rs `queued_work`, and the replay fixtures in run/tests.rs",
+      "kind": "code",
+      "test": "cargo test -p athena-core. The steward.rs fixture reading has a criterion with the same text as its REREAD_REQUEST bullet, so it scores 100 and stays accepted. The refusal test in steward.rs is refused earlier, by `check_criteria_evidence`. The run/tests.rs replay fixtures run under `cargo test --locked`.",
+      "reason": null
+    },
+    {
+      "name": "declared share 'expected 10% of newly refused readings' (criterion 7 and the CHANGELOG)",
+      "dependent": "crates/athena-core/src/reading/replay.rs `replay_declaration`, `declared_percent`, `replay_limit_percent`, `replay_is_held` (the hold at verification and the producer's loop replay)",
+      "kind": "rule",
+      "test": "reading_coverage_refusal_is_declared_intended (step 7) reads the share back with `replay_declaration` and expects Some(10), so the hold limit is 15. The verification replay measures the real rate over recorded readings, which the fixture replay cannot. If it is over 15%, the job is held.",
+      "reason": null
+    },
+    {
+      "name": "new source file reading/coverage.rs",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `reading_source()` and the test-only `reading_source()` in crates/athena-core/src/reading.rs (include_str! lists of the reading source files)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus and cargo test -p athena-core. Both lists get coverage.rs, so the doc-comment and step-line tests find `check_reading_coverage`.",
+      "reason": null
+    },
+    {
+      "name": "order of step! lines in refusing_check and the check_reading_acceptance doc",
+      "dependent": "crates/athena-core/src/reading.rs tests that assert the order of `step!` lines and the `check_reading_acceptance` doc links",
+      "kind": "code",
+      "test": "cargo test -p athena-core",
+      "reason": "They assert the position of one step relative to its neighbour (outcome_state after governance_coverage, history_fixture after code_survey, defined_terms before environment_reach, scope_limit once). The new line goes after check_scope_limit and touches none of those pairs. The doc gets one added link, and the existing link assertions still hold."
+    },
+    {
+      "name": "check_reading_references stays the last step",
+      "dependent": "docs/decisions.md (the record that `check_reading_references` runs last in `check_reading_acceptance`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The new step is placed before check_boundary_and_repo_files, so references is still last and the record stays true."
+    },
+    {
+      "name": "existing corpus expectations",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs existing cases with an Acceptance heading: steward-three-dash-bullets, root-cause-cites-two-jobs-without-relying, follow-up-on-a-job-the-reading-ignores, and the generated-request cases (defined_terms_cases, ambiguous_name_cases). Cases without a heading: star-bullets, numbered-dot-parts, numbered-paren-parts-not-read-today, lettered-paren-parts-not-read-today, retry-complaint-*",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus. `base_reading` copies every request bullet (`request_text_acceptance`) into a criterion, so each bullet scores 100 and stays accepted. Cases refused by an earlier check are refused there first, because the new step is later. The cases without a heading are not checked, by design.",
+      "reason": null
+    },
+    {
+      "name": "fake reader's single stock criterion",
+      "dependent": "crates/athena-agent/src/fake.rs `reader_turn` (stock criterion at line 311) and its own tests, which pin the reading's shape",
+      "kind": "code",
+      "test": "cargo test -p athena-agent, run before deciding on the change. The fake keeps its stock criterion and adds one per Acceptance bullet, so existing assertions on the stock criterion still hold.",
+      "reason": null
+    },
+    {
+      "name": "readings made by the deterministic fake in athena-core tests",
+      "dependent": "athena-core tests using `FakeAgentDriver::deterministic()`: crates/athena-core/src/hestia.rs:3552, code_health.rs:978, invocation.rs:366, and the fake references in run/tests.rs. Hestia and spec requests there carry 'Acceptance:' followed by bullets (hestia.rs around lines 4083, 4764, 5036, 7319)",
+      "kind": "code",
+      "test": "cargo test -p athena-core after the check is wired. Each failing test is fixed by the fake.rs per-bullet criteria, and the final `cargo test --locked` must pass.",
+      "reason": null
+    },
+    {
+      "name": "cli tests that send bullet requests to the fake reader",
+      "dependent": "athena-cli tests crates/athena-cli/tests/drain.rs and job_plan.rs that queue requests with bullets (job_plan.rs:166; drain.rs bare-bullet requests)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli. Requests without an Acceptance heading are unchecked. Steward and Hestia requests with the heading get the fake's per-bullet criteria. drain.rs changes only if a test still fails.",
+      "reason": null
+    },
+    {
+      "name": "reader prompt rule lines",
+      "dependent": "crates/athena-context/src/briefs/reader.rs (READING_RULES) and crates/athena-context/src/briefs.rs (`the_reader_brief_names_each_reading_rule_in_one_short_line`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Out of scope. The reader prompt has 2 tokens of headroom and is not changed. The briefs.rs test lists named checks only, and the refusal text tells the reader how to repair."
+    },
+    {
+      "name": "refusal counts by rule name",
+      "dependent": "crates/athena-core/src/hestia.rs duty 'reading-rule refusal-rate check'",
+      "kind": "code",
+      "test": null,
+      "reason": "It reads recorded `ReadingRefusal.rule` strings generically, so the new name is another string. Searching for `check_scope_limit` found no list of rule names."
+    },
+    {
+      "name": "bullet parser",
+      "dependent": "crates/athena-core/src/reading/topics.rs `is_bullet` (line 266) and `request_text_acceptance` (line 276, used by `athena plan`)",
+      "kind": "code",
+      "test": null,
+      "reason": "Reused read-only through `use super::*`. Not modified, so `athena plan` and the corpus bullets_expected counts do not move. The continuation joining lives only in coverage.rs."
+    },
+    {
+      "name": "request format and token budgets",
+      "dependent": "docs/system-facts.md 'Request format' (acceptance as bullets) and the prompt-set budget lines",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt, brief or fact line changes, so `system_facts_budgets_match_computed` is unaffected. The Acceptance heading is read by coverage.rs alone."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in crates/athena-core/src/reading/coverage.rs. The sza7 request is rebuilt with realistic shared framing: three Acceptance bullets that all open 'The status list shows each job's ...', the last about duration. It is labelled 'rebuilt, records absent'. A reading that omits the duration bullet goes through `check_reading_coverage`. A reading with a criterion for each of the three bullets goes through it too. A second sibling-framing fixture, with only the first bullet covered, is also run.",
+      "command": "cargo test -p athena-core coverage",
+      "observes": "The omitting reading returns Err whose text contains the duration bullet and the phrase 'acceptance bullet'. The sibling fixture returns Err naming the uncovered sibling, which the plain-share scorer of round 1 would have accepted. The reading covering all bullets returns Ok. `refusing_check` names `check_reading_coverage` as the refuser. The final line is 'test result: ok'.",
+      "fails_without": "Without the check, or if the bullet is not named, the Err assertion fails. If the scorer used a plain share, the sibling fixture would be accepted and its Err assertion would fail.",
+      "seam": "Production entry point `check_reading_coverage` (added by step 2), reached through `refusing_check` (exists, checks.rs:518). The fixture is a local `fn reading(criteria: &[&str]) -> Reading` in the coverage.rs tests module (added by step 5). It builds a Reading as the corpus `base_reading` does (refusal_corpus.rs:161), and `use super::*` reaches `Reading`. It passes criteria as plain strings. The scoring is not duplicated in the test."
+    },
+    {
+      "criterion": 2,
+      "method": "The test `coverage_accepts_the_recorded_ttnw_and_bp5e_paraphrases` loads the ttnw and bp5e request and reading shapes. The bullet and criterion strings are the ones quoted in the brief, copied verbatim. The rest of each request is rebuilt, and the source is labelled. It runs `check_reading_coverage` on each. `coverage_threshold_is_tuned_on_the_recorded_shapes` prints each bullet's A, B and score.",
+      "command": "cargo test -p athena-core coverage -- --nocapture",
+      "observes": "Zero refusals. The printed scores for ttnw and bp5e are at or above COVERAGE_MIN_PERCENT. The tuning test asserts the lowest covered score >= the threshold > the highest omitted score, over the ttnw, bp5e, sza7 and sibling shapes.",
+      "fails_without": "A scorer that does not stem queued/queue, ordering/order and names/named, or a threshold above the covered scores, refuses these shapes and the zero-refusal assertion fails.",
+      "seam": "`check_reading_coverage` and the pure scorer `coverage_gaps(request, criteria)`, both added by step 2. The fixtures are consts in the coverage.rs tests module (step 5). They are injected as plain strings. The plan assumes records/ is absent from the snapshot, so only the quoted fragments are exact."
+    },
+    {
+      "criterion": 3,
+      "method": "Test `coverage_judges_words_the_prose_repeats`. The request prose says 'the duration column shows seconds', and one bullet is 'The duration column shows seconds'. Reading A has criteria only for the other bullets. Reading B adds a criterion containing 'duration', 'column' and 'seconds'. Both go through `check_reading_coverage`.",
+      "command": "cargo test -p athena-core coverage",
+      "observes": "A returns Err naming the bullet. B returns Ok. The bullet's words are scored even though the prose repeats them.",
+      "fails_without": "The rejected design that strips prose-repeated words leaves the bullet with no words, so A is accepted and the Err assertion fails.",
+      "seam": "`check_reading_coverage` (step 2) with the local `reading()` fixture (step 5). The request is a const string in the test."
+    },
+    {
+      "criterion": 4,
+      "method": "Test `coverage_a_split_is_allowed_only_when_affirmed`. The same request is run with 'You may split this job.', with 'Do not split this job.', with 'Split the output into two columns.' and with no split line, each against a reading that covers fewer bullets. `request_allows_split` is also run over a phrase table. Allowed rows: 'You may split this job.'; 'Feel free to split this job into follow-ups.'; 'It is ok to split the request into separate jobs.'. Refused rows: 'Do not split this job', 'never split it into jobs', 'don't split the job', \"can't split this job\", 'without splitting', 'Should we split this job?', 'Split the log line into fields.', 'split it on commas', 'Split the output into two columns.'.",
+      "command": "cargo test -p athena-core coverage",
+      "observes": "Only the affirmative request returns Ok. The negated, silent and code-prose requests return Err naming the dropped bullet. The table gives the expected booleans.",
+      "fails_without": "A rule that treats any 'split', 'split into' or 'split it' as permission accepts 'Do not split this job' or the code-prose rows, so an Err assertion fails.",
+      "seam": "`check_reading_coverage` and `request_allows_split`, both added by step 2. The local `reading()` fixture and const requests are added by step 5. Corpus cases coverage-split-allowed-accepted, coverage-split-negated-refused and coverage-split-lookalike-prose-refused (step 7) run the same shapes through `refusing_check`."
+    },
+    {
+      "criterion": 5,
+      "method": "Step 7 adds corpus cases. `every_acceptance_check_has_a_refusing_corpus_case` extracts the `step!(check_` names from `reading_source()` (refusal_corpus.rs, where step 7 adds coverage.rs) and fails unless `check_reading_coverage` is the refusing check in at least one case. `corpus_covers_the_listed_input_forms` checks the new tags. Also run the Grep pattern `step!\\(check_reading_coverage\\(reading, request\\)\\);` on crates/athena-core/src/reading/checks.rs. It must match exactly once.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "All corpus tests pass. The refusing cases are coverage-omitted-bullet-sza7-refused, coverage-sibling-framing-refused, coverage-star-bullet-omitted-refused, coverage-number-dot-omitted-refused, coverage-wrapped-bullet-omitted-refused, coverage-prose-repeated-words-refused, coverage-split-negated-refused and coverage-split-lookalike-prose-refused. The Grep shows one match.",
+      "fails_without": "Without the step line, `refusing_check` never names `check_reading_coverage` and the refusing-case expectations fail. Without a case, the every-check-has-a-case test fails.",
+      "seam": "`refusing_check` (exists, checks.rs:518) and the corpus harness `cases()` and `run()` (exist). The new cases are built with the existing `case()` helper (exists, refusal_corpus.rs:230) and `base_reading()`, with a criterion removed from `case.reading.acceptance_criteria`. `Case.reading` is a pub field of the struct, so no harness change is needed. The cases are added by step 7."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks on the final tree, run as separate commands if the verifier allows only whole simple commands.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "No fmt diff, no clippy warning, all tests pass. These include every existing refusal_corpus case, the reading.rs order and doc tests, the athena-agent fake.rs tests, and the athena-core and athena-cli tests that use the deterministic fake reader.",
+      "fails_without": "A step-order break, an unused import, a corpus case that an earlier check now refuses, or a fake-reader refusal in a hestia, steward or cli test fails one of the three.",
+      "seam": "The whole workspace. No seam is added."
+    },
+    {
+      "criterion": 7,
+      "method": "Test `coverage_replay_over_the_recorded_shapes` runs `check_reading_coverage` over the ttnw, bp5e and sza7 shapes, the sibling-framing shape, and the corpus shapes with an Acceptance heading (steward-three-dash-bullets and root-cause-cites-two-jobs-without-relying). It also runs a copy of each with one bullet dropped. It prints 'coverage replay: N readings, R refused, refused 0 readings that cover every bullet'. It asserts every refusal is an omission, no covering reading is refused, and R equals the number of dropped-bullet readings. The corpus test `reading_coverage_refusal_is_declared_intended` reads the declared share with `replay_declaration` and expects Some(10). The limit is `replay_limit_percent(Some(10))` = 15.",
+      "command": "cargo test -p athena-core -- --nocapture",
+      "observes": "The printed replay line, and a declared share of 10 with a hold limit of 15. The CHANGELOG and criterion text say that 10 is an estimate, that the printed figure covers fixtures only, and that the verification replay measures the real rate over recorded readings and holds the job above 15%.",
+      "fails_without": "A scorer that refuses a covered paraphrase fails the no-covered-reading-refused assertion. A criterion without the exact 'expected 10% of newly refused readings' form makes `replay_declaration` return no share.",
+      "seam": "`check_reading_coverage` and `replay_declaration` (exists, replay.rs:263). The fixture list is a const array in the coverage.rs tests (step 5). The corpus request strings are read from the corpus file's `cases()`, which is the test's input and not a double. No history replay exists in the snapshot, so the figure is over fixtures."
+    },
+    {
+      "criterion": 8,
+      "method": "New test `reading_coverage_refusal_is_declared_intended` follows `history_fixture_refusal_is_declared_intended`. It collapses white space in `include_str!(\"../../../CHANGELOG.md\")` and asserts the substrings 'check_reading_coverage', 'refuses more readings', 'higher refusal rate is intended', 'expected 10% of newly refused readings', 'estimate' and 'verification replay'.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "The test passes. CHANGELOG.md `## [Unreleased]` holds the new entry under Added.",
+      "fails_without": "A missing entry or a changed phrase fails an assertion.",
+      "seam": "`include_str!` of CHANGELOG.md, a pattern already used in this file. The test is added by step 7."
+    },
+    {
+      "criterion": 9,
+      "method": "The same new test reads the contiguous `///` lines above `pub fn check_reading_coverage(` from `reading_source()` (with coverage.rs added by step 7). It asserts the needles '20261029-084645-sza7', '[`check_reading_acceptance`]', 'a split may be proposed only as a question, never by dropping a bullet', 'This check refuses more readings; the higher refusal rate is intended.' and 'estimate'.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "All needles are present in the doc comment.",
+      "fails_without": "If coverage.rs is not in `reading_source()`, the doc is not found and the assertions fail. A missing needle fails.",
+      "seam": "`reading_source()` (exists in refusal_corpus.rs), extended by step 7. The doc text is written by step 2."
+    },
+    {
+      "criterion": 10,
+      "method": "After `cargo test --locked` passes, run `git status` and `git diff --stat`.",
+      "command": "git diff --stat",
+      "observes": "The changed paths are a subset of the seven deliverables. fake.rs appears only if the athena-core, athena-agent or athena-cli suite failed without it, and then its diff is only the added per-bullet criteria. drain.rs appears only if a cli test still failed after the fake.rs change.",
+      "fails_without": "An unneeded edit to either file shows up as an extra changed path.",
+      "seam": "The git working tree. No code seam."
+    }
+  ],
+  "open_questions": [
+    "Host: records/ is not in the snapshot, so the verbatim request and reading texts of jobs sza7, ttnw and bp5e cannot be read from it. Does the producer's sandbox hold the recorded texts? The plan assumes it does not. It uses the exact bullet and criterion strings quoted in the brief, rebuilds the rest of each request, and labels each fixture 'rebuilt, records absent'. If a recorded text is available, the producer replaces the rebuilt fixture with it and re-tunes the threshold from the printed table."
+  ],
+  "producer_section_sha256": "7515c1672209e4e8897311af16b087ed281bba51ddd0b85a00aa1c0853e9fffe"
+}

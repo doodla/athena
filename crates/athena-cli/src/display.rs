@@ -478,6 +478,30 @@ pub fn mistakes(m: &athena_core::status::MistakeReport) -> String {
     };
     let mut out = format!("mistakes {}: by class: {}\n", m.total, join(&m.by_class));
     let _ = writeln!(out, "mistakes by cause: {}", join(&m.by_cause));
+    for t in &m.trends {
+        let months = t
+            .by_month
+            .iter()
+            .map(|(k, n)| format!("{k} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        match (&t.improvement, &t.improved_at) {
+            (Some(id), Some(at)) => {
+                let _ = writeln!(
+                    out,
+                    "mistakes trend {}: before {}, after {} the improvement {id} ({at}) · per month: {months}",
+                    t.class_of_work, t.before, t.after
+                );
+            }
+            _ => {
+                let _ = writeln!(
+                    out,
+                    "mistakes trend {}: no improvement recorded, {} so far · per month: {months}",
+                    t.class_of_work, t.before
+                );
+            }
+        }
+    }
     for p in &m.proposals {
         let _ = writeln!(
             out,
@@ -1972,6 +1996,35 @@ mod tests {
     use super::*;
     use athena_core::gh::{Checks, PrReport};
     use athena_core::pr::{LinkState, PrLink};
+
+    #[test]
+    fn mistakes_show_before_and_after_per_class_and_say_when_no_improvement_is_recorded() {
+        use athena_core::status::{ClassTrend, MistakeReport};
+        let trend = |class: &str, improved: bool, before, after| ClassTrend {
+            class_of_work: class.into(),
+            improvement: improved.then(|| "20261017-120011-1abc".to_string()),
+            improved_at: improved.then(|| "2026-09-20T10:00:00Z".to_string()),
+            before,
+            after,
+            by_month: [("2026-09".to_string(), before + after)].into(),
+        };
+        let report = MistakeReport {
+            total: 4,
+            trends: vec![trend("docs", true, 3, 1), trend("code", false, 1, 0)],
+            ..MistakeReport::default()
+        };
+        let shown = mistakes(&report);
+        assert!(
+            shown.contains("mistakes trend docs: before 3, after 1 the improvement"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("mistakes trend code: no improvement recorded, 1 so far"),
+            "{shown}"
+        );
+        assert!(!shown.contains("trend code: before"), "{shown}");
+        assert_eq!(mistakes(&MistakeReport::default()), "mistakes none\n");
+    }
 
     fn report(checks: Checks, reruns: u32, test: Option<&str>) -> PrReport {
         PrReport {

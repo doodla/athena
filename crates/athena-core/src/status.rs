@@ -547,12 +547,87 @@ pub struct MistakeReport {
     pub by_cause: BTreeMap<String, usize>,
     /// One proposal per cause.
     pub proposals: Vec<MistakeProposal>,
+    /// One trend per class of work with mistakes: its count before and after the improvement recorded for it.
+    pub trends: Vec<ClassTrend>,
+}
+
+/// The mistakes of one class of work, split at the improvement recorded for the class (OLY-1-07).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ClassTrend {
+    pub class_of_work: String,
+    /// The earliest recorded introspection with a prevention that is linked to a mistake of this class;
+    /// `None` when the class has no improvement recorded.
+    pub improvement: Option<String>,
+    /// When that introspection was recorded.
+    pub improved_at: Option<String>,
+    /// Mistakes of the class at or before the improvement (all of them when none is recorded).
+    pub before: usize,
+    /// Mistakes of the class after the improvement.
+    pub after: usize,
+    /// Mistakes of the class per UTC month (`YYYY-MM`).
+    pub by_month: BTreeMap<String, usize>,
+}
+
+/// Splits the mistakes of each class of work at the improvement recorded for it and counts them per month.
+pub fn mistake_trends(records: &Records) -> Vec<ClassTrend> {
+    use athena_data::records::IntrospectionStatus;
+    let mut trends: BTreeMap<String, ClassTrend> = BTreeMap::new();
+    for i in records.interventions.iter().filter(|i| i.is_mistake()) {
+        let t = trends
+            .entry(i.class_of_work.clone())
+            .or_insert_with(|| ClassTrend {
+                class_of_work: i.class_of_work.clone(),
+                improvement: None,
+                improved_at: None,
+                before: 0,
+                after: 0,
+                by_month: BTreeMap::new(),
+            });
+        let month: String = i.at.to_string().chars().take(7).collect();
+        *t.by_month.entry(month).or_default() += 1;
+        let improvement = records
+            .introspections
+            .iter()
+            .filter(|n| {
+                n.status == IntrospectionStatus::Recorded
+                    && n.prevention
+                        .as_deref()
+                        .is_some_and(|p| !p.trim().is_empty())
+                    && n.intervention.as_ref() == Some(&i.id)
+            })
+            .min_by_key(|n| n.at);
+        if let Some(n) = improvement
+            && t.improved_at
+                .as_ref()
+                .is_none_or(|at| n.at.to_string() < *at)
+        {
+            t.improved_at = Some(n.at.to_string());
+            t.improvement = Some(n.id.to_string());
+        }
+    }
+    for t in trends.values_mut() {
+        let split: Option<jiff::Timestamp> = t.improved_at.as_ref().and_then(|a| a.parse().ok());
+        for i in records
+            .interventions
+            .iter()
+            .filter(|i| i.is_mistake() && i.class_of_work == t.class_of_work)
+        {
+            match split {
+                Some(s) if i.at > s => t.after += 1,
+                _ => t.before += 1,
+            }
+        }
+    }
+    trends.into_values().collect()
 }
 
 /// Counts the mistakes in `records` and gathers the prevention proposed for them, one proposal per cause.
 pub fn mistake_report(records: &Records) -> MistakeReport {
     use athena_data::records::{IntrospectionStatus, PreventionKind};
-    let mut report = MistakeReport::default();
+    let mut report = MistakeReport {
+        trends: mistake_trends(records),
+        ..MistakeReport::default()
+    };
     // Normalised cause -> (display text, proposal).
     let mut groups: BTreeMap<String, MistakeProposal> = BTreeMap::new();
     for i in records.interventions.iter().filter(|i| i.is_mistake()) {
@@ -1554,6 +1629,49 @@ mod mistake_tests {
             .collect();
         assert_eq!(kinds["The fmt check is too strict."], "relax a gate");
         assert_eq!(kinds["The lint adds nothing."], "remove a gate");
+    }
+
+    #[test]
+    fn a_class_shows_its_mistakes_before_and_after_its_recorded_improvement() {
+        use InterventionCategory::Mistake;
+        let ts = |s: &str| -> Timestamp { s.parse().unwrap() };
+        let mut records = Records::default();
+        let make = |n: u32, class: &str, when: &str| {
+            let mut i = intervention(n, class, Mistake, "m");
+            i.at = ts(when);
+            i
+        };
+        records.interventions = vec![
+            make(1, "docs", "2026-08-10T10:00:00Z"),
+            make(2, "docs", "2026-09-05T10:00:00Z"),
+            make(3, "docs", "2026-10-02T10:00:00Z"),
+            make(4, "code", "2026-09-06T10:00:00Z"),
+        ];
+        let mut n = introspection(11, 2, "c", PreventionKind::CodeCheck, "Run it.");
+        n.at = ts("2026-09-20T10:00:00Z");
+        // A failed introspection and one without prevention are not improvements.
+        let mut failed = introspection(12, 4, "c", PreventionKind::Default, "p");
+        failed.status = IntrospectionStatus::Failed;
+        records.introspections = vec![n, failed];
+        let report = mistake_report(&records);
+        let docs = report
+            .trends
+            .iter()
+            .find(|t| t.class_of_work == "docs")
+            .unwrap();
+        assert_eq!(docs.improvement.as_deref(), Some(rid(11).as_str()));
+        assert_eq!((docs.before, docs.after), (2, 1));
+        assert_eq!(docs.by_month["2026-08"], 1);
+        assert_eq!(docs.by_month["2026-09"], 1);
+        assert_eq!(docs.by_month["2026-10"], 1);
+        let code = report
+            .trends
+            .iter()
+            .find(|t| t.class_of_work == "code")
+            .unwrap();
+        assert_eq!(code.improvement, None, "no improvement recorded");
+        assert_eq!((code.before, code.after), (1, 0));
+        assert_eq!(report.total, 4);
     }
 
     #[test]
