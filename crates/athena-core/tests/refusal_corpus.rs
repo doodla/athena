@@ -87,7 +87,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 52] = [
+const INPUT_FORMS: [&str; 65] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -140,6 +140,19 @@ const INPUT_FORMS: [&str; 52] = [
     "scope-limit-consumer-not-a-deliverable",
     "scope-limit-proposal-apply",
     "scope-limit-bare-form",
+    "acceptance-bullet-omitted",
+    "near-identical-bullets-one-omitted",
+    "path-token-bullet-omitted",
+    "wrapped-bullet",
+    "acceptance-bullet-covered-across-criteria",
+    "paraphrased-criteria-cover-bullets",
+    "request-allows-split",
+    "request-mentions-split-without-allowing",
+    "non-permitting-split-wording",
+    "split-proposed-as-question",
+    "no-acceptance-heading",
+    "bullet-after-acceptance-section",
+    "indented-bullet",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -296,6 +309,7 @@ fn cases() -> Vec<Case> {
     out.extend(delivery_cases());
     out.extend(defined_terms_cases());
     out.extend(scope_limit_cases());
+    out.extend(coverage_cases());
     out
 }
 
@@ -1670,6 +1684,316 @@ fn queued_work_holds_a_proposed_request_whose_stored_reading_leaves_a_term_undef
     );
 }
 
+/// The request of job 20261029-111121-fzx0, which asked for the request-coverage check, as it was given.
+fn coverage_job_request(extra: &[&str]) -> String {
+    let mut text = vec![
+        "Priority: high",
+        "A reading may drop one of the request's acceptance items into a follow-up (under the small-job default), \
+         and nothing catches it until the final verdict marks the reading a misread, after the full job has run: \
+         on 2026-10-29 a job passed its checks and the verifier and was then rejected for a split the reading \
+         itself chose. Check at reading acceptance that every acceptance bullet of the request is covered by the \
+         reading's criteria; a reading that leaves one out is refused at once with the missing bullet named, \
+         unless the request itself allows a split. The small-job default may propose a split only as a question \
+         back to the request, never by dropping a bullet.",
+    ];
+    text.extend_from_slice(extra);
+    text.extend_from_slice(&[
+        "Acceptance:",
+        "- A test shows a reading that omits one of the request's acceptance bullets is refused at reading time \
+         naming the bullet, and one that covers them all is accepted.",
+        "- fmt, clippy with -D warnings and the test suite pass; CHANGELOG.md has an entry.",
+        "Files: crates/athena-core/src/reading.rs, CHANGELOG.md",
+    ]);
+    lines(&text)
+}
+
+/// `c` with these modified deliverables, all of them files at the base commit.
+fn with_paths(mut c: Case, paths: &[&str]) -> Case {
+    c.reading.deliverables = paths
+        .iter()
+        .map(|p| deliverable(p, DeliverableAction::Modify))
+        .collect();
+    c.repo_files
+        .get_or_insert_with(BTreeSet::new)
+        .extend(paths.iter().map(|p| p.to_string()));
+    c
+}
+
+/// `c` without the criterion at `at`, so the reading leaves that bullet of the request out.
+fn without_criterion(mut c: Case, at: usize) -> Case {
+    c.reading.acceptance_criteria.remove(at);
+    c
+}
+
+/// A content criterion with this text.
+fn content(text: &str) -> Criterion {
+    Criterion {
+        text: text.into(),
+        kind: CriterionKind::Content,
+    }
+}
+
+/// A request with an `Acceptance` heading: the head lines, then the heading and these bullet lines.
+fn acceptance_request(head: &[&str], bullets: &[&str]) -> String {
+    let mut text: Vec<&str> = head.to_vec();
+    text.push("Acceptance:");
+    text.extend_from_slice(bullets);
+    lines(&text)
+}
+
+/// Acceptance bullets of the request that the reading leaves out (`check_request_coverage`), and the requests
+/// and readings it lets through. A reading that repeats every bullet is accepted, by construction.
+fn coverage_cases() -> Vec<Case> {
+    let job_paths = ["crates/athena-core/src/reading.rs", "CHANGELOG.md"];
+    let job_source = "job 20261029-111121-fzx0, its request, verbatim";
+    let mut out: Vec<Case> = Vec::new();
+    // The request that asked for the check: the reading drops the second bullet and the check names it.
+    out.push(without_criterion(
+        with_paths(
+            case(
+                "request-coverage-omitted-bullet-in-job-fzx0-request",
+                job_source,
+                &[
+                    "dash-bullet",
+                    "acceptance-bullet-omitted",
+                    "request-mentions-split-without-allowing",
+                ],
+                &coverage_job_request(&[]),
+                2,
+                Expected::Refuse("check_request_coverage"),
+            ),
+            &job_paths,
+        ),
+        1,
+    ));
+    out.push(with_paths(
+        case(
+            "request-coverage-all-bullets-covered-in-job-fzx0-request",
+            job_source,
+            &["dash-bullet"],
+            &coverage_job_request(&[]),
+            2,
+            Expected::Accept,
+        ),
+        &job_paths,
+    ));
+    // A leniency probe: criteria in the reading's own words cover the verbatim bullets.
+    let mut c = with_paths(
+        case(
+            "request-coverage-paraphrased-criteria-cover-bullets",
+            "job 20261029-111121-fzx0, its request verbatim; the criteria are the reading's own words",
+            &["paraphrased-criteria-cover-bullets"],
+            &coverage_job_request(&[]),
+            2,
+            Expected::Accept,
+        ),
+        &job_paths,
+    );
+    c.reading.acceptance_criteria = [
+        "check_reading_acceptance refuses a reading that leaves one of the acceptance bullets out",
+        "The error names the omitted bullet",
+        "A reading whose criteria cover every bullet is accepted",
+        "cargo fmt --check, cargo clippy with -D warnings and cargo test pass",
+        "CHANGELOG.md gains an entry under Unreleased",
+    ]
+    .map(content)
+    .to_vec();
+    out.push(c);
+    // Near-identical sibling bullets are told apart by their object words.
+    out.push(without_criterion(
+        case(
+            "request-coverage-near-identical-bullets-one-omitted",
+            "job 20261029-111121-fzx0, the shape that caused the rejection; rebuilt from the job brief",
+            &["dash-bullet", "near-identical-bullets-one-omitted"],
+            &acceptance_request(
+                &["Fix the parser.", ""],
+                &[
+                    "- A test shows a star bullet is refused",
+                    "- A test shows a numbered part is refused",
+                ],
+            ),
+            2,
+            Expected::Refuse("check_request_coverage"),
+        ),
+        1,
+    ));
+    // Two bullets that differ only in a path: the omitted bullet needs its own path.
+    out.push(without_criterion(
+        with_paths(
+            case(
+                "request-coverage-path-token-bullet-omitted",
+                "job 20261029-111121-fzx0, a path-token bullet; rebuilt from the job brief",
+                &["dash-bullet", "path-token-bullet-omitted"],
+                &acceptance_request(
+                    &["Write the docs.", ""],
+                    &[
+                        "- docs/guide.md is documented",
+                        "- docs/notes.md is documented",
+                    ],
+                ),
+                2,
+                Expected::Refuse("check_request_coverage"),
+            ),
+            &["docs/guide.md", "docs/notes.md"],
+        ),
+        1,
+    ));
+    // The path of a wrapped bullet is on its second line, which the criteria (the first line) leave out.
+    out.push(case(
+        "request-coverage-wrapped-bullet-second-line-omitted",
+        "job 20261029-111121-fzx0, a bullet wrapped over two lines; rebuilt from the job brief",
+        &["dash-bullet", "wrapped-bullet", "acceptance-bullet-omitted"],
+        &acceptance_request(
+            &["Finish the guide.", ""],
+            &[
+                "- The guide is complete and",
+                "  docs/second.md holds the rest",
+                "- The index lists the guide",
+            ],
+        ),
+        2,
+        Expected::Refuse("check_request_coverage"),
+    ));
+    out.push(without_criterion(
+        case(
+            "request-coverage-numbered-parts-one-omitted",
+            "job 20261029-111121-fzx0, `1.` `2.` `3.` parts with part 2 dropped; rebuilt from the job brief",
+            &["number-dot-parts", "acceptance-bullet-omitted"],
+            &acceptance_request(
+                &["Do three things.", ""],
+                &["1. Add the status flag", "2. Document the guide page", "3. Cover it with a test"],
+            ),
+            3,
+            Expected::Refuse("check_request_coverage"),
+        ),
+        1,
+    ));
+    out.push(without_criterion(
+        case(
+            "request-coverage-indented-bullet-omitted",
+            "job 20261029-111121-fzx0, indented bullets; rebuilt from the job brief",
+            &[
+                "indented-bullet",
+                "dash-bullet",
+                "acceptance-bullet-omitted",
+            ],
+            &acceptance_request(
+                &["Fix the export.", ""],
+                &[
+                    "  - The export writes a header row",
+                    "  - The import rejects a bad date",
+                ],
+            ),
+            2,
+            Expected::Refuse("check_request_coverage"),
+        ),
+        1,
+    ));
+    // One criterion may cover two bullets.
+    let mut c = case(
+        "request-coverage-star-bullets-covered-by-one-merged-criterion",
+        "job 20261029-111121-fzx0, star bullets covered across criteria; rebuilt from the job brief",
+        &["star-bullet", "acceptance-bullet-covered-across-criteria"],
+        &acceptance_request(
+            &["Document the status flag.", ""],
+            &[
+                "* The guide names the flag",
+                "* The guide gives one example",
+            ],
+        ),
+        2,
+        Expected::Accept,
+    );
+    c.reading.acceptance_criteria = vec![content("The guide names the flag and gives an example")];
+    out.push(c);
+    // A request that says, outside its bullets, that the job may be split lets a reading cover fewer bullets.
+    for (id, extra, forms, expected) in [
+        (
+            "request-coverage-request-allows-split",
+            "You may split this job into parts.",
+            &["request-allows-split"][..],
+            Expected::Accept,
+        ),
+        (
+            "request-coverage-request-forbids-split",
+            "Do not split this job.",
+            &["request-mentions-split-without-allowing"][..],
+            Expected::Refuse("check_request_coverage"),
+        ),
+        (
+            "request-coverage-non-permitting-split-wording",
+            "The log is read in parts and the parser may split into tokens.",
+            &["non-permitting-split-wording"][..],
+            Expected::Refuse("check_request_coverage"),
+        ),
+    ] {
+        out.push(without_criterion(
+            with_paths(
+                case(
+                    id,
+                    "job 20261029-111121-fzx0, its request plus one sentence about a split; rebuilt from the job brief",
+                    forms,
+                    &coverage_job_request(&[extra]),
+                    2,
+                    expected,
+                ),
+                &job_paths,
+            ),
+            1,
+        ));
+    }
+    // A split proposed as a question back to the request is the allowed route.
+    let mut c = without_criterion(
+        with_paths(
+            case(
+                "request-coverage-reading-asks-the-split-as-a-question",
+                "job 20261029-111121-fzx0, a reading that asks the split; rebuilt from the job brief",
+                &["split-proposed-as-question", "acceptance-bullet-omitted"],
+                &coverage_job_request(&[]),
+                2,
+                Expected::Accept,
+            ),
+            &job_paths,
+        ),
+        1,
+    );
+    c.reading.question = Some("May the CHANGELOG.md entry be made in a follow-up job?".into());
+    out.push(c);
+    // Known gap: bullets with no `Acceptance` heading are not read as acceptance today.
+    out.push(without_criterion(
+        case(
+            "request-coverage-no-heading-not-read-today",
+            "job 20261029-111121-fzx0, bullets with no `Acceptance` heading; rebuilt from the job brief; a known gap",
+            &["dash-bullet", "no-acceptance-heading"],
+            &lines(&["Fix the guide.", "- The guide names the flag", "- The guide gives an example"]),
+            2,
+            Expected::Accept,
+        ),
+        1,
+    ));
+    // A list after the acceptance section is background, not acceptance.
+    out.push(without_criterion(
+        case(
+            "request-coverage-bullet-after-the-section-is-not-acceptance",
+            "job 20261029-111121-fzx0, a background list after the section; rebuilt from the job brief",
+            &["dash-bullet", "bullet-after-acceptance-section"],
+            &lines(&[
+                "Fix the guide.",
+                "",
+                "Acceptance:",
+                "- The guide names the flag",
+                "",
+                "Earlier behavior:",
+                "- Output grew without a limit",
+            ]),
+            2,
+            Expected::Accept,
+        ),
+        1,
+    ));
+    out
+}
+
 /// Request parser shapes, each with a reading the gate accepts.
 fn parser_cases() -> Vec<Case> {
     vec![
@@ -2674,6 +2998,7 @@ fn reading_source() -> &'static str {
             include_str!("../src/reading/retry.rs"),
             include_str!("../src/reading/topics.rs"),
             include_str!("../src/reading/checks.rs"),
+            include_str!("../src/reading/coverage.rs"),
             include_str!("../src/reading/outcome.rs"),
             include_str!("../src/reading/terms.rs"),
             include_str!("../src/reading/surveys.rs"),

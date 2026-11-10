@@ -219,6 +219,24 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
     }
 }
 
+/// The bullet lines of a request (`- `, `* ` or `N. `), trimmed and without their markers.
+fn request_bullets(request: &str) -> Vec<String> {
+    request
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| {
+            let rest = line.strip_prefix("- ").or_else(|| line.strip_prefix("* "));
+            let rest = rest.or_else(|| {
+                line.split_once(". ")
+                    .filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+                    .map(|(_, rest)| rest)
+            });
+            rest.map(str::trim).filter(|r| !r.is_empty())
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 /// The deterministic reading.
 fn reader_turn(spec: &AgentInvocation) -> FakeTurn {
     let request = section(&spec.user_prompt, "# Request");
@@ -296,6 +314,13 @@ fn reader_turn(spec: &AgentInvocation) -> FakeTurn {
     } else {
         "create"
     };
+    // The one criterion repeats the request's bullets, so the reading covers every acceptance bullet of the
+    // request, as the reading acceptance check requires.
+    let bullets = request_bullets(&request);
+    let mut criterion = format!("{FAKE_DELIVERABLE} contains the request");
+    if !bullets.is_empty() {
+        criterion.push_str(&format!(": {}", bullets.join("; ")));
+    }
     FakeTurn::output(json!({
         "urgent_reason": urgent_reason,
         "hard_reason": null,
@@ -308,7 +333,7 @@ fn reader_turn(spec: &AgentInvocation) -> FakeTurn {
         "defaults_applied": [],
         "assumptions": ["This is a nested run with fake agents."],
         "question": null,
-        "acceptance_criteria": [{ "text": format!("{FAKE_DELIVERABLE} contains the request"), "kind": "content" }],
+        "acceptance_criteria": [{ "text": criterion, "kind": "content" }],
         "deliverables": [{ "path": FAKE_DELIVERABLE, "action": action, "p": 0.9 }],
         "out_of_scope": out_of_scope,
         "forecast": {
@@ -490,6 +515,38 @@ mod tests {
         assert_eq!(action(), "create");
         std::fs::write(dir.path().join(FAKE_DELIVERABLE), "an earlier fake job\n").unwrap();
         assert_eq!(action(), "modify");
+    }
+
+    #[test]
+    fn the_fake_reader_criterion_repeats_the_bullets_of_the_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = FakeAgentDriver::deterministic();
+        let criterion = |request: &str| {
+            let brief = format!(
+                "# Request (verbatim)\n\n> {}\n",
+                request.replace('\n', "\n> ")
+            );
+            let turn = driver
+                .invoke(&spec(Role::Reader, &brief, dir.path().into()), &mut NoSink)
+                .unwrap();
+            turn.structured.unwrap()["acceptance_criteria"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let with = criterion(
+            "Add a note.\n\nAcceptance:\n- The note exists\n  - fmt and test pass\n2. It is short",
+        );
+        assert_eq!(
+            with,
+            format!(
+                "{FAKE_DELIVERABLE} contains the request: The note exists; fmt and test pass; It is short"
+            )
+        );
+        assert_eq!(
+            criterion("add a note"),
+            format!("{FAKE_DELIVERABLE} contains the request")
+        );
     }
 
     #[test]

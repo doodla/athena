@@ -2571,6 +2571,15 @@ impl Lander for RecordingLander {
 
 /// Commits a request on the steward's channel, as the steward's queue does, and returns its job id.
 fn queue_steward_request(athena: &Athena, text: &str) -> String {
+    // The scripted reader returns one fixed reading per scenario, and every scenario here has the behavior
+    // criterion "the tests still pass". The steward renders the request with an `Acceptance:` section, and
+    // reading acceptance requires the criteria to cover each of its bullets, so a text with no bullets gets that
+    // one bullet.
+    let request = if text.lines().any(|l| l.trim_start().starts_with("- ")) {
+        text.to_string()
+    } else {
+        format!("{text}\n- the tests still pass")
+    };
     let change = ProposedChange {
         kind: WorkItemKind::RepeatedFailure,
         key: "repeated-failure:docs".into(),
@@ -2578,7 +2587,7 @@ fn queue_steward_request(athena: &Athena, text: &str) -> String {
         rung: Ladder::Implementation,
         source: Reference::path("records/jobs"),
         evidence: Vec::new(),
-        request: text.into(),
+        request,
         brief: None,
     };
     let queued =
