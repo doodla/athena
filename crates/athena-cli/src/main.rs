@@ -274,6 +274,11 @@ so a run is not seen to end here
   reinstall needed  a job landed and its athena.toml needs a newer Athena than the one running (a new key, for \
 instance); the job is landed and not a failure; reinstall Athena (./setup.sh) and run the drain again
 
+A line of work with two attempts that did not land (rejected, failed, or verified but its pull request was not \
+merged) and none accepted is held, awaiting diagnosis: the drain does not retry it, passes its items over and \
+goes on. The diagnosis job is not built yet. The hold is not a file; it lifts when a pull request lands or the \
+request words change.
+
 Order: planning comes first. Every open request is fleshed out (goal, requirements-ladder rung, acceptance, \
 open questions, dependencies, the paths it touches) and all of them are planned together. Drain works the \
 items in plan order (a dependent after what it needs, then priority urgent, high, normal or low from a \

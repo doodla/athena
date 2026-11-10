@@ -26,6 +26,7 @@
 //! Every threshold is an **estimate, to be tuned** (section 5); the basis for each is in that section's table.
 
 use crate::introspect::normalise;
+use crate::pr::{LinkState, PrLink};
 use crate::reading::retried_job;
 use crate::state::StateDir;
 use crate::store::{JobRecords, JobState, Records};
@@ -34,7 +35,7 @@ use anyhow::{Context, Result};
 use athena_data::JobId;
 use athena_data::records::{OutcomeState, Role};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// T1 (section 5): flag when this attempt number on one line is about to be dispatched. Estimate; basis: the
@@ -64,6 +65,22 @@ pub const PRODUCER_SHARE: f64 = 0.7;
 /// what is left to spend when a retry resumes a kept candidate, so T3 compares such a retry with this share of
 /// the forecast p90, not the whole of it. Together with [`PRODUCER_SHARE`] it makes 1.
 pub const VERIFIER_SHARE: f64 = 0.3;
+
+/// The hold: the drain stops retrying a line once it has this many attempts that did not land
+/// ([`Athena::line_holds`]). The owner-approved loop change names the second attempt that does not land.
+pub const HOLD_ATTEMPTS: usize = 2;
+
+/// A line the drain holds: it has [`HOLD_ATTEMPTS`] or more attempts that did not land and none accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineHold {
+    /// The line, named by its first request id (as a pause is).
+    pub line: String,
+    /// Attempts on the line that did not land.
+    pub attempts: usize,
+    /// The jobs of the line that closed landed locally but that the host did not take, each with its pull
+    /// request number and the link's state, oldest id first.
+    pub unlanded: Vec<(String, u64, LinkState)>,
+}
 
 /// How a finished attempt ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -557,9 +574,17 @@ pub(crate) fn verdict_of(state: JobState, reason: Option<&str>) -> Option<Verdic
 
 /// The finished attempt a request's job made, when it has one: it was dispatched and reached a final state
 /// ([`verdict_of`]); `resumed` says whether it resumed a kept candidate (see [`AttemptRecord::resumed`]).
-fn attempt_of(job: &JobRecords, resumed: bool) -> Option<AttemptRecord> {
+///
+/// `unlanded` is true for a job that closed landed locally but that the host did not take (see
+/// [`Athena::line_holds`]): its verdict is then [`Verdict::Failed`] and not [`Verdict::Accepted`].
+fn attempt_of(job: &JobRecords, resumed: bool, unlanded: bool) -> Option<AttemptRecord> {
     job.job.as_ref()?;
     let verdict = verdict_of(job.state(), job.outcome.as_ref().map(|o| o.reason.as_str()))?;
+    let verdict = if unlanded && verdict == Verdict::Accepted {
+        Verdict::Failed
+    } else {
+        verdict
+    };
     let unmet_criterion = if verdict == Verdict::Rejected {
         job.verification
             .as_ref()
@@ -614,6 +639,17 @@ fn resumed_candidate(job: &JobRecords, target: Option<&JobRecords>) -> bool {
 /// `athena.candidate/2` `previous_job` is not used: it names the latest job landed in the base's history,
 /// which every job started on that base shares, so grouping on it would join unrelated work.
 pub fn request_records(records: &Records) -> Vec<RequestRecord> {
+    request_records_with(records, &|_| false)
+}
+
+/// As [`request_records`], where `unlanded` says that a job which closed landed locally was not taken by the
+/// host. Such a job is a failed attempt: it does not close its line's request text, so a re-ask of the same
+/// words stays on the line. Only the hold ([`Athena::line_holds`]) passes a predicate that is ever true; the
+/// signals T1 to T5 and the pauses use [`request_records`].
+pub(crate) fn request_records_with(
+    records: &Records,
+    unlanded: &dyn Fn(&JobRecords) -> bool,
+) -> Vec<RequestRecord> {
     let mut jobs = records.request_jobs();
     // Oldest request first. Ids carry the time to the second only, so the time of the request decides.
     jobs.sort_by(|a, b| {
@@ -635,7 +671,9 @@ pub fn request_records(records: &Records) -> Vec<RequestRecord> {
                 job,
                 retry_of.as_ref().and_then(|t| records.jobs.get(t.as_str())),
             );
-            let attempts: Vec<AttemptRecord> = attempt_of(job, resumed).into_iter().collect();
+            let attempts: Vec<AttemptRecord> = attempt_of(job, resumed, unlanded(job))
+                .into_iter()
+                .collect();
             if let Some(parent) = &retry_of {
                 retry_parent.insert(id.clone(), parent.clone());
             }
@@ -813,6 +851,105 @@ impl Athena {
             mark.signal_names(),
             mark.reason
         )
+    }
+
+    /// The jobs of `records` that closed landed locally but that the host did not take, each with its
+    /// pull-request link. `go` records a landed outcome before the drain lands the pull request, so a job that
+    /// lost to another landing reads as accepted in the records. The host took a job when its link's state is
+    /// landed ([`PrLink::taken_by_host`]) or when a landing record names it; either one removes it from this
+    /// set. A job with no link (no pull request was ever opened) or whose link cannot be read is left out,
+    /// which errs towards retrying. The job's own link is read, else the one opened early; nothing is moved.
+    fn unlanded_jobs(&self, records: &Records) -> HashMap<String, PrLink> {
+        let landed: HashSet<&str> = records
+            .landings
+            .iter()
+            .flat_map(|l| l.commits.iter())
+            .filter(|c| c.kind == athena_data::history::LandingKind::JobLanding)
+            .filter_map(|c| c.job.as_ref().map(|j| j.as_str()))
+            .collect();
+        records
+            .jobs
+            .values()
+            .filter(|j| j.state() == JobState::Closed(OutcomeState::Landed))
+            .filter(|j| !landed.contains(j.id().as_str()))
+            .filter_map(|j| {
+                let link = crate::pr::load_link_any(&self.state, j.id())
+                    .ok()
+                    .flatten()?;
+                (!link.taken_by_host()).then(|| (j.id().as_str().to_string(), link))
+            })
+            .collect()
+    }
+
+    /// For each of `jobs` that belongs to a line the drain must stop retrying, the hold on that line. A line is
+    /// held when none of its attempts was accepted and at least [`HOLD_ATTEMPTS`] attempts did not land: a
+    /// rejected or failed attempt (environment stops are not counted, as for T1), or a job that closed landed
+    /// locally but that the host did not take ([`Athena::unlanded_jobs`]; for example a collision with another
+    /// landing). Lines are those of [`group_lines`]. The hold is derived from the records and the pull-request
+    /// links each time; nothing is written, so it lifts itself when a link turns landed or the request words
+    /// change. Only the drain asks; `go` and `retry` do not.
+    pub fn line_holds(&self, records: &Records, jobs: &[String]) -> Vec<(String, LineHold)> {
+        let unlanded = self.unlanded_jobs(records);
+        let requests = request_records_with(records, &|j| unlanded.contains_key(j.id().as_str()));
+        let lines = group_lines(&requests);
+        let mut out = Vec::new();
+        for job in jobs {
+            let Some(at) = requests.iter().position(|r| r.id == *job) else {
+                continue;
+            };
+            let Some(line) = lines.iter().find(|l| l.contains(&at)) else {
+                continue;
+            };
+            let attempts = line_attempts(&requests, line);
+            if done(&attempts) {
+                continue;
+            }
+            let did_not_land = attempts
+                .iter()
+                .filter(|a| matches!(a.verdict, Verdict::Rejected | Verdict::Failed))
+                .count();
+            if did_not_land < HOLD_ATTEMPTS {
+                continue;
+            }
+            let mut pull_requests: Vec<(String, u64, LinkState)> = line
+                .iter()
+                .filter_map(|&i| {
+                    let id = &requests[i].id;
+                    unlanded.get(id).map(|l| (id.clone(), l.pr_number, l.state))
+                })
+                .collect();
+            pull_requests.sort_by(|a, b| a.0.cmp(&b.0));
+            out.push((
+                job.clone(),
+                LineHold {
+                    line: requests[line[0]].id.clone(),
+                    attempts: did_not_land,
+                    unlanded: pull_requests,
+                },
+            ));
+        }
+        out
+    }
+
+    /// One line about a held line: which line, how many attempts did not land, the pull requests that were not
+    /// taken (`pull_requests`, one description for each entry of [`LineHold::unlanded`], worded by the
+    /// caller from the link's state), that a diagnosis is awaited (it is not built yet) and what clears the
+    /// hold.
+    pub fn hold_note(&self, hold: &LineHold, pull_requests: &[String]) -> String {
+        let mut note = format!(
+            "line {} has {} attempts that did not land",
+            hold.line, hold.attempts
+        );
+        if !pull_requests.is_empty() {
+            note.push_str(&format!(
+                " (not taken by the host: {})",
+                pull_requests.join(", ")
+            ));
+        }
+        note.push_str(
+            "; it is awaiting diagnosis (not built yet) and the drain will not retry it. It clears when enough of those pull requests land, or the request words change",
+        );
+        note
     }
 
     /// The marks `athena status` shows: the stored marks ([`list_lines`]) that still hold. A pause is shown
@@ -1046,6 +1183,29 @@ mod watcher_tests {
         verdicts: &[Option<usize>],
         free_space: crate::state::FreeSpace,
     ) -> Rig {
+        rig_build(p90, cost, verdicts, free_space, false)
+    }
+
+    /// As [`rig`], but the fake producer writes README text that differs on every call, so every job changes
+    /// the file and lands. The shared rig writes one fixed text, so its second job changes nothing.
+    fn rig_counting(p90: f64, cost: f64, verdicts: &[Option<usize>]) -> Rig {
+        rig_build(
+            p90,
+            cost,
+            verdicts,
+            crate::test_support::plenty_of_space,
+            true,
+        )
+    }
+
+    fn rig_build(
+        p90: f64,
+        cost: f64,
+        verdicts: &[Option<usize>],
+        free_space: crate::state::FreeSpace,
+        counting: bool,
+    ) -> Rig {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
         let raw = include_str!("../../../athena.toml");
         let mut in_job_plan = false;
         let config: String = raw
@@ -1137,7 +1297,13 @@ mod watcher_tests {
                         ],
                         "open_issues": [], "mistakes": [], "learnings": [], "desires": []
                     }));
-                    t.edits = vec![("README.md".into(), Some("# Demo\n\nA demo.\n".into()))];
+                    let text = if counting {
+                        let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        format!("# Demo\n\nA demo {n}.\n")
+                    } else {
+                        "# Demo\n\nA demo.\n".to_string()
+                    };
+                    t.edits = vec![("README.md".into(), Some(text))];
                     t
                 }
                 Role::Verifier => {
@@ -1384,6 +1550,157 @@ mod watcher_tests {
         let requests = request_records(&r.records());
         assert_eq!(group_lines(&requests), vec![vec![0], vec![1]]);
         assert_eq!(requests[1].same_text_as, None);
+    }
+
+    /// Stores a pull-request link for `job` in the given state, as the drain's landing leaves it.
+    fn store_pr(r: &Rig, job: &JobId, number: u64, state: crate::pr::LinkState) {
+        let link = crate::pr::PrLink {
+            pr_number: number,
+            host: "github.com".into(),
+            repository: "example/project".into(),
+            head: "a".repeat(40),
+            job: job.as_str().into(),
+            state,
+            merged_commit: None,
+            base_jobs: Vec::new(),
+        };
+        crate::pr::store_link(&r.athena.state, job, &link).unwrap();
+    }
+
+    /// Two jobs that ask the same words and both land locally, each changing the file.
+    fn two_collisions(r: &Rig) -> (JobId, JobId) {
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Landed);
+        let b = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&b).unwrap(), OutcomeState::Landed);
+        (a, b)
+    }
+
+    fn ids(jobs: &[&JobId]) -> Vec<String> {
+        jobs.iter().map(|j| j.as_str().to_string()).collect()
+    }
+
+    #[test]
+    fn two_verified_but_not_landed_attempts_on_one_line_are_two_attempts_that_did_not_land() {
+        let r = rig_counting(0.8, 0.01, &[None, None]);
+        let (a, b) = two_collisions(&r);
+        // The host took neither: both pull requests are open and no landing record names them.
+        store_pr(&r, &a, 11, crate::pr::LinkState::Open);
+        store_pr(&r, &b, 12, crate::pr::LinkState::Open);
+        let records = r.records();
+        let holds = r.athena.line_holds(&records, &ids(&[&a, &b]));
+        assert_eq!(holds.len(), 2, "both jobs are on the held line: {holds:?}");
+        let hold = &holds[1].1;
+        assert_eq!(hold.attempts, 2);
+        assert_eq!(
+            hold.line,
+            a.as_str(),
+            "the line is named by its first request"
+        );
+        assert_eq!(
+            hold.unlanded,
+            vec![
+                (a.as_str().to_string(), 11, crate::pr::LinkState::Open),
+                (b.as_str().to_string(), 12, crate::pr::LinkState::Open),
+            ]
+        );
+        let note = r.athena.hold_note(hold, &["pull request #11".to_string()]);
+        assert!(
+            note.contains("2 attempts that did not land")
+                && note.contains("awaiting diagnosis")
+                && note.contains("not taken by the host: pull request #11"),
+            "{note}"
+        );
+
+        // Control: the signal readers still see each job as accepted, and as two separate lines.
+        let requests = request_records(&records);
+        assert_eq!(requests[0].attempts[0].verdict, Verdict::Accepted);
+        assert_eq!(
+            group_lines(&requests),
+            vec![vec![0], vec![1]],
+            "the signals do not use the hold's grouping"
+        );
+    }
+
+    #[test]
+    fn a_job_whose_link_state_is_landed_is_not_unlanded_even_with_no_landing_record() {
+        let r = rig_counting(0.8, 0.01, &[None, None]);
+        let (a, b) = two_collisions(&r);
+        store_pr(&r, &a, 11, crate::pr::LinkState::Landed);
+        store_pr(&r, &b, 12, crate::pr::LinkState::Open);
+        let records = r.records();
+        assert!(records.landings.is_empty(), "no landing record exists");
+        let unlanded = r.athena.unlanded_jobs(&records);
+        assert!(!unlanded.contains_key(a.as_str()), "{unlanded:?}");
+        assert!(unlanded.contains_key(b.as_str()));
+        assert!(
+            r.athena.line_holds(&records, &ids(&[&a, &b])).is_empty(),
+            "the landed job closes the text line, so b starts a line with one attempt"
+        );
+        // A link merged with other content is not taken either.
+        store_pr(&r, &a, 11, crate::pr::LinkState::MergedUnverified);
+        assert!(r.athena.unlanded_jobs(&records).contains_key(a.as_str()));
+    }
+
+    #[test]
+    fn a_landing_record_removes_a_job_from_the_unlanded_set() {
+        use athena_data::history::{Landing, LandingCommit, LandingKind, MergeMethod};
+        let r = rig_counting(0.8, 0.01, &[None, None]);
+        let (a, b) = two_collisions(&r);
+        store_pr(&r, &a, 11, crate::pr::LinkState::Open);
+        store_pr(&r, &b, 12, crate::pr::LinkState::Open);
+        let mut records = r.records();
+        assert_eq!(r.athena.unlanded_jobs(&records).len(), 2);
+        let at = jiff::Timestamp::now();
+        records.landings.push(Landing {
+            id: athena_data::RecordId::generate(at),
+            created_at: at,
+            pr_number: 11,
+            head_sha: "a".repeat(40),
+            host_commit: "b".repeat(40),
+            merge_method: MergeMethod::Squash,
+            commits: vec![LandingCommit {
+                sha: "a".repeat(40),
+                tree: "c".repeat(40),
+                kind: LandingKind::JobLanding,
+                job: Some(a.clone()),
+                verification: None,
+            }],
+            intent: athena_data::RecordId::generate(at),
+        });
+        let unlanded = r.athena.unlanded_jobs(&records);
+        assert_eq!(unlanded.len(), 1, "{unlanded:?}");
+        assert!(unlanded.contains_key(b.as_str()));
+        assert!(r.athena.line_holds(&records, &ids(&[&b])).is_empty());
+    }
+
+    #[test]
+    fn a_job_with_no_pull_request_link_is_treated_as_landed() {
+        let r = rig_counting(0.8, 0.01, &[None, None]);
+        let (a, b) = two_collisions(&r);
+        let records = r.records();
+        assert!(r.athena.unlanded_jobs(&records).is_empty());
+        assert!(r.athena.line_holds(&records, &ids(&[&a, &b])).is_empty());
+    }
+
+    #[test]
+    fn a_rejected_attempt_and_an_unlanded_attempt_on_one_line_are_two() {
+        let r = rig_counting(0.8, 0.01, &[Some(0), None]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Rejected);
+        let records = r.records();
+        assert!(
+            r.athena.line_holds(&records, &ids(&[&a])).is_empty(),
+            "one rejected attempt is not held"
+        );
+        let b = r.ask(&format!("try again on {a}"));
+        assert_eq!(r.go(&b).unwrap(), OutcomeState::Landed);
+        assert!(r.athena.line_holds(&r.records(), &ids(&[&b])).is_empty());
+        store_pr(&r, &b, 12, crate::pr::LinkState::Open);
+        let holds = r.athena.line_holds(&r.records(), &ids(&[&b]));
+        assert_eq!(holds.len(), 1);
+        assert_eq!(holds[0].1.attempts, 2);
+        assert_eq!(holds[0].1.unlanded.len(), 1);
     }
 
     #[test]
