@@ -197,219 +197,10 @@ const FAKE_CHANGELOG: &str = "CHANGELOG.md";
 /// The deterministic turn for each role.
 pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
     match spec.role {
-        Role::Reader => {
-            let request = section(&spec.user_prompt, "# Request");
-            let short: String = request
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(50)
-                .collect();
-            // A request that asks to make Athena faster or to cut wasted time is marked urgent, with a reason.
-            let lowered = request.to_lowercase();
-            let urgent_reason = SPEED_WORDS
-                .iter()
-                .find(|w| lowered.contains(*w))
-                .map(|w| format!("A fake reader: the request mentions \"{w}\", so it makes Athena faster or cuts wasted time."));
-            // A retry or follow-up brief carries the previous result and change scope; a reading must name
-            // each earlier job and state what stays out of scope, or it is refused.
-            let prior_section = section(&spec.user_prompt, "# Previous result and change scope");
-            let earlier_jobs: Vec<String> = prior_section
-                .lines()
-                .filter_map(|l| l.strip_prefix("Job "))
-                .filter_map(|l| l.split(':').next())
-                .map(str::to_string)
-                .collect();
-            // The files an earlier job's candidate changed, from the lines under its "Files its candidate
-            // changed" header (each `status path`; `section` has already removed the quote marks). The
-            // reading must keep each as a deliverable or exclude it, so the out_of_scope item names every one
-            // of them. The list ends at the first line that does not start with a status word.
-            let mut earlier_files: Vec<&str> = Vec::new();
-            let mut in_files = false;
-            for line in prior_section.lines() {
-                if line.starts_with("Files its candidate changed (") {
-                    in_files = true;
-                    continue;
-                }
-                let entry = line.split_once(' ').filter(|(status, _)| {
-                    in_files && ["added", "modified", "deleted", "type-changed"].contains(status)
-                });
-                match entry {
-                    Some((_, path)) => {
-                        if path != FAKE_DELIVERABLE && !earlier_files.contains(&path) {
-                            earlier_files.push(path);
-                        }
-                    }
-                    None => in_files = false,
-                }
-            }
-            let (earlier_note, out_of_scope) = if earlier_jobs.is_empty() {
-                (String::new(), json!([]))
-            } else {
-                let mut items = vec![format!("Anything other than {FAKE_DELIVERABLE}.")];
-                if !earlier_files.is_empty() {
-                    items.push(format!(
-                        "The earlier job's other files are left alone: {}.",
-                        earlier_files
-                            .iter()
-                            .map(|f| format!("`{f}`"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-                (
-                    format!(
-                        " It addresses the earlier result of job {}.",
-                        earlier_jobs.join(", job ")
-                    ),
-                    json!(items),
-                )
-            };
-            // The reader's workdir is a copy of the base commit. A file a landed fake job left there is
-            // modified, not created: a reading's deliverable actions must match the files at the base commit.
-            let action = if spec.workdir.join(FAKE_DELIVERABLE).exists() {
-                "modify"
-            } else {
-                "create"
-            };
-            FakeTurn::output(json!({
-                "urgent_reason": urgent_reason,
-                "hard_reason": null,
-                "title": format!("Record the request in {FAKE_DELIVERABLE}"),
-                "summary": format!("A fake reading made without a model call: write the request \"{short}\" to {FAKE_DELIVERABLE}.{earlier_note}"),
-                "class_of_work": first_enum(&spec.json_schema, "class_of_work", "other"),
-                "capability": first_enum(&spec.json_schema, "capability", "change"),
-                "decline_reason": null,
-                "producer_model": first_enum(&spec.json_schema, "producer_model", ""),
-                "defaults_applied": [],
-                "assumptions": ["This is a nested run with fake agents."],
-                "question": null,
-                "acceptance_criteria": [{ "text": format!("{FAKE_DELIVERABLE} contains the request"), "kind": "content" }],
-                "deliverables": [{ "path": FAKE_DELIVERABLE, "action": action, "p": 0.9 }],
-                "out_of_scope": out_of_scope,
-                "forecast": {
-                    "p_reading_accepted": 0.9,
-                    "p_verification_passes": 0.9,
-                    "p_user_intervenes": 0.1,
-                    "cost_usd": { "p10": 0.001, "p50": 0.001, "p90": 0.002 },
-                    "wall_time_s": { "p10": 1.0, "p50": 5.0, "p90": 60.0 },
-                    "departures": "a fake reader: no model call"
-                }
-            }))
-        }
-        Role::Producer => {
-            let request = section(&spec.user_prompt, "## Request");
-            let criteria_check: Vec<Value> = section(&spec.user_prompt, "## Acceptance criteria")
-                .lines()
-                .filter_map(|l| {
-                    l.split_once(". ")
-                        .filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
-                        .map(|(_, rest)| rest)
-                })
-                // The brief gives "[kind] text"; the report names the text alone.
-                .map(|rest| rest.split_once("] ").map_or(rest, |(_, text)| text))
-                .map(|text| json!({ "criterion": text, "status": "met", "evidence": "fake producer: nothing was checked" }))
-                .collect();
-            // The fake changes its own file and, when the brief lists it (a change reading always does), the
-            // changelog: admission refuses a change reading's candidate that leaves it untouched. Every other
-            // expected deliverable is reported as unchanged with a reason, as a real producer must.
-            let listed = section(&spec.user_prompt, "## Expected deliverables");
-            let expected: Vec<&str> = listed
-                .lines()
-                .filter_map(|l| l.strip_prefix("- "))
-                .map(|rest| rest.split_once(" (").map_or(rest, |(path, _)| path))
-                .collect();
-            let edits_changelog = expected.contains(&FAKE_CHANGELOG);
-            let unchanged: Vec<Value> = expected
-                .iter()
-                .filter(|path| **path != FAKE_DELIVERABLE && **path != FAKE_CHANGELOG)
-                .map(|path| json!({ "path": path, "reason": "fake producer: it changes only its own file" }))
-                .collect();
-            let mut files = vec![FAKE_DELIVERABLE];
-            if edits_changelog {
-                files.push(FAKE_CHANGELOG);
-            }
-            let mut turn = FakeTurn::output(json!({
-                "summary": format!("Wrote the request to {FAKE_DELIVERABLE} (fake producer, no model call)."),
-                "files": files,
-                "checks_run": [],
-                "criteria_check": criteria_check,
-                "open_issues": [],
-                "mistakes": [],
-                "learnings": [],
-                "desires": [],
-                "unchanged_planned_files": unchanged
-            }));
-            turn.edits.push((
-                FAKE_DELIVERABLE.to_string(),
-                Some(format!("# Fake change\n\n{request}\n")),
-            ));
-            if edits_changelog {
-                // One line appended to the text the work tree holds, so a second job still has a diff.
-                let mut text =
-                    std::fs::read_to_string(spec.workdir.join(FAKE_CHANGELOG)).unwrap_or_default();
-                if !text.is_empty() && !text.ends_with('\n') {
-                    text.push('\n');
-                }
-                text.push_str("- A fake change.\n");
-                turn.edits.push((FAKE_CHANGELOG.to_string(), Some(text)));
-            }
-            turn
-        }
-        Role::Verifier => {
-            let criteria = section(&spec.user_prompt, "## Acceptance criteria");
-            let entries: Vec<Value> = criteria
-                .lines()
-                .filter_map(|l| l.split_once(". ").filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit())).map(|(_, rest)| rest))
-                .map(|text| json!({ "criterion": text, "met": true, "evidence": "fake verifier: no model call", "commands": [] }))
-                .collect();
-            FakeTurn::output(json!({
-                "verdict": "pass",
-                "criteria": entries,
-                "findings": [],
-                "request_reading_mismatch": null,
-                "summary": "A fake verdict made without a model call."
-            }))
-        }
-        // A plan with one demonstration for each numbered criterion in the brief, and one file to create.
-        Role::Planner => {
-            let demonstrations: Vec<Value> = section(&spec.user_prompt, "## Acceptance criteria")
-                .lines()
-                .filter_map(|l| {
-                    l.split_once(". ")
-                        .filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
-                        .map(|(n, rest)| (n.parse::<u32>().unwrap_or(0), rest))
-                })
-                .map(|(n, rest)| (n, rest.split_once("] ").map_or(rest, |(_, text)| text)))
-                .map(|(n, text)| {
-                    json!({
-                        "criterion": n,
-                        "method": "read the change",
-                        "command": "cargo test --locked",
-                        "observes": format!("fake planner: {text}"),
-                        "fails_without": "fake planner: nothing was checked",
-                        "seam": "fake planner: no seam, the change is not exercised; exists"
-                    })
-                })
-                .collect();
-            FakeTurn::output(json!({
-                "approach": format!("Write the request to {FAKE_DELIVERABLE} (fake planner, no model call)."),
-                "decisions": [],
-                "files": [{ "path": FAKE_DELIVERABLE, "action": "create", "purpose": "Hold the request." }],
-                "steps": [format!("Create {FAKE_DELIVERABLE}.")],
-                "risks": [],
-                "dependents": [{
-                    "name": FAKE_DELIVERABLE,
-                    "dependent": "nothing reads the new file",
-                    "kind": "code",
-                    "test": null,
-                    "reason": "The fake planner creates a new file that no code reads."
-                }],
-                "demonstrations": demonstrations,
-                "open_questions": []
-            }))
-        }
+        Role::Reader => reader_turn(spec),
+        Role::Producer => producer_turn(spec),
+        Role::Verifier => verifier_turn(spec),
+        Role::Planner => planner_turn(spec),
         // A critic that finds nothing wrong.
         Role::Critic => FakeTurn::output(json!({
             "verdict": "accept",
@@ -426,6 +217,228 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
             json!({ "summary": "A fake audit made without a model call.", "findings": [] }),
         ),
     }
+}
+
+/// The deterministic reading.
+fn reader_turn(spec: &AgentInvocation) -> FakeTurn {
+    let request = section(&spec.user_prompt, "# Request");
+    let short: String = request
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(50)
+        .collect();
+    // A request that asks to make Athena faster or to cut wasted time is marked urgent, with a reason.
+    let lowered = request.to_lowercase();
+    let urgent_reason = SPEED_WORDS
+                .iter()
+                .find(|w| lowered.contains(*w))
+                .map(|w| format!("A fake reader: the request mentions \"{w}\", so it makes Athena faster or cuts wasted time."));
+    // A retry or follow-up brief carries the previous result and change scope; a reading must name
+    // each earlier job and state what stays out of scope, or it is refused.
+    let prior_section = section(&spec.user_prompt, "# Previous result and change scope");
+    let earlier_jobs: Vec<String> = prior_section
+        .lines()
+        .filter_map(|l| l.strip_prefix("Job "))
+        .filter_map(|l| l.split(':').next())
+        .map(str::to_string)
+        .collect();
+    // The files an earlier job's candidate changed, from the lines under its "Files its candidate
+    // changed" header (each `status path`; `section` has already removed the quote marks). The
+    // reading must keep each as a deliverable or exclude it, so the out_of_scope item names every one
+    // of them. The list ends at the first line that does not start with a status word.
+    let mut earlier_files: Vec<&str> = Vec::new();
+    let mut in_files = false;
+    for line in prior_section.lines() {
+        if line.starts_with("Files its candidate changed (") {
+            in_files = true;
+            continue;
+        }
+        let entry = line.split_once(' ').filter(|(status, _)| {
+            in_files && ["added", "modified", "deleted", "type-changed"].contains(status)
+        });
+        match entry {
+            Some((_, path)) => {
+                if path != FAKE_DELIVERABLE && !earlier_files.contains(&path) {
+                    earlier_files.push(path);
+                }
+            }
+            None => in_files = false,
+        }
+    }
+    let (earlier_note, out_of_scope) = if earlier_jobs.is_empty() {
+        (String::new(), json!([]))
+    } else {
+        let mut items = vec![format!("Anything other than {FAKE_DELIVERABLE}.")];
+        if !earlier_files.is_empty() {
+            items.push(format!(
+                "The earlier job's other files are left alone: {}.",
+                earlier_files
+                    .iter()
+                    .map(|f| format!("`{f}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        (
+            format!(
+                " It addresses the earlier result of job {}.",
+                earlier_jobs.join(", job ")
+            ),
+            json!(items),
+        )
+    };
+    // The reader's workdir is a copy of the base commit. A file a landed fake job left there is
+    // modified, not created: a reading's deliverable actions must match the files at the base commit.
+    let action = if spec.workdir.join(FAKE_DELIVERABLE).exists() {
+        "modify"
+    } else {
+        "create"
+    };
+    FakeTurn::output(json!({
+        "urgent_reason": urgent_reason,
+        "hard_reason": null,
+        "title": format!("Record the request in {FAKE_DELIVERABLE}"),
+        "summary": format!("A fake reading made without a model call: write the request \"{short}\" to {FAKE_DELIVERABLE}.{earlier_note}"),
+        "class_of_work": first_enum(&spec.json_schema, "class_of_work", "other"),
+        "capability": first_enum(&spec.json_schema, "capability", "change"),
+        "decline_reason": null,
+        "producer_model": first_enum(&spec.json_schema, "producer_model", ""),
+        "defaults_applied": [],
+        "assumptions": ["This is a nested run with fake agents."],
+        "question": null,
+        "acceptance_criteria": [{ "text": format!("{FAKE_DELIVERABLE} contains the request"), "kind": "content" }],
+        "deliverables": [{ "path": FAKE_DELIVERABLE, "action": action, "p": 0.9 }],
+        "out_of_scope": out_of_scope,
+        "forecast": {
+            "p_reading_accepted": 0.9,
+            "p_verification_passes": 0.9,
+            "p_user_intervenes": 0.1,
+            "cost_usd": { "p10": 0.001, "p50": 0.001, "p90": 0.002 },
+            "wall_time_s": { "p10": 1.0, "p50": 5.0, "p90": 60.0 },
+            "departures": "a fake reader: no model call"
+        }
+    }))
+}
+
+/// The deterministic producer turn: write the request to its own file.
+fn producer_turn(spec: &AgentInvocation) -> FakeTurn {
+    let request = section(&spec.user_prompt, "## Request");
+    let criteria_check: Vec<Value> = section(&spec.user_prompt, "## Acceptance criteria")
+                .lines()
+                .filter_map(|l| {
+                    l.split_once(". ")
+                        .filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+                        .map(|(_, rest)| rest)
+                })
+                // The brief gives "[kind] text"; the report names the text alone.
+                .map(|rest| rest.split_once("] ").map_or(rest, |(_, text)| text))
+                .map(|text| json!({ "criterion": text, "status": "met", "evidence": "fake producer: nothing was checked" }))
+                .collect();
+    // The fake changes its own file and, when the brief lists it (a change reading always does), the
+    // changelog: admission refuses a change reading's candidate that leaves it untouched. Every other
+    // expected deliverable is reported as unchanged with a reason, as a real producer must.
+    let listed = section(&spec.user_prompt, "## Expected deliverables");
+    let expected: Vec<&str> = listed
+        .lines()
+        .filter_map(|l| l.strip_prefix("- "))
+        .map(|rest| rest.split_once(" (").map_or(rest, |(path, _)| path))
+        .collect();
+    let edits_changelog = expected.contains(&FAKE_CHANGELOG);
+    let unchanged: Vec<Value> = expected
+        .iter()
+        .filter(|path| **path != FAKE_DELIVERABLE && **path != FAKE_CHANGELOG)
+        .map(
+            |path| json!({ "path": path, "reason": "fake producer: it changes only its own file" }),
+        )
+        .collect();
+    let mut files = vec![FAKE_DELIVERABLE];
+    if edits_changelog {
+        files.push(FAKE_CHANGELOG);
+    }
+    let mut turn = FakeTurn::output(json!({
+        "summary": format!("Wrote the request to {FAKE_DELIVERABLE} (fake producer, no model call)."),
+        "files": files,
+        "checks_run": [],
+        "criteria_check": criteria_check,
+        "open_issues": [],
+        "mistakes": [],
+        "learnings": [],
+        "desires": [],
+        "unchanged_planned_files": unchanged
+    }));
+    turn.edits.push((
+        FAKE_DELIVERABLE.to_string(),
+        Some(format!("# Fake change\n\n{request}\n")),
+    ));
+    if edits_changelog {
+        // One line appended to the text the work tree holds, so a second job still has a diff.
+        let mut text =
+            std::fs::read_to_string(spec.workdir.join(FAKE_CHANGELOG)).unwrap_or_default();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str("- A fake change.\n");
+        turn.edits.push((FAKE_CHANGELOG.to_string(), Some(text)));
+    }
+    turn
+}
+
+/// The deterministic verdict: pass, with every criterion met.
+fn verifier_turn(spec: &AgentInvocation) -> FakeTurn {
+    let criteria = section(&spec.user_prompt, "## Acceptance criteria");
+    let entries: Vec<Value> = criteria
+                .lines()
+                .filter_map(|l| l.split_once(". ").filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit())).map(|(_, rest)| rest))
+                .map(|text| json!({ "criterion": text, "met": true, "evidence": "fake verifier: no model call", "commands": [] }))
+                .collect();
+    FakeTurn::output(json!({
+        "verdict": "pass",
+        "criteria": entries,
+        "findings": [],
+        "request_reading_mismatch": null,
+        "summary": "A fake verdict made without a model call."
+    }))
+}
+
+/// A plan with one demonstration for each numbered criterion in the brief, and one file to create.
+fn planner_turn(spec: &AgentInvocation) -> FakeTurn {
+    let demonstrations: Vec<Value> = section(&spec.user_prompt, "## Acceptance criteria")
+        .lines()
+        .filter_map(|l| {
+            l.split_once(". ")
+                .filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+                .map(|(n, rest)| (n.parse::<u32>().unwrap_or(0), rest))
+        })
+        .map(|(n, rest)| (n, rest.split_once("] ").map_or(rest, |(_, text)| text)))
+        .map(|(n, text)| {
+            json!({
+                "criterion": n,
+                "method": "read the change",
+                "command": "cargo test --locked",
+                "observes": format!("fake planner: {text}"),
+                "fails_without": "fake planner: nothing was checked",
+                "seam": "fake planner: no seam, the change is not exercised; exists"
+            })
+        })
+        .collect();
+    FakeTurn::output(json!({
+        "approach": format!("Write the request to {FAKE_DELIVERABLE} (fake planner, no model call)."),
+        "decisions": [],
+        "files": [{ "path": FAKE_DELIVERABLE, "action": "create", "purpose": "Hold the request." }],
+        "steps": [format!("Create {FAKE_DELIVERABLE}.")],
+        "risks": [],
+        "dependents": [{
+            "name": FAKE_DELIVERABLE,
+            "dependent": "nothing reads the new file",
+            "kind": "code",
+            "test": null,
+            "reason": "The fake planner creates a new file that no code reads."
+        }],
+        "demonstrations": demonstrations,
+        "open_questions": []
+    }))
 }
 
 #[cfg(test)]
