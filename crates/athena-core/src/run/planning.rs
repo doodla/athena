@@ -96,7 +96,6 @@ impl Athena {
             .config
             .job_plan
             .expect("planning runs only with [job_plan]");
-        let last_round = round >= cfg.max_rounds;
         let id = ctx.id().clone();
         let p = ctx.prediction.clone();
         let request = ctx
@@ -243,36 +242,84 @@ impl Athena {
                     resumed_from: None,
                 })));
             }
-            ctx.ui.line(&format!(
-                "athena     plan round {round}: {} finding(s); no critic call; stopping",
-                athena_findings.len()
-            ));
-            let findings = athena_findings;
-            let reason = format!(
-                "the plan still broke Athena's own plan rules after {MAX_MECHANICAL_PASSES} mechanical revisions (round {round} of {}). Findings: {}",
-                cfg.max_rounds,
-                findings_line(&findings)
-            );
-            let critique = Critique {
-                job: id.clone(),
-                round,
-                at: crate::now(),
-                invocation_seq: None,
-                agent_verdict: None,
-                final_verdict: CritiqueVerdict::Revise,
-                findings,
-                request_reading_mismatch: None,
-                summary: Some(
-                    "Athena's own checks found a major problem in the plan; the critic was not called."
-                        .into(),
-                ),
-            };
-            // The plan and its Athena-only critique stand as the round's records, as evidence of the stop.
-            closing.plans.push(plan);
-            closing.critiques.push(critique);
-            self.stop_planning(ctx, closing, &reason);
+            self.stop_on_mechanical_limit(ctx, closing, plan, athena_findings);
             return Ok(RoundEnd::Stopped);
         }
+
+        self.critic_round(ctx, accepted, closing, plan, athena_findings, section)
+    }
+
+    /// Stops the job when a plan still breaks Athena's own plan rules after the last mechanical revision.
+    fn stop_on_mechanical_limit(
+        &self,
+        ctx: &RunContext<'_>,
+        closing: &mut Closing,
+        plan: JobPlan,
+        findings: Vec<Finding>,
+    ) {
+        let round = plan.round;
+        let max_rounds = ctx
+            .jc
+            .config
+            .job_plan
+            .expect("planning runs only with [job_plan]")
+            .max_rounds;
+        ctx.ui.line(&format!(
+            "athena     plan round {round}: {} finding(s); no critic call; stopping",
+            findings.len()
+        ));
+        let reason = format!(
+            "the plan still broke Athena's own plan rules after {MAX_MECHANICAL_PASSES} mechanical revisions (round {round} of {max_rounds}). Findings: {}",
+            findings_line(&findings)
+        );
+        let critique = Critique {
+            job: ctx.id().clone(),
+            round,
+            at: crate::now(),
+            invocation_seq: None,
+            agent_verdict: None,
+            final_verdict: CritiqueVerdict::Revise,
+            findings,
+            request_reading_mismatch: None,
+            summary: Some(
+                "Athena's own checks found a major problem in the plan; the critic was not called."
+                    .into(),
+            ),
+        };
+        // The plan and its Athena-only critique stand as the round's records, as evidence of the stop.
+        closing.plans.push(plan);
+        closing.critiques.push(critique);
+        self.stop_planning(ctx, closing, &reason);
+    }
+
+    /// The critic half of a planning round, run after Athena's own checks pass; see [`Self::plan_round`].
+    fn critic_round(
+        &self,
+        ctx: &RunContext<'_>,
+        accepted: &AcceptedReading,
+        closing: &mut Closing,
+        plan: JobPlan,
+        athena_findings: Vec<Finding>,
+        section: String,
+    ) -> Result<RoundEnd> {
+        let round = plan.round;
+        let jc = ctx.jc;
+        let cfg = jc
+            .config
+            .job_plan
+            .expect("planning runs only with [job_plan]");
+        let last_round = round >= cfg.max_rounds;
+        let id = ctx.id().clone();
+        let p = ctx.prediction.clone();
+        let request = ctx
+            .job
+            .request
+            .as_ref()
+            .map(|r| r.text.clone())
+            .unwrap_or_default();
+        let grant = planning_grant();
+        let snap_dir = self.state.job_dir(&id).join(format!("plan-{round}"));
+        let no_env = std::collections::BTreeMap::new();
 
         // The critic.
         if let Err(e) = self.preflight(jc, ctx.spent(closing), ReserveStage::Critic { round }) {
