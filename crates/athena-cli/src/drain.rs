@@ -51,10 +51,11 @@
 //!   keeps failing) and Hestia (which lists repeated failures) see the failure as before; the drain adds no
 //!   verdict of its own. The one exception is not about the item: when the closing reason of that second
 //!   failure says the environment is at fault ([`athena_core::disk::StopCause`]: the producer's login
-//!   expired, a usage limit was reached, or free disk space is low), every later item would fail the same
+//!   expired or free disk space is low), every later item would fail the same
 //!   way, so the run also ends with [`Stop::Environment`]. Before this rule an item that failed twice with no
 //!   pause or flag ended the whole batch (a 4 Nov batch with $43 and 3 job slots left stopped on one such
-//!   item).
+//!   item). A usage limit is judged sooner: the first job whose reply says the limit was reached ends the
+//!   run at once with [`Stop::UsageLimit`], with no second attempt, and a note gives the reset time.
 //! - **Concurrency.** A group is worked by up to `max_concurrency` workers; the next group starts only when
 //!   the group before it is done, so an item that depends on another starts after it has finished. The groups
 //!   flatten to the plan order, so with one worker the items start exactly in plan order. Landing
@@ -1015,12 +1016,16 @@ pub enum Stop {
     /// The next call's cap did not fit what was left of the budget.
     BudgetSpent,
     /// The environment, not the item, is at fault: an item failed twice and the closing reason of its second
-    /// failure says the producer's login expired, a usage limit was reached, or free disk space is low
+    /// failure says the producer's login expired or free disk space is low
     /// ([`athena_core::disk::StopCause`]). Every later item would fail the same way, so nothing more starts.
     /// An item that fails twice for any other reason is not this: it is passed over and
     /// the batch goes on, as it does for an item whose reader gave no reading twice, or whose line the
     /// scope guard has paused or flagged.
     Environment,
+    /// A job's producer reply said a usage limit was reached (a weekly or session limit, or an API error 429;
+    /// [`athena_core::disk::StopCause::UsageLimit`]). Every later item would hit the same limit, so the run
+    /// ends at the first such job, without a second attempt, and a note gives the reset time.
+    UsageLimit,
     /// Nothing is queued (or everything queued was worked). This is not success.
     QueueEmpty,
     /// The job limit was reached.
@@ -1043,10 +1048,11 @@ pub enum Stop {
 }
 
 impl Stop {
-    pub const ALL: [Stop; 9] = [
+    pub const ALL: [Stop; 10] = [
         Stop::TargetMet,
         Stop::BudgetSpent,
         Stop::Environment,
+        Stop::UsageLimit,
         Stop::QueueEmpty,
         Stop::JobLimit,
         Stop::Requested,
@@ -1060,6 +1066,7 @@ impl Stop {
             Stop::TargetMet => "target met",
             Stop::BudgetSpent => "budget spent",
             Stop::Environment => "environment",
+            Stop::UsageLimit => "usage limit",
             Stop::QueueEmpty => "queue empty",
             Stop::JobLimit => "job limit",
             Stop::Requested => "stop requested",
@@ -1078,7 +1085,10 @@ impl Stop {
                 "spend plus the next model call's cap would exceed the budget; the rest stays queued"
             }
             Stop::Environment => {
-                "an item failed twice because the producer's login expired, a usage limit was reached or free disk space is low, so every later item would fail the same way; fix that and run the drain again (an item that fails twice for any other reason is passed over and does not stop the batch)"
+                "an item failed twice because the producer's login expired or free disk space is low, so every later item would fail the same way; fix that and run the drain again (an item that fails twice for any other reason is passed over and does not stop the batch)"
+            }
+            Stop::UsageLimit => {
+                "a job's reply said the model's usage limit was reached, so every later item would fail the same way and nothing more started; the note gives when the limit resets; run the drain again after that"
             }
             Stop::QueueEmpty => "nothing was left to work; this is not success",
             Stop::JobLimit => "the job limit was reached",
@@ -1537,6 +1547,16 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         }
     }
 
+    /// Ends the run with [`Stop::UsageLimit`] and notes when the limit resets, as the reply worded it.
+    fn stop_for_usage_limit(&self, item: &str, reason: &str) {
+        let note = match athena_core::disk::usage_limit_reset(reason) {
+            Some(resets) => format!("usage limit reached; it resets {resets}"),
+            None => "usage limit reached; the reply gave no reset time".to_string(),
+        };
+        self.note(format!("{note} (item {item})"));
+        self.set_stop(Stop::UsageLimit);
+    }
+
     fn stopped(&self) -> bool {
         self.st().stop.is_some()
     }
@@ -1707,6 +1727,13 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             }
             other => {
                 line.outcome = other.map_or("no outcome", OutcomeState::as_str).to_string();
+                // A usage limit is the model's, not this item's: every later item would hit it too, so the
+                // run ends at the first job that did, and the reset time is put where the report shows it.
+                if other == Some(OutcomeState::Failed)
+                    && StopCause::of(&run.reason) == StopCause::UsageLimit
+                {
+                    self.stop_for_usage_limit(&item.job, &run.reason);
+                }
                 self.push(line);
                 RunStep::Failed {
                     job,
@@ -2603,9 +2630,10 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     &item.job,
                     &format!("failed twice; left for the scope guard and Hestia: {shown}"),
                 );
+                // (A usage limit never gets here: `run_job` ends the run at its first job, [`Stop::UsageLimit`].)
                 if matches!(
                     StopCause::of(&reason),
-                    StopCause::ProducerAuth | StopCause::UsageLimit | StopCause::LowDisk
+                    StopCause::ProducerAuth | StopCause::LowDisk
                 ) {
                     self.set_stop(Stop::Environment);
                 }

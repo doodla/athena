@@ -1211,11 +1211,42 @@ fn an_item_whose_producer_login_expired_twice_stops_the_batch_and_the_next_item_
 }
 
 #[test]
-fn a_usage_limit_or_low_disk_failing_an_item_twice_also_stops_the_batch() {
-    for reason in [
-        "environment: usage limit reached: API Error: 429",
-        "environment: low disk",
-    ] {
+fn low_disk_failing_an_item_twice_also_stops_the_batch() {
+    let stub = Stub {
+        items: vec!["a", "b"],
+        outcomes: RefCell::new(vec![OutcomeState::Failed, OutcomeState::Failed]),
+        run_reason: Some("environment: low disk"),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(5.0), &Stamped::new(&stub)).unwrap();
+    assert_eq!(report.stop, Stop::Environment);
+    assert!(!stub.log().iter().any(|l| l == "read b"));
+}
+
+#[test]
+fn a_usage_limit_reply_stops_the_drain_at_once_with_its_reset_time() {
+    // The reason is what the core writes for the driver's reply, so the drain reads the real text.
+    let cases = [
+        (
+            "success: You've hit your weekly limit · resets Nov 12, 3pm",
+            "usage limit reached; it resets Nov 12, 3pm",
+        ),
+        (
+            "success: You've hit your session limit · resets 9pm (UTC)",
+            "usage limit reached; it resets 9pm (UTC)",
+        ),
+        (
+            "success: You've hit your weekly limit",
+            "usage limit reached; the reply gave no reset time",
+        ),
+        (
+            "success: API Error: 429 slow down",
+            "usage limit reached; the reply gave no reset time",
+        ),
+    ];
+    for (detail, note) in cases {
+        let reason: &'static str =
+            Box::leak(athena_core::disk::producer_stop_reason(detail).into_boxed_str());
         let stub = Stub {
             items: vec!["a", "b"],
             outcomes: RefCell::new(vec![OutcomeState::Failed, OutcomeState::Failed]),
@@ -1223,9 +1254,33 @@ fn a_usage_limit_or_low_disk_failing_an_item_twice_also_stops_the_batch() {
             ..Stub::default()
         };
         let report = drain::drain(&stub, limits(5.0), &Stamped::new(&stub)).unwrap();
-        assert_eq!(report.stop, Stop::Environment, "{reason}");
-        assert!(!stub.log().iter().any(|l| l == "read b"), "{reason}");
+        assert_eq!(report.stop, Stop::UsageLimit, "{detail}");
+        // The first job ends the run: no second attempt of a, and b is never read.
+        assert_eq!(stub.log(), ["read a", "run a"], "{detail}");
+        let text = display::drain(&report);
+        assert!(text.contains("stopped     usage limit: "), "{text}");
+        assert!(text.contains(note), "{text}");
     }
+}
+
+#[test]
+fn a_failed_job_that_is_not_a_usage_limit_does_not_stop_the_drain_as_one() {
+    // A model's own prose about the limit, under another subtype, is a failure of the work.
+    let reason: &'static str = Box::leak(
+        athena_core::disk::producer_stop_reason(
+            "error_max_turns: You've hit your weekly limit · resets Nov 12, 3pm",
+        )
+        .into_boxed_str(),
+    );
+    let stub = Stub {
+        items: vec!["a", "b"],
+        outcomes: RefCell::new(vec![OutcomeState::Failed; 4]),
+        run_reason: Some(reason),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Stamped::new(&stub)).unwrap();
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert!(stub.log().iter().any(|l| l == "run b-retry"));
 }
 
 #[test]
