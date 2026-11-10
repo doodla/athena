@@ -479,7 +479,13 @@ fn root_cause_request_at(
     let cause_text = plain_boundary_text(&cause.cause)?;
     let mut body = String::from(
         "The same cause has produced failures in more than one job. Find the cause where it originates and fix \
-         it there, so the whole class is prevented; do not work around one instance.\n\n",
+         it there, so the whole class is prevented; do not work around one instance.\n\n\
+         Most causes are a stage that lacked information, not a stage that needed to refuse. First ask what \
+         the failing stage lacked, and give that information to it: in its brief, in the system facts it is \
+         given, or in the reader's inputs.\n\n\
+         Add a new refusal rule only when giving the information cannot prevent the failure. Then the request \
+         must state this line with a number: Expected share of past accepted readings it would refuse: N%. The \
+         replay holds the rule against that number.\n\n",
     );
     if let Some(class) = &cause.class {
         body.push_str(&format!("Failure class: {}\n", plain_boundary_text(class)?));
@@ -3816,6 +3822,33 @@ mod tests {
         assert!(crate::reading::scan_request_input(&text).is_empty());
         assert!(text.contains("the person running Athena"), "{text}");
         assert!(text.contains("[local path]"), "{text}");
+    }
+
+    #[test]
+    fn a_root_cause_request_asks_for_missing_information_before_any_refusal_rule() {
+        let mut records = Records::default();
+        records.introspections = vec![
+            introspection(10, 'a', None, "The reader lacked a fact"),
+            introspection(20, 'b', None, "The reader lacked a fact"),
+        ];
+        let causes = repeated_causes(&records);
+        assert_eq!(causes.len(), 1);
+        let text = root_cause_request(&causes[0], &records).unwrap();
+        let info = text
+            .find("give that information to it")
+            .expect("asks for the information");
+        assert!(text.contains("in its brief"), "{text}");
+        assert!(text.contains("system facts"), "{text}");
+        assert!(text.contains("reader's inputs"), "{text}");
+        let rule = text
+            .find("Add a new refusal rule only when giving the information cannot prevent the failure")
+            .expect("allows a refusal rule only then");
+        assert!(info < rule, "{text}");
+        let share = text
+            .find("Expected share of past accepted readings it would refuse: N%")
+            .expect("requires the expected refusal share");
+        assert!(rule < share, "{text}");
+        assert_eq!(text.matches("refusal rule").count(), 1, "{text}");
     }
 
     #[test]
