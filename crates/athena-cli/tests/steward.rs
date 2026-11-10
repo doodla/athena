@@ -174,7 +174,7 @@ fn repeated_failure_items(jobs: &[String]) -> Vec<Value> {
             "BRIEF.md should say the README is never deleted",
             "brief-requirements",
             ("path", "records/jobs"),
-            &[("job", &jobs[0])],
+            &[("job", &jobs[0]), ("job", &jobs[1])],
             None,
         ),
     ]
@@ -558,7 +558,7 @@ fn a_missing_token_reaches_the_owner_with_its_brief_and_a_plain_gap_does_not() {
             "BRIEF.md should say the README is never deleted",
             "brief-requirements",
             ("path", "README.md"),
-            &[("path", "README.md")],
+            &[("path", "BRIEF.md"), ("path", "docs/spec.toml")],
             None,
         ),
     ]);
@@ -682,8 +682,17 @@ fn items_that_fail_validation_are_reported_and_nothing_is_queued_for_them() {
                 "Has no request on a rung it may change",
                 "implementation",
                 ("path", "records/jobs"),
-                &[("job", &jobs[0])],
+                &[("job", &jobs[0]), ("job", &jobs[1])],
                 None,
+            ),
+            item(
+                "repeated-failure",
+                "bad:evidence",
+                "Cites one job, which is one instance and not a general weakness",
+                "implementation",
+                ("path", "records/jobs"),
+                &[("job", &jobs[0])],
+                Some("Do it."),
             ),
         ]
     });
@@ -691,6 +700,17 @@ fn items_that_fail_validation_are_reported_and_nothing_is_queued_for_them() {
     let head = fx.head();
     let report = run_steward(&athena);
     assert!(report.queued.is_empty());
-    assert_eq!(report.rejected.len(), 3, "{:?}", report.rejected);
+    assert_eq!(report.rejected.len(), 4, "{:?}", report.rejected);
+    let reason = |key: &str| {
+        report
+            .rejected
+            .iter()
+            .find(|r| r.contains(key))
+            .unwrap_or_else(|| panic!("no reason for {key}: {:?}", report.rejected))
+    };
+    assert!(reason("bad:request").contains("needs a request"));
+    let evidence = reason("bad:evidence");
+    assert!(evidence.contains("not a general weakness"), "{evidence}");
+    assert!(evidence.contains("1 distinct"), "{evidence}");
     assert_eq!(fx.head(), head);
 }

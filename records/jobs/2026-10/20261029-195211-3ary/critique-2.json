@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-195211-3ary",
+  "round": 2,
+  "at": "2026-11-10T22:02:33.379272716Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The CLI steward integration tests feed proposals with one evidence reference through `steward::run`. The new rule refuses those proposals, so three tests break, and neither the dependents list nor the file list mentions them.",
+      "evidence": "Read crates/athena-cli/tests/steward.rs. `repeated_failure_items` builds `proposal:brief-readme` with source `records/jobs` and evidence `&[(\"job\", &jobs[0])]`, which is 1 distinct reference. `scripted_output_with_a_real_gap_commits_the_work_items_and_a_queued_request` asserts `report.queued == [\"repeated-failure:docs\", \"proposal:brief-readme\"]` and `report.rejected.is_empty()`. `a_second_run_with_the_same_keys_queues_nothing_again` asserts `first.queued.len() == 2`. `a_missing_token_reaches_the_owner_with_its_brief_and_a_plain_gap_does_not` builds a proposal whose source and only evidence are both `README.md`, which is 0 references other than its source, and asserts it is queued with no rejections. `items_that_fail_validation_are_reported_and_nothing_is_queued_for_them` would still count 3 rejections, but `bad:request` (one job) would now be refused by the evidence floor and not by the missing request, so it would stop testing what it claims to test. The dependents entry 'steward structured output in fake-driver runs' lists only the `{\"items\": []}` fakes and misses `scenario.steward = json!({ \"items\": items })` at line 125. The root Cargo.toml is a virtual workspace with no default-members, so step 7's `cargo test --locked` would hit these failures, but the plan has no step to fix them. Fix: Add crates/athena-cli/tests/steward.rs to Files and Dependents, plus a step. Give `proposal:brief-readme` a second distinct reference in `repeated_failure_items`, e.g. `(\"job\", &jobs[1])`. In the missing-token test, give the plain proposal evidence other than its source, e.g. `(\"path\", \"BRIEF.md\"), (\"path\", \"docs/spec.toml\")`, or change its source. Give `bad:request` two jobs (`jobs[0]`, `jobs[1]`) and assert its reason still names the request, so it keeps testing the request rule. Name `cargo test -p athena-cli --test steward` in the demonstration for criterion 4. Optionally add one end-to-end case through `steward::run` that shows a one-job proposal in `report.rejected` with the new reason.",
+      "location": "Dependents / Files / Steps 3-4; crates/athena-cli/tests/steward.rs:160-181, 223-236, 348-353, 539-574, 656-696",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "For a repeated failure, commit references count as instances, but check_reference only checks that a commit looks like a hex id, not that it exists. Two made-up hashes pass, which is the same loophole the plan closed for paths.",
+      "evidence": "steward.rs:867-877 accepts any 7 to 40 character lowercase-hex string as a commit. Decision 1 rejects paths because `check_reference` accepts any relative path without checking it exists, yet counts commits that are checked no more strictly. Risk 3 says 'only existing jobs and well-formed commits count', which concedes this. Fix: Either count only Job references for a repeated failure (the steward brief at steward.rs:1105-1116 already defines generality as failed jobs), or state in the mechanism text and the CHANGELOG that commit ids are not checked to exist. Prefer jobs only: it is simpler and matches what the brief says.",
+      "location": "Decision 1 / Risks (third bullet)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "'Comment out the check, confirm the test fails, restore it' is a manual step and leaves no trace for the verifier.",
+      "evidence": "Step 4 and the criterion 3 demonstration rely on the producer doing this by hand. The test itself already covers it, because its first refusal assertion fails without the check. Fix: Keep the manual step, but have the report quote the failing assertion output from the run with the check removed.",
+      "location": "Step 4 / Criterion 3 demonstration",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Revise: the plan breaks three CLI integration tests that it does not list. Most of the plan holds up. validate_item, check_reference, the blind-spot branch, the fixtures records_with_job and item(), the eight-rejection test, the OLY-5-07 row (mechanism currently \"none\") and the free enforcement id M34 all exist as described. The check sits in the right place: after the references are validated and before the rung and request checks. The new unit test calls the real validate_items with no double, and its first refusal assertion fails without the check. The split counting (only jobs and commits for a repeated failure; references other than the source for a proposal) is defensible, and the mechanism text honestly says the \"no inappropriate universal rules\" clause is not mechanized. The problem is crates/athena-cli/tests/steward.rs, whose readers the dependents list omits. It drives steward::run with scripted items that include a one-job proposal (repeated_failure_items) and a proposal whose only evidence is its own source (the missing-token test). The new rule would refuse both, so scripted_output_with_a_real_gap…, a_second_run_with_the_same_keys… and a_missing_token… fail. items_that_fail_validation… would still pass, but its bad:request case would be refused for the wrong reason. Separately, counting unverified commit hashes as failure instances is a smaller loophole of the same kind the plan closed for paths. Both need plan edits, and neither changes the approach."
+}

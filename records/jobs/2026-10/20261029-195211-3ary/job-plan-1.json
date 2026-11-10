@@ -1,0 +1,238 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261029-195211-3ary",
+  "round": 1,
+  "at": "2026-11-10T21:58:49.719940114Z",
+  "invocation_seq": 2,
+  "approach": "In `validate_item` (crates/athena-core/src/steward.rs), after the evidence references are checked and before the rung and request checks, count the distinct validated evidence references and refuse a non-blind-spot item with fewer than two (new const MIN_EVIDENCE = 2). The reason names the key and says one instance is not a general weakness. Blind spots return earlier in the function, so they stay exempt. Raise the shared `item()` test helper to two evidence references and fix the three tests that assert one. Add one new unit test for the refusal and for duplicates counting once. Fill OLY-5-07's mechanism in docs/spec.toml and set its measure to `cargo test -p athena-core steward; status: not shown`. Add enforcement row M34 and a CHANGELOG entry.",
+  "decisions": [
+    {
+      "choice": "Count distinct validated `Reference` values (after `check_reference` trims them) with a Vec and `contains`; require at least 2 (`MIN_EVIDENCE`). Place the check after the evidence is validated, before the rung and request checks.",
+      "reason": "`Reference` derives only Debug, Clone, PartialEq, Eq, Serialize and Deserialize (crates/athena-data/src/records/work.rs:18), so it cannot go in a HashSet or BTreeSet without changing the data crate. A list of at most a few items makes a linear contains cheap. Checking after validation means a malformed reference reports its own error first, and ' k7q2 ' and 'k7q2' count once.",
+      "rejected": [
+        {
+          "option": "Count raw item.evidence entries before validation",
+          "why": "Duplicates and whitespace variants of one job would pass, which is the one-off the rule exists to refuse."
+        },
+        {
+          "option": "Derive Hash/Ord on Reference in athena-data",
+          "why": "It widens the change to a second crate for a list of a few entries."
+        },
+        {
+          "option": "Add the source reference to the evidence count",
+          "why": "The source says where the proposal came from, not what shows the weakness is general. Counting it would let one cited job pass."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the empty-evidence message and check ahead of the new check. The new check has its own reason text.",
+      "reason": "The existing test `invalid_items_are_dropped_with_a_reason_and_do_not_stop_the_rest` expects eight rejections, and keeping both checks keeps that count at eight. Zero evidence and one evidence are different faults to report.",
+      "rejected": [
+        {
+          "option": "Replace the empty check with 'fewer than two'",
+          "why": "It loses the specific zero-evidence message that existing callers may read."
+        }
+      ]
+    },
+    {
+      "choice": "Exempt blind spots by leaving the early return as is.",
+      "reason": "A blind spot is Athena's own report that a source cannot be read. Its evidence is the source name (steward.rs:779, or empty at line 761), and its key and rung are Athena's.",
+      "rejected": [
+        {
+          "option": "Apply the rule to all kinds",
+          "why": "The existing blind-spot tests clear the evidence and expect acceptance (lines 1849, 1868, 2229), and the brief says blind spots are exempt."
+        }
+      ]
+    },
+    {
+      "choice": "Leave the steward brief and role prompt text alone.",
+      "reason": "Changing prompts and role definitions is out of scope. The refusal reason is recorded in `Validated.rejected` and reaches the run report (steward.rs:1304).",
+      "rejected": [
+        {
+          "option": "Add 'cite at least two' to the brief at steward.rs:1128 and 1424",
+          "why": "Out of scope."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "purpose": "Add `MIN_EVIDENCE` and the distinct-evidence check in `validate_item`; raise the `item()` helper and the JSON/assertion tests to two references; add the new unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "OLY-5-07 only: set the mechanism to the new rule in `validate_item` and the measure to `cargo test -p athena-core steward; status: not shown`. Owner stays Athena.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under [Unreleased] / Added for the rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/enforcement.md",
+      "action": "modify",
+      "purpose": "Add row M34: a steward proposal needs two distinct evidence references; names the blocking and allowing tests.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-core/src/steward.rs, next to MAX_REQUEST (~line 842), add `/// The fewest distinct evidence references a non-blind-spot item may cite: one instance is not a general weakness.` and `const MIN_EVIDENCE: usize = 2;`.",
+    "In `validate_item`, after `let evidence = ...?;` (line ~998) and before `let rung = ladder(item.rung);`, build `let mut distinct: Vec<&Reference> = Vec::new();`, push each reference not already contained, and if `distinct.len() < MIN_EVIDENCE` return `Err(format!(\"{key}: evidence holds {n} distinct reference(s); one instance is not a general weakness, so cite at least {MIN_EVIDENCE}\"))`. Keep the existing empty-evidence check above it. Do not touch the blind-spot branch.",
+    "Update the tests. In `item()` (line ~1992) add a second `StewardRefOutput { kind: RefKindOutput::Path, value: \"records/jobs\".into() }` after the job entry. In `a_valid_item_becomes_a_proposed_change` (line ~2020) assert evidence equals the job reference and `Reference::path(\"records/jobs\")`. In `the_steward_output_parser_reads_the_five_brief_fields` (line ~1886) add a second evidence object, a path reference. Leave `change()` and the `decide` tests alone since they bypass validation. Confirm that `unknown_job` and `bad_commit` still fail on their own reference error.",
+    "Add the test `one_instance_is_not_a_general_weakness` after `invalid_items_are_dropped_with_a_reason_and_do_not_stop_the_rest`. Cases: (a) a repeated-failure item and a proposal item with one evidence reference, each refused with a reason containing the key and `not a general weakness`; (b) one job cited twice, once with surrounding spaces, refused; (c) a job plus a path accepted; (d) a blind spot with empty evidence accepted. Then confirm the test fails with the check commented out, and restore the check.",
+    "In docs/spec.toml, change only the OLY-5-07 row: mechanism = \"validate_item in crates/athena-core/src/steward.rs refuses a repeated-failure or proposal item that cites fewer than two distinct evidence references, so one instance is not treated as a general weakness; blind spots are exempt.\"; owner stays \"Athena\"; measure = \"cargo test -p athena-core steward; status: not shown\".",
+    "In docs/enforcement.md add row M34 after M33: rule 'A steward proposal needs general evidence, not one instance (OLY-5-07)'; mechanism `validate_item` in steward.rs with `MIN_EVIDENCE`; blocks `one_instance_is_not_a_general_weakness`; allows `a_valid_item_becomes_a_proposed_change`. Add to CHANGELOG.md under [Unreleased] / Added a bullet about the rule, naming OLY-5-07 and the exempt blind spots.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, `cargo test -p athena-core --test refusal_corpus` and `cargo test -p xtask`. Report which passed."
+  ],
+  "risks": [
+    {
+      "risk": "A genuine one-off the steward should still raise (a proposal citing a single decisive job) is now refused.",
+      "mitigation": "This is the stated requirement. The refusal is recorded in `rejected` with the key and the reason, and the rule is one const (`MIN_EVIDENCE`) the owner can change. Blind spots are exempt."
+    },
+    {
+      "risk": "The steward's prompt does not say that two references are needed, so early runs may lose items to the new rule.",
+      "mitigation": "Prompts are out of scope here. The reason text tells the next reader what is missing, and the CHANGELOG entry says so. The user can approve a later prompt change."
+    },
+    {
+      "risk": "The rule counts references, not whether they show the same failure, so two weak references pass.",
+      "mitigation": "The check is a floor, not a judgment of quality; the existing rung, request and critic checks still apply. The measure is `status: not shown`, so no claim is made beyond the test."
+    },
+    {
+      "risk": "A new row in docs/enforcement.md breaks xtask if a test name is misspelled.",
+      "mitigation": "Step 6 copies the test names from the new test and the edited existing test. `cargo test -p xtask` is in the verification commands."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "validate_item / validate_items refusal behavior",
+      "dependent": "crates/athena-core/src/steward.rs `consult` (line ~1288) calls `validate_items(report.items, role, records)`; `run` (line 1314) reaches it",
+      "kind": "code",
+      "test": "cargo test -p athena-core steward (new `one_instance_is_not_a_general_weakness` plus the edited existing tests). Items the model sends with one reference are now listed in `Validated.rejected` and reported in the run output; no state is read beyond `Records.jobs`.",
+      "reason": null
+    },
+    {
+      "name": "the shared `item()` helper's single evidence reference",
+      "dependent": "crates/athena-core/src/steward.rs tests `a_valid_item_becomes_a_proposed_change`, `the_steward_output_parser_reads_the_five_brief_fields`, `invalid_items_are_dropped_with_a_reason_and_do_not_stop_the_rest`, `a_run_queues_at_most_twenty_items`, `a_briefed_item_needs_no_request_and_a_plain_in_limit_item_still_does`, `a_steward_proposal_with_a_boundary_word_is_written_without_it`, `a_key_or_path_with_a_boundary_word_is_refused_with_the_word_named`",
+      "kind": "code",
+      "test": "The helper gets a second evidence entry (a path `records/jobs`). The first test's evidence assertion (line 2020) and the JSON test (line 1886) are updated. The other tests build valid items through the helper, so they pass unchanged. In `invalid_items_are_dropped_...`, `unknown_job` and `bad_commit` replace evidence[0] and still fail on their own reference error first.",
+      "reason": null
+    },
+    {
+      "name": "ProposedChange evidence length in decide()",
+      "dependent": "crates/athena-core/src/steward.rs tests `change()` and `plain_change()` (line 1650) and `an_unbriefed_change_above_the_limit_is_recorded...` (asserts `item.evidence.len() == 1`, line 1732)",
+      "kind": "code",
+      "test": null,
+      "reason": "These build `ProposedChange` directly and call `decide`, not `validate_item`, so the new rule does not run and their assertions on one reference still hold. Blind-spot changes made by `blind_spot_change` also bypass the rule."
+    },
+    {
+      "name": "steward structured output in fake-driver runs",
+      "dependent": "crates/athena-agent/src/fake.rs:212, crates/athena-core/src/run_pin_tests.rs:222, crates/athena-core/src/run/tests.rs:271 (fake steward output)",
+      "kind": "code",
+      "test": null,
+      "reason": "All three return `{\"items\": []}`, so no item reaches `validate_item`."
+    },
+    {
+      "name": "StewardOutput JSON with one evidence entry",
+      "dependent": "crates/athena-context/src/outputs.rs:974 steward schema test",
+      "kind": "code",
+      "test": null,
+      "reason": "It only parses the JSON into `StewardOutput` and checks the schema; it never calls `validate_items`. The schema is unchanged, so the one-entry parse stays valid."
+    },
+    {
+      "name": "OLY-5-07 mechanism and measure",
+      "dependent": "docs/spec.toml OLY-5-07 row; xtask/tests/spec.rs `check_how_it_is_met` and `the_real_spec_passes`; crates/athena-core/src/hestia.rs `measure_problem` (line 1219) and the spec review that queues a request for a mechanism of `none`",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test spec the_real_spec_passes. The measure ends `status: not shown`, which `measure_problem` accepts. With the mechanism no longer `none`, the Hestia sweep stops queuing the request for this row.",
+      "reason": null
+    },
+    {
+      "name": "new enforcement row M34 naming test functions",
+      "dependent": "docs/enforcement.md and xtask test `every_test_named_in_the_enforcement_map_exists`",
+      "kind": "rule",
+      "test": "cargo test -p xtask. The test checks that every backticked test name in the new row (`one_instance_is_not_a_general_weakness`, `a_valid_item_becomes_a_proposed_change`) exists as a test function.",
+      "reason": null
+    },
+    {
+      "name": "model-facing instruction about evidence",
+      "dependent": "crates/athena-core/src/steward.rs brief text (~lines 1128, 1424) and the steward role's prompt, which tell the model to cite evidence by reference",
+      "kind": "code",
+      "test": null,
+      "reason": "Not changed (prompts and roles are out of scope). The existing wording says to cite evidence and does not promise that one is enough. A refused item is reported in `rejected`, so the model's next run can cite more."
+    },
+    {
+      "name": "reading and admission refusal rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and the reading and admission checks in crates/athena-core/src/admission.rs and reading.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "Not changed. The new rule sits only in the steward's validation of the model's report, and no corpus case or reading-check input form reaches it. The producer and verifier run `cargo test -p athena-core --test refusal_corpus` to show it still passes; no case id is cited because none is affected."
+    },
+    {
+      "name": "documented steward validation",
+      "dependent": "docs/decisions.md and docs/system-facts.md mentions of the steward's validation",
+      "kind": "rule",
+      "test": null,
+      "reason": "decisions.md mentions `validate_items`/`StewardItemOutput` as history. Neither file states a minimum of one evidence reference, and system-facts.md has no steward evidence fact, so neither needs an edit."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Grep docs/spec.toml for the OLY-5-07 row. Then run the xtask spec test and the hestia measure tests, which validate the measure and the mechanism. Last, the new `measure_problem` check accepts the measure: its label starts with `not shown`.",
+      "command": "cargo test -p xtask --test spec the_real_spec_passes",
+      "observes": "The OLY-5-07 row has mechanism text naming validate_item in crates/athena-core/src/steward.rs, owner \"Athena\", and a measure `cargo test -p athena-core steward; status: not shown`. `the_real_spec_passes` reports no 'no mechanism', 'no measure' or 'no measure label' error for OLY-5-07.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test in steward.rs's `mod tests` calls `validate_items` (which calls the private `validate_item`) with a `Records` fixture from `records_with_job`. The test builds a repeated-failure item and a proposal item with the shared `item()` helper trimmed to one evidence reference.",
+      "command": "cargo test -p athena-core steward::tests::one_instance_is_not_a_general_weakness",
+      "observes": "A one-evidence repeated-failure item and a one-evidence proposal item each land in `rejected` with a reason that contains the key and `not a general weakness`, and `changes` stays empty. The same items with a second distinct reference are accepted. A blind-spot item with empty evidence is still accepted.",
+      "fails_without": "Without the check, the one-evidence items are accepted. `valid.rejected` is empty and the `contains(\"not a general weakness\")` assertion fails.",
+      "seam": "Entry point `validate_items` -> `validate_item` (steward.rs:932,954), called directly from the in-file test module. The fixture is `records_with_job` (exists, steward.rs:1970) and the `item()` helper (exists, steward.rs:1982; step 3 changes it to two references). No double: the real code runs."
+    },
+    {
+      "criterion": 3,
+      "method": "The same new test also builds an item whose two evidence entries are the same job (once with surrounding spaces) and asserts it is refused. Removing the new check from `validate_item` makes the test fail, and putting it back makes it pass. The producer checks this by temporarily commenting out the check, running the test, then restoring it.",
+      "command": "cargo test -p athena-core steward::tests::one_instance_is_not_a_general_weakness",
+      "observes": "The duplicate-reference item is refused, with the rejection counting one distinct reference. A path reference and a job reference make two distinct references and are accepted.",
+      "fails_without": "The test fails at its first assertion when the new check is absent, because the single-evidence and duplicate-evidence items are accepted. It passes with the check present.",
+      "seam": "Same entry point and fixtures as criterion 2: `validate_items` with `records_with_job` (exists). The step-4 test adds the cases. No double."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the whole steward module, then fmt, clippy and the workspace tests. These include the edited tests: `a_valid_item_becomes_a_proposed_change` now asserts two evidence references, `the_steward_output_parser_reads_the_five_brief_fields` has a second evidence entry in its JSON, and `invalid_items_are_dropped_with_a_reason_and_do_not_stop_the_rest` still sees eight rejections plus one accepted item.",
+      "command": "cargo test -p athena-core steward",
+      "observes": "All steward tests pass. Then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` finish clean.",
+      "fails_without": "If `item()` kept one evidence reference, every test using it as a valid item would fail with the new reason, such as `a_run_queues_at_most_twenty_items`, which needs 20 changes.",
+      "seam": "Existing tests, edited in step 3. `validate_items` is the entry point and is called by steward.rs:1288 (`consult`). The fakes in crates/athena-agent/src/fake.rs:212, run_pin_tests.rs:222 and run/tests.rs:271 return `{\"items\": []}`, so no other fixture needs to change."
+    },
+    {
+      "criterion": 5,
+      "method": "Content check: the rule's only call site is `validate_items` in `consult` (steward.rs:1288). No code in reading.rs or admission.rs calls it. No file under crates/ matched by the record round-trip or allow-list is added. The producer's final message states this and names the call sites. Run `cargo test -p athena-core admission` and `cargo test -p athena-core --test refusal_corpus` to show admission and reading refusals are unchanged.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "The refusal corpus passes unchanged. No reading or admission case is refused newly (expected 0% of newly refused readings, an estimate from reading the code, not a measurement). `git diff --stat` shows no record or data file and no allow-list change.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Grep CHANGELOG.md for the new entry under [Unreleased] / Added, and run the hestia tests that exercise `measure_problem` and the xtask spec test.",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "CHANGELOG.md has an `Added` bullet naming `validate_item`, the two-reference rule and OLY-5-07. The hestia tests pass, and `measure_problem` returns `None` for `cargo test -p athena-core steward; status: not shown`, because the label starts with `not shown` (hestia.rs:1229). `cargo test -p xtask` also passes, covering the new enforcement row's test names.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: Is 'two distinct evidence references' the right test for a demonstrated general weakness? A stricter test, such as two distinct jobs, would also refuse a job plus a path. This plan takes the reading's rule: any two distinct references of any kind."
+  ],
+  "producer_section_sha256": "3ef78a6350f9287e979b79e16f274d033b039e1eba8adf98c1ff4e4394ff4a46"
+}
