@@ -694,12 +694,196 @@ fn array_of_value<'a>(value: &'a Value, file: &str) -> Result<&'a Vec<Value>> {
 /// page lists only open proposals above the raising role's limit; work decisions are read from the records
 /// branch and from main.
 pub fn build(root: &Path, out: &Path) -> Result<()> {
-    let html = render(&load(&root.join(STUDY_DIR))?)?;
+    let html = with_evidence(
+        render(&load(&root.join(STUDY_DIR))?)?,
+        &evidence_section(root, EVIDENCE_JOB),
+    );
     std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
     let index = out.join("index.html");
     std::fs::write(&index, html).with_context(|| format!("cannot write {}", index.display()))?;
     println!("wrote {}", index.display());
     crate::decisions::write(root, out)
+}
+
+/// The landed job the homepage shows as evidence for its header claims. Everything else about it is read
+/// from that job's records.
+const EVIDENCE_JOB: &str = "20261029-073603-7kqv";
+
+/// One invocation of the job: a stage, the model that ran it and what it cost.
+struct Stage {
+    path: String,
+    role: String,
+    model: String,
+    cost: Option<f64>,
+}
+
+/// What the job's records say, read from the records branch.
+struct Evidence {
+    job: String,
+    tip: String,
+    producer_model: String,
+    verifier_model: String,
+    verdict: String,
+    verifier_verdict: Option<String>,
+    verification_path: String,
+    stages: Vec<Stage>,
+}
+
+fn text_field(value: &Value, key: &str, path: &str) -> Result<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("{path} has no `{key}`"))
+}
+
+/// Reads job `job` from the records branch of the repository at `root`.
+fn read_evidence(root: &Path, job: &str) -> Result<Evidence> {
+    let (git, tip) = crate::decisions::records_tip(root).map_err(|why| anyhow!(why))?;
+    let (year, month) = (job.get(..4), job.get(4..6));
+    let (Some(year), Some(month)) = (year, month) else {
+        bail!("`{job}` is not a job id");
+    };
+    let dir = format!("records/jobs/{year}-{month}/{job}");
+    let mut readings: Vec<(u32, Value)> = Vec::new();
+    let mut verification = None;
+    let mut stages = Vec::new();
+    for entry in git.ls_tree_under(&tip, &dir)? {
+        let rel = entry.path.strip_prefix(&format!("{dir}/")).unwrap_or("");
+        let record = |entry: &athena_git::TreeEntry| -> Result<Value> {
+            let bytes = git.cat_blob(&entry.oid)?;
+            serde_json::from_slice(&bytes).with_context(|| format!("{} is not JSON", entry.path))
+        };
+        if let Some(n) = rel
+            .strip_prefix("reading-")
+            .and_then(|r| r.strip_suffix(".json"))
+            .and_then(|n| n.parse::<u32>().ok())
+        {
+            readings.push((n, record(&entry)?));
+        } else if rel == "verification.json" {
+            verification = Some((entry.path.clone(), record(&entry)?));
+        } else if rel.starts_with("invocations/") && rel.ends_with(".json") {
+            let value = record(&entry)?;
+            stages.push(Stage {
+                role: text_field(&value, "role", &entry.path)?,
+                model: text_field(&value, "model", &entry.path)?,
+                cost: value
+                    .get("cost")
+                    .and_then(|c| c.get("value"))
+                    .and_then(Value::as_f64),
+                path: entry.path,
+            });
+        }
+    }
+    stages.sort_by(|a, b| a.path.cmp(&b.path));
+    readings.sort_by_key(|(n, _)| *n);
+    let Some((_, reading)) = readings.last() else {
+        bail!("no reading record for job {job}");
+    };
+    let Some((verification_path, verification)) = verification else {
+        bail!("no verification record for job {job}");
+    };
+    if stages.is_empty() {
+        bail!("no invocation records for job {job}");
+    }
+    Ok(Evidence {
+        job: job.to_string(),
+        producer_model: text_field(reading, "producer_model", "the reading")?,
+        verifier_model: text_field(reading, "verifier_model", "the reading")?,
+        verdict: text_field(&verification, "final_verdict", &verification_path)?,
+        verifier_verdict: verification
+            .get("agent_verdict")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        verification_path,
+        stages,
+        tip,
+    })
+}
+
+fn record_link(tip: &str, path: &str, label: &str) -> String {
+    format!(
+        "<a href=\"{}\">{}</a>",
+        escape(&source_url(ATHENA_URL, tip, path, 0, 0)),
+        escape(label)
+    )
+}
+
+fn evidence_html(e: &Evidence) -> String {
+    let relation = if e.producer_model == e.verifier_model {
+        "the same model checked it"
+    } else {
+        "a different model checked it"
+    };
+    let mut html = format!(
+        "<section id=\"job-evidence\"><h2>Check it on a real job</h2>\
+         <p>Job <code>{job}</code> is a real job Athena ran. The work was produced by <code>{p}</code>; \
+         {relation}: <code>{v}</code>. The verdict was <strong>{verdict}</strong>",
+        job = escape(&e.job),
+        p = escape(&e.producer_model),
+        v = escape(&e.verifier_model),
+        verdict = escape(&e.verdict),
+    );
+    if let Some(own) = &e.verifier_verdict {
+        let _ = write!(
+            html,
+            " (the verifying model's own verdict: {})",
+            escape(own)
+        );
+    }
+    html.push_str(
+        ". Each stage's cost below is the figure recorded for that stage. \
+         These values are read from the job's records when this page is built.</p>\
+         <table><thead><tr><th>Stage</th><th>Model</th><th>Recorded cost</th><th>Source record</th></tr></thead><tbody>",
+    );
+    let mut total = 0.0;
+    for s in &e.stages {
+        let cost = match s.cost {
+            Some(c) => {
+                total += c;
+                format!("${c:.2}")
+            }
+            None => "not recorded".to_string(),
+        };
+        let file = s.path.rsplit('/').next().unwrap_or(&s.path);
+        let _ = write!(
+            html,
+            "<tr><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
+            escape(&s.role),
+            escape(&s.model),
+            cost,
+            record_link(&e.tip, &s.path, file)
+        );
+    }
+    let _ = write!(
+        html,
+        "</tbody></table><p>Total of the recorded stage costs: ${total:.2}. Source: {}.</p></section>",
+        record_link(
+            &e.tip,
+            &e.verification_path,
+            "the job's verification record"
+        )
+    );
+    html
+}
+
+/// The homepage section for `job`, or a section saying why its records could not be shown.
+fn evidence_section(root: &Path, job: &str) -> String {
+    match read_evidence(root, job) {
+        Ok(e) => evidence_html(&e),
+        Err(why) => format!(
+            "<section id=\"job-evidence\"><h2>Check it on a real job</h2>\
+             <p>The records of job <code>{}</code> could not be read here, so no models, verdict or \
+             costs are shown: {}.</p></section>",
+            escape(job),
+            escape(&why.to_string())
+        ),
+    }
+}
+
+/// Places `section` directly under the page header.
+fn with_evidence(html: String, section: &str) -> String {
+    html.replacen("</header>", &format!("</header>{section}"), 1)
 }
 
 pub(crate) const CSS: &str = "\
@@ -721,6 +905,130 @@ dt{font-weight:600}dd{margin:0 0 .5rem}\
 .deciders{margin:1rem 0}\
 .sources{color:var(--muted);font-size:.85rem}\
 @media (max-width:40rem){h1{font-size:1.5rem}main{padding:.6rem}}";
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+    use athena_git::Git;
+    use athena_git::records_branch::{Change, RecordsWriter};
+
+    const JOB: &str = "20261001-000000-fixt";
+    const PRODUCER: &str = "fixture-producer-model";
+    const VERIFIER: &str = "fixture-verifier-model";
+
+    /// A repository whose records branch holds a fixture job: two stages, with a recorded cost each.
+    fn repo_with_job() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::isolated(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "init"]).unwrap();
+        let base = format!("records/jobs/2026-10/{JOB}");
+        let invocation = |role: &str, model: &str, cost: f64| {
+            serde_json::json!({
+                "schema": "athena.invocation/1", "role": role, "model": model,
+                "cost": {"value": cost, "unit": "usd", "provenance": "reported", "basis": "fixture"}
+            })
+            .to_string()
+        };
+        let changes = [
+            Change::put(
+                format!("{base}/reading-1.json"),
+                serde_json::json!({"producer_model": "older-reading-model", "verifier_model": "older-reading-model"})
+                    .to_string(),
+            ),
+            Change::put(
+                format!("{base}/reading-2.json"),
+                serde_json::json!({"producer_model": PRODUCER, "verifier_model": VERIFIER})
+                    .to_string(),
+            ),
+            Change::put(
+                format!("{base}/verification.json"),
+                serde_json::json!({"final_verdict": "pass", "agent_verdict": "pass"}).to_string(),
+            ),
+            Change::put(
+                format!("{base}/invocations/01-producer.json"),
+                invocation("producer", PRODUCER, 1.25),
+            ),
+            Change::put(
+                format!("{base}/invocations/02-verifier.json"),
+                invocation("verifier", VERIFIER, 0.75),
+            ),
+        ];
+        RecordsWriter::new(&git)
+            .append("records", &changes)
+            .unwrap();
+        dir
+    }
+
+    fn study_page() -> String {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap()
+    }
+
+    /// The check the homepage must pass: the section is there, and it names the job, both models, the
+    /// verdict, and a recorded cost for each stage, with links to the source records.
+    fn shows_job_evidence(html: &str) -> Result<()> {
+        let at = html
+            .find("<section id=\"job-evidence\">")
+            .ok_or_else(|| anyhow!("the page has no job evidence section"))?;
+        let section = html[at..].split("</section>").next().unwrap_or("");
+        for needle in [
+            JOB,
+            PRODUCER,
+            VERIFIER,
+            "<strong>pass</strong>",
+            "$1.25",
+            "$0.75",
+            "a different model checked it",
+            "/blob/",
+            "/records/jobs/2026-10/",
+        ] {
+            if !section.contains(needle) {
+                bail!("the job evidence section lacks `{needle}`");
+            }
+        }
+        if section.matches("<a href=").count() < 3 {
+            bail!("the job evidence section links too few source records");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_homepage_shows_a_jobs_models_verdict_and_stage_costs_from_its_records() {
+        let repo = repo_with_job();
+        let html = with_evidence(study_page(), &evidence_section(repo.path(), JOB));
+        shows_job_evidence(&html).unwrap();
+        // The producer and verifier models differ, which is what the header claims.
+        assert_ne!(PRODUCER, VERIFIER);
+        // The latest reading is the one shown, and the section sits under the header.
+        assert!(!html.contains("older-reading-model"));
+        assert!(
+            html.find("</header><section id=\"job-evidence\">")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_page_without_the_section_or_without_the_records_fails_the_check() {
+        let repo = repo_with_job();
+        assert!(shows_job_evidence(&study_page()).is_err());
+        let no_records = tempfile::tempdir().unwrap();
+        Git::isolated(no_records.path())
+            .run(["init", "-q", "-b", "main"])
+            .unwrap();
+        let html = with_evidence(study_page(), &evidence_section(no_records.path(), JOB));
+        assert!(html.contains("could not be read here"));
+        assert!(shows_job_evidence(&html).is_err());
+        // A job the branch does not hold fails the same way.
+        let html = with_evidence(
+            study_page(),
+            &evidence_section(repo.path(), "20261001-000000-none"),
+        );
+        assert!(shows_job_evidence(&html).is_err());
+    }
+}
 
 #[cfg(test)]
 mod tests {
