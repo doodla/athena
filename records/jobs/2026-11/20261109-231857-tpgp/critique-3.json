@@ -1,0 +1,27 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261109-231857-tpgp",
+  "round": 3,
+  "at": "2026-11-09T23:35:17.405546022Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan says one drain run is one process, but a drain run can re-exec itself, so the once-per-run set is cleared partway through the run.",
+      "evidence": "I read the drain.rs module doc at lines 150-160: after a landing that changes Athena's code and a successful rebuild, `follow_restart` runs `athena drain` again as a new binary ([`reexec_args`]). The run's tallies are handed on through `drain.carry` (`carry_file`, 502; `Carried`, 3219-3229), and \"the closing summary covers the whole run, not the last pass\". `Carried` has no field for queued markers, and commands.rs:341-356 builds a fresh `RealSteps::live` inside `run_pass` for each pass. A `static SOURCE_FIX_QUEUED` in the old process is therefore gone after a rebuild. A source fix that landed without removing the contradiction would be queued again in the same run, once per rebuild, which is the loop decision 1 is meant to stop. The plan's reasons (\"process scope is run scope\", \"A drain command is one process, so the set is exactly one run\") are false, and the dependents list leaves out `run_pass`, `Carried` and `follow_restart`. Fix: Store the queued markers in the run state that survives a re-exec. Either add a `source_fix_queued: Vec<String>` field to `Carried` (filled from the Report or Drain state and restored by `Carried::apply`), or keep a small file in the state directory next to `drain.carry` that `guarded` removes on a fresh start, as it already does for the carry. Keying the set on the repository directory is still fine. Add `Carried`/`run_pass`/`guarded` to the dependents list. Add a test that a marker queued before a simulated restart (store_carry, then take the carry) is not queued again after it, or else state the re-exec gap in the CHANGELOG and the doc comment.",
+      "location": "Decision 1; Step 7; Dependents entry 'New process-wide set SOURCE_FIX_QUEUED'; Risks (hidden state)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The anchor rule is a containment heuristic with several fallbacks. It is acceptable because the checker call is out of scope, but it has an obvious false-positive case.",
+      "evidence": "A candidate matches when either side contains the other, with the shorter side at least 12 characters. So a short glossary definition or a `transition` string that happens to be contained in a long statement credits that entry, even when the statement is about a different entry. In the study files I read, the many short `claims`-bearing strings in intro.json (for example the term definitions at lines 83 and 115) could become such accidental matches. The cap at three owners limits this, but one or two accidental owners would still give a wrong but stable anchor that merges two distinct contradictions. Fix: Use containment one way only: the candidate must contain the statement, or the statement must contain the candidate with the candidate covering most of the statement (for example at least half its length). Or prefer the candidate whose owner is named in the checker's evidence. Add a unit test where a short unrelated definition sits inside a long statement and is not credited.",
+      "location": "Decision 2 / Step 3 (finding_anchor)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I reviewed the plan against the snapshot using Read and Grep; I ran no commands. The plan fits the request and the accepted reading. The names it cites exist at the stated lines: check_page at drain.rs:4666, study_text at 3496, TABLE_LOCK at 799, OUTCOME_PATHS at 462, Athena::queue at reading.rs:919, structural_pass_open at code_health.rs:573, SourceReport at pin.rs:283, check_study_text_inner at pin.rs:392 and GitRepo::dir at athena-git lib.rs:198. c45 is at claims.json:344-350 with the one-word quote 'Queued'. Both fallback quotes are present at claims.json:169 and :180. The study text already says reopened returns to Queued, at intro.json:73 and :115 and in the waiting state at model.json:10. The demonstrations for criterion 4 run through production RealSteps::check_page with only the SourceJudge checker faked, and each test would fail without the behavior. The c45 fallback and its CHANGELOG disclosure follow the reading's assumption for when the pinned source is absent. One major problem remains. Decision 1 depends on a drain run being a single process, but drain.rs documents a re-exec after a rebuild, with run state carried in `drain.carry` (`Carried`). The static marker set would be lost at that point and a landed-but-ineffective fix could be queued again in the same run. The marker set should go into the carried run state, or the gap should be stated and tested. A minor soundness point: the two-way containment rule for anchors can credit short, unrelated entries."
+}
