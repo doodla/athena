@@ -1909,11 +1909,47 @@ fn a_refused_reading_is_read_again_at_once_with_the_refusal_text_and_the_second_
         "{}",
         proposal.spent_usd
     );
+    // The first reading is recorded as refused by the rule that refuses it, with its text; the second as
+    // the accepted reading made again.
+    let attempts = reading_attempts(&git, &proposal.job);
+    assert_eq!(attempts.len(), 2, "{attempts:?}");
+    assert_eq!(attempts[0].attempt, 1);
+    let refusal = attempts[0].refusal.as_ref().expect("the first is refused");
+    assert_eq!(refusal.rule, "check_criteria_evidence");
+    assert!(refusal.text.contains(REPORT_CRITERION), "{}", refusal.text);
+    assert_eq!(attempts[1].attempt, 2);
+    assert_eq!(attempts[1].refusal, None);
+}
+
+/// The `reading_attempt` of each reader invocation committed for `job`, in order of sequence.
+fn reading_attempts(
+    git: &athena_git::Git,
+    job: &athena_data::JobId,
+) -> Vec<athena_data::records::ReadingAttempt> {
+    let prefix = format!("{}/invocations/", job.dir());
+    let mut found: Vec<(u32, athena_data::records::ReadingAttempt)> = git
+        .ls_tree_under("HEAD", &prefix)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| {
+            let bytes = git.show_file("HEAD", &e.path).unwrap().unwrap();
+            match athena_data::records::AnyRecord::parse(&e.path, &bytes) {
+                Ok(athena_data::records::AnyRecord::Invocation(inv))
+                    if inv.role == Role::Reader =>
+                {
+                    inv.reading_attempt.clone().map(|a| (inv.seq, a))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    found.sort_by_key(|(seq, _)| *seq);
+    found.into_iter().map(|(_, a)| a).collect()
 }
 
 #[test]
 fn a_second_refusal_is_the_failure_and_the_reader_is_not_run_a_third_time() {
-    let (dir, _git) = repo(&config(true));
+    let (dir, git) = repo(&config(true));
     let state = tempfile::tempdir().unwrap();
     let briefs: Arc<Mutex<Vec<String>>> = Arc::default();
     let athena = athena_with(
@@ -1940,6 +1976,15 @@ fn a_second_refusal_is_the_failure_and_the_reader_is_not_run_a_third_time() {
         "{}",
         proposal.spent_usd
     );
+    // Both readings are recorded as refused by the same rule, the second as the re-read.
+    let attempts = reading_attempts(&git, &proposal.job);
+    assert_eq!(attempts.len(), 2, "{attempts:?}");
+    for (index, attempt) in attempts.iter().enumerate() {
+        assert_eq!(attempt.attempt as usize, index + 1);
+        let refusal = attempt.refusal.as_ref().expect("both are refused");
+        assert_eq!(refusal.rule, "check_criteria_evidence");
+        assert!(refusal.text.contains(REPORT_CRITERION), "{}", refusal.text);
+    }
 }
 
 /// A reader that changes its reading with `edit(read_index, reading)` on each read, costs $0.02 a read, and

@@ -88,8 +88,8 @@ use crate::gate_counts::{GateCount, gate_counts, gate_of_prevention, prevention_
 use crate::plan::{Improvement, Priority};
 use crate::state::format_bytes;
 use crate::status::{
-    Bar, LandedJob, Measure, StageMinutes, THROUGHPUT_WINDOW, Throughput, landed_jobs,
-    landed_jobs_among_first, median,
+    Bar, LandedJob, Measure, ReadingRuleStats, StageMinutes, THROUGHPUT_WINDOW, Throughput,
+    landed_jobs, landed_jobs_among_first, median,
 };
 use crate::steward::StewardRequest;
 use crate::store::{JobRecords, JobState, Records};
@@ -195,6 +195,87 @@ pub fn run_sweep(checks: &[Box<dyn Check>], id: RecordId, at: Timestamp) -> Swee
         at,
         checks: results,
         findings,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Reading rule refusals
+
+/// A reading rule is flagged when it refused more than this share, in percent, of the first readings in the
+/// window ([`crate::status::READING_WINDOW`]). A rule at exactly this share is not flagged.
+pub const REFUSAL_FLAG_PERCENT: usize = 30;
+
+/// The fewest first readings the window must hold before any rule is flagged. With fewer, one refusal moves a
+/// rule's share by ten points or more, so the share says nothing; the check then looks at nothing and says
+/// nothing, and in particular does not report the rules as healthy.
+pub const MIN_FIRST_READINGS: usize = 10;
+
+/// The id of the check that flags reading rules that refuse too many first readings.
+pub const READING_RULES_CHECK_ID: &str = "reading-rule-refusals";
+
+/// The findings for the reading rules that refused more than [`REFUSAL_FLAG_PERCENT`] of the first readings in
+/// `stats`, one for each, most refusals first. A finding names the rule and quotes the refusal text it gave most
+/// often. No finding is made when the window holds fewer than [`MIN_FIRST_READINGS`] first readings.
+///
+/// A refused first reading costs a reader call and a second reading, so a rule that refuses often is a rule
+/// whose text the reader brief does not teach, or a rule that is too broad; the finding says to fix one of them.
+pub fn reading_rule_findings(stats: &ReadingRuleStats) -> Vec<Finding> {
+    if stats.first_readings < MIN_FIRST_READINGS {
+        return Vec::new();
+    }
+    stats
+        .rules
+        .iter()
+        .filter(|r| r.first_refused * 100 > stats.first_readings * REFUSAL_FLAG_PERCENT)
+        .map(|r| Finding {
+            check: READING_RULES_CHECK_ID.into(),
+            subject: r.rule.clone(),
+            evidence: format!(
+                "{} refused {} of the last {} first readings ({:.1}%), more than {REFUSAL_FLAG_PERCENT}%; \
+                 its most common refusal text ({} time(s)): \"{}\". Fix the reader's brief so the reader meets \
+                 this rule the first time, or fix the rule if it refuses what it should not.",
+                r.rule,
+                r.first_refused,
+                stats.first_readings,
+                r.first_refused as f64 * 100.0 / stats.first_readings as f64,
+                r.top_text_count,
+                one_line(&r.top_text)
+            ),
+            age_seconds: 0,
+            state: FindingState::Open,
+        })
+        .collect()
+}
+
+/// The Hestia check over [`ReadingRuleStats`]. A [`Check`] cannot reach the records, so the stats are computed
+/// first and handed in. A window below [`MIN_FIRST_READINGS`] first readings, or with no recorded reading
+/// attempt, examines nothing and finds nothing.
+#[derive(Debug)]
+pub struct ReadingRulesCheck {
+    stats: std::result::Result<Option<ReadingRuleStats>, String>,
+}
+
+impl ReadingRulesCheck {
+    pub fn new(stats: std::result::Result<Option<ReadingRuleStats>, String>) -> Self {
+        Self { stats }
+    }
+}
+
+impl Check for ReadingRulesCheck {
+    fn id(&self) -> &str {
+        READING_RULES_CHECK_ID
+    }
+
+    fn run(&self, _: Timestamp) -> Result<CheckOutput> {
+        let stats = match &self.stats {
+            Err(error) => bail!("the records could not be read: {error}"),
+            Ok(Some(stats)) if stats.first_readings >= MIN_FIRST_READINGS => stats,
+            Ok(_) => return Ok(CheckOutput::default()),
+        };
+        Ok(CheckOutput {
+            examined: stats.first_readings as u32,
+            findings: reading_rule_findings(stats),
+        })
     }
 }
 
@@ -2658,6 +2739,13 @@ impl Athena {
         ui: &dyn Ui,
         builder: &dyn CargoBuilder,
     ) -> Result<Sweep> {
+        self.report_build_measurement(ui, builder);
+        self.hestia_sweep(checks)
+    }
+
+    /// Runs the build measurement pass with `builder` and tells `ui` what it did; a failure is reported and
+    /// does not stop the sweep.
+    fn report_build_measurement(&self, ui: &dyn Ui, builder: &dyn CargoBuilder) {
         match self.measure_build_pass(builder, ui) {
             Ok(Some(m)) => ui.line(&format!(
                 "hestia     build measurement {} recorded for Cargo.lock {}",
@@ -2669,26 +2757,45 @@ impl Athena {
                 "hestia     build measurement: could not run: {e:#}"
             )),
         }
-        self.hestia_sweep(checks)
     }
 
-    /// Runs `checks`, commits the report as a record, and returns it. The review passes of
-    /// [`Athena::review_passes`] run first and their summary lines go to `ui`, then the build measurement
-    /// pass ([`Athena::measure_build_pass`]) with the real builder.
+    /// Runs `checks` and the reading rule check ([`ReadingRulesCheck`]), commits the report as a record, and
+    /// returns it. The review passes of [`Athena::review_passes`] run first and their summary lines go to `ui`,
+    /// then the build measurement pass ([`Athena::measure_build_pass`]) with the real builder. The reading rule
+    /// check prints no line; its result is in the record.
     pub fn hestia_sweep_with(&self, checks: &[Box<dyn Check>], ui: &dyn Ui) -> Result<Sweep> {
         if self.git.head()?.is_some() {
             for line in self.review_passes(ui) {
                 ui.line(&line);
             }
         }
-        self.hestia_sweep_measuring(checks, ui, &CargoBuild)
+        self.report_build_measurement(ui, &CargoBuild);
+        self.commit_sweep(checks, true)
     }
 
     /// Runs `checks`, commits the report as a record, and returns it. Prints nothing; the sweep that also runs
     /// the review passes is [`Athena::hestia_sweep_with`].
     pub fn hestia_sweep(&self, checks: &[Box<dyn Check>]) -> Result<Sweep> {
-        let known = match self.git.head()? {
-            Some(head) => Records::load(&self.git, &head)?,
+        self.commit_sweep(checks, false)
+    }
+
+    /// The reading rule check over the records at `head` (the `athena/records` worktree when it exists, as
+    /// `athena status` reads them). A failure to read them is the check's error, which the sweep reports.
+    fn reading_rules_check(&self, head: &str) -> ReadingRulesCheck {
+        let worktree = athena_data::paths::records_worktree(self.state.root());
+        let stats = Records::load_current(&self.git, head, &worktree)
+            .map(|records| ReadingRuleStats::compute(&records))
+            .map_err(|e| format!("{e:#}"));
+        ReadingRulesCheck::new(stats)
+    }
+
+    /// Runs `checks`, and the reading rule check when `reading_rules` is set, and commits one report.
+    fn commit_sweep(&self, checks: &[Box<dyn Check>], reading_rules: bool) -> Result<Sweep> {
+        let (head, known) = match self.git.head()? {
+            Some(head) => {
+                let known = Records::load(&self.git, &head)?;
+                (head, known)
+            }
             None => bail!(
                 "the repository has no commits yet; commit athena.toml and defaults.toml first"
             ),
@@ -2698,7 +2805,13 @@ impl Athena {
         while known.has_record_id(&id) {
             id = RecordId::generate(now);
         }
-        let sweep = run_sweep(checks, id, now);
+        let mut sweep = run_sweep(checks, id, now);
+        if reading_rules {
+            let extra: Vec<Box<dyn Check>> = vec![Box::new(self.reading_rules_check(&head))];
+            let more = run_sweep(&extra, sweep.id.clone(), now);
+            sweep.checks.extend(more.checks);
+            sweep.findings.extend(more.findings);
+        }
         sweep.validate().map_err(|e| anyhow::anyhow!(e))?;
         let record = AnyRecord::HestiaSweep(Box::new(sweep.clone()));
         let subject = format!(
@@ -2950,6 +3063,220 @@ mod tests {
         assert!(last.findings[0].evidence.contains("boom"));
         let path = format!("records/hestia-sweeps/{}/{}.json", last.id.month(), last.id);
         assert!(dir.path().join(&path).exists(), "{path}");
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // Reading rule refusals
+
+    use crate::status::reading_rule_tests::{job_id, reading_job, records_of};
+
+    /// Records of first readings: for each `(rule, text, count)`, `count` first readings that rule refused with
+    /// that text, then `accepted` first readings accepted at once. Job `n` started at `10 n` seconds.
+    fn first_readings(refusals: &[(&str, &str, usize)], accepted: usize) -> Records {
+        let mut invocations = Vec::new();
+        let mut n = 0u32;
+        for (rule, text, count) in refusals {
+            for _ in 0..*count {
+                n += 1;
+                invocations.extend(reading_job(n, i64::from(n) * 10, Some((rule, text)), None));
+            }
+        }
+        for _ in 0..accepted {
+            n += 1;
+            invocations.extend(reading_job(n, i64::from(n) * 10, None, None));
+        }
+        records_of(invocations)
+    }
+
+    fn reading_check(records: &Records) -> Box<dyn Check> {
+        Box::new(ReadingRulesCheck::new(Ok(ReadingRuleStats::compute(
+            records,
+        ))))
+    }
+
+    /// 20 first readings: rule A refused 7 (35%), four of them with one text and three with a text each,
+    /// rule B refused 6 (exactly 30%), rule C refused 2, and 5 were accepted.
+    fn twenty_readings() -> Records {
+        first_readings(
+            &[
+                ("rule_a", "A's usual text", 4),
+                ("rule_a", "A other one", 1),
+                ("rule_a", "A other two", 1),
+                ("rule_a", "A other three", 1),
+                ("rule_b", "B text", 6),
+                ("rule_c", "C text", 2),
+            ],
+            5,
+        )
+    }
+
+    #[test]
+    fn the_flag_limit_and_the_minimum_window_are_named_constants() {
+        assert_eq!(REFUSAL_FLAG_PERCENT, 30);
+        assert_eq!(MIN_FIRST_READINGS, 10);
+    }
+
+    #[test]
+    fn a_rule_refusing_more_than_thirty_percent_is_flagged_with_its_commonest_text_and_one_at_thirty_is_not()
+     {
+        let stats = ReadingRuleStats::compute(&twenty_readings()).unwrap();
+        assert_eq!(stats.first_readings, 20);
+        let findings = reading_rule_findings(&stats);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let flagged = &findings[0];
+        assert_eq!(flagged.subject, "rule_a");
+        assert_eq!(flagged.state, FindingState::Open);
+        for part in [
+            "rule_a",
+            "7 of the last 20",
+            "35.0%",
+            "30%",
+            "A's usual text",
+            "4 time",
+        ] {
+            assert!(
+                flagged.evidence.contains(part),
+                "{part}: {}",
+                flagged.evidence
+            );
+        }
+        assert!(
+            !flagged.evidence.contains("A other"),
+            "{}",
+            flagged.evidence
+        );
+        // Rule B refused exactly 30% and rule C 10%: neither is named.
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.subject != "rule_b" && f.subject != "rule_c")
+        );
+
+        // Through the sweep: the finding is filed under the check, which examined the 20 first readings.
+        let sweep = run_sweep(
+            &[reading_check(&twenty_readings())],
+            rid("20261101-000000-aaaa"),
+            crate::now(),
+        );
+        assert_eq!(sweep.checks.len(), 1);
+        assert_eq!(sweep.checks[0].check, READING_RULES_CHECK_ID);
+        assert_eq!(
+            (
+                sweep.checks[0].examined,
+                sweep.checks[0].count,
+                sweep.checks[0].errored
+            ),
+            (20, 1, false)
+        );
+        assert_eq!(sweep.findings[0].check, READING_RULES_CHECK_ID);
+        assert_eq!(sweep.findings[0].subject, "rule_a");
+    }
+
+    #[test]
+    fn the_limit_is_decided_on_the_share_of_the_window_just_over_and_just_under() {
+        // 50 first readings, the most the window holds: 16 refusals is 32%, 15 is exactly 30%.
+        for (refused, flagged) in [(16, true), (15, false), (14, false)] {
+            let records = first_readings(&[("rule_a", "text", refused)], 50 - refused);
+            let stats = ReadingRuleStats::compute(&records).unwrap();
+            assert_eq!(stats.first_readings, 50);
+            assert_eq!(
+                reading_rule_findings(&stats).len(),
+                usize::from(flagged),
+                "{refused} of 50"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_with_no_readings_or_too_few_gives_no_flag_and_no_claim_of_health() {
+        let nine_all_refused = first_readings(&[("rule_a", "text", MIN_FIRST_READINGS - 1)], 0);
+        let stats = ReadingRuleStats::compute(&nine_all_refused).unwrap();
+        assert_eq!(stats.first_readings, 9);
+        assert!(reading_rule_findings(&stats).is_empty());
+        for records in [Records::default(), nine_all_refused] {
+            let sweep = run_sweep(
+                &[reading_check(&records)],
+                rid("20261101-000000-aaaa"),
+                crate::now(),
+            );
+            let result = &sweep.checks[0];
+            assert_eq!(result.check, READING_RULES_CHECK_ID);
+            // Nothing was examined, nothing found, and the check did not fail: no "all clear" is recorded.
+            assert_eq!(
+                (result.examined, result.count, result.errored),
+                (0, 0, false)
+            );
+            assert!(sweep.findings.is_empty());
+        }
+        // The minimum is inclusive: ten first readings, all refused, flag the rule.
+        let ten = first_readings(&[("rule_a", "text", MIN_FIRST_READINGS)], 0);
+        let findings = reading_rule_findings(&ReadingRuleStats::compute(&ten).unwrap());
+        assert_eq!(findings.len(), 1);
+        let text = format!("{:?}", findings).to_lowercase();
+        assert!(!text.contains("healthy"), "{text}");
+    }
+
+    #[test]
+    fn records_that_cannot_be_read_make_the_reading_check_error_not_pass() {
+        let check: Vec<Box<dyn Check>> =
+            vec![Box::new(ReadingRulesCheck::new(Err("no records".into())))];
+        let sweep = run_sweep(&check, rid("20261101-000000-aaaa"), crate::now());
+        assert!(sweep.checks[0].errored);
+        assert!(sweep.findings[0].evidence.contains("no records"));
+    }
+
+    #[test]
+    fn the_sweep_command_path_flags_the_rule_from_committed_invocation_records() {
+        use crate::status::records_worktree_tests::{commit_in_tree, job_record};
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        // No reader invocation recorded: the check examines nothing and finds nothing.
+        let empty = athena.hestia_sweep_with(&[], &Lines::default()).unwrap();
+        let result = empty
+            .checks
+            .iter()
+            .find(|c| c.check == READING_RULES_CHECK_ID)
+            .expect("the sweep runs the reading rule check");
+        assert_eq!((result.examined, result.count), (0, 0));
+        assert!(
+            empty
+                .findings
+                .iter()
+                .all(|f| f.check != READING_RULES_CHECK_ID)
+        );
+
+        let fixture = twenty_readings();
+        let mut files = Vec::new();
+        for n in 1..=20u32 {
+            files.push(job_record(job_id(n).as_str(), "docs"));
+        }
+        for job in fixture.jobs.values() {
+            for inv in &job.invocations {
+                files.push(AnyRecord::Invocation(Box::new(inv.clone())));
+            }
+        }
+        commit_in_tree(&athena, &files);
+        let sweep = athena.hestia_sweep_with(&[], &Lines::default()).unwrap();
+        let result = sweep
+            .checks
+            .iter()
+            .find(|c| c.check == READING_RULES_CHECK_ID)
+            .unwrap();
+        assert_eq!((result.examined, result.count), (20, 1));
+        let flagged: Vec<&Finding> = sweep
+            .findings
+            .iter()
+            .filter(|f| f.check == READING_RULES_CHECK_ID)
+            .collect();
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(flagged[0].subject, "rule_a");
+        assert!(flagged[0].evidence.contains("A's usual text"));
+        // The committed report holds the same finding.
+        assert_eq!(athena.last_sweep().unwrap().unwrap(), sweep);
+        // The plain sweep without the review passes does not run the check.
+        let plain = athena.hestia_sweep(&[]).unwrap();
+        assert!(plain.checks.is_empty());
     }
 
     // -----------------------------------------------------------------------------------------------------

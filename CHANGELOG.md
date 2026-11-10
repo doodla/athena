@@ -7,6 +7,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `athena status` now shows, for each reading rule, how many first readings it refused and how many second
+  readings (the reading made again with the refusal as a correction) it refused, over the last 50 first readings
+  (`READING_WINDOW`, `ReadingRuleStats` in `crates/athena-core/src/status.rs`). A rule is named by its check
+  function; a reading that was not valid reader output is counted under `other`. A reading is refused by the first
+  rule that refuses it, so each refusal is counted under one rule. Nothing recorded which rule refused a reading,
+  so a reader invocation record now has an optional `reading_attempt` field (`attempt` 1 or 2, and the refusing
+  rule and its redacted text when refused); older records have none and are not counted.
+- The Hestia sweep has a check, `reading-rule-refusals`, that flags any reading rule refusing more than 30% of
+  the first readings in that window (`REFUSAL_FLAG_PERCENT`; a rule at exactly 30% is not flagged). The finding
+  names the rule and its most common refusal text, so the reader's brief or the rule can be fixed. With fewer than
+  10 first readings (`MIN_FIRST_READINGS`) the check examines nothing, flags nothing and does not report the rules
+  as healthy. No reading rule, refusal text or prompt changed.
+
 ### Changed
 
 - `deterministic_turn` in `crates/athena-agent/src/fake.rs` now hands the reader, producer, verifier and planner

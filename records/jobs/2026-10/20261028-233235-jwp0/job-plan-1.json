@@ -1,0 +1,397 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261028-233235-jwp0",
+  "round": 1,
+  "at": "2026-11-10T05:28:04.375816128Z",
+  "invocation_seq": 2,
+  "approach": "Nothing records which reading rule refused a reading, so the plan adds the smallest record field first. Each reader invocation whose output reached the reading rules gets an optional `reading_attempt` field: `attempt` is 1 for the first reading and 2 for the re-read, and `refusal` is `{rule, text}` or absent when the reading was accepted. `read_once` in reading.rs sets it. It switches from `check_reading_acceptance` to `refusing_check`, which already returns the name of the first refusing check and gives the same accept/refuse result and text. A size refusal (from `build_reading`) is named `check_reading_size`, and any other invalid reader output is named `other`. `status.rs` adds `ReadingRuleStats::compute(&Records)`. It takes the 50 most recent first readings (attempt-1 invocations by `started_at`), pairs each with its re-read (same job, seq+1), and counts per rule the first readings refused and the second readings still refused. It also keeps the most common first-refusal text per rule. `StatusView.reading_rules` carries it, `text()` prints it, and display.rs calls `text()`. hestia.rs adds a pure `reading_rule_findings(&ReadingRuleStats)` and a `ReadingRulesCheck` that implements `Check`. `hestia_sweep_with` (the real `athena hestia sweep` path) runs it next to the caller's checks. The check flags a rule only when its first-refusal count × 100 is greater than the first-reading count × `REFUSAL_FLAG_PERCENT` (30), and only when the window holds at least `MIN_FIRST_READINGS` (10) first readings. Below the minimum it reports `examined = 0` and no finding, and prints no \"healthy\" line. No reading rule, refusal text, prompt or governance file changes. There is no landing, history-check or attribution rule here, so no commit-shape table applies.",
+  "decisions": [
+    {
+      "choice": "Record the refusal as a typed optional field `reading_attempt: Option<ReadingAttempt{attempt, refusal: Option<ReadingRefusal{rule,text}>}>` on `Invocation` (`#[serde(default, skip_serializing_if)]`, schema stays `athena.invocation/1`), written on every reader invocation that reached the rules (accepted or refused).",
+      "reason": "Nothing stores the refusal text or rule today. `read_once` returns it only as an in-memory `ReadError::Refused(String)`, and the Reading record exists only for an accepted reading. The Invocation is committed for both runs of `read_for` (`invocation_files`), including a double refusal that leaves no Reading. The field must be written on accepted attempts too: the denominator ('first readings') needs the accepted ones, and the `attempt` number separates a first reading from a re-read after `read_unread` (reading.rs:1051).",
+      "rejected": [
+        {
+          "option": "Put `rule: text` into `Invocation.detail`",
+          "why": "`detail` is free text that other code treats as a failure reason (reading.rs:668, hestia.rs:2342, steward.rs:1283). Overloading it needs prefix parsing and mixes failure and refusal meanings."
+        },
+        {
+          "option": "A new record type such as `athena.reading-refusal/1`",
+          "why": "Needs a new `AnyRecord` variant, canonical path, schema and store loading. That is far larger than one optional field and still needs a link back to the invocation."
+        },
+        {
+          "option": "Add the field to `Reading`",
+          "why": "A double refusal leaves no Reading, and the first refusal of an accepted second reading would still need a place. The Reading also has many struct literals."
+        },
+        {
+          "option": "Count invocations per job only (a job with two reader invocations means a re-read)",
+          "why": "This gives no rule and no text, which the request asks for. The brief says to measure the property directly, not through a stand-in."
+        }
+      ]
+    },
+    {
+      "choice": "Name the rule with `refusing_check`'s returned check name (`stringify!` of the called function). A `check_reading_size` error is named `check_reading_size` by wrapping it at its call site in `build_reading` in a small error type whose Display is the unchanged text. Any other `build_reading` failure is `other` (`OTHER_READING_RULE`).",
+      "reason": "`refusing_check` (checks.rs:518) is the one gate the refusal corpus pins, with names such as `check_scope_limit` and `check_governance_coverage` (refusal_corpus.rs:347, 842). No second list of rule names can drift. A downcast is exact, where text prefixes are fragile. The size rule stays untouched.",
+      "rejected": [
+        {
+          "option": "Map refusal text to a rule by prefix after the fact",
+          "why": "A prefix table is a second list that drifts when a rule's wording changes. The name is known at refusal time."
+        },
+        {
+          "option": "Edit `check_reading_size` to return a typed error",
+          "why": "Out of scope: the brief forbids changing a reading rule or its refusal text."
+        }
+      ]
+    },
+    {
+      "choice": "The window is the 50 most recent first readings (attempt-1 invocations, ordered by `started_at`, then job id and seq) across all jobs. `READING_WINDOW = 50` is a named constant in status.rs. A second reading is the attempt-2 invocation of the same job with seq = first.seq + 1. A re-read after a user correction (reading.rs:1287) and a re-read after a failed reader (`read_unread`) each count as a reading.",
+      "reason": "A job whose two readings were both refused has no Reading record, and those are the costliest cases, so 'jobs that have a reading' would hide them. Pairing by seq matches `read_for`, which uses `seq` and `seq + 1`. The brief's 'per job' wording is approximated per reading, and the plan says so in the docs and CHANGELOG.",
+      "rejected": [
+        {
+          "option": "Count only jobs that have a Reading record",
+          "why": "It misses double refusals, so refusal rates would look better than they are."
+        }
+      ]
+    },
+    {
+      "choice": "Each refusal names exactly one rule, because the gate stops at the first refusing check. The sweep rate for a rule is first refusals by that rule divided by first readings in the window. It is flagged only when `first_refused * 100 > first_readings * REFUSAL_FLAG_PERCENT` (`REFUSAL_FLAG_PERCENT = 30`), so exactly 30% is not flagged. No flag is made when the window has fewer than `MIN_FIRST_READINGS = 10` first readings.",
+      "reason": "This follows the brief's 'more than 30%'. Integer arithmetic avoids float edge cases at exactly 30%. With fewer than 10 readings one refusal swings the rate by 10 points or more, and an empty window must not be read as healthy (the no-empty-success default).",
+      "rejected": [
+        {
+          "option": "Flag on any rate above 30% regardless of window size",
+          "why": "One refused reading in a window of one is 100%, which would be a false flag."
+        },
+        {
+          "option": "Report 'healthy' when no rule is over the limit",
+          "why": "The brief forbids a healthy claim for an empty or tiny window. The sweep adds no healthy text at all."
+        }
+      ]
+    },
+    {
+      "choice": "The most common first-refusal text of a rule is the exact text with the highest count in the window. A tie goes to the most recent. The sweep evidence cuts it with the existing `one_line` (240 characters).",
+      "reason": "The brief asks for 'most common refusal text'. Exact grouping is the plain reading of that phrase. Path-specific texts will often tie at 1, so the latest tie-break gives an example from the newest reading.",
+      "rejected": [
+        {
+          "option": "Normalise text into templates before grouping",
+          "why": "It would be a new matching rule with its own failure shapes. Not needed to meet the criteria."
+        }
+      ]
+    },
+    {
+      "choice": "Run the new check from `hestia_sweep_with` by splitting the measuring pass out of `hestia_sweep_measuring` and committing the sweep over the caller's checks plus the reading-rule check. `hestia_sweep`, `hestia_sweep_measuring` and `default_checks()` keep their behavior.",
+      "reason": "`Check::run(now)` has no records, so the check is built from `ReadingRuleStats`, computed with `Records::load_current` as `status()` does. The existing tests assert `default_checks().is_empty()` (hestia.rs:2868), two checks in a `hestia_sweep` record (hestia.rs:2949) and exactly 3 ui lines per `hestia_sweep_with` (hestia.rs:4728). Adding no ui line and not touching `hestia_sweep` keeps all three true.",
+      "rejected": [
+        {
+          "option": "Register the check in `default_checks()`",
+          "why": "It has no access to records, and a test pins it empty."
+        },
+        {
+          "option": "Append the check inside `hestia_sweep`",
+          "why": "That changes the check count that tests at hestia.rs:2936-2950 and 4591-4687 rely on."
+        },
+        {
+          "option": "Print a 'not enough readings' ui line",
+          "why": "It would raise the pinned line count (hestia.rs:4728), and the record already shows `examined` 0 and 0 findings."
+        }
+      ]
+    },
+    {
+      "choice": "List only rules that refused at least once in the window. Do not keep a constant list of all rule names.",
+      "reason": "The refusal-rate question is about rules that cause re-reads. A full list would be a second copy of the `step!` lines, with a drift test to maintain. The window totals are always printed, so a rule absent from the list refused nothing in the window.",
+      "rejected": [
+        {
+          "option": "A `READING_RULES` constant with zero rows",
+          "why": "Adds a list that must stay in step with `refusing_check`, for no extra decision."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `ReadingAttempt`, `ReadingRefusal` and the `OTHER_READING_RULE` constant, plus the optional `Invocation.reading_attempt` field. Add a sample-Invocation test helper and tests: round trip, `check_record_file`, old record, unknown inner key.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "`ReadError::Refused` carries `{rule, text}`. `read_once` calls `refusing_check` and sets `record.reading_attempt` for accepted and refused readings (attempt 1, or 2 when a refusal was passed in). `build_reading` wraps the size error under `check_reading_size`. `read_for` keeps its behavior and its text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add `READING_WINDOW`, `RuleRefusals`, `ReadingRuleStats` with `compute` and `text`, and the `StatusView.reading_rules` field filled in `status()`. Add the `readings` label and tests, including the fixture helper that hestia tests reuse.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "Add `REFUSAL_FLAG_PERCENT`, `MIN_FIRST_READINGS`, `reading_rule_findings`, `ReadingRulesCheck`, and the `hestia_sweep_with` wiring. Add tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Print `reading_rules` in `status()` with one `if let Some(r) = &v.reading_rules { out.push_str(&r.text()); }` after the gates section. Not in the brief's file list, but `athena status` text is built here.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "action": "modify",
+      "purpose": "Add `reading_attempt: None` to the two `Invocation` literals (`invocation_record`, `interrupted_record`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/pr_check.rs",
+      "action": "modify",
+      "purpose": "Add `reading_attempt: None` to the `Invocation` literal in its test fixture (line 269).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/reconcile.rs",
+      "action": "modify",
+      "purpose": "Add `reading_attempt: None` to the `Invocation` literal in its test fixture (line 245).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "purpose": "Add `reading_attempt: None` to the `Invocation` literal in its test helper (line 125).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Extend the two refused-reading tests (lines 1855 and 1915) to read the committed invocations and assert the recorded attempt, rule and text of each reading.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "Describe `reading_attempt` next to the invocation record's `effort` note.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the entry under `## [Unreleased]`: per-rule first and second refusal counts in `athena status`, the Hestia flag above 30%, and the recorded field.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "1. athena-data records.rs: add `pub const OTHER_READING_RULE: &str = \"other\";`, `ReadingRefusal { rule: String, text: String }` and `ReadingAttempt { attempt: u32, refusal: Option<ReadingRefusal> }`. Both structs derive Debug, Clone, PartialEq, Serialize, Deserialize with `deny_unknown_fields`. Add `#[serde(default, skip_serializing_if = \"Option::is_none\")] pub reading_attempt: Option<ReadingAttempt>` to `Invocation`, with a doc comment (1 first reading, 2 re-read; absent when the output never reached the rules). Add tests: a full sample Invocation helper, a round trip through `AnyRecord`, `check_record_file` at `canonical_path()`, an old JSON without the key, and an unknown key inside the field.",
+    "2. Add `reading_attempt: None` to every other `Invocation` literal: invocation.rs (two), status.rs test helper, pr_check.rs, athena-gate reconcile.rs and landing_tests.rs. In `invocation_record`, keep `None`: only `read_once` sets it.",
+    "3. reading.rs: change `ReadError::Refused(String)` to a struct variant carrying `rule: String` and `text: String`; `into_text` and `read_for` use `text`. In `read_once`, make `record` mutable. Replace the `check_reading_acceptance` call by `refusing_check(..)` with the same arguments, mapping `Some((name, e))` to `Refused { rule: name, text }` where text is `format!(\"{e:#}\")` as today. For a `build_reading` error, take the rule from a downcast to a small `NamedRefusal` error (Display = the unchanged text) or `OTHER_READING_RULE`. In `build_reading`, wrap only the `check_reading_size(..)` error as `NamedRefusal { rule: \"check_reading_size\", .. }`. Before returning, redact the stored text with `redactor.redact_all`, and set `record.reading_attempt = Some(ReadingAttempt { attempt: if refusal.is_some() { 2 } else { 1 }, refusal })` on the accepted and refused paths only, not on the `Failed` paths.",
+    "4. run_pin_tests.rs: extend `a_refused_reading_is_read_again_at_once_with_the_refusal_text_and_the_second_is_recorded` and `a_second_refusal_is_the_failure_and_the_reader_is_not_run_a_third_time` to parse the committed reader invocations (as that test already does for seqs) and assert: first has attempt 1 with a refusal whose rule is the check that refuses REPORT_CRITERION and whose text contains it; second has attempt 2 and no refusal (first test) or attempt 2 with a refusal (second test). Add a reading.rs unit test for the `check_reading_size` and `other` naming.",
+    "5. status.rs: add `pub const READING_WINDOW: usize = 50;`, `RuleRefusals` (rule, first_refused, second_refused, top_text, top_text_count), and `ReadingRuleStats` (window, first_readings, second_readings, rules sorted by first_refused desc then rule name). `ReadingRuleStats::compute(&Records) -> Option<Self>` collects attempt-1 reader invocations over all jobs, sorts by `started_at`, job id and seq, keeps the newest `READING_WINDOW`, and pairs each with the attempt-2 invocation of the same job at seq + 1. Add `text()` (a line starting `readings    last N first readings (M re-read): refused per rule, first / second`, then one row per rule). Add `StatusView.reading_rules` with `skip_serializing_if`, fill it in `status()`, and add `(\"readings\", \"reading_rules\")` to `STATUS_MEASURE_LABELS`. Add a `reading_rule_tests` module with a fixture helper for reader invocations (also pub(crate) for hestia), and tests for criteria 1 and 2 (rule A 3 and 1, rule B 1 and 0, the 55-reading window ordered by time, no field when no data, and an end-to-end `Athena::status()` test over committed invocation records).",
+    "6. display.rs: in `status()`, after the gates section, add `if let Some(r) = &v.reading_rules { out.push_str(&r.text()); }`.",
+    "7. hestia.rs: add `pub const REFUSAL_FLAG_PERCENT: usize = 30;`, `pub const MIN_FIRST_READINGS: usize = 10;`, `pub const READING_RULES_CHECK_ID: &str = \"reading-rule-refusals\";`, the pure `reading_rule_findings(&ReadingRuleStats) -> Vec<Finding>` and `ReadingRulesCheck { stats: Result<Option<ReadingRuleStats>, String> }` implementing `Check`. `run` returns `examined` = first readings when at least the minimum and 0 below it or with no data, and an `Err` for a records-load failure (which `run_sweep` reports as a failed check). Evidence: the rule, refused count out of first readings and the percent, the limit, the most common text (cut with `one_line`) with its count, and a pointer to the reader brief or the rule. No text anywhere says the rules are healthy.",
+    "8. hestia.rs wiring: move the build-measurement `match` of `hestia_sweep_measuring` into a private helper. Move the body of `hestia_sweep` into a private `commit_sweep(&self, checks, extra: Vec<Box<dyn Check>>)` that runs `run_sweep` over `checks` and then over `extra` and merges the results. `hestia_sweep(checks)` calls it with no extra, and `hestia_sweep_measuring` keeps its signature. `hestia_sweep_with` builds the `ReadingRulesCheck` from `Records::load_current(&self.git, &head, &athena_data::paths::records_worktree(self.state.root()))`, runs review passes and the measuring helper, then `commit_sweep(checks, vec![reading_check])`. Add the hestia tests for criteria 3 and 4 (pure function, `run_sweep`, and the full `hestia_sweep_with` path) and one test that the constants are 30 and 10.",
+    "9. docs/records.md: add a short paragraph after the `effort` note on `reading_attempt` (attempt, rule, text, absent for older records). CHANGELOG.md: add an entry under `## [Unreleased]` naming the per-rule first and second refusal counts in `athena status` over the last 50 readings, the recorded `reading_attempt` field, and the Hestia sweep flag for any rule above 30% of first readings, with its minimum of 10 and the 'no healthy claim' behavior. Use no banned boundary words and no email-like text.",
+    "10. Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-data`, `cargo test -p athena-core status`, `cargo test -p athena-core hestia`, `cargo test -p athena-core --test refusal_corpus`, and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "The gate stops at the first refusing check, so a rule later in the order is hidden whenever an earlier rule refuses the same reading. Its rate can be understated.",
+      "mitigation": "The measure is documented as refusals by the first rule to refuse, which is also what triggers the re-read. No rule order or text changes."
+    },
+    {
+      "risk": "Refusal texts name request-specific paths, so exact-text grouping often ties at 1 and 'most common text' is only an example.",
+      "mitigation": "A tie goes to the most recent text, the sweep evidence shows its count, and the status test pins that rule."
+    },
+    {
+      "risk": "Older records have no `reading_attempt`, so the window is thin right after the change and the sweep stays silent.",
+      "mitigation": "The minimum of 10 first readings means no flag and no healthy claim. `examined` stays 0 in the sweep record."
+    },
+    {
+      "risk": "An older installed binary rejects new invocation records because of `deny_unknown_fields`.",
+      "mitigation": "The field is serialized only on reader invocations that reached the rules. The existing stale-build warning covers old binaries, and new binaries read old records through `#[serde(default)]`."
+    },
+    {
+      "risk": "Redaction: the refusal text can quote request or reading text.",
+      "mitigation": "`read_once` passes the text through `redactor.redact_all` before storing it, as `build_reading` does for other reader free text."
+    },
+    {
+      "risk": "hestia.rs and status.rs are very large files and function size is tracked by code-health.",
+      "mitigation": "New code is small, separate functions, none long, and the `hestia_sweep_with` refactor only moves the existing measuring-pass match into a helper."
+    },
+    {
+      "risk": "The CLI printing is a one-line call to `text()`, which has no test through the `athena status` binary.",
+      "mitigation": "`text()` is tested in status.rs and the label test checks the `\"readings ` literal exists. The `Option` stays absent when empty, as the existing introspection.rs status tests already check for `gate_counts`."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "New field `Invocation.reading_attempt`",
+      "dependent": "Every `Invocation { .. }` struct literal: crates/athena-core/src/invocation.rs:195 and :281, status.rs:1737 (test helper), pr_check.rs:269, crates/athena-gate/src/reconcile.rs:245 and landing_tests.rs:125",
+      "kind": "code",
+      "test": "cargo test --locked and cargo clippy --all-targets compile and run every crate. Each literal gets `reading_attempt: None`.",
+      "reason": null
+    },
+    {
+      "name": "Record schema `athena.invocation/1` and its validation",
+      "dependent": "Records parsing with `deny_unknown_fields`: `AnyRecord::parse` and `check_record_file` (records.rs:1375), the gate's record checks (crates/athena-gate), and `Records::load`/`load_current` (store.rs:348, 367)",
+      "kind": "code",
+      "test": "athena-data tests added in step 1 (round trip, `check_record_file`, old record without the field). The existing attribution and records tests in athena-gate stay in `cargo test --locked`.",
+      "reason": null
+    },
+    {
+      "name": "The records branch is shared with whatever binary reads it",
+      "dependent": "An older installed Athena binary reading records that carry the new field",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The key is omitted unless a reader invocation reached the rules, and the status stale-build warning (`stale_build_line`, status.rs) already tells the user to update the binary. Records written before this change parse in the new build through `#[serde(default)]`."
+    },
+    {
+      "name": "`read_once`/`read_for` now record the attempt and rule, and call `refusing_check` instead of `check_reading_acceptance`",
+      "dependent": "`read_for` callers: crates/athena-core/src/reading.rs:1082 (`first_reading`, also reached by `read_unread`), reading.rs:1287 (re-read after a correction) and crates/athena-core/src/run/pin.rs:158",
+      "kind": "code",
+      "test": "run_pin_tests.rs tests at lines 1855 (refused then accepted), 1915 (second refusal is the failure, no third run) and 1968 (boundary word); step 4 extends the first two to assert the recorded `attempt`, `rule` and `text`, and the refusal text in the second brief is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "The reading gate: result and error text",
+      "dependent": "`check_reading_acceptance` and its other callers: reading/replay.rs:55 (`check_reading_text`, `athena check-reading`) and the reading.rs unit tests",
+      "kind": "code",
+      "test": "tests/refusal_corpus.rs: `corpus_cases_get_the_expected_outcome`, `the_wrapper_agrees_with_refusing_check_on_every_case`, `no_check_bypasses_refusing_check`",
+      "reason": "The wrapper stays and still calls `refusing_check`. No `step!` line, check or refusal text changes."
+    },
+    {
+      "name": "Size refusal now wrapped at its call site in `build_reading`",
+      "dependent": "`check_reading_size` and its tests in reading.rs; the error text that run_pin_tests.rs and other tests assert with `contains`",
+      "kind": "code",
+      "test": "Existing size tests in reading.rs, and the status test for rule `check_reading_size`",
+      "reason": "The wrapper's Display is the unchanged text, so `format!(\"{e:#}\")` (reading.rs:718) is byte-identical. `check_reading_size` itself is untouched."
+    },
+    {
+      "name": "New field `StatusView.reading_rules`",
+      "dependent": "`StatusView` (status.rs:228) consumers: `athena status` text in crates/athena-cli/src/display.rs:1159, `athena status --json` in crates/athena-cli, and crates/athena-cli/tests/introspection.rs:1476-1511 (asserts JSON keys by name and absence of `gate_counts`)",
+      "kind": "code",
+      "test": "The status.rs tests (criterion 1) and the existing introspection.rs status tests",
+      "reason": "The field has `skip_serializing_if = \"Option::is_none\"` and is `None` without reader invocations carrying `reading_attempt`, so the existing JSON and text assertions are unchanged."
+    },
+    {
+      "name": "Adding the label `(\"readings\", \"reading_rules\")`",
+      "dependent": "`STATUS_MEASURE_LABELS` (status.rs:166), its test `every_measure_label_names_a_status_view_field_and_a_printed_line` (status.rs:1405), hestia.rs:696 (spec measure check), docs/spec.toml",
+      "kind": "code",
+      "test": "The existing test requires `pub reading_rules:` in status.rs and a printed literal starting `\"readings ` in status.rs, display.rs or hestia.rs; `text()` provides it.",
+      "reason": null
+    },
+    {
+      "name": "The sweep now has the check `reading-rule-refusals`",
+      "dependent": "`Athena::hestia_sweep_with` caller crates/athena-cli/src/commands.rs:201 (`athena hestia sweep`) and its tests hestia.rs:4693-4729; `hestia_report` in crates/athena-cli/src/lib.rs:30",
+      "kind": "code",
+      "test": "The hestia.rs test at 4693 (still exactly 3 ui lines, since the new check prints no ui line) and the new hestia tests",
+      "reason": "`hestia_report` prints any check and finding generically. `hestia_sweep`, `hestia_sweep_measuring` and `default_checks()` are unchanged, so the tests at hestia.rs:2868, 2936-2950 and 4591-4687 keep their check counts."
+    },
+    {
+      "name": "New finding shape",
+      "dependent": "`Sweep::validate`/`HestiaSweep` record (crates/athena-data/src/records/throughput.rs:328): a finding needs a non-blank subject and evidence, and counts must match",
+      "kind": "code",
+      "test": "The hestia full-path test commits the sweep; `run_sweep` rejects a finding without subject or evidence (hestia.rs:154).",
+      "reason": null
+    },
+    {
+      "name": "Record documentation",
+      "dependent": "docs/records.md (invocation record description, near line 135)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Documentation only; step 8 adds a paragraph on `reading_attempt`. No test reads it (grep found `records.md` only in a status.rs message)."
+    },
+    {
+      "name": "Wording of new docs, code comments and CHANGELOG",
+      "dependent": "xtask/tests/policy.rs (boundary-word scan of tracked files) and the `[personal_data]` allow-list in athena.toml",
+      "kind": "rule",
+      "test": "cargo test --locked (xtask policy tests)",
+      "reason": "The new text uses none of the scanned words and no email-like strings."
+    },
+    {
+      "name": "Prompt token budgets",
+      "dependent": "Reader prompt budget (`budget reader: 1998 of 2000` in docs/system-facts.md) and `system_facts_budgets_match_computed`",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt, brief or governance file (athena.toml, defaults.toml, workflows) is edited."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in status.rs, plus an end-to-end test that commits fixture reader-invocation records and calls the real `Athena::status()`.",
+      "command": "cargo test -p athena-core status",
+      "observes": "The fixture has these first readings. Rule A, `check_governance_coverage`, refuses 3 first readings and, in the following re-read, 1 second reading. Rule B, `check_code_survey`, refuses 1 first reading and its re-read is accepted. The rest are accepted first readings. `ReadingRuleStats::compute` returns, in order, A with first_refused 3, second_refused 1 and B with 1, 0. The window totals are right and `text()` prints each rule with both counts. `Athena::status()` over committed fixture invocation records returns the same under `StatusView.reading_rules`, and the field is absent when no reader invocation has a `reading_attempt`.",
+      "fails_without": "Without the field or `compute`, the counts are absent. If second readings were ignored, A would show 0 second refusals instead of 1. If rules were merged, A and B would not be reported separately.",
+      "seam": "Production entry points: `ReadingRuleStats::compute(&Records)` and `Athena::status()` (status.rs:985, exists). Fixtures: `Records` built from `JobRecords` with `Invocation`s made by `planning_cost_tests::invocation` (status.rs:1735, pub(crate), exists) with `reading_attempt` set. For the end-to-end case, `code_health::tests::set_up()` and `records_worktree_tests::commit_in_tree` (status.rs:1628, exist) inject them into a temporary git repository. Plan steps 1-2 add `reading_attempt` and `compute`. No logic sits in the fixtures, which hold only recorded facts. Step 4 also extends run_pin_tests.rs (the refused-then-read-again test at line 1855, with the scripted reader `reader_refused_then`) to show `read_once` writes the field."
+    },
+    {
+      "criterion": 2,
+      "method": "A unit test with fixtures of more than 50 first readings, where the oldest are refused by one rule and the newest 50 are accepted.",
+      "command": "cargo test -p athena-core status",
+      "observes": "With 55 first readings by `started_at`, the 5 oldest refused by rule X, `first_readings` is 50 and X is absent or 0. When 5 of the newest 50 are also refused, X shows exactly 5. The same fixture ordered by job id rather than by time pins the sort key.",
+      "fails_without": "A window that counts all readings would report X 5 refusals and 55 first readings.",
+      "seam": "`ReadingRuleStats::compute` over `Records` fixtures (as in criterion 1). `READING_WINDOW` is the named constant the test reads. The seam is added by plan step 2."
+    },
+    {
+      "criterion": 3,
+      "method": "A hestia test builds a stats fixture of 20 first readings. Rule A refuses 7 (35%) with the same text 4 times and 3 other texts once each, B refuses 6 (exactly 30%), and C refuses 2. It calls `reading_rule_findings`, then runs the check through `run_sweep` and through `Athena::hestia_sweep_with` on committed fixture invocation records.",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "Exactly one finding comes out, under check id `reading-rule-refusals`, with subject A's rule name. Its evidence names A, 7 of 20 and 35%, and quotes the 4-times text. B (exactly 30%) and C produce no finding. A test also checks `REFUSAL_FLAG_PERCENT == 30`. In the full path the committed sweep record holds the finding and the check result `examined` 20, count 1.",
+      "fails_without": "If the comparison were `>=`, B would be flagged. If rates were not per rule, A would not be isolated. Without the check wired into `hestia_sweep_with`, the committed sweep would have no finding.",
+      "seam": "Production entry points: `reading_rule_findings(&ReadingRuleStats)` (pure, added by plan step 5), `ReadingRulesCheck` through `run_sweep` (hestia.rs:148, exists), and `Athena::hestia_sweep_with` (hestia.rs:2678, exists, refactored in step 5). Fixtures: `ReadingRuleStats` literals, and for the full path `athena_in(dir, state)` (hestia.rs:2871, exists, with `FakeAgentDriver`) plus `commit_in_tree` and `planning_cost_tests::invocation`. The test holds only recorded facts, and the 30% rule lives in the production function."
+    },
+    {
+      "criterion": 4,
+      "method": "Hestia tests with zero first readings, 9 first readings all refused, and 10 first readings all refused.",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "With 0 or 9 first readings there are no findings and `examined` is 0. The evidence and any output contain no 'healthy', 'ok' or 'pass' claim. With 10 all-refused readings the rule is flagged, which pins the minimum as inclusive. `MIN_FIRST_READINGS` is a named constant. The full-path test shows the committed sweep for the backlog fixture of the existing test (hestia.rs:4693) has the check with count 0 and examined 0.",
+      "fails_without": "Without the minimum, 9 all-refused readings would flag. Reporting `examined` as 9 with 0 findings would let a reader take a tiny window as healthy.",
+      "seam": "`reading_rule_findings` and `ReadingRulesCheck::run` (added by step 5), with `ReadingRuleStats` literals; the full path uses `hestia_sweep_with` as in criterion 3."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three project checks on the whole workspace, plus the refusal corpus as a regression check. The corpus is not changed, and it pins the rule names the new field records.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three pass. Existing tests touched by the new struct field compile and pass: hestia.rs:2936 and :4693 (3 ui lines), the run_pin_tests.rs tests at 1855 and 1915, and the refusal corpus. The corpus is also run on its own with `cargo test -p athena-core --test refusal_corpus`. I read these ids there: `corpus_cases_get_the_expected_outcome`, `the_wrapper_agrees_with_refusing_check_on_every_case`, `every_acceptance_check_has_a_refusing_corpus_case` and `no_check_bypasses_refusing_check`. I have not run it. It must still pass because `check_reading_acceptance` and the `step!` list are unchanged.",
+      "fails_without": "A missed `Invocation` literal (reconcile.rs, landing_tests.rs, pr_check.rs, invocation.rs, status.rs) fails to compile. A changed ui line count fails hestia.rs:4728.",
+      "seam": "The cargo commands run the whole workspace. Fixtures exist today. Plan steps 1-8 keep every `Invocation` literal compiling."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of CHANGELOG.md.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new entry under `## [Unreleased]` names the per-rule first and second refusal counts in `athena status` (last 50 readings), the new `reading_attempt` invocation field, and the Hestia sweep flag for a rule refusing more than 30% of first readings (minimum 10 readings), and states what the change measures. It is written for an outside reader and uses no banned boundary words, since xtask/tests/policy.rs scans tracked files.",
+      "fails_without": null,
+      "seam": "Not a behavior criterion. The file exists and the entry is added by step 9."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff of the two source files, and run the tests that name the constant and the per-rule rows.",
+      "command": "git diff -- crates/athena-core/src/status.rs crates/athena-core/src/hestia.rs",
+      "observes": "The status.rs diff has `RuleRefusals { rule, first_refused, second_refused, .. }` rows, and `text()` prints one row per rule with both counts. The hestia.rs diff defines `pub const REFUSAL_FLAG_PERCENT: usize = 30;` and `pub const MIN_FIRST_READINGS: usize = 10;`, and only the constant appears in the comparison, with no bare `30`.",
+      "fails_without": null,
+      "seam": "Not a behavior criterion. Steps 2 and 5 write these."
+    },
+    {
+      "criterion": 8,
+      "method": "Add tests in athena-data records.rs for the new field. One test makes a full Invocation fixture with `reading_attempt` set, both accepted and refused. It round-trips through `AnyRecord::Invocation(..).to_json()` and `AnyRecord::parse`, and `check_record_file` accepts it at its `canonical_path()`. One test shows an Invocation JSON without the field parses with `None`, and an unknown key inside `reading_attempt` is rejected (`deny_unknown_fields`).",
+      "command": "cargo test -p athena-data",
+      "observes": "The round trip returns an equal record. `check_record_file(path, bytes)` returns `Ok(Some(AnyRecord::Invocation(..)))` and a misplaced path is `Misplaced`. Old records still parse.",
+      "fails_without": "Without `#[serde(default)]` an old record fails to parse. Without the field on the struct, the round trip would drop the refusal.",
+      "seam": "Production entry points: `AnyRecord::parse`, `AnyRecord::to_json`, `check_record_file` (records.rs:1375, exists). The Invocation fixture is a new test helper in records.rs added by step 1; the athena-data tests have none today."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "2bbfa9bc6db379b88eeca27817a3202204b3fff637e282736651a4098ca0241a"
+}

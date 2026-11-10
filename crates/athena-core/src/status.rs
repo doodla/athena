@@ -158,6 +158,145 @@ pub struct Bootstrap {
     pub note: String,
 }
 
+/// How many of the most recent first readings the per-rule refusal counts cover.
+pub const READING_WINDOW: usize = 50;
+
+/// What one reading rule refused in the window ([`ReadingRuleStats`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuleRefusals {
+    /// The name of the rule: its check function, or `check_reading_size`, or `other` for reader output that
+    /// was not a valid reading.
+    pub rule: String,
+    /// First readings this rule refused.
+    pub first_refused: usize,
+    /// Second readings (the reading made again with a refusal as its correction) this rule refused.
+    pub second_refused: usize,
+    /// The refusal text this rule gave most often to a first reading; a tie goes to the most recent.
+    pub top_text: String,
+    /// How many first readings got `top_text`.
+    pub top_text_count: usize,
+}
+
+/// How often each reading rule refused a reading, over the last [`READING_WINDOW`] first readings. A refused
+/// first reading is read again once, so a first refusal costs a reader call, and a second refusal fails the
+/// request. A reading is refused by the first rule that refuses it, so each refusal is counted under exactly one
+/// rule, and a rule that comes later in the order is hidden whenever an earlier one refuses the same reading.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReadingRuleStats {
+    /// First readings in the window.
+    pub first_readings: usize,
+    /// Of those, the ones that were read again (the first was refused and the reader ran a second time).
+    pub second_readings: usize,
+    /// Rules that refused at least one reading in the window, most first refusals first, then by name.
+    pub rules: Vec<RuleRefusals>,
+}
+
+impl ReadingRuleStats {
+    /// The stats over the newest [`READING_WINDOW`] first readings (reader invocations recorded as attempt 1,
+    /// ordered by start time, then job id and sequence), each paired with the reading made again in the same
+    /// job at the next sequence number. `None` when no reader invocation has a recorded reading attempt, which
+    /// is also the case for records written before the attempt was recorded.
+    pub fn compute(records: &Records) -> Option<Self> {
+        let attempt = |inv: &Invocation| inv.reading_attempt.as_ref().map(|a| a.attempt);
+        let mut firsts: Vec<(&Invocation, Option<&Invocation>)> = Vec::new();
+        for job in records.jobs.values() {
+            let readers = || job.invocations.iter().filter(|i| i.role == Role::Reader);
+            for first in readers().filter(|i| attempt(i) == Some(1)) {
+                let second = readers().find(|i| i.seq == first.seq + 1 && attempt(i) == Some(2));
+                firsts.push((first, second));
+            }
+        }
+        firsts.sort_by(|(a, _), (b, _)| {
+            (a.started_at, a.job.as_str(), a.seq).cmp(&(b.started_at, b.job.as_str(), b.seq))
+        });
+        let window = &firsts[firsts.len().saturating_sub(READING_WINDOW)..];
+        if window.is_empty() {
+            return None;
+        }
+        // Per rule: its row and how often each first-refusal text came, with the position of the latest.
+        let mut rows: BTreeMap<String, RuleRow> = BTreeMap::new();
+        let refusal_of =
+            |inv: &Invocation| inv.reading_attempt.as_ref().and_then(|a| a.refusal.clone());
+        let mut second_readings = 0;
+        for (position, (first, second)) in window.iter().enumerate() {
+            if let Some(refusal) = refusal_of(first) {
+                let (counts, texts) = rows
+                    .entry(refusal.rule.clone())
+                    .or_insert_with(|| (empty_row(&refusal.rule), BTreeMap::new()));
+                counts.first_refused += 1;
+                let seen = texts.entry(refusal.text).or_insert((0, position));
+                seen.0 += 1;
+                seen.1 = position;
+            }
+            let Some(second) = second else { continue };
+            second_readings += 1;
+            if let Some(refusal) = refusal_of(second) {
+                let (counts, _) = rows
+                    .entry(refusal.rule.clone())
+                    .or_insert_with(|| (empty_row(&refusal.rule), BTreeMap::new()));
+                counts.second_refused += 1;
+            }
+        }
+        let mut rules: Vec<RuleRefusals> = rows
+            .into_values()
+            .map(|(mut counts, texts)| {
+                if let Some((text, (count, _))) = texts
+                    .into_iter()
+                    .max_by_key(|(_, (count, latest))| (*count, *latest))
+                {
+                    counts.top_text = text;
+                    counts.top_text_count = count;
+                }
+                counts
+            })
+            .collect();
+        rules.sort_by(|a, b| {
+            b.first_refused
+                .cmp(&a.first_refused)
+                .then_with(|| a.rule.cmp(&b.rule))
+        });
+        Some(Self {
+            first_readings: window.len(),
+            second_readings,
+            rules,
+        })
+    }
+
+    /// The lines `athena status` prints: the window, then one row for each rule that refused a reading with its
+    /// first-refusal and second-refusal counts. A window where nothing was refused says so.
+    pub fn text(&self) -> String {
+        let mut out = format!(
+            "readings    last {} first readings ({} read again): refused per rule, first / second\n",
+            self.first_readings, self.second_readings
+        );
+        if self.rules.is_empty() {
+            out.push_str("            no rule refused a reading in this window\n");
+        }
+        for r in &self.rules {
+            out.push_str(&format!(
+                "            {}: {} first · {} second\n",
+                r.rule, r.first_refused, r.second_refused
+            ));
+        }
+        out
+    }
+}
+
+/// A rule's row while counting, with how often each first-refusal text came and the window position of its
+/// latest occurrence.
+type RuleRow = (RuleRefusals, BTreeMap<String, (usize, usize)>);
+
+/// A rule's row before anything is counted under it.
+fn empty_row(rule: &str) -> RuleRefusals {
+    RuleRefusals {
+        rule: rule.to_string(),
+        first_refused: 0,
+        second_refused: 0,
+        top_text: String::new(),
+        top_text_count: 0,
+    }
+}
+
 /// Where a requirement's measure can appear in `athena status`: the label `athena status` prints at the start
 /// of a line, and the [`StatusView`] field that holds what it prints. A measure in `docs/spec.toml` ends with
 /// `status: <label>` using one of these, or with `status: not shown` and names the test or check that shows
@@ -176,6 +315,7 @@ pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
     ("audit", "audit"),
     ("audience", "audience"),
     ("requirement", "spec_gaps"),
+    ("readings", "reading_rules"),
 ];
 
 /// The line `athena status` prints for the latest build measurement (`athena measure-build`): T (one cold
@@ -268,6 +408,10 @@ pub struct StatusView {
     /// a job.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gate_counts: Vec<crate::gate_counts::GateCount>,
+    /// Per reading rule: the first readings it refused and the second readings it refused, over the last
+    /// [`READING_WINDOW`] first readings. Absent when no reader invocation has recorded a reading attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reading_rules: Option<ReadingRuleStats>,
     /// Landed jobs per day, median minutes per landed job by stage, idle time between jobs and time spent on
     /// jobs that did not land, computed from the job records; absent until a request job has landed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1088,6 +1232,7 @@ impl Athena {
             producer_settings: producer_settings(&records),
             check_durations,
             gate_counts: crate::gate_counts::gate_counts(&records),
+            reading_rules: ReadingRuleStats::compute(&records),
             throughput: Throughput::compute(&records),
             build_measurement: build_measurement_line(BuildMeasurement::latest(
                 &records.build_measurements,
@@ -1787,6 +1932,7 @@ pub(crate) mod planning_cost_tests {
             turns: None,
             commands_run: vec![],
             policy_denials: vec![],
+            reading_attempt: None,
         }
     }
 
@@ -3466,6 +3612,241 @@ pub(crate) mod planning_cost_tests {
         let window = landed_jobs(&records);
         assert_eq!(StageMinutes::median_of(&window), throughput.median_stages);
         assert_eq!(StageMinutes::median_of(&[]), StageMinutes::default());
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod reading_rule_tests {
+    use super::*;
+    use athena_data::JobId;
+    use athena_data::records::{ReadingAttempt, ReadingRefusal};
+
+    pub(crate) const RULE_A: &str = "check_governance_coverage";
+    pub(crate) const RULE_B: &str = "check_code_survey";
+
+    /// A refusal as a rule name and its text; `None` is an accepted reading.
+    pub(crate) type Refusal<'a> = Option<(&'a str, &'a str)>;
+
+    pub(crate) fn job_id(n: u32) -> JobId {
+        JobId::parse(&format!("20261001-{n:06}-aaaa")).unwrap()
+    }
+
+    /// A reader invocation recorded as `attempt` (1 or 2) of its run, started `at` seconds after the epoch.
+    pub(crate) fn reading_invocation(
+        n: u32,
+        seq: u32,
+        at: i64,
+        attempt: u32,
+        refusal: Refusal,
+    ) -> Invocation {
+        let mut inv = planning_cost_tests::invocation(&job_id(n), seq, Role::Reader, 0.02);
+        inv.started_at = jiff::Timestamp::from_second(at).unwrap();
+        inv.reading_attempt = Some(ReadingAttempt {
+            attempt,
+            refusal: refusal.map(|(rule, text)| ReadingRefusal {
+                rule: rule.into(),
+                text: text.into(),
+            }),
+        });
+        inv
+    }
+
+    /// The reader invocations of job `n`: a first reading started at `at`, and its re-read when `second` is
+    /// given (`Some(None)` is a re-read that was accepted).
+    pub(crate) fn reading_job(
+        n: u32,
+        at: i64,
+        first: Refusal,
+        second: Option<Refusal>,
+    ) -> Vec<Invocation> {
+        let mut out = vec![reading_invocation(n, 1, at, 1, first)];
+        if let Some(second) = second {
+            out.push(reading_invocation(n, 2, at + 1, 2, second));
+        }
+        out
+    }
+
+    pub(crate) fn records_of(invocations: Vec<Invocation>) -> Records {
+        let mut records = Records::default();
+        for inv in invocations {
+            records
+                .jobs
+                .entry(inv.job.as_str().to_string())
+                .or_insert_with(|| JobRecords {
+                    id: Some(inv.job.clone()),
+                    ..JobRecords::default()
+                })
+                .invocations
+                .push(inv);
+        }
+        records
+    }
+
+    /// Ten first readings. Rule A refuses three of them: the first of these is accepted when read again, the
+    /// second is refused again by A and the third is accepted when read again. Rule B refuses one, which is
+    /// accepted when read again. Six are accepted at once.
+    fn rule_fixture() -> Records {
+        let mut all = Vec::new();
+        all.extend(reading_job(1, 10, Some((RULE_A, "a one")), Some(None)));
+        all.extend(reading_job(
+            2,
+            20,
+            Some((RULE_A, "a two")),
+            Some(Some((RULE_A, "a two"))),
+        ));
+        all.extend(reading_job(3, 30, Some((RULE_A, "a two")), Some(None)));
+        all.extend(reading_job(4, 40, Some((RULE_B, "b one")), Some(None)));
+        for n in 5..=10 {
+            all.extend(reading_job(n, 10 * i64::from(n), None, None));
+        }
+        records_of(all)
+    }
+
+    #[test]
+    fn each_rule_is_reported_with_its_first_and_second_refusal_counts() {
+        let stats = ReadingRuleStats::compute(&rule_fixture()).unwrap();
+        assert_eq!(stats.first_readings, 10);
+        assert_eq!(stats.second_readings, 4);
+        let counts: Vec<(&str, usize, usize)> = stats
+            .rules
+            .iter()
+            .map(|r| (r.rule.as_str(), r.first_refused, r.second_refused))
+            .collect();
+        assert_eq!(counts, vec![(RULE_A, 3, 1), (RULE_B, 1, 0)]);
+        // The text refused most often is kept per rule.
+        assert_eq!(stats.rules[0].top_text, "a two");
+        assert_eq!(stats.rules[0].top_text_count, 2);
+        assert_eq!(stats.rules[1].top_text, "b one");
+        let text = stats.text();
+        assert!(
+            text.starts_with("readings    last 10 first readings (4 read again)"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("{RULE_A}: 3 first · 1 second")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("{RULE_B}: 1 first · 0 second")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_second_refusal_by_another_rule_counts_under_that_rule() {
+        let records = records_of(reading_job(
+            1,
+            10,
+            Some((RULE_A, "a")),
+            Some(Some((RULE_B, "b"))),
+        ));
+        let stats = ReadingRuleStats::compute(&records).unwrap();
+        let counts: Vec<(&str, usize, usize)> = stats
+            .rules
+            .iter()
+            .map(|r| (r.rule.as_str(), r.first_refused, r.second_refused))
+            .collect();
+        assert_eq!(counts, vec![(RULE_A, 1, 0), (RULE_B, 0, 1)]);
+    }
+
+    #[test]
+    fn a_tie_between_refusal_texts_goes_to_the_most_recent() {
+        let mut all = Vec::new();
+        all.extend(reading_job(1, 10, Some((RULE_A, "older")), None));
+        all.extend(reading_job(2, 20, Some((RULE_A, "newer")), None));
+        let stats = ReadingRuleStats::compute(&records_of(all)).unwrap();
+        assert_eq!(stats.rules[0].top_text, "newer");
+        assert_eq!(stats.rules[0].top_text_count, 1);
+    }
+
+    /// 55 first readings. In job order `n`, job 1 is the newest by start time and job 55 the oldest, so the
+    /// window cuts by time and not by job id.
+    fn many_readings(refused: impl Fn(u32) -> bool) -> Records {
+        let mut all = Vec::new();
+        for n in 1..=55u32 {
+            let first = refused(n).then_some(("check_x", "x refused"));
+            all.extend(reading_job(n, 1000 - i64::from(n) * 10, first, None));
+        }
+        records_of(all)
+    }
+
+    #[test]
+    fn only_the_newest_fifty_first_readings_are_counted() {
+        // The five oldest by time (jobs 51 to 55) are refused; they fall outside the window.
+        let stats = ReadingRuleStats::compute(&many_readings(|n| n > 50)).unwrap();
+        assert_eq!(stats.first_readings, READING_WINDOW);
+        assert_eq!(stats.rules, vec![]);
+        // Five of the newest (jobs 1 to 5) are refused as well: exactly those five count.
+        let stats = ReadingRuleStats::compute(&many_readings(|n| n > 50 || n <= 5)).unwrap();
+        assert_eq!(stats.first_readings, 50);
+        assert_eq!(stats.rules.len(), 1);
+        assert_eq!(stats.rules[0].first_refused, 5);
+        assert_eq!(stats.rules[0].second_refused, 0);
+    }
+
+    #[test]
+    fn a_re_read_belongs_to_the_window_of_its_first_reading() {
+        // Job 55 is the oldest: outside the window, so its re-read is not counted either.
+        let mut all = Vec::new();
+        for n in 1..=55u32 {
+            let at = 1000 - i64::from(n) * 10;
+            all.extend(reading_job(n, at, Some(("check_x", "x")), Some(None)));
+        }
+        let stats = ReadingRuleStats::compute(&records_of(all)).unwrap();
+        assert_eq!(stats.first_readings, 50);
+        assert_eq!(stats.second_readings, 50);
+        assert_eq!(stats.rules[0].first_refused, 50);
+    }
+
+    #[test]
+    fn records_without_a_reading_attempt_give_no_stats() {
+        assert_eq!(ReadingRuleStats::compute(&Records::default()), None);
+        let mut plain = planning_cost_tests::invocation(&job_id(1), 1, Role::Reader, 0.02);
+        plain.reading_attempt = None;
+        assert_eq!(ReadingRuleStats::compute(&records_of(vec![plain])), None);
+        // A re-read alone, with no first reading before it, is not a first reading.
+        let orphan = reading_invocation(1, 2, 10, 2, Some((RULE_A, "a")));
+        assert_eq!(ReadingRuleStats::compute(&records_of(vec![orphan])), None);
+    }
+
+    #[test]
+    fn a_window_where_nothing_was_refused_is_reported_as_such() {
+        let stats = ReadingRuleStats::compute(&records_of(reading_job(1, 10, None, None))).unwrap();
+        assert_eq!(stats.first_readings, 1);
+        assert!(stats.rules.is_empty());
+        assert!(stats.text().contains("no rule refused a reading"));
+    }
+
+    #[test]
+    fn athena_status_reports_the_counts_from_the_committed_invocation_records() {
+        use super::records_worktree_tests::{commit_in_tree, job_record};
+        use athena_data::records::AnyRecord;
+        let (_dir, _state, athena) = crate::code_health::tests::set_up();
+        // With no reader invocation recorded, the field is absent.
+        assert!(athena.status().unwrap().reading_rules.is_none());
+        let mut files = Vec::new();
+        for n in 1..=10u32 {
+            files.push(job_record(job_id(n).as_str(), "docs"));
+        }
+        let fixture = rule_fixture();
+        for job in fixture.jobs.values() {
+            for inv in &job.invocations {
+                files.push(AnyRecord::Invocation(Box::new(inv.clone())));
+            }
+        }
+        commit_in_tree(&athena, &files);
+        let view = athena.status().unwrap();
+        let stats = view
+            .reading_rules
+            .clone()
+            .expect("the reading rules are reported");
+        assert_eq!(stats, ReadingRuleStats::compute(&fixture).unwrap());
+        assert_eq!(
+            (stats.rules[0].first_refused, stats.rules[0].second_refused),
+            (3, 1)
+        );
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["reading_rules"]["first_readings"], 10);
     }
 }
 

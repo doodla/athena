@@ -222,6 +222,7 @@ impl Athena {
             turns: output.turns,
             commands_run,
             policy_denials,
+            reading_attempt: None,
         })
     }
 
@@ -329,6 +330,7 @@ pub fn interrupted_record(
         turns: None,
         commands_run: Vec::new(),
         policy_denials: Vec::new(),
+        reading_attempt: None,
     }
 }
 

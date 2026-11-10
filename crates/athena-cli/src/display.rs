@@ -1241,6 +1241,9 @@ pub fn status(v: &StatusView) -> String {
     if !v.gate_counts.is_empty() {
         out.push_str(&gate_counts_lines(&v.gate_counts));
     }
+    if let Some(rules) = &v.reading_rules {
+        out.push_str(&rules.text());
+    }
     if let Some(throughput) = &v.throughput {
         let _ = writeln!(out, "{}", throughput.text());
     }
