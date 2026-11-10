@@ -11,7 +11,8 @@ use crate::procs::{
 };
 use crate::stream::{ResultEvent, StreamState};
 use crate::{
-    AgentDriver, AgentInvocation, AgentOutput, DriverError, UsageSink, nested_marker, refuse_nested,
+    AgentDriver, AgentInvocation, AgentOutput, DriverError, Usage, UsageSink, nested_marker,
+    refuse_nested,
 };
 use athena_data::records::{DriverInfo, InvocationOutcome};
 use std::collections::BTreeMap;
@@ -40,6 +41,8 @@ pub struct ClaudeCodeDriver {
     refuse_nested_runs: bool,
     /// The shortest stall window; tests lower it to exercise the watchdog quickly.
     min_stall_window: Duration,
+    /// The wait before the one retry after an expired login; tests lower it.
+    auth_retry_wait: Duration,
 }
 
 /// Checks that the binary at `bin` reports the pinned version, and returns it.
@@ -92,6 +95,7 @@ impl ClaudeCodeDriver {
             version,
             registry,
             min_stall_window: MIN_STALL_WINDOW,
+            auth_retry_wait: AUTH_RETRY_WAIT,
         })
     }
 
@@ -283,6 +287,142 @@ pub fn output_from_result(
     }
 }
 
+/// The HTTP status of an API error in the detail of a stopped agent, or `None` when the detail is not one.
+///
+/// The detail is built by [`output_from_result`] as `<subtype>: <first 300 characters of the result text>`.
+/// An API error reads `success: Failed to authenticate. API Error: 401 {...}` or
+/// `success: API Error: 429 ...`: the CLI reports it as an error result whose subtype is `success`. Only that
+/// form counts, with a subtype of `success` or `error`; a model's own closing words under another subtype
+/// (`error_max_turns`, `error_during_execution`) are free prose and are never read. No word list is used.
+///
+/// The driver retries a 401 with this, and the core classifies a stopped producer with it, so the two cannot
+/// disagree about what an expired login looks like.
+pub fn api_error_status(detail: &str) -> Option<u16> {
+    let rest = ["success: ", "error: "]
+        .iter()
+        .find_map(|subtype| detail.strip_prefix(subtype))
+        .unwrap_or(detail);
+    let rest = rest
+        .strip_prefix("Failed to authenticate. ")
+        .unwrap_or(rest);
+    let digits = rest.strip_prefix("API Error: ")?;
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
+    digits[..end].parse().ok()
+}
+
+/// How long the driver waits before it calls again after an expired login. The login normally refreshes by
+/// itself within minutes; this is the short wait of one retry, not a wait for that refresh.
+const AUTH_RETRY_WAIT: Duration = Duration::from_secs(30);
+
+/// The least time a retry after an expired login must have left; with less, the first call's error is returned.
+const MIN_RETRY_RUN: Duration = Duration::from_secs(10);
+
+/// The least budget a retry after an expired login must have left, in US dollars.
+const MIN_RETRY_BUDGET_USD: f64 = 0.01;
+
+/// The line put before the brief of a retried call. The CLI keeps no session (`--no-session-persistence`),
+/// so the retried agent does not remember what it did before the login expired; its edits are still in the
+/// working directory.
+const RETRY_NOTE: &str = "An earlier attempt at this task stopped when the login expired. Anything it changed is already in your working directory: check it before redoing work.";
+
+/// The invocation for the one retry after an expired login, or `None` when too little is left to run it.
+/// The retry is part of the same invocation, so it gets what the first call left of the timeout and the
+/// budget: `used` is the time since the first call began, including the wait, and the first call's reported
+/// cost is taken off the budget. Its brief starts with [`RETRY_NOTE`].
+fn retry_spec(
+    spec: &AgentInvocation,
+    first: &AgentOutput,
+    used: Duration,
+) -> Option<AgentInvocation> {
+    let timeout = spec.timeout.checked_sub(used)?;
+    let budget = spec.max_budget_usd - first.cost_usd.unwrap_or(0.0);
+    if timeout < MIN_RETRY_RUN || budget < MIN_RETRY_BUDGET_USD {
+        return None;
+    }
+    let mut retry = spec.clone();
+    retry.timeout = timeout;
+    retry.max_budget_usd = budget;
+    retry.user_prompt = format!("{RETRY_NOTE}\n\n{}", spec.user_prompt);
+    Some(retry)
+}
+
+/// A sink for the second call of one invocation: it passes on the first call's usage and commands plus the
+/// second call's, so the stored lower bound never goes backwards when the second call starts.
+struct OffsetSink<'a> {
+    inner: &'a mut dyn UsageSink,
+    usage: Usage,
+    commands: Vec<String>,
+}
+
+impl UsageSink for OffsetSink<'_> {
+    fn update(&mut self, usage: &Usage, commands_run: &[String]) {
+        let mut commands = self.commands.clone();
+        commands.extend_from_slice(commands_run);
+        self.inner.update(&sum_usage(&self.usage, usage), &commands);
+    }
+}
+
+fn sum_usage(a: &Usage, b: &Usage) -> Usage {
+    Usage {
+        input: a.input + b.input,
+        output: a.output + b.output,
+        cache_read: a.cache_read + b.cache_read,
+        cache_write: a.cache_write + b.cache_write,
+    }
+}
+
+/// One output for two calls that make one invocation. Usage, models, turns, API time, commands and denials
+/// are summed or joined; the cost is the sum only when both calls reported one (else it is unknown, and the
+/// record bounds it by the cap); the usage is measured only when both were. The outcome, detail and structured
+/// report are the second call's, which is what the invocation ended with. `wall_s` is the time of the pair.
+fn merge_outputs(first: AgentOutput, second: AgentOutput, wall_s: f64) -> AgentOutput {
+    let mut models_used = first.models_used;
+    for (model, used) in second.models_used {
+        match models_used.get_mut(&model) {
+            Some(total) => {
+                total.input += used.input;
+                total.output += used.output;
+                total.cache_read += used.cache_read;
+                total.cache_write += used.cache_write;
+                total.cost_usd += used.cost_usd;
+            }
+            None => {
+                models_used.insert(model, used);
+            }
+        }
+    }
+    let mut commands_run = first.commands_run;
+    commands_run.extend(second.commands_run);
+    let mut denials = first.denials;
+    denials.extend(second.denials);
+    AgentOutput {
+        outcome: second.outcome,
+        detail: second.detail,
+        structured: second.structured,
+        started_at: first.started_at,
+        ended_at: second.ended_at,
+        wall_s,
+        usage: sum_usage(&first.usage, &second.usage),
+        usage_measured: first.usage_measured && second.usage_measured,
+        models_used,
+        cost_usd: first.cost_usd.zip(second.cost_usd).map(|(a, b)| a + b),
+        turns: sum_options(first.turns, second.turns),
+        duration_api_ms: sum_options(first.duration_api_ms, second.duration_api_ms),
+        commands_run,
+        denials,
+    }
+}
+
+/// The sum of two optional counts; absent only when both are.
+fn sum_options<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    }
+}
+
 impl AgentDriver for ClaudeCodeDriver {
     fn info(&self) -> DriverInfo {
         DriverInfo {
@@ -292,6 +432,61 @@ impl AgentDriver for ClaudeCodeDriver {
     }
 
     fn invoke(
+        &self,
+        spec: &AgentInvocation,
+        sink: &mut dyn UsageSink,
+    ) -> Result<AgentOutput, DriverError> {
+        let began = Instant::now();
+        let first = self.invoke_once(spec, sink)?;
+        if first.outcome != InvocationOutcome::Error
+            || first.detail.as_deref().and_then(api_error_status) != Some(401)
+        {
+            return Ok(first);
+        }
+        self.retry_after_login_expiry(spec, sink, first, began)
+    }
+}
+
+impl ClaudeCodeDriver {
+    /// Runs the call again, once, after `first` ended on an expired login (an API error 401). The login
+    /// usually refreshes by itself within minutes, so a producer that has worked for half an hour is not
+    /// thrown away for it. The two calls are one invocation to the caller: the second gets what is left of the
+    /// time and the budget, its usage reaches `sink` on top of the first call's, and the output merges both
+    /// ([`merge_outputs`]). The retry is skipped, and `first` returned for the caller to close as an
+    /// environment stop, when too little time or budget is left. If the retry fails too, its output is
+    /// returned, whatever it is: there is no third call.
+    fn retry_after_login_expiry(
+        &self,
+        spec: &AgentInvocation,
+        sink: &mut dyn UsageSink,
+        first: AgentOutput,
+        began: Instant,
+    ) -> Result<AgentOutput, DriverError> {
+        let Some(retry) = retry_spec(spec, &first, began.elapsed() + self.auth_retry_wait) else {
+            return Ok(first);
+        };
+        let until = Instant::now() + self.auth_retry_wait;
+        loop {
+            if self.registry.stopped() {
+                return Err(DriverError::Stopped);
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(Duration::from_secs(1)));
+        }
+        let mut offset = OffsetSink {
+            inner: sink,
+            usage: first.usage,
+            commands: first.commands_run.clone(),
+        };
+        let second = self.invoke_once(&retry, &mut offset)?;
+        Ok(merge_outputs(first, second, began.elapsed().as_secs_f64()))
+    }
+
+    /// One call of the CLI, with no retry.
+    fn invoke_once(
         &self,
         spec: &AgentInvocation,
         sink: &mut dyn UsageSink,
@@ -603,7 +798,14 @@ mod stand_in_tests {
 
     const STAND_IN: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.299 (Claude Code)"; exit 0; fi
-cat > /dev/null
+cat > "${PROMPT_FILE:-/dev/null}"
+n=1
+if [ -n "$COUNT_FILE" ]; then
+  if [ -f "$COUNT_FILE" ]; then n=$(( $(cat "$COUNT_FILE") + 1 )); fi
+  echo "$n" > "$COUNT_FILE"
+  printf '%s\n' "$*" >> "$COUNT_FILE.args"
+fi
+AUTH='{"type":"result","subtype":"success","is_error":true,"num_turns":1,"duration_api_ms":100,"total_cost_usd":0.25,"result":"Failed to authenticate. API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth access token has expired. Please obtain a new token or refresh your existing token.\"}}","usage":{"input_tokens":4,"cache_creation_input_tokens":10,"cache_read_input_tokens":2,"output_tokens":9},"modelUsage":{"claude-haiku-5-5":{"inputTokens":4,"outputTokens":9,"cacheReadInputTokens":2,"cacheCreationInputTokens":10,"costUSD":0.25}},"permission_denials":[]}'
 echo '{"type":"system","subtype":"init","session_id":"0c32611b-5c0a-43eb-bacb-20a90569b268"}'
 if [ "$MODE" = "spill" ]; then
   d="$HOME/.claude/projects/$(pwd | sed 's/[^A-Za-z0-9]/-/g')/0c32611b-5c0a-43eb-bacb-20a90569b268/tool-results"
@@ -616,6 +818,12 @@ if [ "$MODE" = "slow" ]; then
   for i in 1 2 3 4; do sleep 2; echo '{"type":"system","subtype":"progress"}'; done
 fi
 if [ "$MODE" = "stopped" ]; then echo on > "$STOP_FILE"; exit 143; fi
+if [ "$MODE" = "auth_always" ] || { [ "$MODE" = "auth_once" ] && [ "$n" = "1" ]; }; then printf '%s\n' "$AUTH"; exit 0; fi
+if [ "$MODE" = "auth_stop" ]; then printf '%s\n' "$AUTH"; echo on > "$STOP_FILE"; exit 0; fi
+if [ "$MODE" = "limit" ]; then
+  echo '{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0.01,"result":"API Error: 429 usage limit reached","permission_denials":[]}'
+  exit 0
+fi
 echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_api_ms":900,"total_cost_usd":0.002,"usage":{"input_tokens":5,"cache_creation_input_tokens":120,"cache_read_input_tokens":40,"output_tokens":60},"modelUsage":{"claude-haiku-5-5":{"inputTokens":5,"outputTokens":60,"cacheReadInputTokens":40,"cacheCreationInputTokens":120,"costUSD":0.002}},"permission_denials":[],"structured_output":{"answer":42}}'
 "#;
 
@@ -634,7 +842,30 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
             registry,
             refuse_nested_runs: false,
             min_stall_window: crate::procs::MIN_STALL_WINDOW,
+            auth_retry_wait: AUTH_RETRY_WAIT,
         }
+    }
+
+    /// A spec whose child counts its calls in `count` and keeps its last prompt in `prompt`.
+    fn counted(dir: &Path, mode: &str, timeout: Duration) -> (AgentInvocation, PathBuf, PathBuf) {
+        let count = dir.join("count");
+        let prompt = dir.join("prompt");
+        let mut invocation = spec(dir, mode, timeout);
+        invocation
+            .env
+            .insert("COUNT_FILE".into(), count.display().to_string());
+        invocation
+            .env
+            .insert("PROMPT_FILE".into(), prompt.display().to_string());
+        (invocation, count, prompt)
+    }
+
+    fn calls(count: &Path) -> u32 {
+        std::fs::read_to_string(count)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
     }
 
     fn spec(dir: &Path, mode: &str, timeout: Duration) -> AgentInvocation {
@@ -700,6 +931,198 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
         assert_eq!(out.structured.unwrap()["answer"], 42);
         assert_eq!(out.commands_run, vec!["cargo test".to_string()]);
         assert!(!sink.0.is_empty(), "usage was persisted as it accrued");
+    }
+
+    /// A sink that keeps every update, with the commands it was given.
+    #[derive(Default)]
+    struct Trace(Vec<(Usage, Vec<String>)>);
+
+    impl UsageSink for Trace {
+        fn update(&mut self, usage: &Usage, commands_run: &[String]) {
+            self.0.push((*usage, commands_run.to_vec()));
+        }
+    }
+
+    const LOGIN_EXPIRED_DETAIL: &str = "success: Failed to authenticate. API Error: 401";
+
+    #[test]
+    fn a_login_expiry_is_retried_once_and_a_second_call_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut driver = driver(stand_in(dir.path()), Registry::new(state.path()));
+        driver.auth_retry_wait = Duration::from_millis(300);
+        let (invocation, count, prompt) = counted(dir.path(), "auth_once", Duration::from_secs(30));
+        let mut sink = Trace::default();
+        let started = Instant::now();
+        let out = driver.invoke(&invocation, &mut sink).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(300), "it waited");
+        // Exactly two calls, and the job's caller sees one successful invocation.
+        assert_eq!(calls(&count), 2);
+        assert_eq!(out.outcome, InvocationOutcome::Success);
+        assert_eq!(out.detail, None);
+        assert_eq!(out.structured.clone().unwrap()["answer"], 42);
+        // The second call ran with what the first left of the budget (0.50 less its 0.25), and was told
+        // that an earlier attempt had stopped.
+        let args = std::fs::read_to_string(format!("{}.args", count.display())).unwrap();
+        let args: Vec<&str> = args.lines().collect();
+        assert_eq!(args.len(), 2);
+        assert!(args[0].contains("--max-budget-usd 0.50"), "{}", args[0]);
+        assert!(args[1].contains("--max-budget-usd 0.25"), "{}", args[1]);
+        let second_prompt = std::fs::read_to_string(&prompt).unwrap();
+        assert!(second_prompt.starts_with(RETRY_NOTE), "{second_prompt}");
+        assert!(second_prompt.ends_with("brief"), "{second_prompt}");
+        // Both calls' spend is in the one output: the cost, the tokens, the models and the commands.
+        assert!(
+            (out.cost_usd.unwrap() - 0.252).abs() < 1e-9,
+            "{:?}",
+            out.cost_usd
+        );
+        assert_eq!(
+            out.usage,
+            Usage {
+                input: 9,
+                output: 69,
+                cache_read: 42,
+                cache_write: 130
+            }
+        );
+        assert!(out.usage_measured);
+        assert_eq!(out.turns, Some(3));
+        assert_eq!(out.duration_api_ms, Some(1000));
+        let haiku = &out.models_used["claude-haiku-5-5"];
+        assert_eq!((haiku.input, haiku.output), (9, 69));
+        assert!((haiku.cost_usd - 0.252).abs() < 1e-9);
+        assert_eq!(out.commands_run, vec!["cargo test", "cargo test"]);
+        assert!(out.wall_s >= 0.3, "the pair's time includes the wait");
+        assert!(out.started_at <= out.ended_at);
+        // The sink never goes backwards: the second call's updates carry the first call's totals.
+        let (usage, commands) = sink.0.last().unwrap();
+        assert_eq!(
+            *usage,
+            Usage {
+                input: 7,
+                output: 16,
+                cache_read: 2,
+                cache_write: 110
+            }
+        );
+        assert_eq!(commands, &vec!["cargo test".to_string(); 2]);
+        assert!(
+            sink.0.windows(2).all(|w| w[0].0.input <= w[1].0.input),
+            "{:?}",
+            sink.0
+        );
+    }
+
+    #[test]
+    fn two_login_expiries_make_two_calls_and_return_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut driver = driver(stand_in(dir.path()), Registry::new(state.path()));
+        driver.auth_retry_wait = Duration::from_millis(300);
+        let (invocation, count, _) = counted(dir.path(), "auth_always", Duration::from_secs(30));
+        let started = Instant::now();
+        let out = driver
+            .invoke(&invocation, &mut Recorder::default())
+            .unwrap();
+        // One retry and no more: the second 401 is returned for the caller to close as an environment stop.
+        assert_eq!(calls(&count), 2);
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert_eq!(out.outcome, InvocationOutcome::Error);
+        let detail = out.detail.unwrap();
+        assert!(detail.starts_with(LOGIN_EXPIRED_DETAIL), "{detail}");
+        assert_eq!(api_error_status(&detail), Some(401));
+        assert!((out.cost_usd.unwrap() - 0.5).abs() < 1e-9, "both spends");
+    }
+
+    #[test]
+    fn a_login_expiry_with_no_time_left_is_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut driver = driver(stand_in(dir.path()), Registry::new(state.path()));
+        driver.auth_retry_wait = Duration::from_secs(3);
+        let (invocation, count, _) = counted(dir.path(), "auth_once", Duration::from_secs(2));
+        let started = Instant::now();
+        let out = driver
+            .invoke(&invocation, &mut Recorder::default())
+            .unwrap();
+        assert_eq!(calls(&count), 1);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "it did not wait"
+        );
+        assert_eq!(out.outcome, InvocationOutcome::Error);
+        assert!(out.detail.unwrap().starts_with(LOGIN_EXPIRED_DETAIL));
+    }
+
+    #[test]
+    fn an_athena_stop_during_a_login_expiry_wait_ends_the_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::new(state.path());
+        let mut driver = driver(stand_in(dir.path()), registry.clone());
+        driver.auth_retry_wait = Duration::from_millis(300);
+        let (mut invocation, count, _) = counted(dir.path(), "auth_stop", Duration::from_secs(30));
+        invocation.env.insert(
+            "STOP_FILE".to_string(),
+            registry.stop_file().display().to_string(),
+        );
+        let result = driver.invoke(&invocation, &mut Recorder::default());
+        assert!(matches!(result, Err(DriverError::Stopped)), "{result:?}");
+        assert_eq!(calls(&count), 1, "no second call after the stop");
+    }
+
+    #[test]
+    fn a_usage_limit_is_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut driver = driver(stand_in(dir.path()), Registry::new(state.path()));
+        driver.auth_retry_wait = Duration::from_millis(300);
+        let (invocation, count, _) = counted(dir.path(), "limit", Duration::from_secs(30));
+        let out = driver
+            .invoke(&invocation, &mut Recorder::default())
+            .unwrap();
+        assert_eq!(calls(&count), 1);
+        assert_eq!(out.outcome, InvocationOutcome::Error);
+        assert_eq!(api_error_status(&out.detail.unwrap()), Some(429));
+    }
+
+    #[test]
+    fn retry_spec_leaves_the_remaining_time_and_budget() {
+        let mut original = spec(Path::new("/w"), "complete", Duration::from_secs(600));
+        original.user_prompt = "the brief".into();
+        original.max_budget_usd = 3.0;
+        let at = jiff::Timestamp::UNIX_EPOCH;
+        let mut first = output_from_result(
+            &ResultEvent {
+                is_error: true,
+                subtype: "success".into(),
+                text: Some("Failed to authenticate. API Error: 401".into()),
+                cost_usd: Some(1.25),
+                ..ResultEvent::default()
+            },
+            "claude-haiku-5-5",
+            at,
+            at,
+            100.0,
+            Vec::new(),
+        );
+        // 100 s of the first call and a 30 s wait leave 470 s; $3.00 less $1.25 leaves $1.75.
+        let retry = retry_spec(&original, &first, Duration::from_secs(130)).unwrap();
+        assert_eq!(retry.timeout, Duration::from_secs(470));
+        assert!((retry.max_budget_usd - 1.75).abs() < 1e-9);
+        assert_eq!(retry.user_prompt, format!("{RETRY_NOTE}\n\nthe brief"));
+        assert_eq!(retry.job, original.job);
+        // Less than the floor of time, or of budget, is not worth a call.
+        assert!(retry_spec(&original, &first, Duration::from_secs(591)).is_none());
+        assert!(retry_spec(&original, &first, Duration::from_secs(600)).is_none());
+        assert!(retry_spec(&original, &first, Duration::from_secs(900)).is_none());
+        first.cost_usd = Some(2.995);
+        assert!(retry_spec(&original, &first, Duration::from_secs(130)).is_none());
+        // A first call with no reported cost leaves the whole budget to the retry.
+        first.cost_usd = None;
+        let retry = retry_spec(&original, &first, Duration::from_secs(130)).unwrap();
+        assert!((retry.max_budget_usd - 3.0).abs() < 1e-9);
     }
 
     #[test]

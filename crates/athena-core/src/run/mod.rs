@@ -873,8 +873,9 @@ impl Athena {
         }
     }
 
-    /// The kept work of a timed out job that a retry resumes from: the request must be "try again on <job>"
-    /// for a job that closed `timed_out`; its progress note must exist, and so must its kept candidate commit
+    /// The kept work of a stopped producer that a retry resumes from: the request must be "try again on <job>"
+    /// for a job that closed `timed_out`, or closed failed because its producer's login expired
+    /// ([`crate::disk::keeps_unfinished_work`]); its progress note must exist, and so must its kept candidate commit
     /// (or, for a job that kept a work tree instead, that directory); and the files agents see at `head` must
     /// be those the job's base had (only `records/` differs), so that resuming cannot undo later work. The
     /// commit is preferred over the directory. Otherwise `None`: the retry starts from the base.
@@ -890,7 +891,10 @@ impl Athena {
         let Some(job) = records.jobs.get(id.as_str()) else {
             return Ok(None);
         };
-        if job.state() != JobState::Closed(OutcomeState::TimedOut) {
+        if !crate::disk::keeps_unfinished_work(
+            job.state(),
+            job.outcome.as_ref().map(|o| o.reason.as_str()),
+        ) {
             return Ok(None);
         }
         let (Some(note), Some(base)) = (
@@ -928,19 +932,22 @@ impl Athena {
         }))
     }
 
-    /// Ends a producer that hit its deadline, keeping what it did. The snapshot's change list becomes a
+    /// Ends a producer that stopped before it finished, keeping what it did. `ended` says why: a deadline
+    /// (the job closes `timed_out`) or an expired login (the job closes failed with the environment reason
+    /// [`crate::disk::producer_stop_reason`] gives, so it stays an environment stop). The snapshot's change list becomes a
     /// candidate commit in the user's repository (the same commit shape as any candidate, built by
     /// [`Athena::build_candidate`]), recorded in the closing and named in the outcome reason and the progress
     /// note. No admission runs: the work is unfinished, and the retry's own candidate is admitted in full.
     /// Only when no commit can be built (an error) does the work tree move to the kept directory, outside the
     /// job's directory, which closing removes. A study's pinned checkout is mounted inside the work tree, so a
     /// pinned job keeps nothing. The note also lists the planned files with no change yet.
-    fn keep_timed_out_work(
+    fn keep_unfinished_work(
         &self,
         ctx: &RunContext<'_>,
         snapshot: &Snapshot,
         accepted: &AcceptedReading,
         reason: &str,
+        ended: Ended,
         closing: &mut Closing,
     ) -> Result<()> {
         let id = ctx.id().clone();
@@ -987,7 +994,10 @@ impl Athena {
             format!("{}/progress-note.md", id.dir()),
             texts.remove(0),
         ));
-        let mut full = format!("the producer did not complete: {reason}");
+        let mut full = match ended {
+            Ended::Deadline => format!("the producer did not complete: {reason}"),
+            Ended::EnvironmentStop => crate::disk::producer_stop_reason(reason),
+        };
         if let TimedOutKeep::Candidate(commit) = &kept {
             full.push_str(&format!(
                 "; its edits are kept as candidate {}",
@@ -996,7 +1006,9 @@ impl Athena {
         }
         closing.happened = self.failure(ctx, &full);
         closing.happened.changed_paths = candidate_paths;
-        closing.happened.state = Some(OutcomeState::TimedOut);
+        if ended == Ended::Deadline {
+            closing.happened.state = Some(OutcomeState::TimedOut);
+        }
         Ok(())
     }
 
@@ -1378,8 +1390,8 @@ struct RunContext<'a> {
     conflicts: Vec<String>,
 }
 
-/// The kept work of a timed out job and the progress note it left. A retry starts from `commit`, the
-/// candidate the deadline kept; `dir` is the fallback for a job that kept its work tree instead (an older
+/// The kept work of a stopped producer (a timed out job, or one whose login expired) and the progress note
+/// it left. A retry starts from `commit`, the candidate the stop kept; `dir` is the fallback for a job that kept its work tree instead (an older
 /// job, or one whose candidate could not be built).
 struct TimeoutSeed {
     job: JobId,
@@ -1388,7 +1400,16 @@ struct TimeoutSeed {
     dir: Option<PathBuf>,
 }
 
-/// What a producer's deadline kept.
+/// Why a producer stopped before it finished, for [`Athena::keep_unfinished_work`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// It ran out of time or went silent: the job closes `timed_out`.
+    Deadline,
+    /// The environment stopped it (an expired login): the job closes failed with an environment reason.
+    EnvironmentStop,
+}
+
+/// What a stopped producer's kept work was.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TimedOutKeep {
     /// The edits, as this candidate commit.
@@ -1399,7 +1420,7 @@ enum TimedOutKeep {
     Nothing(String),
 }
 
-/// The progress note of a producer that hit its deadline: what stopped it, the files it had changed against
+/// The progress note of a producer that stopped before it finished: what stopped it, the files it had changed against
 /// the base (status letter and path), what was kept, and the planned files with no change yet. A retry's
 /// producer brief quotes it, so it is the one account of "what was done and what the plan still needs".
 fn timeout_note(

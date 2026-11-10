@@ -5272,6 +5272,234 @@ mod produce_and_verify_order_tests {
         );
     }
 
+    /// The base script, except that the producer edits the README and then ends with `outcome` and `detail`
+    /// and no report. `roles` collects the role of every agent call, in order.
+    fn producer_ending(
+        outcome: InvocationOutcome,
+        detail: &str,
+        edits: bool,
+        roles: Arc<Mutex<Vec<Role>>>,
+    ) -> athena_agent::fake::Script {
+        let inner = base_script();
+        let detail = detail.to_string();
+        Box::new(move |spec: &AgentInvocation| {
+            roles.lock().unwrap().push(spec.role);
+            let mut turn = inner(spec);
+            if spec.role == Role::Producer {
+                turn.outcome = outcome;
+                turn.structured = None;
+                turn.detail = Some(detail.clone());
+                if !edits {
+                    turn.edits.clear();
+                }
+            }
+            turn
+        })
+    }
+
+    /// What the driver gives the core when the producer's login has expired: the detail of the CLI's error
+    /// result, built by the code that builds it in production.
+    fn expired_login() -> String {
+        crate::disk::driver_detail(&crate::disk::result_line(
+            "success",
+            crate::disk::EXPIRED_LOGIN_TEXT,
+        ))
+    }
+
+    #[test]
+    fn a_producer_login_expiry_keeps_its_edits_and_closes_as_an_environment_stop() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let roles = Arc::new(Mutex::new(Vec::new()));
+        let detail = expired_login();
+        assert!(detail.starts_with("success: Failed to authenticate. API Error: 401"));
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            producer_ending(InvocationOutcome::Error, &detail, true, roles.clone()),
+        );
+        let (first, done) = finished_job(&athena);
+        // An environment stop, not a rejection and not a failure of the work.
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            done.reason
+                .starts_with("environment: producer login expired"),
+            "{}",
+            done.reason
+        );
+        assert!(crate::disk::is_environment_reason(&done.reason));
+        assert_eq!(
+            crate::disk::StopCause::of(&done.reason),
+            crate::disk::StopCause::ProducerAuth
+        );
+        // The producer ran once, and no verifier ran on its unfinished work.
+        let roles = roles.lock().unwrap();
+        assert_eq!(roles.iter().filter(|r| **r == Role::Producer).count(), 1);
+        assert!(!roles.contains(&Role::Verifier), "{roles:?}");
+        // Its edits are kept as a candidate commit in the repository, named in the reason.
+        let head = athena.head().unwrap();
+        let records = Records::load(&athena.git, &head).unwrap();
+        let job = &records.jobs[first.as_str()];
+        let commit = job
+            .candidate
+            .as_ref()
+            .and_then(|c| c.candidate_commit.clone())
+            .expect("the login expiry kept a candidate commit");
+        assert!(
+            done.reason.ends_with(&format!(
+                "; its edits are kept as candidate {}",
+                short(&commit)
+            )),
+            "{}",
+            done.reason
+        );
+        let kept = athena.git.show_file(&commit, "README.md").unwrap().unwrap();
+        assert_eq!(String::from_utf8(kept).unwrap(), "# Demo\n\nA demo.\n");
+        // The progress note names the changed file and the candidate; no resume mark is written, so a retry
+        // runs a producer on the kept work and not the checks.
+        let note = job.briefs.get("progress-note").expect("a progress note");
+        assert!(
+            note.contains("README.md") && note.contains(short(&commit)),
+            "{note}"
+        );
+        assert!(note.contains("API Error: 401"), "{note}");
+        assert_eq!(athena.state.read_resume(&first), None);
+        assert!(!athena.state.kept_work_dir(&first).exists());
+        // `athena retry` may resume it.
+        assert!(crate::disk::resumable_stop(
+            JobState::Closed(OutcomeState::Failed),
+            Some(&done.reason)
+        ));
+        assert!(crate::disk::keeps_unfinished_work(
+            JobState::Closed(OutcomeState::Failed),
+            Some(&done.reason)
+        ));
+    }
+
+    #[test]
+    fn a_login_expiry_with_no_edit_keeps_nothing_and_a_usage_limit_keeps_nothing() {
+        // No file changed: the stop is still an environment stop, and the note says nothing was kept.
+        let first_repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_with(
+            &first_repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            producer_ending(
+                InvocationOutcome::Error,
+                &expired_login(),
+                false,
+                Arc::default(),
+            ),
+        );
+        let (first, done) = finished_job(&athena);
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            done.reason
+                .starts_with("environment: producer login expired")
+        );
+        assert!(
+            !done.reason.contains("kept as candidate"),
+            "{}",
+            done.reason
+        );
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = &records.jobs[first.as_str()];
+        assert!(job.candidate.is_none());
+        let note = job.briefs.get("progress-note").expect("a progress note");
+        assert!(note.contains("Nothing was kept"), "{note}");
+
+        // A usage limit stays as it was: an environment stop that keeps nothing of the producer's.
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let limit = crate::disk::driver_detail(&crate::disk::result_line(
+            "success",
+            "API Error: 429 usage limit reached",
+        ));
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            producer_ending(InvocationOutcome::Error, &limit, true, Arc::default()),
+        );
+        let (first, done) = finished_job(&athena);
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            done.reason.starts_with(crate::disk::USAGE_LIMIT),
+            "{}",
+            done.reason
+        );
+        assert!(
+            !done.reason.contains("kept as candidate"),
+            "{}",
+            done.reason
+        );
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = &records.jobs[first.as_str()];
+        assert!(job.candidate.is_none());
+        assert!(!job.briefs.contains_key("progress-note"));
+    }
+
+    #[test]
+    fn timeout_seed_resumes_a_login_expiry_stop_but_not_other_failures() {
+        let cases = [
+            (
+                "a login expiry",
+                InvocationOutcome::Error,
+                Some(expired_login()),
+            ),
+            (
+                "a usage limit",
+                InvocationOutcome::Error,
+                Some(crate::disk::driver_detail(&crate::disk::result_line(
+                    "success",
+                    "API Error: 429 usage limit reached",
+                ))),
+            ),
+            ("a report that is missing", InvocationOutcome::Success, None),
+        ];
+        for (name, outcome, detail) in cases {
+            let repo = repo();
+            let state = tempfile::tempdir().unwrap();
+            let athena = athena_with(
+                &repo,
+                &state,
+                PASSES,
+                crate::test_support::plenty_of_space,
+                producer_ending(
+                    outcome,
+                    detail.as_deref().unwrap_or(""),
+                    true,
+                    Arc::default(),
+                ),
+            );
+            let (first, done) = finished_job(&athena);
+            assert_eq!(done.state, OutcomeState::Failed, "{name}: {}", done.reason);
+            let head = athena.head().unwrap();
+            let records = Records::load(&athena.git, &head).unwrap();
+            let seed = athena
+                .timeout_seed(&records, &format!("try again on {first}"), &head)
+                .unwrap();
+            if name == "a login expiry" {
+                let commit = records.jobs[first.as_str()]
+                    .candidate
+                    .as_ref()
+                    .and_then(|c| c.candidate_commit.clone())
+                    .unwrap();
+                let seed = seed.expect("a retry resumes from the kept candidate");
+                assert_eq!(seed.job, first);
+                assert_eq!(seed.commit.as_deref(), Some(commit.as_str()));
+                assert!(seed.note.contains("README.md"), "{}", seed.note);
+            } else {
+                assert!(seed.is_none(), "{name}: {}", done.reason);
+            }
+        }
+    }
+
     #[test]
     fn the_timeout_note_names_the_candidate_the_changed_files_and_what_is_still_to_do() {
         let job = JobId::parse("20261010-120000-abcd").unwrap();

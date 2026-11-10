@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261109-231857-tpgp",
+  "round": 1,
+  "at": "2026-11-09T23:25:49.40013706Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The dedup key is guessed from the model's free text, and the fallback order puts the least stable field first.",
+      "evidence": "pin.rs:343-356 tells the checker to quote the statement. For claims.json that quote is the claim's `text` (claims.json:346), not its id, so the claim-id anchor will rarely fire for real reports. The next fallback is 'path and lines' parsed from `evidence`, which is free prose the model rewrites every run ('lines 30-33' vs 'line 30', other paths). So the same contradiction will often get a new marker and be queued again, which is the goal this job exists for. The plan rejects keying on the statement text because the model rewords it, yet still uses a statement hash as the last fallback. The criterion 4 test only passes because its fake statement names 'c45' outright. Fix: Anchor on data the code already has. check_page holds the StudyText, so match the normalised statement against the study's own entries: the claim whose `text` contains it gives the claim id, and the model state or transition it quotes gives that id. Fall back to a hash of the normalised statement only when nothing matches, and leave `evidence` out of the key. Add a test where two runs report the same claims.json contradiction with different evidence wording and no id in the statement, and check that only one request is queued.",
+      "location": "Decision 1 / Step 4 (finding_anchor order: claim id in statement, else cited path and lines in evidence, else statement hash)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A drain run re-reads the queue after each wave, so a fix request queued by check_page is planned and worked in the same run. The dependents list does not name this, and no test covers it.",
+      "evidence": "check_page is called from Drain::rate after a landing (drain.rs:2451). The run loop calls `steps.queue()` again after each wave (drain.rs:3084). RealSteps::queue lists `steward::queued_work`, which takes channel `cli` requests (drain.rs:4363). So in production a held-back run would go on to plan, read and run the new Source fix job and spend budget on it. The plan's only test for this entry is the existing steward unit tests, and WithRealCheck stubs `queue()`, so no test exercises the same-run pickup. Fix: Decide whether a fix request should be worked in the run that queued it, and say so in the plan and the CHANGELOG. Then add a drain-level test with real `queue` and check_page, or a stubbed queue that reads records, showing the chosen behavior. If it should not be worked in the same run, filter it out or defer it, and test that.",
+      "location": "Dependents: 'a queued fix request is channel cli' entry; drain.rs:3084 and RealSteps::queue (drain.rs:4339-4368)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The criterion 3 demonstration does not depend on the corrected study, and it does not show which validation route ran.",
+      "evidence": "The fake SourceJudge in the extended passing-path test returns no problem whatever c45 says, so 'the drain source check passes on the corrected study' is not shown. The reading asks to 'confirm the study validates with the pinned source, not conventions only'. The conventions test prints 'fully validated' or 'conventions only' to stderr (rules.rs:1850-1859) and passes either way. The demonstration does not observe that line. Fix: Run `cargo test -p athena-cap-study every_study_follows -- --nocapture` and record the route printed for firstmate-work-handling. If pinned-source/ and ATHENA_PIN_* are available, run with them so the route is 'fully validated'. If they are not, state plainly that the source-check half of criterion 3 is unshown, rather than presenting the fake-checker test as covering it, and put that in the CHANGELOG.",
+      "location": "Demonstration for criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "StewardRequest rewords boundary words in the title, so the stored first line can differ from the raw marker, and that request would be queued again on every run.",
+      "evidence": "steward.rs:544: `let title = plain_boundary_text(title.trim())?`. citing_request compares the request's first line with a marker built from the raw finding. steward.rs:906 refuses a key rather than rewording it for exactly this reason. Fix: Build the marker once, pass it through plain_boundary_text, and use that same value both to queue and to look up open requests. Or make the anchor from ids and a hash only, so it holds no words.",
+      "location": "Step 4 citing_request (first line == marker) vs StewardRequest::new (steward.rs:532-546)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The fallback quotes do not mention Queued, so the real source check may still flag c45's 'goes back to Queued'.",
+      "evidence": "claims.json:169 quotes 'replaced by `tasks-axi reopen`' and :180 quotes 'reopens the row instead of closing it'. Neither says Queued, but c45's text (claims.json:346) says 'the backlog row goes back to Queued'. Fix: In the fallback, either narrow c45's wording to what the quoted lines support (reopened, not closed) or record in the CHANGELOG that the Queued wording is unsupported by the cited lines. Only c45 changes, so the model and intro need no rewrite.",
+      "location": "Step 1 fallback for c45 (line 30 and transition-lib line 54)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "`real_check` builds the Fixture inside the helper and returns only (Check, roles), so the test cannot load Records at head as written.",
+      "evidence": "drain.rs tests: lines 6857-6872 create `fx` locally and do not return it. Fix: Have the helper also return the fixture (or the records at head), or add a variant that does.",
+      "location": "Step 6 (extend the passing-path test)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the snapshot and confirmed the plan's main claims. The fix-request functions are absent from crates/. SourceReport, CheckerProblem and check_page exist as described, and code_health's structural_pass_open is the right open-request pattern to copy. The Scenario.source_check and real_check test seams exist, and c45 currently cites fm-teardown.sh lines 3894-3896, which are far past every other citation of that script (the highest is line 184). The plan fits the reading and one producer run, but three findings are major. First, the dedup key is parsed from the model's free text and puts the volatile evidence lines before the statement. Real checker reports quote the claim text rather than its id, so the same contradiction would often be queued again; anchoring on the study's own claim or model ids is more correct. Second, the dependents list leaves out that the drain re-reads the queue after each wave (drain.rs:3084), so a fix request queued during the source check is worked in the same run, and nothing tests that. Third, the criterion 3 demonstration uses a fake checker that passes whatever c45 says, and it does not observe whether the study validated with the pinned source or by conventions only, which the reading asks for. Smaller points: the boundary-word rewording of the title can break the first-line match, and the c45 fallback quotes do not support the word Queued."
+}

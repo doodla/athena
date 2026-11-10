@@ -1,0 +1,186 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261109-231857-tpgp",
+  "candidate_commit": "76ad159c29ea9ff2fb5e82f0da6fe2a73546fc66",
+  "verified_fingerprint": "sha256:181cc13210e58ab7f9a8bef3582a1054f57ceb5c9834cc856bf8ebba3c233c84",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42726589827 for 76ad159c29ea9ff2fb5e82f0da6fe2a73546fc66",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42726589827 for 76ad159c29ea9ff2fb5e82f0da6fe2a73546fc66",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42726589827 for 76ad159c29ea9ff2fb5e82f0da6fe2a73546fc66",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 13,
+  "criteria": [
+    {
+      "criterion": "claims.json claim c45 cites bin/fm-teardown.sh lines where the reopen path returns the row to Queued, with a quote that is present in those lines; git diff shows the lines changed from 3894-3896 or the CHANGELOG states the check result.",
+      "kind": "content",
+      "met": true,
+      "evidence": "`git diff HEAD~1` shows c45 no longer cites lines 3894-3896 with the quote \"Queued\". It now cites bin/fm-teardown.sh line 30 and bin/fm-backlog-transition-lib.sh line 54. Both quotes are verbatim copies of the quotes at claims.json:169 (c23) and :180 (c24). The CHANGELOG states the check result: the route printed \"conventions only\", the pinned source was not read, and the cited lines do not say Queued. This is met only through the fallback the accepted reading allows when the pinned source is absent. The cited lines do not show the row returning to Queued; see the major finding.",
+      "commands": [
+        "git diff HEAD~1 -- studies CHANGELOG.md crates/athena-cli/src/drain.rs"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Grep for 'final state' and 'both end the task' in studies/firstmate-work-handling finds no claim that reopened is terminal; model.json shows reopened -> queued.",
+      "kind": "content",
+      "met": true,
+      "evidence": "A Grep for final state, both end the task and terminal finds only intro.json:83 (the `done` glossary entry) and model.json:9 (`done` as terminal-success). In model.json, `reopened` is kind `waiting` (line 10), t9 goes ready -> reopened, and t12 goes reopened -> queued (line 110). intro.json:54 says \"Reopened is not a failure and does not end the task: the backlog row goes back to Queued\". The diff does not touch model.json or intro.json.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo run -p xtask -- site`: it builds the study without error and the drain source check passes on the corrected study.",
+      "kind": "behavior",
+      "met": false,
+      "evidence": "`cargo run -p xtask -- site` exited 0 and wrote target/verify/site/index.html and decisions.html. `cargo test -p athena-cap-study every_study_follows -- --nocapture` passed but printed \"firstmate-work-handling: conventions only\". The c45 quotes were not matched against the pinned tree, and the model-backed source check was not run. Nothing shows the source check passing on the corrected study. The producer's report lists this criterion as unmet. The candidate's own CHANGELOG says \"the real source check may report c45 until a line that sets the row to Queued is cited\". The pinned source is absent from this snapshot, so this result is about the snapshot only.",
+      "commands": [
+        "cargo run -p xtask -- site",
+        "cargo test -p athena-cap-study every_study_follows -- --nocapture"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test -p athena-cli` and `cargo test -p athena-core`: the drain test with a fake source check reporting a contradiction shows exactly one fix request queued through StewardRequest citing the statement and source, none on a second run while it is open, and a different contradiction in the same file is still queued.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "All 8 tests in the new drain test filter passed. The main one, source_fix_queues_one_request_per_contradiction_and_none_while_open, calls the production RealSteps::check_page with a fake SourceJudge. After run 1 there is exactly one request: its first line is 'Source fix: studies/demo/claims.json contradicted c1', it contains the statement and the defanged evidence, it has Acceptance and Files sections, and it touches only studies/demo/claims.json. After run 2, with different case, spacing and evidence, there is still one. After run 3, a c2 contradiction in the same file is queued and there are two. Other tests cover a landed job not being re-queued in the same run, a later run re-queueing after a failure, the carry across a rebuild, and a stale carry being dropped. The request is built by steward::source_fix_request, which calls StewardRequest::new. 16 core pin and steward unit tests passed. The full athena-cli and athena-core suites passed in Athena's recorded `cargo test --locked`.",
+      "commands": [
+        "cargo test -p athena-cli --test drain source_fix",
+        "cargo test -p athena-core source_f",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "drain.rs has the study_text doc comment directly above `pub fn study_text`, checked with git diff.",
+      "kind": "content",
+      "met": true,
+      "evidence": "A Grep with 5 lines of context shows the `/// A study's page text and pin, from its files...` block at drain.rs:3560-3562, directly above `pub fn study_text(` at 3563. No drain.rs hunk adds anything between them. The new statics sit near TABLE_LOCK, and queue_source_fixes sits in `impl RealSteps`.",
+      "commands": [
+        "git diff HEAD~1 -- studies CHANGELOG.md crates/athena-cli/src/drain.rs"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded checks for 76ad159c (CI run 42726589827) show that fmt, clippy and test all passed.",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "CHANGELOG.md has an entry covering the study correction, the c45 citation and the drain fix-request queueing.",
+      "kind": "content",
+      "met": true,
+      "evidence": "There is one new bullet under [Unreleased] / Changed. It has sub-bullets for the study (c45 re-cited, what was not checked, the model, lead-in and glossary verified rather than rewritten) and for the drain (SourceReport.findings, finding_anchor, finding_marker, source_fix_request, citing_request, RealSteps::check_page). A third sub-bullet covers the once-per-run rule, Carried::source_fix_queued and run_pass across a rebuild, same-run pickup, and the limits (a manual restart, hash anchors).",
+      "commands": [
+        "git diff HEAD~1 -- studies CHANGELOG.md crates/athena-cli/src/drain.rs"
+      ],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "c45 is still not checked. Its new sources do not support its main fact (the row goes back to Queued), so the source check may keep reporting it.",
+      "evidence": "c45's text says \"the backlog row goes back to Queued\". The new sources are bin/fm-teardown.sh:30 (\"The close - and only the close - is replaced by `tasks-axi reopen` with the\") and bin/fm-backlog-transition-lib.sh:54 (\"records the deliverable and reopens the row instead of closing it, and never\"), copied from c23 and c24. Neither line mentions Queued. The CHANGELOG admits this and says the real source check may report c45. The retry's stated aim was to make the c45 citation checked. Now the deterministic quote validator will pass c45 on a mounted tree while its distinctive fact has no source, which hides the gap instead of closing it. A better route: on a host with pinned-source/ (ATHENA_PIN_URL/ATHENA_PIN_SHA set), read the reopen path and cite the line that sets the row to Queued. If no such line exists, narrow c45's text to what the cited lines say. Then run the source check.",
+      "location": "studies/firstmate-work-handling/claims.json:345-350",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "A finding that matches no entry falls back to a hash of the checker's wording, so a reworded statement can be queued again in a later run.",
+      "evidence": "finding_anchor (pin.rs) returns 'h'+FNV hash of the normalised statement when no study entry, or more than three, contains or covers the statement. Different wording of the same contradiction then gives a different marker. The CHANGELOG documents this limit, and the once-per-run set bounds it within a run.",
+      "location": "crates/athena-core/src/pin.rs (finding_anchor)",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "1 of 7 criteria unmet",
+    "1 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results",
+    "planned demonstrations and files"
+  ],
+  "summary": "The drain part of the change works and is well tested. When the source check reports a statement, one \"Source fix: studies/<study>/<file> <kind> <anchor>\" request is queued through StewardRequest. The anchor is the study entry that holds the statement, so the same contradiction is skipped however the checker words it, and a different contradiction in the same file is queued. A marker is queued at most once per drain run, including across a rebuild. All 8 new drain tests and 16 core tests pass. The study_text doc comment is back directly above `pub fn study_text`. The model and intro text were checked, not rewritten. CI recorded fmt, clippy and the full test suite as passing. The job still fails on the c45 citation, which the retry was meant to fix. The pinned source is not in this copy: the conventions test printed \"conventions only\". So c45 was re-cited to two lines that other claims (c23, c24) already cite. Those lines say the item is reopened. They do not say the backlog row goes back to Queued. The claim's main fact is still unsupported. The CHANGELOG says this honestly, and also says the real source check may keep reporting c45. Criterion 3 (\"the drain source check passes on the corrected study\") is therefore not shown. The producer's own note predicts it may fail. To finish, someone needs to run this on a host with the pinned source (or ATHENA_PIN_URL/ATHENA_PIN_SHA set and pinned-source/ mounted), find the line where the reopen sets the row to Queued, cite it, and then run the source check."
+}
