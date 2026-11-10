@@ -6857,7 +6857,12 @@ fn judged_scenario(judge: SourceJudge) -> Scenario {
 fn real_check(texts: &Texts) -> (Check, Vec<Role>) {
     let fx = Fixture::new();
     commit_study(&fx, "demo", &texts.files());
-    let scenario = judged_scenario(Arc::new(judge));
+    check_in(&fx, Arc::new(judge))
+}
+
+/// Runs the real page check once in `fx`, with `judge` as the fake checker: the check and the roles invoked.
+fn check_in(fx: &Fixture, judge: SourceJudge) -> (Check, Vec<Role>) {
+    let scenario = judged_scenario(judge);
     let invocations = scenario.invocations.clone();
     let athena = fx.athena(scenario.script());
     let steps = RealSteps {
@@ -6873,8 +6878,14 @@ fn real_check(texts: &Texts) -> (Check, Vec<Role>) {
 
 #[test]
 fn a_page_with_correct_text_in_every_file_passes_the_source_check_with_one_verifier_call() {
-    let (check, roles) = real_check(&Texts::correct());
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &Texts::correct().files());
+    let (check, roles) = check_in(&fx, Arc::new(judge));
     assert!(check.passed, "{}", check.detail);
+    assert!(
+        fix_requests(&fx).is_empty(),
+        "a clean report queues no fix request"
+    );
     // claims.json, intro.json and model.json; the pin and the rule results are not page text.
     assert!(
         check.detail.contains("3 page text file"),
@@ -7171,6 +7182,413 @@ fn a_text_file_added_to_a_study_is_checked_without_anyone_listing_it() {
         "{}",
         check.detail
     );
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The source check queues one fix request per reported contradiction
+
+const C1_TEXT: &str = "Teardown closes a task, and a closed task can reopen.";
+const C2_TEXT: &str = "A worker slot is released when its pull request is ready.";
+/// What the fake checker quotes of c1 and c2: a fragment, with no claim id.
+const C1_FRAGMENT: &str = "closes a task, and a closed task";
+const C2_FRAGMENT: &str = "A worker slot is released when its";
+const C1_MARKER: &str = "Source fix: studies/demo/claims.json contradicted c1";
+const C2_MARKER: &str = "Source fix: studies/demo/claims.json contradicted c2";
+
+/// The demo study with two claims of different texts in claims.json.
+fn two_claim_files() -> Vec<(&'static str, String)> {
+    let mut files = Texts::correct().files();
+    for (name, body) in files.iter_mut() {
+        if *name == "claims.json" {
+            *body = json!([
+                { "id": "c1", "text": C1_TEXT },
+                { "id": "c2", "text": C2_TEXT }
+            ])
+            .to_string();
+        }
+    }
+    files
+}
+
+fn claim_problem(statement: &str, evidence: &str) -> serde_json::Value {
+    json!({ "file": "claims.json", "kind": "contradicted", "statement": statement, "evidence": evidence })
+}
+
+/// The problems the fake checker reports, changed between runs by the test.
+type Reported = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+fn reported(problems: Vec<serde_json::Value>) -> Reported {
+    Arc::new(std::sync::Mutex::new(problems))
+}
+
+/// A checker that reads every file and reports exactly `reported`.
+fn reporting(reported: &Reported) -> SourceJudge {
+    let reported = reported.clone();
+    Arc::new(move |workspace| {
+        json!({
+            "files_checked": page_text_files(workspace),
+            "problems": reported.lock().unwrap().clone()
+        })
+    })
+}
+
+/// The source-fix requests at the head commit as (job, text), oldest first.
+fn fix_requests(fx: &Fixture) -> Vec<(String, String)> {
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let mut found: Vec<(String, String)> = records
+        .request_jobs()
+        .iter()
+        .filter_map(|job| {
+            let text = job.request.as_ref()?.text.clone();
+            text.starts_with("Source fix: ")
+                .then(|| (job.id().as_str().to_string(), text))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or("")
+}
+
+/// Closes the request `job` with `state`, as a landing or a failure records it.
+fn close_request(fx: &Fixture, athena: &Athena, job: &str, state: OutcomeState) {
+    use athena_core::commits::NewFile;
+    use athena_data::{Quantity, Unit};
+    let zero = || Quantity::reported(0.0, Unit::Usd, "sum");
+    let record = AnyRecord::Outcome(Box::new(athena_data::records::Outcome {
+        job: athena_data::JobId::parse(job).unwrap(),
+        state,
+        reason: "closed by the test".into(),
+        at: "2026-11-01T12:00:00Z".parse().unwrap(),
+        totals: Some(athena_data::records::Totals {
+            cost_all: zero(),
+            cost_execution: zero(),
+            wall_time_execution: None,
+            tokens: std::collections::BTreeMap::new(),
+            invocations: 0,
+        }),
+        branch: None,
+        base_commit: None,
+        candidate_commit: None,
+        after_blocked: false,
+        through_commit: None,
+    }));
+    let file = NewFile::record(&record);
+    write_bytes(fx.root(), &file.path, &file.bytes);
+    athena.git.run(["add", "-A"]).unwrap();
+    athena
+        .git
+        .run(["commit", "-q", "-m", "Close the request"])
+        .unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert!(records.invalid.is_empty(), "{:?}", records.invalid);
+    assert_eq!(records.jobs[job].state(), JobState::Closed(state));
+}
+
+/// The finding the fake checker's c1 fragment becomes, built by hand.
+fn c1_finding() -> athena_core::pin::SourceFinding {
+    athena_core::pin::SourceFinding {
+        study: "demo".into(),
+        file: "claims.json".into(),
+        kind: "contradicted".into(),
+        statement: C1_FRAGMENT.into(),
+        evidence: "pinned-source/bin/x.sh lines 30-33".into(),
+        anchor: "c1".into(),
+    }
+}
+
+#[test]
+fn source_fix_queues_one_request_per_contradiction_and_none_while_open() {
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &two_claim_files());
+    let said = reported(vec![claim_problem(
+        C1_FRAGMENT,
+        "pinned-source/bin/x.sh lines 30-33",
+    )]);
+    let athena = fx.athena(judged_scenario(reporting(&said)).script());
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    // Run 1: the contradiction fails the check and one request is queued, citing the statement and source.
+    let check = steps.check_page();
+    assert!(!check.passed, "{}", check.detail);
+    assert!(check.detail.contains("demo/claims.json") && check.detail.contains(C1_FRAGMENT));
+    let found = fix_requests(&fx);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let (job, text) = &found[0];
+    assert_eq!(first_line(text), C1_MARKER);
+    assert!(text.contains(C1_FRAGMENT), "{text}");
+    assert!(
+        text.contains("pinned-source / bin / x . sh lines 30-33"),
+        "{text}"
+    );
+    assert!(text.contains("\nAcceptance:\n- "), "{text}");
+    assert!(text.contains("Files: studies/demo/claims.json"), "{text}");
+    assert_eq!(
+        athena_core::reading::request_text_touches(text),
+        ["studies/demo/claims.json"]
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(
+        athena_core::steward::citing_request(&records, C1_MARKER).map(|j| j.as_str().to_string()),
+        Some(job.clone())
+    );
+    // The same run can work it: the production queue lists it, and its plan has no open question.
+    let queue = steps.queue().unwrap();
+    assert!(
+        queue.items.iter().any(|i| i.job == *job),
+        "{:?}",
+        queue.items
+    );
+    let entry = queue.plan.iter().find(|e| e.id == *job).unwrap();
+    assert!(
+        entry.open_questions.is_empty(),
+        "{:?}",
+        entry.open_questions
+    );
+
+    // Run 2: the same contradiction, worded with other case and spacing and other evidence, while the
+    // request is open: nothing new.
+    *said.lock().unwrap() = vec![claim_problem(
+        "  CLOSES   a task,\n and a closed TASK ",
+        "somewhere else entirely, lines 1-2",
+    )];
+    let check = steps.check_page();
+    assert!(!check.passed);
+    assert_eq!(fix_requests(&fx).len(), 1);
+
+    // Run 3: a different contradiction in the same file is queued.
+    said.lock().unwrap().push(claim_problem(
+        C2_FRAGMENT,
+        "pinned-source/bin/y.sh lines 4-6",
+    ));
+    steps.check_page();
+    let found = fix_requests(&fx);
+    assert_eq!(found.len(), 2, "{found:?}");
+    let lines: Vec<&str> = found.iter().map(|(_, t)| first_line(t)).collect();
+    assert!(
+        lines.contains(&C1_MARKER) && lines.contains(&C2_MARKER),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn source_fix_is_not_queued_again_after_its_job_lands_in_the_same_run() {
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &two_claim_files());
+    let said = reported(vec![claim_problem(C1_FRAGMENT, "lines 30-33")]);
+    let athena = fx.athena(judged_scenario(reporting(&said)).script());
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    steps.check_page();
+    let found = fix_requests(&fx);
+    assert_eq!(found.len(), 1);
+
+    // The fix lands, which closes the request; the checker still reports the contradiction.
+    close_request(&fx, &athena, &found[0].0, OutcomeState::Landed);
+    let check = steps.check_page();
+    assert!(!check.passed);
+    assert_eq!(
+        fix_requests(&fx).len(),
+        1,
+        "not asked for again in this run"
+    );
+    let queue = steps.queue().unwrap();
+    assert!(
+        queue.items.iter().all(|i| i.job != found[0].0),
+        "{:?}",
+        queue.items
+    );
+}
+
+#[test]
+fn source_fix_closed_without_landing_is_queued_by_a_later_run_only() {
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &two_claim_files());
+    let said = reported(vec![claim_problem(C1_FRAGMENT, "lines 30-33")]);
+    let athena = fx.athena(judged_scenario(reporting(&said)).script());
+    // An earlier run queued the request and it failed; this process has not queued it for this repository.
+    let seeded = athena
+        .queue(&athena_core::steward::source_fix_request(&c1_finding()).unwrap())
+        .unwrap()
+        .0;
+    close_request(&fx, &athena, seeded.as_str(), OutcomeState::Failed);
+    assert_eq!(fix_requests(&fx).len(), 1);
+
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    steps.check_page();
+    let found = fix_requests(&fx);
+    assert_eq!(found.len(), 2, "the later run asks again: {found:?}");
+
+    // Closing that one too does not bring a third in the same run.
+    let newest = found.iter().find(|(j, _)| j != seeded.as_str()).unwrap();
+    close_request(&fx, &athena, &newest.0, OutcomeState::Failed);
+    steps.check_page();
+    assert_eq!(fix_requests(&fx).len(), 2);
+}
+
+#[test]
+fn source_fix_process_failure_queues_nothing() {
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &Texts::correct().files());
+    // The checker reports no problem but read only one file: a process failure, not a statement.
+    let skipping: SourceJudge =
+        Arc::new(|_| json!({ "files_checked": ["claims.json"], "problems": [] }));
+    let (check, _) = check_in(&fx, skipping);
+    assert!(!check.passed);
+    assert!(
+        check.detail.contains("did not report reading"),
+        "{}",
+        check.detail
+    );
+    assert!(fix_requests(&fx).is_empty());
+}
+
+/// A drain with an empty queue, as the pass of a test run.
+fn empty_pass() -> anyhow::Result<drain::Report> {
+    drain::drain(&Stub::default(), limits(9.0), &Quiet)
+}
+
+#[test]
+fn source_fix_marker_is_carried_across_a_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &two_claim_files());
+    let said = reported(vec![claim_problem(C1_FRAGMENT, "lines 30-33")]);
+    let athena = fx.athena(judged_scenario(reporting(&said)).script());
+    let lander = RecordingLander::default();
+    let real = real_steps(&athena, &lander);
+    let stub = rebuilding(Ok(()));
+    let carried: RefCell<Option<drain::Carried>> = RefCell::new(None);
+
+    let report = drain::run_pass(
+        root.path(),
+        &Quiet,
+        || {
+            real.check_page();
+            drain::drain(&stub, limits(9.0), &Quiet)
+        },
+        &|next| {
+            let text = std::fs::read_to_string(drain::carry_file(root.path())).unwrap();
+            *carried.borrow_mut() = Some(serde_json::from_str(&text).unwrap());
+            drain::drain(&stub, next, &Quiet)
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    let carried = carried.into_inner().expect("the pass ended in a rebuild");
+    let dir = fx.git.dir().to_string_lossy().into_owned();
+    assert!(
+        carried
+            .source_fix_queued
+            .contains(&(dir, C1_MARKER.to_string())),
+        "{:?}",
+        carried.source_fix_queued
+    );
+    assert_eq!(fix_requests(&fx).len(), 1);
+}
+
+#[test]
+fn source_fix_marker_in_the_carry_is_not_queued_again_after_the_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &two_claim_files());
+    let said = reported(vec![claim_problem(C1_FRAGMENT, "lines 30-33")]);
+    let athena = fx.athena(judged_scenario(reporting(&said)).script());
+    let lander = RecordingLander::default();
+    let real = real_steps(&athena, &lander);
+    // The process before the rebuild queued the request, landed it and closed it: only the carry knows.
+    let marker = athena_core::steward::finding_marker(&c1_finding()).unwrap();
+    assert_eq!(marker, C1_MARKER);
+    drain::store_carry(
+        root.path(),
+        &drain::Carried {
+            source_fix_queued: vec![(fx.git.dir().to_string_lossy().into_owned(), marker)],
+            ..drain::Carried::default()
+        },
+    )
+    .unwrap();
+
+    drain::run_pass(
+        root.path(),
+        &Quiet,
+        || {
+            let check = real.check_page();
+            assert!(!check.passed, "the contradiction is still reported");
+            empty_pass()
+        },
+        &|_| panic!("no restart"),
+    )
+    .unwrap();
+    assert!(fix_requests(&fx).is_empty(), "{:?}", fix_requests(&fx));
+}
+
+#[test]
+fn source_fix_a_fresh_drain_ignores_a_stale_carry() {
+    let root = tempfile::tempdir().unwrap();
+    let fx = Fixture::new();
+    commit_study(&fx, "demo", &two_claim_files());
+    let said = reported(vec![claim_problem(C1_FRAGMENT, "lines 30-33")]);
+    let athena = fx.athena(judged_scenario(reporting(&said)).script());
+    let lander = RecordingLander::default();
+    let real = real_steps(&athena, &lander);
+    // A carry left by a run that died, naming this marker; no pid file names this process.
+    drain::store_carry(
+        root.path(),
+        &drain::Carried {
+            source_fix_queued: vec![(
+                fx.git.dir().to_string_lossy().into_owned(),
+                C1_MARKER.to_string(),
+            )],
+            ..drain::Carried::default()
+        },
+    )
+    .unwrap();
+
+    drain::guarded(
+        root.path(),
+        &drain::RealProcs,
+        "athena test",
+        &|| None,
+        || {
+            drain::run_pass(
+                root.path(),
+                &Quiet,
+                || {
+                    real.check_page();
+                    empty_pass()
+                },
+                &|_| panic!("no restart"),
+            )
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        fix_requests(&fx).len(),
+        1,
+        "a fresh run starts with no markers"
+    );
+}
+
+#[test]
+fn a_carry_without_the_source_fix_field_still_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let mut value = serde_json::to_value(earlier_pass()).unwrap();
+    assert!(
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("source_fix_queued")
+            .is_some()
+    );
+    std::fs::write(drain::carry_file(root.path()), value.to_string()).unwrap();
+    let carried = drain::take_carry(root.path()).expect("an old carry reads");
+    assert_eq!(carried.landed, 3);
+    assert!(carried.source_fix_queued.is_empty());
 }
 
 #[test]

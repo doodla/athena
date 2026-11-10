@@ -158,6 +158,8 @@
 //!   on are still only what is left, so the carry never counts spend twice against them; the report's
 //!   budget is the whole run's. [`guarded`] removes a carry when the start is not the drain's own exec, so a
 //!   fresh drain starts at zero. The plan, the queue and the waiting proposals stay those of the last pass.
+//!   The carry also holds the source-fix requests queued so far (`Carried::source_fix_queued`), so the
+//!   once-per-run rule of the source check holds across the rebuild.
 //! - **A landed config the running build cannot read is not a failure.** Right after a landing the drain asks
 //!   [`Steps::config_after_landing`]. The config was readable when the run started, so if it is not now, the
 //!   landing added something only a newer build understands (a new key, for instance). The job stays
@@ -204,6 +206,15 @@
 //!      (a reopened backlog item shown as finished although the source returns it to Queued, a counter
 //!      that missed a failed close freeing the place, a red-PR rule contradicting a waiver on the same page).
 //!      When it fails, drain keeps running and the report names the statement ([`Report::held_back`]).
+//!      The real check also queues one fix request for each statement the checker reported
+//!      (`athena_core::steward::source_fix_request`). Its first line, `Source fix: studies/<study>/<file>
+//!      <kind> <anchor>`, names the study entry that holds the statement, so the same contradiction gets the
+//!      same line however the checker words it and a second contradiction in the same file gets its own. A
+//!      finding is skipped while a request with that line is open, and a line is queued at most once per drain
+//!      run, also across a rebuild, because a fix that lands (and is then closed) while the contradiction is
+//!      still reported would otherwise be asked for again after its own landing. A request queued this way is
+//!      on the `cli` channel, so the same run works it when the budget fits. A drain stopped and started again
+//!      by hand is a new run and may queue a line once more. The check passes or fails as before.
 //!
 //!   The source check is a model call per study, so it is guarded like the others: the reserve is
 //!   [`Steps::check_cap`] (the verifier's cap times the number of studies), it must fit the budget or drain
@@ -797,6 +808,47 @@ pub struct InFlight {
 }
 
 static TABLE_LOCK: Mutex<()> = Mutex::new(());
+
+/// The source-fix requests this drain run has queued, as (repository directory, first line): the run scope of
+/// the once-per-run rule in [`RealSteps::check_page`]. An open request alone is not enough to stop a repeat: a
+/// fix that lands is closed, and its own landing (a change under `studies/`) triggers the next source check,
+/// which may report the same contradiction again. One run can span several processes, because a rebuild
+/// replaces the process, so [`run_pass`] hands this set on through the carry file ([`Carried`]) and restores it
+/// in the process that continues. A drain stopped or killed and started again by hand is a new run and may
+/// queue a marker once more.
+static SOURCE_FIX_QUEUED: Mutex<BTreeSet<(PathBuf, String)>> = Mutex::new(BTreeSet::new());
+
+fn source_fixes() -> MutexGuard<'static, BTreeSet<(PathBuf, String)>> {
+    SOURCE_FIX_QUEUED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Records that `marker` is being queued for the repository at `dir`. False if this run already queued it.
+fn claim_source_fix(dir: &Path, marker: &str) -> bool {
+    source_fixes().insert((dir.to_path_buf(), marker.to_string()))
+}
+
+/// Takes the claim back when queueing failed, so a later check tries again.
+fn release_source_fix(dir: &Path, marker: &str) {
+    source_fixes().remove(&(dir.to_path_buf(), marker.to_string()));
+}
+
+/// The markers this run has queued, for [`Carried`]: the directory (lossily as text) and the marker.
+fn queued_source_fixes() -> Vec<(String, String)> {
+    source_fixes()
+        .iter()
+        .map(|(dir, marker)| (dir.to_string_lossy().into_owned(), marker.clone()))
+        .collect()
+}
+
+/// Puts the markers an earlier process of this run queued back into the set.
+fn restore_source_fixes(queued: &[(String, String)]) {
+    let mut set = source_fixes();
+    for (dir, marker) in queued {
+        set.insert((PathBuf::from(dir), marker.clone()));
+    }
+}
 
 impl InFlight {
     /// The table in the state directory `state_root`.
@@ -3226,6 +3278,11 @@ pub struct Carried {
     pub improvement_turns: Vec<ImprovementTaken>,
     pub rating: Option<RatingLine>,
     pub held_back: Option<String>,
+    /// The source-fix requests the run has queued so far (repository directory, first line), so the process
+    /// that continues the run does not queue the same one again. [`run_pass`] fills it and restores it; it is
+    /// not part of the [`Report`], and a carry file without it reads as empty.
+    #[serde(default)]
+    pub source_fix_queued: Vec<(String, String)>,
 }
 
 impl Carried {
@@ -3241,6 +3298,7 @@ impl Carried {
             improvement_turns: report.improvement_turns.clone(),
             rating: report.rating,
             held_back: report.held_back.clone(),
+            source_fix_queued: Vec::new(),
         }
     }
 
@@ -3300,6 +3358,8 @@ pub fn take_carry(state_root: &Path) -> Option<Carried> {
 /// [`Stop::Rebuilt`] first writes the run's tallies so far to the carry file, then [`follow_restart`] hands
 /// the remaining budget and job limit (unchanged by the carry) to `restart`, which replaces this process. If it
 /// returns, the exec failed and the file is removed. [`guarded`] removes a carry that no continuing drain owns.
+/// The carry also holds the source-fix requests queued so far (`Carried::source_fix_queued`): they are
+/// restored before the pass runs, so the once-per-run rule of [`RealSteps::check_page`] holds across a rebuild.
 pub fn run_pass(
     state_root: &Path,
     ui: &dyn Ui,
@@ -3307,12 +3367,19 @@ pub fn run_pass(
     restart: &dyn Fn(Limits) -> anyhow::Result<Report>,
 ) -> anyhow::Result<Report> {
     let carried = take_carry(state_root);
+    if let Some(carried) = &carried {
+        restore_source_fixes(&carried.source_fix_queued);
+    }
     let mut report = pass()?;
     if let Some(carried) = carried {
         report = carried.apply(report);
     }
     if report.restart.is_some() {
-        store_carry(state_root, &Carried::from_report(&report)).map_err(|e| {
+        let carry = Carried {
+            source_fix_queued: queued_source_fixes(),
+            ..Carried::from_report(&report)
+        };
+        store_carry(state_root, &carry).map_err(|e| {
             anyhow::anyhow!("cannot write {}: {e}", carry_file(state_root).display())
         })?;
     }
@@ -4182,6 +4249,53 @@ impl<'a> RealSteps<'a> {
         }
     }
 
+    /// Queues one fix request for each statement the source check reported. A finding is skipped when a request
+    /// with the same first line ([`steward::finding_marker`]) is still open, or when this run has already
+    /// queued that marker (see [`SOURCE_FIX_QUEUED`]): a fix that landed and left the contradiction in place is
+    /// not asked for again until a later run. A second contradiction in the same file has another marker and is
+    /// queued. Returns the problems met while queueing, which are added to the check's detail; queueing never
+    /// changes whether the check passes.
+    fn queue_source_fixes(&self, findings: &[athena_core::pin::SourceFinding]) -> Vec<String> {
+        if findings.is_empty() {
+            return Vec::new();
+        }
+        let records = match self.records() {
+            Ok(records) => records,
+            Err(error) => return vec![format!("source fix requests not queued: {error:#}")],
+        };
+        let dir = self.athena.git.dir();
+        let mut problems = Vec::new();
+        for finding in findings {
+            let marker = match steward::finding_marker(finding) {
+                Ok(marker) => marker,
+                Err(why) => {
+                    problems.push(format!("source fix request not queued: {why}"));
+                    continue;
+                }
+            };
+            if steward::citing_request(&records, &marker).is_some()
+                || !claim_source_fix(dir, &marker)
+            {
+                continue;
+            }
+            let queued = steward::source_fix_request(finding)
+                .map_err(anyhow::Error::msg)
+                .and_then(|text| self.athena.queue(&text));
+            match queued {
+                Ok((job, _)) => self
+                    .ui
+                    .line(&format!("drain      queued {}: {marker}", job.as_str())),
+                Err(error) => {
+                    release_source_fix(dir, &marker);
+                    problems.push(format!(
+                        "source fix request not queued ({marker}): {error:#}"
+                    ));
+                }
+            }
+        }
+        problems
+    }
+
     fn records(&self) -> anyhow::Result<Records> {
         Records::load(&self.athena.git, &self.athena.head()?)
     }
@@ -4699,6 +4813,7 @@ impl Steps for RealSteps<'_> {
         // The source check: every page text file of every study, against that study's pinned source.
         let mut cost = 0.0;
         let mut files_checked = 0;
+        let mut findings = Vec::new();
         for (name, files) in &studies {
             let study = match study_text(name, files) {
                 Ok(study) => study,
@@ -4711,7 +4826,9 @@ impl Steps for RealSteps<'_> {
             let report = self.athena.check_study_text(&study);
             cost += report.cost_usd;
             problems.extend(report.problems);
+            findings.extend(report.findings);
         }
+        problems.extend(self.queue_source_fixes(&findings));
         if problems.is_empty() {
             Check::pass(format!(
                 "{} study(ies), {files_checked} page text file(s), match the pinned source and are consistent with themselves",
