@@ -479,7 +479,13 @@ fn root_cause_request_at(
     let cause_text = plain_boundary_text(&cause.cause)?;
     let mut body = String::from(
         "The same cause has produced failures in more than one job. Find the cause where it originates and fix \
-         it there, so the whole class is prevented; do not work around one instance.\n\n",
+         it there, so the whole class is prevented; do not work around one instance.\n\n\
+         First ask what information the failing stage lacked, and change the code so that information is \
+         given to it: in its brief, in the system facts it is shown, or in the inputs its reader receives. \
+         Prefer this over any rule that refuses work.\n\n\
+         A refusal rule is allowed only when giving the stage that information cannot prevent the failure. \
+         A request that adds one must state the expected share of past accepted readings the rule would \
+         refuse.\n\n",
     );
     if let Some(class) = &cause.class {
         body.push_str(&format!("Failure class: {}\n", plain_boundary_text(class)?));
@@ -4037,6 +4043,43 @@ mod tests {
         assert!(text.contains("Cause: - first - second\n"), "{text}");
         assert!(text.starts_with("Priority: high\n"), "{text}");
         assert!(!text.to_lowercase().contains("urgent"), "{text}");
+    }
+
+    #[test]
+    fn the_root_cause_request_asks_for_missing_information_before_allowing_a_refusal_rule() {
+        let cause = RepeatedCause {
+            key: "cause:x".into(),
+            class: None,
+            cause: one_line("The planner lacked a fact"),
+            introspections: vec![rec_id(10).to_string(), rec_id(20).to_string()],
+            jobs: vec![job('a').as_str().to_string(), job('b').as_str().to_string()],
+            request: None,
+        };
+        let records = Records {
+            introspections: Vec::new(),
+            ..Default::default()
+        };
+        let text = root_cause_request(&cause, &records).unwrap();
+        let ask = text
+            .find("First ask what information the failing stage lacked")
+            .unwrap_or_else(|| panic!("{text}"));
+        let supplied = text
+            .find("given to it: in its brief, in the system facts it is shown, or in the inputs its reader receives")
+            .unwrap_or_else(|| panic!("{text}"));
+        let rule = text
+            .find("A refusal rule is allowed only when giving the stage that information cannot prevent the failure")
+            .unwrap_or_else(|| panic!("{text}"));
+        let share = text
+            .find("state the expected share of past accepted readings the rule would refuse")
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(ask < supplied && supplied < rule && rule < share, "{text}");
+        // The builder refuses a bullet-like body line, so the Ok above shows there is none; the acceptance
+        // list is still the three lines of the template.
+        assert_eq!(
+            crate::reading::request_text_acceptance(&text).len(),
+            3,
+            "{text}"
+        );
     }
 
     // -----------------------------------------------------------------------------------------------------

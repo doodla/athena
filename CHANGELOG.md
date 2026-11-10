@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The root-cause request Hestia queues now asks first that the information the failing stage lacked be given to
+  it (in its brief, the system facts it is shown, or its reader's inputs), and allows a refusal rule only when
+  giving that information cannot prevent the failure, with the expected share of past accepted readings it would
+  refuse stated in the request. Prose in the generated request only; no reading rule changes.
 - New design note `docs/design/direct-main-landing.md` for throughput review `20261110-024838-mch9`: build each
   verified job's landing commit on host main (`Git::merge_tree`, then `Git::commit_tree`) and push it, instead of
   staging it on the local landing branch. Predicts 5.0 minutes saved per landed job and says how the next review
