@@ -136,6 +136,13 @@ An abridged invocation record:
 was kept has none. A reading of a job judged hard also carries `hard_reason` and `producer_effort`, which an
 ordinary reading leaves out.
 
+A reader invocation whose output reached the reading rules also carries `reading_attempt`:
+`{ "attempt": 1 }` for the first reading of a run and `{ "attempt": 2 }` for the reading made again with a
+refusal as its correction, with `"refusal": { "rule": "<check function>", "text": "..." }` when a rule refused it
+(`other` for output that was not a valid reading). The text is redacted. `athena status` counts these per rule over
+the last 50 first readings, and the Hestia sweep flags a rule that refused more than 30% of them. Other roles, a
+reader that did not finish, and records written before the field have none.
+
 A killed invocation records bounds instead: tokens `estimated` with the basis "lower bound: usage before
 termination", and a cost with `value` null, `lower` 0, and `upper` the invocation's cap.
 

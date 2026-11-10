@@ -685,6 +685,29 @@ pub struct Denial {
     pub detail: String,
 }
 
+/// The rule name recorded for a refusal that no reading rule is named for: output that did not parse or
+/// validate as a reading.
+pub const OTHER_READING_RULE: &str = "other";
+
+/// One refusal of a reading: the reading rule (the name of its check function) and the text it gave.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadingRefusal {
+    pub rule: String,
+    pub text: String,
+}
+
+/// What became of the output of one reader invocation once it reached the reading rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadingAttempt {
+    /// 1 for the first reading of a run, 2 for the reading made again with a refusal as a correction.
+    pub attempt: u32,
+    /// The refusal; absent when the reading was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<ReadingRefusal>,
+}
+
 /// `athena.invocation/1`: one model invocation, with its usage, cost, time, and outcome.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -711,6 +734,10 @@ pub struct Invocation {
     pub turns: Option<u32>,
     pub commands_run: Vec<String>,
     pub policy_denials: Vec<Denial>,
+    /// For a reader invocation whose output reached the reading rules: which reading it was and the rule that
+    /// refused it, if one did. Absent for other roles, for a reader that did not finish, and in older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reading_attempt: Option<ReadingAttempt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1529,6 +1556,108 @@ mod tests {
         assert!(text.contains("\"schema\": \"athena.reading/1\""));
         let back = AnyRecord::parse("x", text.as_bytes()).unwrap();
         assert_eq!(back, record);
+    }
+
+    fn sample_invocation(reading_attempt: Option<ReadingAttempt>) -> Invocation {
+        let tokens = |v: f64| Quantity::measured(v, Unit::Tokens, "result.usage");
+        Invocation {
+            job: job(),
+            seq: 1,
+            role: Role::Reader,
+            driver: DriverInfo {
+                name: "claude-code".into(),
+                version: "2.1.299".into(),
+            },
+            athena: Build {
+                version: "0.1.0".into(),
+                source_commit: "0".repeat(40),
+                dirty: false,
+            },
+            model: "m".into(),
+            effort: None,
+            context: InvocationContext {
+                components: vec![],
+                prompt_sha256: "0".repeat(64),
+                prompt_tokens: tokens(1.0),
+                host_baseline: tokens(600.0),
+                tools: vec![],
+            },
+            caps: InvocationCaps {
+                max_budget_usd: 1.0,
+                timeout_s: 600,
+            },
+            started_at: ts(),
+            ended_at: ts(),
+            wall_time: Quantity::measured(60.0, Unit::Seconds, "athena clock"),
+            tokens: Tokens {
+                input: tokens(1.0),
+                output: tokens(1.0),
+                cache_read: tokens(1.0),
+                cache_write: tokens(1.0),
+            },
+            models_used: BTreeMap::new(),
+            cost: Quantity::reported(0.5, Unit::Usd, "Claude Code total_cost_usd"),
+            outcome: InvocationOutcome::Success,
+            detail: None,
+            turns: None,
+            commands_run: vec![],
+            policy_denials: vec![],
+            reading_attempt,
+        }
+    }
+
+    #[test]
+    fn a_reading_attempt_on_an_invocation_round_trips_and_is_checked_at_its_path() {
+        let refused = ReadingAttempt {
+            attempt: 1,
+            refusal: Some(ReadingRefusal {
+                rule: "check_code_survey".into(),
+                text: "the reading has no code survey".into(),
+            }),
+        };
+        let accepted = ReadingAttempt {
+            attempt: 2,
+            refusal: None,
+        };
+        for attempt in [refused, accepted] {
+            let record = AnyRecord::Invocation(Box::new(sample_invocation(Some(attempt))));
+            let text = record.to_json();
+            assert!(text.contains("\"reading_attempt\""));
+            assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), record);
+            let path = record.canonical_path();
+            assert_eq!(
+                check_record_file(&path, text.as_bytes()).unwrap(),
+                Some(record)
+            );
+            assert!(matches!(
+                check_record_file("records/jobs/x/invocations/09-reader.json", text.as_bytes()),
+                Err(RecordError::Misplaced { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn an_invocation_without_a_reading_attempt_has_no_key_and_an_old_one_parses() {
+        let record = AnyRecord::Invocation(Box::new(sample_invocation(None)));
+        let text = record.to_json();
+        assert!(!text.contains("reading_attempt"));
+        assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), record);
+        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        value["reading_attempt"] = serde_json::json!({"attempt": 1, "extra": true});
+        let bad = serde_json::to_string(&value).unwrap();
+        assert!(AnyRecord::parse("x", bad.as_bytes()).is_err());
+        value["reading_attempt"] = serde_json::json!({"attempt": 1});
+        let bare = serde_json::to_string(&value).unwrap();
+        let AnyRecord::Invocation(parsed) = AnyRecord::parse("x", bare.as_bytes()).unwrap() else {
+            panic!("not an invocation");
+        };
+        assert_eq!(
+            parsed.reading_attempt,
+            Some(ReadingAttempt {
+                attempt: 1,
+                refusal: None
+            })
+        );
     }
 
     fn focus(n: u32, text: &str, set_by: &str) -> FocusRecord {
