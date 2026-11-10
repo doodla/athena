@@ -1711,6 +1711,26 @@ pub fn filled_feedback_dimensions(record: &IntrospectionRecord) -> Vec<&'static 
         .collect()
 }
 
+/// How many hypotheses or work items an introspection record holds for each feedback dimension (OLY-3-06), in
+/// the order of [`FEEDBACK_DIMENSIONS`]. List fields count one per entry (the matched decisions for expectation,
+/// the earlier cases for reproduction); single-valued fields count 1 when filled and 0 when blank.
+pub fn feedback_dimension_counts(record: &IntrospectionRecord) -> [(&'static str, usize); 10] {
+    let text = |t: &Option<String>| usize::from(t.as_deref().is_some_and(|s| !s.trim().is_empty()));
+    let counts = [
+        text(&record.what_happened),
+        record.decisions_matched.len(),
+        record.earlier_cases.len(),
+        usize::from(record.failure_class.is_some()),
+        usize::from(record.intervention.is_some()),
+        text(&record.cause),
+        usize::from(record.prevention_kind.is_some()),
+        text(&record.proposed_request),
+        text(&record.prevention),
+        usize::from(record.evidence.is_some()),
+    ];
+    std::array::from_fn(|i| (FEEDBACK_DIMENSIONS[i], counts[i]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1948,6 +1968,23 @@ mod tests {
 
         sparse.what_happened = Some("  ".into());
         assert!(filled_feedback_dimensions(&sparse).is_empty());
+    }
+
+    #[test]
+    fn a_dimension_can_hold_several_items() {
+        let mut rec = blank_record();
+        rec.what_happened = Some("the job was rejected".into());
+        rec.decisions_matched = vec!["D87".into(), "D88".into(), "D89".into()];
+        rec.earlier_cases = vec![
+            RecordId::parse("20261014-170200-2abc").unwrap(),
+            RecordId::parse("20261014-170300-3abc").unwrap(),
+        ];
+        let counts = feedback_dimension_counts(&rec);
+        let names: Vec<&str> = counts.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, FEEDBACK_DIMENSIONS);
+        let n: Vec<usize> = counts.iter().map(|(_, c)| *c).collect();
+        assert_eq!(n, vec![1, 3, 2, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(n[1] > 1 && n[2] > 1);
     }
 
     fn boundary_answer(word: &str) -> Answer {
