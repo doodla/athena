@@ -333,19 +333,27 @@ fn read_snapshot(git: &Git, tip: &str) -> Result<Snapshot> {
 /// Finds the records branch under `root` and reads it. A checkout that is not a git repository, has no
 /// records branch, or cannot be read gives [`Records::Missing`], so the rest of the site is still built.
 pub fn locate(root: &Path) -> Records {
-    let git = Git::at(root);
-    match resolve_tip(&git) {
-        Ok(RecordsTip::At { tip, .. }) => match read_snapshot(&git, &tip) {
+    match records_tip(root) {
+        Ok((git, tip)) => match read_snapshot(&git, &tip) {
             Ok(snapshot) => Records::Read(snapshot),
             Err(e) => Records::Missing(format!("it could not be read: {e}")),
         },
-        Ok(RecordsTip::Missing) => Records::Missing(format!(
+        Err(why) => Records::Missing(why),
+    }
+}
+
+/// The git handle and the tip of the records branch under `root`; the error says why there is none.
+pub(crate) fn records_tip(root: &Path) -> Result<(Git, String), String> {
+    let git = Git::at(root);
+    match resolve_tip(&git) {
+        Ok(RecordsTip::At { tip, .. }) => Ok((git, tip)),
+        Ok(RecordsTip::Missing) => Err(format!(
             "this checkout has no {RECORDS_BRANCH} branch (fetch it before building the site)"
         )),
-        Ok(RecordsTip::Diverged { .. }) => Records::Missing(
+        Ok(RecordsTip::Diverged { .. }) => Err(
             "the local and fetched copies of it differ, and neither contains the other".to_string(),
         ),
-        Err(e) => Records::Missing(format!("git could not be asked: {e}")),
+        Err(e) => Err(format!("git could not be asked: {e}")),
     }
 }
 
