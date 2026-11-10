@@ -1,0 +1,168 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261029-002753-n9hq",
+  "n": 1,
+  "at": "2026-11-10T06:54:10.552736776Z",
+  "invocation_seq": 1,
+  "base_commit": "3c0ab4cecf2d9e47ced41f4f02148015b52d28bf",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Treat a weekly/session usage-limit reply as an environment stop",
+  "summary": "Teach the driver and disk.rs's environment-reason path to recognise \"You've hit your weekly/session limit … resets <time>\" replies (not only \"API Error: 429\") as a usage-limit environment stop, keeping the reset time. Make athena drain stop at once with reason \"usage limit\" and that reset time. Audience: the athena operator reading drain output and the verifier running tests.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Criteria require new tests plus cargo test, clippy -D warnings and fmt --check to pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria name tests that show the job closing as an environment stop and the drain stopping with the reason and reset time."
+    },
+    {
+      "id": "small",
+      "how": "One focused change across the four named files, plus tests."
+    },
+    {
+      "id": "root-cause",
+      "how": "The classifier is extended in the shared disk.rs path that the scope guard and drain already read, not patched in one caller."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-agent/src/claude.rs (api_error_status reads only 'API Error: NNN' details; output_from_result builds the detail as '<subtype>: <first 300 chars>'), crates/athena-core/src/disk.rs (USAGE_LIMIT, StopCause::of, producer_stop_reason, is_environment_reason), crates/athena-core/src/run/producer.rs (a non-success invocation goes through producer_stop_reason, then self.failure for usage limits, closing failed with an environment reason), crates/athena-core/src/scope_guard.rs (environment reasons are not counted as attempts) and crates/athena-cli/src/drain.rs (Stop enum; ItemEnd::Failed sets Stop::Environment only after an item fails twice).",
+    "No record file or data file is added, so check_record_file, AnyRecord and the round-trip test are not touched. The Stop::label and Stop::meaning tables, and any test that iterates Stop::ALL, may need updating if a variant is added.",
+    "Existing code: the usage-limit path already exists for 'API Error: 429' (disk::USAGE_LIMIT, StopCause::UsageLimit, producer_stop_reason). This job extends it with text detection and a reset time; it does not add a parallel path.",
+    "Assumption: the limit text looks like \"You've hit your weekly limit · resets Nov 12, 3pm\" (or 'session limit'). The detector matches 'hit your weekly limit' / 'hit your session limit' case-insensitively, and takes any text after 'resets' as the reset time. A reply without a reset time still counts as a usage limit, with no time shown.",
+    "Assumption: 'drain stop with the reason usage limit' means a new Stop variant labelled 'usage limit' (not the generic 'environment'). It ends the run on the first such job, since every later item would hit the same limit. The reset time goes in the drain's stop output. The existing 'fails twice' Environment rule for logins and disk is unchanged.",
+    "Reset time is carried inside the existing closing-reason string (USAGE_LIMIT prefix plus detail), so no new record kind is needed. The drain reads it back from the last reason.",
+    "No governance files (athena.toml, defaults.toml, workflows) change; the only non-source deliverable is CHANGELOG.md."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new unit test in crates/athena-agent/src/claude.rs (fake driver script emitting an is_error result with 'You've hit your weekly limit · resets <time>') passes under `cargo test -p athena-agent`, and shows the classifier reports a usage limit with the reset time. A 'session limit' reply is covered too.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test in crates/athena-core/src/disk.rs shows producer_stop_reason on the limit text gives a reason starting with disk::USAGE_LIMIT that includes the reset time, and that is_environment_reason is true and StopCause::of gives UsageLimit. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A run-level test with a fake driver reply carrying the limit text (beside the existing usage-limit test in crates/athena-core/src/run/tests.rs, or an equivalent in a file listed as a deliverable) shows the job closes as an environment stop, not a counted failure, and keeps nothing. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A drain test in crates/athena-cli (drain.rs unit test or tests/drain.rs) shows the run stops after the first job whose reply says the limit was hit, with the stop reason 'usage limit' and the reset time in the output. Run `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Controls: text that only mentions a limit in a model's own prose (under a subtype other than success/error) and a normal success reply are not classified as usage limits. Existing 429 and 401 tests still pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry, in the file's existing format, describing the usage-limit environment stop and the drain stop with reset time. `git diff` shows it.",
+      "kind": "content"
+    },
+    {
+      "text": "The diff limits itself to the deliverables: no status display, no new record kind and no change to retry or resume logic (the resumable_stop and keeps_unfinished_work behaviour is unchanged). Checked with `git diff --stat`.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Status display of the usage limit or reset time",
+    "A new record kind",
+    "Changes to retry or resume (resumable_stop, keeps_unfinished_work)",
+    "Waiting until the reset time or automatic restart of the drain",
+    "Changes to the existing login (401) or low-disk handling"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2100.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6825396825396826,
+      "p_user_intervenes": 0.07145421903052064,
+      "cost_usd": {
+        "p10": 0.5601708514320531,
+        "p50": 1.5036058,
+        "p90": 5.080330580012721
+      },
+      "wall_time_s": {
+        "p10": 572.2917310801554,
+        "p50": 2118.9574808447323,
+        "p90": 4353.067912939027
+      }
+    }
+  },
+  "departures": "Slightly higher cost and time than the reference: the change spans three crates and needs both a run-level and a drain-level test, and a new Stop variant may touch label/meaning tables and docs.",
+  "hard_reason": "Changes how a stopped job is classified (failure versus environment stop) and when the drain stops, which feeds the scope guard's failure counting.",
+  "producer_effort": "high"
+}
