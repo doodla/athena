@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- The reader brief now prints the recorded deliverable count for every job a request retries or names
+  ("Allowed change scope, deliverables (N recorded, ...)"), taken from the length of the recorded list. Before, the
+  reader saw a bare list and had to count it, and miscounted: in job 7zqw it wrote 12 deliverables for a job whose
+  record holds 11. The stage lacked the recorded number, so the brief gives it; no refusal rule is added.
+
 ### Changed
 
 - `planning_round` in `crates/athena-core/src/run/planning.rs` is split into smaller private methods

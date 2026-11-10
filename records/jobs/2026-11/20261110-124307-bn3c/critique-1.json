@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261110-124307-bn3c",
+  "round": 1,
+  "at": "2026-11-10T12:53:51.779870039Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The split-permission phrases 'split into' and 'split it' (and the bare 'split is fine' forms) match ordinary request prose. One such line turns the check off for the whole request.",
+      "evidence": "Decision 3 counts any sentence matching 'split into' or 'split it' with no negation word as permission. A request sentence such as 'Split the log line into fields' or 'split it on commas' is about the code, not the job, yet it passes both the phrase test and the negation guard. `request_allows_split` then returns true and `check_reading_coverage` returns Ok whatever the reading drops. The Criterion 4 phrase table tests only negations ('Do not split', 'never split') and has no affirmative-looking false positive. Fix: Require the phrase to say what is being split: 'split this job/request/work', 'may/can split (it|this) into (jobs|parts|follow-ups)', 'split into separate jobs'. Drop the bare 'split into' and 'split it'. Add rows to the phrase table and a corpus case where 'Split the output into two columns.' is in the prose and the reading drops a bullet; it must still be refused.",
+      "location": "Plan Decision 3; Step 2(e); Criterion 4 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Scoring every word the same, with a 40% threshold, lets a sibling bullet's criterion cover a dropped bullet that shares its framing words. That is the sza7 failure, and the rebuilt sza7 fixture is built so it is never tested.",
+      "evidence": "Multi-part requests often share framing across bullets. Take bullets 'The status table shows each job's state' and 'The status table shows each job's duration'. The second has stems {status, table, show, job, duration}. A criterion for the first bullet shares 4 of 5 (80%), so the dropped duration bullet is scored covered. The plan sets the omitted sza7 bullet at 20% or less by construction, because records/ is absent and the fixture is rebuilt. So Criterion 1's demonstration would pass even though the rule fails open on the realistic shape. The Criterion 3 fixture also scores well only if the other criteria share no words with the duration bullet. Fix: Add a fixture with sibling bullets that share framing and a reading that covers only one of them. It must be refused naming the other. To make it pass without discarding any word (the reading forbids prose stripping and the uniqueness rule), weight each stem by how few of the request's bullets contain it, so the matched share is weighted rather than a raw count. Alternatively, assign criteria to bullets so one criterion's best match is not reused to cover a sibling whose distinguishing stems it lacks. Rebuild the sza7 case with realistic shared framing rather than a shape chosen to score 20% or less, and re-tune the threshold against that.",
+      "location": "Plan Decision 1; Criterion 1 demonstration; Risks bullet 1 ('The rebuilt sza7 shapes keep the omitted bullet at 20% or less')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The Acceptance section ends at the first non-bullet line, so a wrapped bullet's continuation line ends the section early. The later bullets go unchecked and the wrapped bullet is scored on its first line only.",
+      "evidence": "Decision 2 says the section 'ends at the first non-empty non-bullet line'. `request_text_acceptance` (topics.rs:276) trims each line, and an indented continuation such as '  and the docs say so' is not a bullet. Fix: Treat an indented non-bullet line right after a bullet as part of that bullet. End the section at a blank line followed by a non-bullet line, or at a `Files:` or `Priority:` line. Add a unit test with a wrapped bullet.",
+      "location": "Plan Decision 2; Step 2(d)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The dependents list names only athena-cli tests for the fake-reader fallback. athena-core tests also run the deterministic fake reader, and some queue requests with an `Acceptance:` heading.",
+      "evidence": "`FakeAgentDriver::deterministic()` is used in crates/athena-core/src/hestia.rs:3552 and code_health.rs:978, and run/tests.rs has 32 fake references. Hestia/spec requests carry 'Acceptance:\\n- ' (hestia.rs:4083, 4764, 5036, 7319). With the stock criterion 'FAKE-CHANGE.md contains the request', those readings would be refused. fake.rs's own tests (fake.rs:540-610) may also assert the reading's shape. Fix: Add athena-core hestia.rs, code_health.rs and run/tests.rs, and athena-agent's fake.rs tests, to the dependents entry. Run `cargo test -p athena-core` and `cargo test -p athena-agent` before deciding the step-10 fallback, and expect it to be needed.",
+      "location": "Plan Dependents: \"fake reader's single criterion\"",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say that the verification replay over recorded readings will measure the real refusal rate against the 15% hold limit. Readers who paraphrase Steward and Hestia bullets could push the rate past it.",
+      "evidence": "`check_reading_text` (replay.rs:54) calls `check_reading_acceptance`, so the replay at verification runs the new step over history. `replay_limit_percent(Some(10))` is 15 (replay.rs:304). The fixture replay says nothing about that rate. Fix: State in the CHANGELOG/criterion-7 text, or in Risks, that the verification replay measures the real rate over records. If it exceeds 15% the job is held, so the producer's loop replay figure, if available, should replace the estimate.",
+      "location": "Plan Decision 6; Risks bullet 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read checks.rs, topics.rs, surveys.rs, replay.rs, fake.rs and refusal_corpus.rs, and grepped for every request with an `Acceptance:` heading. The plan's names and locations hold up. `refusing_check` and its step list are at checks.rs:518-546, `is_bullet` is at topics.rs:266 and `has_phrase` at surveys.rs:39. `sentences` is at checks.rs:332 and splits on newline and ';'. `INPUT_FORMS` is `[&str; 52]` at refusal_corpus.rs:90 and `reading_source` is at :2670. `replay_declaration` returns a struct with `.share`, as `history_fixture_refusal_is_declared_intended` (:2916) uses it. The fake reader emits one stock criterion (fake.rs:311). The step placement, wiring, corpus cases, CHANGELOG and doc tests are sound, and the plan fits one producer run. The verdict is revise because of two soundness problems in the core rule. First, the split-permission phrase list includes 'split into' and 'split it'. Those match ordinary request prose ('split the output into columns'), and one such line turns the whole check off for that request. Second, every word counts the same and the threshold is 40%. A dropped bullet that shares its framing words with a sibling bullet (for example, 'the status table shows X' and 'the status table shows Y') is then counted as covered by the sibling's criterion. That is the sza7-style omission this check exists to refuse. The rebuilt sza7 fixture is built so the omitted bullet scores 20% or less, so it never tests that shape. Smaller points: wrapped bullet lines end the Acceptance section early, and the dependents list misses athena-core tests that run the deterministic fake reader."
+}

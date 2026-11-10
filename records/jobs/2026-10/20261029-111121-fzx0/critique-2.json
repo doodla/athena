@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-111121-fzx0",
+  "round": 2,
+  "at": "2026-11-10T11:12:51.88689167Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "How strict the rule is gets tuned against one hand-written probe, but the replay of stored readings is what judges it, and the plan gives the producer no way to respond when that replay holds the work.",
+      "evidence": "replay.rs:296-305: replay_is_held holds the work when newly refused readings exceed replay_limit_percent(declared), which is the declared share plus REPLAY_DECLARED_MARGIN_POINTS (5, replay.rs:161). So declaring 10% gives a 15% limit. run/mod.rs:2254 runs this replay inside the producer's loop and sends the work back when it is held (reading.rs:6573). Requests in this repository usually have an 'Acceptance:' heading (this job's request does, and so does every StewardRequest, steward.rs:581). Readers paraphrase their criteria: this job's criterion 1 matches its bullet 1 on only 2 of 4 specific stems under the plan's own rule, because 'naming'/'names' do not match (see the next finding). Step 6 allows tuning only when the probe case fails and otherwise says 'do not weaken the check'. A loop replay above 15% would therefore leave the producer with no permitted move, and the job would be held at verification. That is the late failure the request is trying to prevent. Fix: Name the producer-loop replay as the real test of strictness. Step 6 should say: if the loop replay newly refuses more than 15%, lower the share to at least one specific stem (and loosen the stemmer, see the next finding), keep the near-identical, path-token and verbatim corpus cases refusing, and never raise the declared 10%. Alternatively, make 'at least one specific stem' the default, since the plan already notes that it still refuses cases B and C. Correct Risk 2: the declaration sets a 15% limit; it does not exempt this rule from the replay.",
+      "location": "Decision 1 (ceil(n/2) of specific stems), Step 6 (\"the one permitted tuning\" only if the paraphrase probe fails), Risk 2 (\"The declared 10% ... lets the replay pass this rule\")",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stemmer does not match common inflections of short roots, which adds false refusals.",
+      "evidence": "Suffixes are stripped only when 4 or more letters remain, so 'naming' and 'named' stay whole and 'names' becomes 'name'. related() needs a common prefix of at least 4 characters, and 'nam' has only 3. So 'naming the bullet' (this job's bullet 1) is not matched by 'names the omitted bullet' (its criterion 1). Going the other way, 'change' (stem 'chang', prefix 5 of 6) is related to 'changelog', so a criterion that says 'change' counts toward a bullet about the changelog. Fix: Allow stripping when 3 or more letters remain, or compare with a 3-character prefix when both words are 4 to 6 letters long. Add 'name', 'names', 'naming', 'named' to the stem unit tests. Exclude token-like words such as 'changelog' from prefix matching, since distinctive tokens already cover them.",
+      "location": "Step 1 `stems` and `related`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A wrapped bullet's second line is thrown away instead of being judged with its bullet.",
+      "evidence": "The approach says such a line is a continuation of the bullet. Step 1 says to skip it. If skipped, the words and tokens of a two-line bullet's second half are never checked, and the refusal quotes only the first line. Fix: Append a continuation line to the previous bullet's body before extracting tokens and stems, and add a parser unit test for a two-line bullet.",
+      "location": "Approach (\"a non-bullet line between bullets is a wrapped continuation\") vs Step 1 (\"skip a non-bullet line between bullets\")",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The dependents list leaves out the deterministic fake reader, whose single stock criterion will now be refused for any request with an Acceptance heading.",
+      "evidence": "crates/athena-agent/src/fake.rs:311: the fake reader always returns one criterion, '{FAKE_DELIVERABLE} contains the request'. It is used in nested runs (crates/athena-cli/src/wiring.rs:189) and in test Athenas (hestia.rs:3552, code_health.rs:978, invocation.rs:366, drain.rs:7320, focus.rs:140). The tests I read either queue heading requests without running them or run requests that have no heading. But a nested run, or a future test, that reads a steward- or Hestia-made request through the fake reader would now be refused. Fix: Add fake.rs reader_turn to the dependents list and say how it is handled. Either make the fake reader copy the request's acceptance bullets into its criteria (fake.rs is then a deliverable, covered by athena-agent's tests), or state that no current flow reaches it and that nested runs of heading requests will be refused.",
+      "location": "Dependents list",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Part (1) parses a sentence written into the test, so it shows that the parser works, not that the change declares the share.",
+      "evidence": "The plan runs replay_declaration on a criterion string built inside the test. The declaration the replay actually reads is the reading's own criterion 6, plus whatever the changelog and doc say. Part (2) does show the rise in refusals. Fix: Run declared_percent or replay_declaration on the real changelog item and on the new function's doc text (both already read by the criterion 7 and 8 test), or drop part (1) and rely on part (2) together with the reading's own criterion.",
+      "location": "Demonstration for criterion 6, part (1)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot. Most of what it names exists as described: the step! list in refusing_check (checks.rs:532-546), the doc list of check_reading_acceptance, the 'runs last in' sentence (checks.rs:219), is_bullet on the raw line versus the trimmed request_text_acceptance (topics.rs:266-282), request_words (outcome.rs:141), both reading_source() include lists, INPUT_FORMS at 52, base_reading copying bullets verbatim, and the step-order tests. Putting the step last keeps every asserted neighbour pair. The question and decline exemption matches what the other checks do (checks.rs:415, outcome.rs:315). The corpus cases built from scope_case and root_cause_request either have no heading or copy the bullets as criteria. The Hestia, steward and code-health tests with a heading only queue or render requests; none sends them through the reader. One problem needs a revision. The plan picks a fairly strict threshold (ceil(n/2) of the specific stems, with a weak stemmer) and allows tuning only when its one paraphrase probe fails. But the real test of strictness is the replay of stored readings. Declaring 10% sets the hold limit at 15% (declared plus REPLAY_DECLARED_MARGIN_POINTS = 5), and the replay inside the producer's loop sends the work back when that limit is exceeded. The user requests in this repository usually carry an Acceptance heading, and readers paraphrase their criteria, so the replay could hold the candidate. The plan's rule \"do not weaken the check\" would then leave the producer stuck. The plan also says the declaration \"lets the replay pass\", which misstates how the replay works. The smaller findings are about the stemmer, the handling of wrapped bullet lines, the fake reader missing from the dependents list, and one weak demonstration."
+}

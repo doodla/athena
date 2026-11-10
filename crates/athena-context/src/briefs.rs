@@ -3893,6 +3893,45 @@ mod tests {
     }
 
     #[test]
+    fn the_brief_prints_the_recorded_deliverable_count_for_every_carried_job() {
+        let job = |id: &str, n: usize| EarlierAttempt {
+            job: id.into(),
+            end_state: "landed".into(),
+            reading_deliverables: (0..n).map(|i| format!("modify file{i}.rs")).collect(),
+            ..Default::default()
+        };
+        let mut inputs = reader_inputs(&reading());
+        inputs.earlier_attempt = Some(job("20261010-000000-aaaa", 1));
+        inputs.referenced_jobs = vec![
+            job("20261010-000000-bbbb", 11),
+            job("20261010-000000-cccc", 3),
+            job("20261010-000000-dddd", 0),
+        ];
+        let brief = reader_brief(&inputs);
+        let section = &brief[brief.find(PRIOR_RESULT_HEADING).expect("section")..];
+        let after = |id: &str| {
+            let at = section.find(&format!("Job {id}:")).unwrap();
+            section[at..].lines().nth(1).unwrap().to_string()
+        };
+        assert!(
+            after("20261010-000000-aaaa").contains("deliverables (1 recorded"),
+            "{section}"
+        );
+        assert!(
+            after("20261010-000000-bbbb").contains("deliverables (11 recorded"),
+            "{section}"
+        );
+        assert!(
+            after("20261010-000000-cccc").contains("deliverables (3 recorded"),
+            "{section}"
+        );
+        assert!(
+            after("20261010-000000-dddd").contains("deliverables: none recorded for it"),
+            "{section}"
+        );
+    }
+
+    #[test]
     fn a_follow_up_brief_carries_the_result_and_scope_of_each_named_job() {
         let mut inputs = reader_inputs(&reading());
         inputs.referenced_jobs = vec![EarlierAttempt {

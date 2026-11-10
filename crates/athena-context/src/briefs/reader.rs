@@ -171,7 +171,11 @@ fn prior_result_section(out: &mut String, inputs: &ReaderInputs) {
                 "Allowed change scope, deliverables: none recorded for it. Work out from the repository and the findings which paths this request needs, and list them."
             );
         } else {
-            let _ = writeln!(out, "Allowed change scope, deliverables:");
+            let _ = writeln!(
+                out,
+                "Allowed change scope, deliverables ({} recorded, copy this number, do not count):",
+                prior.reading_deliverables.len()
+            );
             for deliverable in &prior.reading_deliverables {
                 let _ = writeln!(out, "{}", quote(deliverable));
             }
