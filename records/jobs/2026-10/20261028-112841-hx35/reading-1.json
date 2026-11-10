@@ -1,0 +1,170 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261028-112841-hx35",
+  "n": 1,
+  "at": "2026-11-10T01:28:07.065288694Z",
+  "invocation_seq": 1,
+  "base_commit": "c3e2983f3c816d605be27b8e7edfe3a5ef890c97",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Keep partial work and retry once on producer 401 login expiry",
+  "summary": "A producer that fails with API Error 401 (expired login) should end as an environment stop whose partial work is kept as a candidate, as a timed-out producer's is. `athena retry` should resume from that candidate, and the driver call should be retried once after a short wait. The goal is that a transient login expiry no longer costs a 30-minute producer's work. The audience is the owner running `athena retry`.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "The criteria require new tests plus cargo test, clippy -D warnings and fmt --check."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The criteria check the 401 stop, kept work, resume and retry by running tests, not by checking that code exists."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix reuses the timeout keep-work path and the central StopCause classification instead of adding a special case."
+    },
+    {
+      "id": "strangers",
+      "how": "The CHANGELOG entry and doc comments are written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/disk.rs. `api_error_status`, `StopCause::of`, `producer_stop_reason`, `is_environment_reason` and `resumable_stop` already treat a 401 (PRODUCER_AUTH) and a 429 as environment stops, and `resumable_stop` lets `athena retry` resume a Failed job with an environment reason.",
+    "Code survey: read crates/athena-core/src/run/producer.rs (around lines 364-391). A TimedOut outcome goes to `keep_timed_out_work`, which builds a candidate commit and a progress note. Any other non-Success outcome, including a 401, goes to `self.failure(producer_stop_reason(..))`, which keeps nothing. This is the gap the request names.",
+    "Code survey: read crates/athena-core/src/run/mod.rs. `keep_timed_out_work` (line ~938), `timeout_seed` (~881, which requires the job state TimedOut), `resume_seed` and `resume_candidate` (~533, ~647, which read a resume mark), `write_resume_mark` (~834), and `TimedOutKeep` and `timeout_note` (~1393-1435). The change reuses `keep_timed_out_work` for an auth stop. The job closes Failed with the PRODUCER_AUTH reason, so `resumable_stop` still holds, and the retry finds the kept candidate through the existing seed path. The job state is not TimedOut, so the producer must either add a Failed-state branch to `timeout_seed` or write the resume mark. This is the main design choice.",
+    "Code survey: read crates/athena-agent/src/claude.rs. The driver spawns the CLI through `retry_busy` and builds the detail in `output_from_result` (`<subtype>: <result text>`). A single retry after a short wait on a 401 result goes here, and the wait must be injectable or short so the test is fast. crates/athena-agent/src/fake.rs holds the fake driver the tests use. Existing tests are in crates/athena-core/src/run/tests.rs and crates/athena-cli/tests/retry.rs. The test helpers `EXPIRED_LOGIN_TEXT`, `result_line` and `driver_detail` in disk.rs hold the exact 401 text.",
+    "Records and data: no new record or data file is added, so `check_record_file`, `AnyRecord` and the round-trip test are not affected.",
+    "The 'once after a short wait' retry lives in the agent driver (claude.rs). A second 401 after the retry falls through to the environment stop with kept work.",
+    "Not a refusal rule: nothing newly refuses readings. A 401 job is already classified as an environment stop, so the change only adds kept work.",
+    "Environment: no CI workflow, push or PR is involved. Tests use a fake driver in the local workspace only.",
+    "Consumers: none found. No config deliverable. athena.toml and defaults.toml stay unchanged."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test using a fake driver that returns the 401 text (`Failed to authenticate. API Error: 401 ... OAuth access token has expired`) for every call, after the producer has edited files, ends the job Failed with a reason starting `environment: producer login expired`. The test asserts that the closing holds a candidate commit with the producer's edits. Run `cargo test -p athena-core` and check that this test passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test shows `athena retry <job>` on that stopped job resumes from the kept candidate (the retry's seed or resume names the earlier job, and the earlier edits are present) instead of starting from scratch. Run `cargo test` and check that this test passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test shows a driver that returns a 401 once and then succeeds yields a successful invocation: exactly two driver calls were made and the job does not end as an environment stop. Run `cargo test -p athena-agent` and check that this test passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows two consecutive 401 results lead to only one retry (two calls in total, no more) before the environment stop. Run `cargo test` and check that this test passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The diff in crates/athena-agent/src/claude.rs adds the single retry after a short wait on a 401. crates/athena-core/src/run/mod.rs (with run/producer.rs if needed) keeps partial work for a 401 stop by reusing `keep_timed_out_work`. crates/athena-core/src/disk.rs changes only if the classification or resume rules need it. All three are listed in `git diff`.",
+      "kind": "content"
+    },
+    {
+      "text": "The existing timeout path and the 429 and low-disk paths keep their behavior: the existing tests in crates/athena-core/src/run/tests.rs and crates/athena-cli/tests/retry.rs still pass under `cargo test`.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry describing the 401 environment stop, the kept partial work with resume, and the single driver retry.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.75
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Handling other API errors (5xx, 529 overloaded) with retries",
+    "Changing how 429 usage limits are handled",
+    "Automatic retry or resume of the job without the user running `athena retry`, beyond the existing drain behavior",
+    "Refreshing the login or reading credentials"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6813627254509018,
+      "p_user_intervenes": 0.07210144927536231,
+      "cost_usd": {
+        "p10": 0.5691927293010134,
+        "p50": 1.5164948072931013,
+        "p90": 5.042337748980144
+      },
+      "wall_time_s": {
+        "p10": 571.1736084301111,
+        "p50": 2120.547459108001,
+        "p90": 4347.724188075184
+      }
+    }
+  },
+  "departures": "The change spans the agent driver and the run pipeline and needs several new tests, including a fake-driver retry and a resume test. Cost and time sit above the reference. Verification is a little lower because the retry and resume wiring is subtle.",
+  "urgent_reason": "Cuts redo-work retries: a producer that ran 30 minutes lost its partial work to an expired login and the retry started from scratch.",
+  "hard_reason": "Changes how the run pipeline closes a failed producer and what a retry resumes from, and adds a driver retry rule, so a mistake would lose work or hide failures.",
+  "producer_effort": "high"
+}
