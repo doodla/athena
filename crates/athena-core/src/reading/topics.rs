@@ -525,18 +525,58 @@ pub fn continued_jobs<'a>(
         .collect()
 }
 
-/// The jobs a request names by full id, other than `skip` (the retried job): each one's request and
-/// final findings, redacted. Ids that match no job (or a job without a request) are ignored. At most
-/// [`MAX_REFERENCED_JOBS`] are carried; jobs the request says it follows up come first so the cap never
-/// drops one. Carrying a job only shows it to the reader: [`continued_jobs`] decides which of them the
-/// reading must account for.
+/// The most jobs that the retried job's introspection may add to the reader brief, after the jobs the
+/// request names.
+pub const MAX_CITED_JOBS: usize = 4;
+
+/// The job ids an introspection cites, in order, without repeats: first the job of each earlier case, then
+/// the ids written in the cause, the prevention and the proposed request, then those in the texts of the
+/// earlier cases.
+pub fn introspection_cited_ids(cause: &RetryCause) -> Vec<RecordId> {
+    let mut ids: Vec<RecordId> = Vec::new();
+    let mut add = |id: RecordId| {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    };
+    for job in cause.earlier_cases.iter().filter_map(|c| c.job.as_deref()) {
+        if let Ok(id) = RecordId::parse(job) {
+            add(id);
+        }
+    }
+    for text in [&cause.cause, &cause.prevention, &cause.proposed_request] {
+        job_ids_in(text).into_iter().for_each(&mut add);
+    }
+    for case in &cause.earlier_cases {
+        job_ids_in(&case.what).into_iter().for_each(&mut add);
+        if let Some(prevention) = &case.prevention {
+            job_ids_in(prevention).into_iter().for_each(&mut add);
+        }
+    }
+    ids
+}
+
+/// The past jobs a reading may rely on: each one's request, criteria, deliverables and final findings,
+/// redacted. First the jobs the request names by full id (at most [`MAX_REFERENCED_JOBS`]; those it says
+/// it follows up come first so the cap never drops one), then the jobs the retried job's introspection
+/// cites (at most [`MAX_CITED_JOBS`], not already carried). The retried job itself is left out. Ids that
+/// match no job (or a job without a request) are ignored.
+///
+/// Root cause this fixes: ids that an introspection cited were never resolved to the deliverables recorded
+/// for those jobs, so a reading built its fixtures and thresholds from an assumed shape that was invented.
+/// The reader now sees the recorded shape of every job the request or the introspection cites. Ids the
+/// reader introduces in its own reading are not resolved here.
+///
+/// Carrying a job only shows it to the reader: [`continued_jobs`] decides which of them the reading must
+/// account for.
 pub fn referenced_jobs(
     records: &Records,
     request: &str,
-    skip: Option<&str>,
+    attempt: Option<&EarlierAttempt>,
     redactor: &Redactor,
 ) -> Result<Vec<EarlierAttempt>> {
-    let mut out = Vec::new();
+    let skip = attempt.map(|a| a.job.as_str());
+    let mut out: Vec<EarlierAttempt> = Vec::new();
     let mut ids = followed_up_ids(request);
     for id in job_ids_in(request) {
         if !ids.contains(&id) {
@@ -556,5 +596,240 @@ pub fn referenced_jobs(
             out.push(carried);
         }
     }
+    let cited = attempt
+        .and_then(|a| a.introspection.as_ref())
+        .map(introspection_cited_ids)
+        .unwrap_or_default();
+    let mut added = 0;
+    for id in cited {
+        if added >= MAX_CITED_JOBS {
+            break;
+        }
+        if skip == Some(id.as_str()) || out.iter().any(|j| j.job == id.as_str()) {
+            continue;
+        }
+        if let Some(job) = records.jobs.get(id.as_str())
+            && let Some(carried) = carry(job, redactor)?
+        {
+            out.push(carried);
+            added += 1;
+        }
+    }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reading::tests::scoped_reading;
+    use athena_context::briefs::EarlierCase;
+
+    fn job_with_reading(
+        id: &str,
+        request: &str,
+        deliverables: &[(&str, DeliverableAction)],
+    ) -> JobRecords {
+        let job = JobId::parse(id).unwrap();
+        let mut reading = scoped_reading("a reading", &[], &[]);
+        reading.job = job.clone();
+        reading.deliverables = deliverables
+            .iter()
+            .map(|(path, action)| Deliverable {
+                path: (*path).into(),
+                action: *action,
+                p: 0.9,
+            })
+            .collect();
+        JobRecords {
+            id: Some(job.clone()),
+            request: Some(athena_data::records::Request {
+                job,
+                text: request.into(),
+                received_at: jiff::Timestamp::UNIX_EPOCH,
+                channel: "cli".into(),
+            }),
+            readings: vec![reading],
+            ..JobRecords::default()
+        }
+    }
+
+    fn id_of(n: usize) -> String {
+        format!("20261110-00000{n}-aaaa")
+    }
+
+    fn records_of(jobs: Vec<JobRecords>) -> Records {
+        let mut records = Records::default();
+        for job in jobs {
+            records.jobs.insert(job.id().as_str().to_string(), job);
+        }
+        records
+    }
+
+    fn attempt_citing(job: &str, cause: RetryCause) -> EarlierAttempt {
+        EarlierAttempt {
+            job: job.into(),
+            request: "the retried request".into(),
+            introspection: Some(cause),
+            ..EarlierAttempt::default()
+        }
+    }
+
+    fn redactor() -> Redactor {
+        Redactor::new(&athena_gate::builtin_config()).unwrap()
+    }
+
+    const A_LIST: [&str; 2] = ["modify crates/x/a.rs", "create crates/x/b.rs"];
+
+    fn a_records() -> Records {
+        records_of(vec![
+            job_with_reading(
+                &id_of(1),
+                "job a",
+                &[
+                    ("crates/x/a.rs", DeliverableAction::Modify),
+                    ("crates/x/b.rs", DeliverableAction::Create),
+                ],
+            ),
+            job_with_reading(
+                &id_of(2),
+                "job b",
+                &[("crates/y.rs", DeliverableAction::Modify)],
+            ),
+        ])
+    }
+
+    #[test]
+    fn referenced_jobs_returns_a_job_cited_only_by_the_introspection() {
+        let records = a_records();
+        let a = id_of(1);
+        let b = id_of(2);
+        let causes = [
+            RetryCause {
+                earlier_cases: vec![EarlierCase {
+                    id: "i1".into(),
+                    job: Some(a.clone()),
+                    ..EarlierCase::default()
+                }],
+                ..RetryCause::default()
+            },
+            RetryCause {
+                cause: format!("it repeated what happened in {a}"),
+                ..RetryCause::default()
+            },
+            RetryCause {
+                prevention: format!("rule: check against {a}"),
+                ..RetryCause::default()
+            },
+        ];
+        for cause in causes {
+            let attempt = attempt_citing(&b, cause);
+            let got =
+                referenced_jobs(&records, "try again on it", Some(&attempt), &redactor()).unwrap();
+            assert_eq!(got.len(), 1, "{got:?}");
+            assert_eq!(got[0].job, a);
+            assert_eq!(got[0].reading_deliverables, A_LIST);
+        }
+    }
+
+    #[test]
+    fn referenced_jobs_skips_the_retried_job_and_unknown_ids() {
+        let records = a_records();
+        let (a, b) = (id_of(1), id_of(2));
+        let attempt = attempt_citing(
+            &b,
+            RetryCause {
+                cause: format!("{b} {} {a}", id_of(9)),
+                ..RetryCause::default()
+            },
+        );
+        let got = referenced_jobs(&records, "x", Some(&attempt), &redactor()).unwrap();
+        assert_eq!(
+            got.iter().map(|j| j.job.as_str()).collect::<Vec<_>>(),
+            [a.as_str()]
+        );
+        let without = referenced_jobs(&records, "x", None, &redactor()).unwrap();
+        assert!(without.is_empty());
+        let named = referenced_jobs(&records, &format!("see {a}"), None, &redactor()).unwrap();
+        assert_eq!(named.len(), 1);
+    }
+
+    #[test]
+    fn referenced_jobs_lists_request_named_jobs_first_and_never_drops_one() {
+        // Jobs 1..=3 and 8 are named by the request; 4..=7 and 9 are cited by the introspection.
+        let jobs: Vec<JobRecords> = (1..=9)
+            .map(|n| {
+                let path = format!("crates/n{n}.rs");
+                job_with_reading(
+                    &id_of(n),
+                    "r",
+                    &[(path.as_str(), DeliverableAction::Modify)],
+                )
+            })
+            .chain([job_with_reading("20261110-000059-bbbb", "retried", &[])])
+            .collect();
+        let records = records_of(jobs);
+        let cited: Vec<String> = [4, 5, 1, 6, 7, 9, 8].iter().map(|n| id_of(*n)).collect();
+        let attempt = attempt_citing(
+            "20261110-000059-bbbb",
+            RetryCause {
+                cause: cited.join(" "),
+                ..RetryCause::default()
+            },
+        );
+        let request = format!("see {} {} {} {}", id_of(1), id_of(2), id_of(3), id_of(8));
+        let got = referenced_jobs(&records, &request, Some(&attempt), &redactor()).unwrap();
+        let ids: Vec<&str> = got.iter().map(|j| j.job.as_str()).collect();
+        let want: Vec<String> = [1, 2, 3, 4, 5, 6, 7].iter().map(|n| id_of(*n)).collect();
+        assert_eq!(ids, want, "request-named first, then cited");
+        assert_eq!(got.len(), MAX_REFERENCED_JOBS + MAX_CITED_JOBS);
+        assert_eq!(got[3].reading_deliverables, ["modify crates/n4.rs"]);
+        assert_eq!(got[4].reading_deliverables, ["modify crates/n5.rs"]);
+        assert_ne!(got[3].reading_deliverables, got[4].reading_deliverables);
+
+        // The request cap dropped the fourth request-named job; it is carried when the introspection cites it.
+        let attempt = attempt_citing(
+            "20261110-000059-bbbb",
+            RetryCause {
+                cause: id_of(8),
+                ..RetryCause::default()
+            },
+        );
+        let got = referenced_jobs(&records, &request, Some(&attempt), &redactor()).unwrap();
+        let ids: Vec<&str> = got.iter().map(|j| j.job.as_str()).collect();
+        assert_eq!(ids, [id_of(1), id_of(2), id_of(3), id_of(8)]);
+    }
+
+    #[test]
+    fn referenced_jobs_doc_and_changelog_name_the_cause() {
+        let marker = concat!("pub fn ", "referenced_jobs(");
+        let source = include_str!("topics.rs");
+        let at = source.find(marker).unwrap();
+        let mut doc: Vec<&str> = Vec::new();
+        for line in source[..at].lines().rev() {
+            if line.trim_start().starts_with("///") {
+                doc.push(line);
+            } else if !doc.is_empty() {
+                break;
+            }
+        }
+        let doc = doc.join("\n");
+        let phrases = [concat!("never ", "resolved"), concat!("in", "vented")];
+        for phrase in phrases {
+            assert!(doc.contains(phrase), "doc lacks {phrase}: {doc}");
+        }
+        let changelog = include_str!("../../../../CHANGELOG.md");
+        let from = changelog.find("## [Unreleased]").unwrap();
+        let rest = &changelog[from + 5..];
+        let section = &rest[..rest.find("\n## [").unwrap_or(rest.len())];
+        for needle in [
+            "20261109-075120-7zqw",
+            "20261029-111121-fzx0",
+            "20261110-124307-bn3c",
+        ] {
+            assert!(section.contains(needle), "changelog lacks {needle}");
+        }
+        for phrase in phrases {
+            assert!(section.contains(phrase), "changelog lacks {phrase}");
+        }
+    }
 }

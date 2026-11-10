@@ -48,7 +48,7 @@
 //! Run: `cargo test -p athena-core --test refusal_corpus`.
 
 use anyhow::Error;
-use athena_context::briefs::EarlierAttempt;
+use athena_context::briefs::{EarlierAttempt, EarlierCase, RetryCause};
 use athena_core::reading::{refusing_check, request_text_acceptance};
 use athena_core::store::{JobRecords, JobState, Records};
 use athena_data::records::{
@@ -1786,6 +1786,41 @@ fn request_citing_cases() -> Vec<Case> {
         Expected::Accept,
     );
     c.attempt = Some(earlier(RETRIED_JOB, "Check that a cited prior job exists"));
+    c.reading.summary = format!(
+        "Retry of job {RETRIED_JOB}: the rule is re-planned with a corpus of real request shapes."
+    );
+    c.reading.deliverables = vec![deliverable(
+        "crates/athena-core/src/reading.rs",
+        DeliverableAction::Modify,
+    )];
+    c.reading.out_of_scope = vec!["The reader and verifier prompts are not changed".into()];
+    out.push(c);
+    // A job the retried job's introspection cites is carried so the reader sees its recorded shape, but the
+    // reading need not account for it: only the retried job and followed-up jobs are accounted for.
+    let mut c = case(
+        "introspection-cited-job-carried-but-not-relied-on",
+        "job 20261030-060751-5389 retried, its introspection citing job 20261029-111202-2bpc; rebuilt from the job brief",
+        &["retry-complaint"],
+        retry_request,
+        0,
+        Expected::Accept,
+    );
+    let mut retried = earlier(RETRIED_JOB, "Check that a cited prior job exists");
+    retried.introspection = Some(RetryCause {
+        introspection: "20261030-170739-hq09".into(),
+        earlier_cases: vec![EarlierCase {
+            id: "20261029-181811-bs86".into(),
+            job: Some(OTHER_JOB.into()),
+            what: "A rule was planned from an assumed shape".into(),
+            prevention: None,
+        }],
+        ..RetryCause::default()
+    });
+    c.attempt = Some(retried);
+    c.referenced = vec![earlier(
+        OTHER_JOB,
+        "Add parts coverage to reading acceptance",
+    )];
     c.reading.summary = format!(
         "Retry of job {RETRIED_JOB}: the rule is re-planned with a corpus of real request shapes."
     );

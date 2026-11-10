@@ -1,0 +1,313 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261029-111121-fzx0",
+  "round": 2,
+  "at": "2026-11-10T11:09:19.782423022Z",
+  "invocation_seq": 4,
+  "approach": "Add `check_request_coverage(reading, request)` in a new module `crates/athena-core/src/reading/coverage.rs` (declared in reading.rs with `mod coverage;` and `pub use coverage::*;`), wired as ONE `step!` line, last in `refusing_check`. It parses the request's acceptance bullets and refuses, naming every uncovered bullet verbatim, when the union of the reading's criteria does not cover a bullet. REVISED coverage rule (answers finding 1): a bullet is judged only on what is specific to it. (a) If the bullet has distinctive tokens (a whitespace piece, trimmed of quotes, backticks, brackets and trailing punctuation and lowercased, that contains `/`, or starts with `--`, or looks like a file name: an interior `.` whose last part is 2 to 5 ASCII letters and whose first part has 2 or more characters and a letter, so `CHANGELOG.md`, `reading.rs`, `crates.io` count and `e.g`, `v1.2` do not), every one must appear in the lowercased criteria text (AND, no stem fallback); a path token also counts as found when its last `/` segment appears. (b) Otherwise the bullet's specific stems are its stems minus the stems of every OTHER bullet of the request minus the stems of the request's non-bullet lines (a stem counts as shared when it is equal to or related to the other stem); if that set is empty, fall back to the stems minus other bullets, and if still empty, to all of its stems. The bullet is covered when at least ceil(n/2) of its n specific stems are related to a stem of the criteria taken together. Two stems are related when equal, or both have 4+ characters and share a common prefix of at least max(4, shorter length - 1) characters (omit/omitt, accept/acceptance, cover/coverage, refus/refusal). Stems come from the existing `request_words` (outcome.rs:141, field `.text`), minus a short stop list, minus words of 2 or fewer letters, with a trailing `'s`, `ing`, `ed`, `es` or `s` stripped when 4+ letters remain; the crate has no stem or stop-list helper (searched earlier), so coverage.rs defines small ones. Two near-identical bullets that differ only in their object ('A test shows a star bullet is refused' / '... a numbered part is refused') therefore reduce to the object words, which a reading that dropped the second bullet does not contain, so it is refused. Parsing (answers finding 3): every line is trimmed before the heading test, the `Files:` test and `is_bullet` (topics.rs:266 tests the raw line, so indented bullets need the trim; `request_text_acceptance` at topics.rs:278 trims the same way). The heading is a trimmed line that, after removing leading `#`, `*`, `_` and trailing `:`, `*`, `_`, equals `acceptance` or `acceptance criteria` (case-insensitive); bullets are the following trimmed lines for which `is_bullet` holds; a non-bullet line between bullets is a wrapped continuation; the section ends at the first blank line once a bullet was seen or at a `Files:` line. A request without the heading or with no bullets under it asks for nothing. Exemptions: Ok for a reading that declines (`capability` None) or asks a question (`question` Some): a split may be proposed only as that question, never by dropping a bullet. Allowed split (answers finding 2): the request allows a split only when a single sentence of its NON-bullet text (split on `.`, `!`, `?`, `;`, newline; lowercased; punctuation read as spaces; whole words) holds (i) a permission word (`may`, `can`, `could`, `allowed`, `permitted`, `free`, `ok`, `okay`, `fine`, `acceptable`), (ii) the word `split`, `splits` or `splitting`, (iii) a job-word (`job`, `jobs`, `work`, `request`, `change`, `task`) within 40 characters after `split` or, for the passive, within 40 characters before it, and (iv) none of the negating or conditional words `not`, `n't`, `never`, `no`, `only`, `unless`, `if`, `without`, `must`, `cannot`, `forbid`, `forbidden`. 'in parts' and 'separate jobs' alone never allow a split, so 'the log is read in parts' or 'CI runs separate jobs' leave the request checked. This job's own request holds three sentences with 'split': none has a permission word with no negation, so it is still checked. Wiring/docs: step last (after `check_reading_references`) so the neighbour pairs asserted by existing tests do not change; the doc of `check_reading_acceptance` gains a link; the new function's doc names the 2026-10-29 job, the question-only rule, the refusal-rate sentence and the estimate. Corpus: a `coverage_cases()` group with 15 cases, 12 new input-form tags (52 to 64), coverage.rs added to both `reading_source()` lists, and a CHANGELOG item.",
+  "decisions": [
+    {
+      "choice": "Judge a bullet on its specific stems and its distinctive tokens, not on all its words: tokens are required (AND); otherwise at least ceil(n/2) of the stems that no other bullet and no non-bullet request line shares must appear (fuzzy-related) in the union of all criteria.",
+      "reason": "Finding 1: bullets of one request share wording ('A test shows ...'), so counting shared stems lets a dropped bullet ride on its neighbours. Removing the shared stems leaves the words that tell the bullets apart (the object), which a dropped bullet's absence removes. Tokens as AND stops a missing path or file name from passing on common words. The union of criteria is kept because a reading may split one bullet over several criteria (this job's reading does).",
+      "rejected": [
+        {
+          "option": "Keep 'all tokens OR half of all stems'",
+          "why": "Finding 1: a bullet with a missing path token passes on shared common words, and near-identical bullets pass once one is covered."
+        },
+        {
+          "option": "Require one criterion to contain all of a bullet's words",
+          "why": "Refuses readings that legitimately split a bullet over two criteria, such as this job's own reading (criteria 5 and 7)."
+        },
+        {
+          "option": "Ask a model whether each bullet is covered",
+          "why": "Reading checks are deterministic and call no model (checks.rs:219 doc); the check also runs in replay and check-reading with no agent."
+        },
+        {
+          "option": "Require a strict majority (n/2+1) of specific stems",
+          "why": "Heavy paraphrase (this job's own criterion 1 against its bullet 1 shares few words) would be refused; ceil(n/2) with related-stem matching keeps one correction round for real omissions only. If the probe corpus case 'paraphrased criteria' is refused, the producer may lower the share to at least one specific stem; the near-identical and path-token cases still refuse under that rule."
+        }
+      ]
+    },
+    {
+      "choice": "Place the step last in refusing_check, after check_reading_references.",
+      "reason": "Existing tests assert the neighbours of check_outcome_state, check_environment_reach and check_code_survey (reading.rs:4911, 5394, 7417, 8116), so inserting after check_outcome_state breaks them. Last also leaves the first-refusing check of every existing refusing corpus case unchanged. The refusal still happens at reading acceptance, before any producer run.",
+      "rejected": [
+        {
+          "option": "Insert directly after check_outcome_state as the reading assumed",
+          "why": "Breaks the adjacency assertion at reading.rs:5394 (outcome_state then environment_reach) and needs those tests rewritten for no gain."
+        },
+        {
+          "option": "Call the check directly inside check_reading_acceptance",
+          "why": "refusing_check's doc and the corpus test that scans check_reading_acceptance for a direct `check_` call require a step! line, and the corpus needs the name to prove a refusing case."
+        }
+      ]
+    },
+    {
+      "choice": "Read bullets only under an Acceptance heading (trimmed lines; `Acceptance`/`Acceptance criteria`, optional markdown marks and colon), ending at a blank line after a bullet or at a Files: line; a request without the heading is not checked.",
+      "reason": "That is the shape of the failing request and of steward-, Hestia- and user-made requests (steward.rs:581). Bullets elsewhere (background lists) are not acceptance, and scripted-reader tests in other crates whose requests have bullets but no heading stay outside the rule. Trimming each line (finding 3) catches indented bullets because is_bullet tests the raw line. A corpus case pins the no-heading gap as known.",
+      "rejected": [
+        {
+          "option": "Reuse request_text_acceptance (all bullet lines anywhere)",
+          "why": "Treats any list as acceptance and would newly refuse readings in tests and records whose requests carry non-acceptance bullets."
+        },
+        {
+          "option": "Call is_bullet on untrimmed lines",
+          "why": "Misses indented bullets (finding 3); topics.rs:278 trims for the same reason."
+        }
+      ]
+    },
+    {
+      "choice": "The request allows a split only through a sentence of its non-bullet text with a permission word, the word split, a job-word near it and no negating or conditional word; the reading's own question exempts the reading.",
+      "reason": "Finding 2 and the failing request: it uses 'split' and 'follow-up' while forbidding the drop, so a keyword test would switch the check off for the very request it protects; 'in parts' / 'separate jobs' / 'split into' appear in unrelated sentences. Requiring a job-word near 'split' and a permission word keeps unrelated sentences ('the parser may split into tokens') from disabling the check. The question field is the only channel for proposing a split.",
+      "rejected": [
+        {
+          "option": "Exempt any request containing split or follow-up, or the phrase list 'in parts', 'separate jobs', 'split into'",
+          "why": "Matches this job's own request text, the corpus request 'Follow up on job ...' (refusal_corpus.rs:1767) and unrelated sentences, disabling the check where it matters."
+        },
+        {
+          "option": "Let the reading itself declare a split in an assumption or out_of_scope",
+          "why": "That is the mechanism that caused the misread: the reading chose the split."
+        }
+      ]
+    },
+    {
+      "choice": "Name every omitted bullet in one refusal line, marker stripped, text verbatim in quotes, starting 'the reading was refused because'.",
+      "reason": "Matches the other checks' shape (one line, asserted at reading.rs:4702-4706); check_reading_text collapses white space so verbatim text survives. The reader has one correction round, so naming all avoids a second refusal.",
+      "rejected": [
+        {
+          "option": "Name only the first omitted bullet",
+          "why": "A second refusal would follow after the reader's one correction."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/coverage.rs",
+      "action": "create",
+      "purpose": "`check_request_coverage(reading, request) -> Result<()>` with its one-paragraph doc (2026-10-29 job, question-only split, refusal-rate sentence, estimate, limits), the trimmed-line heading-scoped bullet parser, the allow-split sentence test with job-word and negation guards, the stop list, stem and related-stem helpers, distinctive-token extraction and the specific-stem coverage rule. Functions kept short (repo cap 200 lines).",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "purpose": "Add `step!(check_request_coverage(reading, request));` as the last line of `refusing_check`; add the `[`check_request_coverage`]` link to the ordered list in the doc of `check_reading_acceptance`; change 'it runs last in' to 'it runs second to last in' in the doc of `check_boundary_and_repo_files`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Declare `mod coverage;` and `pub use coverage::*;`; add `include_str!(\"reading/coverage.rs\")` to `reading_source()` (line 1491); add the tests for criteria 1, 2, 4, 6, 7 and 8 plus parser and stem unit tests (including indented bullets and the near-identical and path-token cases).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add `include_str!(\"../src/reading/coverage.rs\")` to `reading_source()` (line 2670); add 12 tags to INPUT_FORMS (52 to 64); add `coverage_cases()` with 15 cases and extend `cases()` (line 292).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One item under `## [Unreleased]` / `### Added` naming `reading::check_request_coverage`, what it refuses, its exemptions, that it refuses more readings, that the higher refusal rate is intended and 'expected 10% of newly refused readings' (an estimate).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Create crates/athena-core/src/reading/coverage.rs starting with `use super::*;` (is_bullet and request_words are pub(super) and reached through the parent's glob imports, as terms.rs and outcome.rs do; `RequestWord.text` is the word). Write small functions (each under 60 lines): `acceptance_bullets(request) -> Vec<String>` (trim every line first; find the heading line: strip leading `#`/`*`/`_`/spaces and trailing `:`/`*`/`_`, lowercase, equals `acceptance` or `acceptance criteria`; then collect trimmed lines with `is_bullet`; skip a non-bullet line between bullets; stop at the first blank line once a bullet was seen or at a trimmed line that starts `files:` case-insensitively; return the bullets with the marker removed by `bullet_body`); `bullet_body(line) -> &str` (strip `- `, `* `, `N. `); `non_bullet_text(request) -> String` (every trimmed line that is not an `is_bullet` line); `allows_split(request) -> bool` (sentences of the non-bullet text split on `.!?;` and newline, lowercased, punctuation to spaces, whole-word match: permission word in {may, can, could, allowed, permitted, free, ok, okay, fine, acceptable}, a word `split`/`splits`/`splitting`, a job-word in {job, jobs, work, request, change, task} within 40 characters after `split` or before it, and none of {not, n't, never, no, only, unless, if, without, must, cannot, forbid, forbidden}; 'in parts' and 'separate jobs' alone never allow); `stems(text) -> Vec<String>` (via `request_words`, remove a trailing `'s`, small stop list including that, the, and, with, for, from, into, them, all, one, any, are, has, have, not, its, this, but, only, each, every, also, when, then, than, was, were, will; drop words of 2 or fewer letters; strip `ing`, `ed`, `es`, `s` when 4+ letters remain; dedupe); `related(a, b) -> bool` (equal, or both 4+ chars and common prefix at least max(4, shorter length - 1)); `distinctive_tokens(body) -> Vec<String>` (whitespace pieces trimmed of quotes, backticks, brackets and trailing `.,;:!?`, lowercased; keep those containing `/`, starting `--`, or file-name-like: interior `.`, last part 2 to 5 ASCII letters, first part 2+ chars with a letter); `token_found(token, criteria_lower) -> bool` (whole token, or for a `/` token its last segment); `specific_stems(body, other_bodies, context) -> Vec<String>` with the two fallbacks; `is_covered(...)`: tokens non-empty -> all found; otherwise count of specific stems related to some criteria stem is at least ceil(n/2). `pub fn check_request_coverage(reading: &Reading, request: &str) -> Result<()>` returns Ok when `reading.capability.is_none()`, `reading.question.is_some()`, there are no bullets, or `allows_split(request)`; otherwise it collects the uncovered bullets and, if any, bails with one line: `the reading was refused because its acceptance criteria leave out <n> of the request's <total> acceptance bullets: \"<bullet>\"; ... Cover each one in a criterion, or, if the job is too large for one run, ask the split as a question; a reading may not drop a bullet into a follow-up`. Give it one `///` paragraph with no blank `///` line holding: the root cause (the 2026-10-29 job, described in the request of job 20261029-111121-fzx0, passed its checks and the verifier and was rejected for a split the reading chose; nothing compared the reading's criteria with the request's bullets), how a bullet is read and judged, the exemptions, 'a split may be proposed only as a question, never by dropping a bullet', 'This check refuses more readings; the higher refusal rate is intended.', that 'expected 10% of newly refused readings' is an estimate, not a measurement, and the limits of the rule.",
+    "In crates/athena-core/src/reading.rs add `mod coverage;` (after `mod checks;`) and `pub use coverage::*;`, and add `include_str!(\"reading/coverage.rs\")` to the list in `reading_source()` (line 1491). Add the tests near the other check tests, building readings with `governed_reading` (line 4527) and requests as plain string constants: parser unit tests (dash, star, `1.` bullets under `Acceptance:`, `Acceptance criteria:`, `## Acceptance`, `**Acceptance:**`, an indented two-space bullet is found, stop at a blank line and at `Files:`, a bullet after the section ignored, `1)` ignored, no heading gives nothing); stem and related-stem unit tests; `request_coverage_refuses_an_omitted_bullet_and_accepts_full_coverage` (cases A to D of criterion 1); `request_coverage_lets_a_request_that_allows_a_split_through` (cases a, a2, b, c, d, e and the question case, including this job's own request text); `request_coverage_has_one_step_line`; `request_coverage_refusal_is_declared_intended`; `request_coverage_doc_and_changelog_name_the_cause`.",
+    "In crates/athena-core/src/reading/checks.rs: append `    step!(check_request_coverage(reading, request));` after the `check_reading_references` step line (line 546); extend the ordered list in the doc of `check_reading_acceptance` (lines 475-489) with 'then the acceptance bullets of the request that the criteria leave out ([`check_request_coverage`])'; in the doc of `check_boundary_and_repo_files` change 'it runs last in' to 'it runs second to last in' (line 219).",
+    "In crates/athena-core/tests/refusal_corpus.rs: add `include_str!(\"../src/reading/coverage.rs\")` to `reading_source()` (line 2670); add the 12 new tags (acceptance-bullet-omitted, near-identical-bullets-one-omitted, path-token-bullet-omitted, acceptance-bullet-covered-across-criteria, paraphrased-criteria-cover-bullets, request-allows-split, request-mentions-split-without-allowing, non-permitting-split-wording, split-proposed-as-question, no-acceptance-heading, bullet-after-acceptance-section, indented-bullet) to `INPUT_FORMS` and change its length from 52 to 64 (line 90); add `fn coverage_cases() -> Vec<Case>` with the 15 cases of the criterion-3 demonstration (use `case(..)`, then edit `c.reading.acceptance_criteria`, `c.reading.question` or the request; give each a source string and its `bullets_expected` as `request_text_acceptance` counts it, every bullet line of the request) and add `out.extend(coverage_cases());` to `cases()` (line 292). For the first case use this job's request text verbatim (Priority line, paragraph, `Acceptance:`, the two bullets, `Files:` line) with source 'job 20261029-111121-fzx0, its request, verbatim'; the reading drops the second criterion. For the paraphrase probe use this job's reading criteria 1 to 8 in their own words against the verbatim bullets.",
+    "In CHANGELOG.md add one item under `## [Unreleased]` / `### Added` (after line 15): the new check `reading::check_request_coverage` in crates/athena-core/src/reading/coverage.rs, its step at the end of `refusing_check`, what it refuses (a reading whose criteria leave out an acceptance bullet of the request, with the bullet named) and its exemptions (a request that affirmatively allows a split; a reading that asks a question or declines), that it refuses more readings, that the higher refusal rate is intended, and 'expected 10% of newly refused readings' as an estimate the replay does not measure.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test -p athena-core --test refusal_corpus`, then `cargo test --locked`. For any test the new check newly refuses, change that fixture's criteria so they repeat the bullets; do not weaken the check. If the verbatim first corpus case is refused by an earlier check, rebuild it from the same two bullets and say so in its `source`. If only the paraphrase probe case is refused, lower the share of specific stems to at least one (the one permitted tuning) and keep the near-identical and path-token cases refusing."
+  ],
+  "risks": [
+    {
+      "risk": "Existing tests or fixtures with an `Acceptance:` heading and a reading whose criteria do not repeat the bullets are newly refused (hestia.rs, steward.rs, code_health.rs, cli tests with a scripted reader). The planner could not run the suite.",
+      "mitigation": "The check is scoped to the heading and identical text is always covered (all tokens and all stems occur). Step 6 has the producer run `cargo test --locked` and, for any test newly refused, change that fixture's criteria to repeat the bullet (never relax the check). The files with a heading are known: steward.rs, hestia.rs, code_health.rs, reading.rs, refusal_corpus.rs."
+    },
+    {
+      "risk": "False refusals: a reading that paraphrases a bullet with few words in common with its specific stems, or gives a bare file name where the bullet gives a path, is refused although it covers the bullet. The stricter rule (finding 1) raises this risk compared with the old OR rule.",
+      "mitigation": "A path token also matches by its last `/` segment; stems match by related prefix (omit/omitted, accept/acceptance); the share is ceil(n/2) of specific stems over the union of all criteria; questions and declines are exempt. The refusal text names the bullet and the question route, so one correction round repairs it. The probe corpus case 'paraphrased-criteria-cover-bullets' (this job's own reading) shows the rule is not over-strict; if it is refused, the producer lowers the share to at least one specific stem, which still refuses the near-identical and path-token cases. The doc states the limits. The declared 10% (an estimate) lets the replay pass this rule."
+    },
+    {
+      "risk": "False acceptance: a dropped bullet whose specific words all occur in other criteria, or a bullet with tokens whose other half is dropped (tokens are required, stems then not checked), is judged covered.",
+      "mitigation": "Accepted by design: the target is the wholesale drop that caused the 2026-10-29 rejection, including the realistic case of near-identical sibling bullets, which the near-identical and path-token tests and corpus cases pin. The limit is written in the doc comment."
+    },
+    {
+      "risk": "The reader is not told of the rule, so the first reading of an affected job can be refused (reader prompt set has 2 tokens of headroom; prompts are out of scope).",
+      "mitigation": "The refusal reaches the reader as its one correction (reading.rs:740-761) and names the bullet and the question route."
+    },
+    {
+      "risk": "The verbatim request in the first corpus case could be refused first by another check (for example check_defined_terms or check_outcome_state) because of its wording, hiding the new check.",
+      "mitigation": "The new step is last, so an earlier refusal shows in `corpus_cases_get_the_expected_outcome` as 'refused by <other check>'. The request uses no ladder, tier, layer or rung word, no delivery verb and no job id (read from the brief). If one still refuses, step 4 rebuilds the case from the same two bullets and says so in its `source` string, keeping the omitted-bullet and split-words shape."
+    },
+    {
+      "risk": "The id of the rejected 2026-10-29 job is in no file the planner can read (HISTORY.txt and the repository hold no record of it), so the doc cannot cite it by id.",
+      "mitigation": "The doc names the date and the request of job 20261029-111121-fzx0 that describes it; the doc test asserts the date string and the phrase, not an id."
+    },
+    {
+      "risk": "The allow-split sentence test can still wrongly allow a request such as 'The parser may split lines in this job' (permission word, split, job-word, no negation).",
+      "mitigation": "The job-word must lie within 40 characters of `split` and `into tokens`-style sentences without a job-word stay checked; the case is rare, errs toward accepting (no wasted run), and the corpus pins the unrelated-wording case that matters (non-permitting-split-wording)."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusing_check step list (new last step)",
+      "dependent": "crates/athena-core/src/reading/checks.rs `refusing_check` (callers: `check_reading_acceptance` checks.rs:497; `read_once` reading.rs:722 feeding the refusal back as the reader's one correction; refusal_corpus.rs `run` :2595; about 77 uses in reading.rs tests)",
+      "kind": "code",
+      "test": "cargo test -p athena-core (reading.rs tests that use requests without an `Acceptance:` heading are untouched because the check returns Ok without a heading); cargo test -p athena-core --test refusal_corpus",
+      "reason": null
+    },
+    {
+      "name": "check_reading_acceptance now also refuses an uncovered acceptance bullet",
+      "dependent": "crates/athena-core/src/reading/replay.rs `check_reading_text` (replay.rs:54) used by `athena check-reading` (crates/athena-cli/src/main.rs:682), the replay of accepted readings (BinaryChecker, replay.rs:101), `queued_work` (steward.rs:424), crates/athena-core/src/run/tests.rs:1817,1824,2142, crates/athena-cli/tests/drain.rs:4431,4451",
+      "kind": "code",
+      "test": "cargo test --locked: steward.rs `a_stored_reading_that_fails_a_reading_check_is_left_for_a_person` (:2600) and the `queued_work` tests using REREAD_REQUEST (steward.rs:2430; stored criterion 'the greeting prints' equals the bullet, so identical text is covered); refusal_corpus.rs `queued_work_holds_a_proposed_request_whose_stored_reading_leaves_a_term_undefined` (:1644; criteria equal the bullet); drain.rs :4431/:4451 use UNREAD_FIRST/UNREAD_SECOND, which carry no `Acceptance:` heading. The new rule treats identical text as covered by construction (every bullet token and every stem occurs in the criteria), which the unit tests assert.",
+      "reason": null
+    },
+    {
+      "name": "newly refused share of accepted readings",
+      "dependent": "The verification replay of accepted readings (REPLAY_HOLD_PERCENT = 10, replay.rs:13; `replay_declaration`)",
+      "kind": "rule",
+      "test": "request_coverage_refusal_is_declared_intended parses 'expected 10% of newly refused readings' to Some(10). The share is an estimate: the replay passes no repository, and stored readings of steward- or Hestia-made requests (which carry the heading) are the ones that can newly refuse.",
+      "reason": null
+    },
+    {
+      "name": "order of step! lines in refusing_check",
+      "dependent": "Step-order tests in reading.rs :4911 (governance then outcome_state), :5394 (outcome_state then environment_reach), :7417 (environment_reach then defined_terms), :8116 (code_survey then history_fixture), :8486 (one scope_limit line); refusal_corpus.rs `an_extra_check_with_no_case_is_reported` (anchor `    step!(check_reading_references(` at :2752)",
+      "kind": "code",
+      "test": null,
+      "reason": "The new step is appended after check_reading_references, so no asserted neighbour pair changes and the anchor line stays. The doctored source in the anchor test gets `check_new_rule` inserted before the anchor, so names.len() still rises by one."
+    },
+    {
+      "name": "the corpus coverage rule for step! checks, input-form tags and source lists",
+      "dependent": "refusal_corpus.rs `every_acceptance_check_has_a_refusing_corpus_case` (:2730), `corpus_covers_the_listed_input_forms` (INPUT_FORMS, :90), and `reading_source()` in refusal_corpus.rs:2670 and reading.rs:1491 (include_str! lists of the reading modules)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus; steps 2 and 4 add coverage.rs to both lists, 12 tags to INPUT_FORMS (length 52 to 64) and the cases give `check_request_coverage` refusing cases.",
+      "reason": null
+    },
+    {
+      "name": "accepted corpus cases with a heading",
+      "dependent": "Corpus cases with an `Acceptance:` heading and an Accept expectation: root_cause_request users (refusal_corpus.rs:1351, 1558, 1754, 1767), generated requests (`hestia::root_cause_request` :1174, `approve_request` :1216) and parser case `steward-three-dash-bullets` (:1677)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus (`corpus_cases_get_the_expected_outcome`)",
+      "reason": "They are built with `case(..)`/`base_reading(request)`, whose criteria are the request's bullet lines verbatim, so every bullet is covered by identical text; cases that change a field only add criteria (`with_behavior` appends, refusal_corpus.rs:704)."
+    },
+    {
+      "name": "requests with an Acceptance heading made by Hestia, the steward and code health",
+      "dependent": "crates/athena-core/src/hestia.rs tests whose request has an `Acceptance:` heading (hestia.rs:4764, 5036, 5920, 7319, 7324, 7411, 7417), steward.rs:1553, 1610, code_health.rs:1362",
+      "kind": "code",
+      "test": "cargo test --locked (step 6: any full `go` path with a scripted reader that the new check refuses gets criteria that repeat the bullet; the check is not weakened)",
+      "reason": "These tests build, queue or render requests and assert on the text or on records; none was seen calling the reading gate with a scripted reading in the lines read. Short Hestia bullets (hestia.rs:4764 'The output is whole') are judged on their specific stems, falling back to all stems; a reading that repeats the bullet is covered."
+    },
+    {
+      "name": "reader prompt rule list",
+      "dependent": "crates/athena-context/src/briefs.rs `the_reader_brief_names_each_reading_rule_in_one_short_line` (:3474, fixed list of 9 checks) and the reader prompt set budget (system-facts: reader 1998 of 2000)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The list is a fixed set of named checks; `check_outcome_state` and `check_history_fixture` are already steps not in it, so a new step needs no line. Changing reader prompts is out of scope (2 tokens of headroom); the reader learns of the rule from the refusal, its one correction."
+    },
+    {
+      "name": "CHANGELOG.md Unreleased section",
+      "dependent": "CHANGELOG.md `## [Unreleased]` parsers in reading.rs tests (:5422, :6852, :7531, :8509) and refusal_corpus.rs tests using `include_str!(\"../../../CHANGELOG.md\")`",
+      "kind": "code",
+      "test": "cargo test -p athena-core request_coverage_doc_and_changelog_name_the_cause",
+      "reason": "Each test looks up its own item by a check name or phrase; the new item starts with `- ` in `### Added` and uses the name `reading::check_request_coverage`, which no other test searches for."
+    },
+    {
+      "name": "doc sentence that names the last check",
+      "dependent": "doc of `check_boundary_and_repo_files` in checks.rs ('it runs last in [`check_reading_acceptance`]', :219)",
+      "kind": "code",
+      "test": null,
+      "reason": "Only the doc states it (grep for 'runs last' over crates/ found this one line; no test asserts it). Step 3 changes it to 'it runs second to last' so it stays true."
+    },
+    {
+      "name": "helpers reused unchanged",
+      "dependent": "crates/athena-core/src/reading/topics.rs `is_bullet` (:266, raw line, not trimmed) and `request_text_acceptance` (:276), outcome.rs `request_words` (:141) and `RequestWord.text` (:122)",
+      "kind": "code",
+      "test": null,
+      "reason": "Read, not modified. `athena plan` and the corpus `bullets_expected` still use `request_text_acceptance`, so the plan parse and corpus counts do not move. The new parser trims each line before `is_bullet` to match that function's behavior."
+    },
+    {
+      "name": "refusal rule name `check_request_coverage`",
+      "dependent": "`ReadingRefusal { rule, text }` (reading.rs:754-760) stores the rule name as the step's `stringify!` name",
+      "kind": "code",
+      "test": null,
+      "reason": "The rule field is a free string (OTHER_READING_RULE = \"other\" is the only constant, athena-data records.rs:690); no enumerated list of rule names exists. No record format or schema changes, so check_record_file, AnyRecord and the round-trip test are untouched."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in the tests module of crates/athena-core/src/reading.rs. Case A (distinct wording): request with an `Acceptance:` heading and bullets 'A reading that omits a bullet is refused naming the bullet' and 'CHANGELOG.md has an Unreleased entry'; a reading with one criterion covering only the first gets Err whose text contains the second bullet verbatim and starts 'the reading was refused because'; `refusing_check` on it returns the name `check_request_coverage`. Case B (the hard case of finding 1): bullets 'A test shows a star bullet is refused' and 'A test shows a numbered part is refused' under a request with one context line; the reading's only criterion is the first bullet; Err naming the second bullet. Case C (token): bullets 'docs/guide.md is documented' and 'docs/notes.md is documented'; the reading covers only the first; Err naming the second (shared words alone would not have covered it under the old OR rule). Case D: for each of A, B and C a reading with criteria covering both (one criterion paraphrased in A) returns Ok. Plus unit tests of the parser: dash, star and `1.` bullets, an indented (two-space) bullet found, headings `Acceptance:`, `Acceptance criteria:`, `## Acceptance`, `**Acceptance:**`, stop at a blank line and at `Files:`, a bullet after the section ignored, `1)` parts ignored, no heading gives nothing; and of the stem rule (related stems omit/omitted, shared stems removed, empty specific set falls back).",
+      "command": "cargo test -p athena-core request_coverage_refuses_an_omitted_bullet_and_accepts_full_coverage",
+      "observes": "The omitting readings return Err naming the omitted bullet in all three shapes, including the near-identical and path-token ones; the covering readings return Ok.",
+      "fails_without": "Without the step, check_reading_acceptance returns Ok for each omitting reading, so the `unwrap_err()` panics; under the old 'tokens OR half of all stems' rule, case B and case C are accepted and the test fails.",
+      "seam": "Production entry points `check_reading_acceptance(&reading, request, None, &[], None)` (checks.rs:490) and `refusing_check` (checks.rs:518). Fixture `governed_reading(&[\"docs/guide.md\"], &[criteria], &[])` (reading.rs:4527, exists, passes every earlier step with repo_files None). The request is a plain string argument; no double. `check_request_coverage` and its step line are added by plan steps 1 and 3."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test `request_coverage_lets_a_request_that_allows_a_split_through` in reading.rs. The same omitting reading is run against: (a) the request plus 'You may split this job into parts.' -> Ok; (a2) plus 'The work can be split into follow-ups.' (passive form) -> Ok; (b) plus 'Do not split this job.' -> Err naming the bullet; (c) the text of this job's request (says 'split' and 'follow-up', allows nothing) -> Err; (d) plus 'The log is read in parts and the parser may split into tokens.' (finding 2: unrelated wording) -> Err; (e) plus 'If it is large you may split this job.' -> Err (conditional); and the omitting reading with `question = Some(..)` against the unmodified request -> Ok.",
+      "command": "cargo test -p athena-core request_coverage_lets_a_request_that_allows_a_split_through",
+      "observes": "Only an affirmative, unnegated permission to split the job or work in the request's own text, or a question in the reading, lets a bullet be uncovered; unrelated 'in parts' or 'split into' sentences do not.",
+      "fails_without": "Without the allow-split rule (a) and (a2) are refused; without the negation guard (b) is accepted; with a bare 'split' keyword, (c) is accepted; with the old phrase list, (d) is accepted.",
+      "seam": "`check_reading_acceptance` with request strings as arguments; reading from `governed_reading(..)` (exists, reading.rs:4527) with `question` set in the question case. No double."
+    },
+    {
+      "criterion": 3,
+      "method": "`coverage_cases()` in crates/athena-core/tests/refusal_corpus.rs added to `cases()`; each starts from `case(..)`/`base_reading(request)` (criteria are the request's bullet lines verbatim; exist, refusal_corpus.rs:161, 230) and edits one field. Ids, outcomes and tags: request-coverage-omitted-bullet-in-job-fzx0-request (this job's request verbatim, second criterion removed; Refuse `check_request_coverage`; dash-bullet, acceptance-bullet-omitted, request-mentions-split-without-allowing); request-coverage-all-bullets-covered-in-job-fzx0-request (Accept); request-coverage-paraphrased-criteria-cover-bullets (this job's real criteria 1 to 8 in its reading's own words against the bullets; Accept; paraphrased-criteria-cover-bullets; a leniency probe); request-coverage-near-identical-bullets-one-omitted (Refuse; near-identical-bullets-one-omitted); request-coverage-path-token-bullet-omitted (docs/guide.md vs docs/notes.md; Refuse; path-token-bullet-omitted); request-coverage-numbered-parts-one-omitted (`1.`/`2.`/`3.`, part 2 dropped; Refuse; number-dot-parts); request-coverage-indented-bullet-omitted (two-space-indented bullets; Refuse; indented-bullet); request-coverage-star-bullets-covered-by-one-merged-criterion (Accept; star-bullet, acceptance-bullet-covered-across-criteria); request-coverage-request-allows-split (Accept; request-allows-split); request-coverage-request-forbids-split (Refuse; request-mentions-split-without-allowing); request-coverage-non-permitting-split-wording (the 'in parts' and 'may split into tokens' sentence; Refuse; non-permitting-split-wording); request-coverage-reading-asks-the-split-as-a-question (Accept; split-proposed-as-question); request-coverage-no-heading-not-read-today (Accept; no-acceptance-heading; known gap like `numbered-paren-parts-not-read-today`); request-coverage-paren-parts-under-heading-not-read-today (`1)` parts, 0 bullets; Accept; number-paren-parts); request-coverage-bullet-after-the-section-is-not-acceptance (Accept; bullet-after-acceptance-section). Each case pins `bullets_expected` as `request_text_acceptance` counts it. Input-form map for existing forms: dash/star/`1.` bullets -> `steward-three-dash-bullets` (:1677) plus the new cases; `1)` and `(a)` parts without a heading -> `numbered-paren-parts-not-read-today` (:1719), `lettered-paren-parts-not-read-today` (:1732); a request that cites a job without relying on it -> `root-cause-cites-two-jobs-without-relying` (:1751) and `follow-up-on-a-job-the-reading-ignores` (:1764, still refused earlier by `check_prior_result_and_scope`); retry complaint, crate-relative or governance path, brand word, environment variable -> read as ordinary words only inside bullets and covered by identical text, so each existing case in the file keeps its outcome (producer confirms by the run). 12 new tags are added to `INPUT_FORMS` (52 to 64).",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "`corpus_cases_get_the_expected_outcome` gives the stated outcome for every case; `every_acceptance_check_has_a_refusing_corpus_case` finds `check_request_coverage` among the refusing checks; `corpus_covers_the_listed_input_forms` finds the 12 new tags held; `the_wrapper_agrees_with_refusing_check_on_every_case` agrees on error text.",
+      "fails_without": "Without the step the coverage check is invisible to `every_acceptance_check_has_a_refusing_corpus_case`; with the step but no case it fails by naming `check_request_coverage`; with the check removed the Refuse cases are accepted.",
+      "seam": "Production entry point `athena_core::reading::refusing_check` via `run(c)` (refusal_corpus.rs:2595, exists). Fixtures `case(..)` and `base_reading(..)` exist. `reading_source()` (refusal_corpus.rs:2670) gains `include_str!(\"../src/reading/coverage.rs\")` (step 4). No double; the check's result is never stubbed."
+    },
+    {
+      "criterion": 4,
+      "method": "Test `request_coverage_has_one_step_line` in reading.rs, modelled on `environment_reach_has_one_step_line` (reading.rs:5376): takes the body of `refusing_check` from `reading_source()`, asserts exactly one line equals `step!(check_request_coverage(reading, request));`, that it follows `step!(check_reading_references(reading, repo_files));`, and that the text before `pub fn check_reading_acceptance(` contains \"[`check_request_coverage`]\". Also Grep `step!(check_request_coverage` over crates/athena-core/src/reading/checks.rs: one line.",
+      "command": "cargo test -p athena-core request_coverage_has_one_step_line",
+      "observes": "One step line, last, and the doc link; the existing corpus test that scans check_reading_acceptance for a direct check call still passes.",
+      "fails_without": "A direct call or a missing doc link fails the equality or `contains` assertion.",
+      "seam": "Source text via `reading_source()` (reading.rs:1491, exists; step 2 adds coverage.rs to its list). No double."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three checks over the whole workspace; the producer first fixes any fixture the new check newly refuses by making its criteria repeat the bullet (never relaxing the check).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0; the full run includes the other crates that reach check_reading_acceptance (cli drain tests, steward, run tests, hestia).",
+      "fails_without": "Any formatting difference, warning or failing test makes the command exit non-zero.",
+      "seam": "The cargo commands themselves; no fixture is added for this criterion."
+    },
+    {
+      "criterion": 6,
+      "method": "Test `request_coverage_refusal_is_declared_intended` in reading.rs: (1) `replay_declaration` on a behavior criterion 'The change refuses more readings: expected 10% of newly refused readings' gives `share == Some(10)`; (2) a reading that `refusing_check` accepts against a request with no `Acceptance:` heading (None) is refused with name `check_request_coverage` once the request has a heading and a bullet the reading omits, so the refusal rate rises by this check alone.",
+      "command": "cargo test -p athena-core request_coverage_refusal_is_declared_intended",
+      "observes": "The declared share parses as 10; the same reading flips from accepted to refused by the new check.",
+      "fails_without": "Without the check the second half returns None and `assert_eq!(name, \"check_request_coverage\")` fails; without the declared sentence the share is None.",
+      "seam": "`replay_declaration` (exists, used at refusal_corpus.rs:2773) and `refusing_check` with `governed_reading` (exists). No double. The 10% is an estimate, not a measurement, and is labelled so in the doc and the changelog."
+    },
+    {
+      "criterion": 7,
+      "method": "Add one item under `## [Unreleased]` / `### Added` in CHANGELOG.md naming `reading::check_request_coverage`, what it refuses, its exemptions, 'refuses more readings', 'higher refusal rate is intended' and 'expected 10% of newly refused readings' (an estimate). The test, modelled on `scope_limit_doc_and_changelog_name_the_cause` (reading.rs:8493), parses the Unreleased items, collapses white space and asserts the item holds those phrases.",
+      "command": "cargo test -p athena-core request_coverage_doc_and_changelog_name_the_cause",
+      "observes": "The Unreleased item exists and carries the four phrases.",
+      "fails_without": "A missing or reworded item fails the `contains` assertions.",
+      "seam": "`include_str!(\"../../../CHANGELOG.md\")` in the test, as sibling tests do (exists). No double."
+    },
+    {
+      "criterion": 8,
+      "method": "The same test collapses the `///` lines above `pub fn check_request_coverage(` taken from `reading_source()` and asserts they hold '2026-10-29', 'rejected for a split the reading chose', 'only as a question, never by dropping a bullet', 'This check refuses more readings; the higher refusal rate is intended.' and 'estimate'. The doc is one paragraph with no blank `///` line and also states the limits of the rule (a paraphrase sharing no specific word is refused; a bullet is judged on the words and tokens that tell it from the other bullets).",
+      "command": "cargo test -p athena-core request_coverage_doc_and_changelog_name_the_cause",
+      "observes": "The doc comment of the new check names the 2026-10-29 job and states the question-only rule.",
+      "fails_without": "A missing phrase, or coverage.rs absent from `reading_source()`, fails the test.",
+      "seam": "Source text via `reading_source()`, extended in step 2 with coverage.rs. No double."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "a17b31a66c0065f955e5860c3f3cad7352effedfed351b661e8eb88b48e12b5e"
+}

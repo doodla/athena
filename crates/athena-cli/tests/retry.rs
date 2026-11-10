@@ -216,6 +216,54 @@ fn a_retry_starts_from_the_introspection_and_shows_earlier_cases_and_tried_preve
 }
 
 #[test]
+fn a_retry_resolves_the_cited_earlier_case_job_to_its_recorded_deliverables() {
+    use athena_data::records::DeliverableAction;
+    let model = Model::default();
+    let (fx, athena) = setup(&model);
+    let (first, second) = two_cases(&model, &athena);
+    // The retry request names only `second`; `first` is linked only by the introspection's earlier case.
+    athena.retry(&second, &Lines::default()).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let recorded: Vec<String> = records.jobs[first.as_str()]
+        .latest_reading()
+        .expect("the first job was read")
+        .deliverables
+        .iter()
+        .map(|d| {
+            let action = match d.action {
+                DeliverableAction::Create => "create",
+                DeliverableAction::Modify => "modify",
+                DeliverableAction::Delete => "delete",
+            };
+            format!("> {action} {}", d.path)
+        })
+        .collect();
+    assert!(!recorded.is_empty());
+
+    let brief = model.last_brief();
+    let start = brief.find("# Referenced jobs").unwrap_or_else(|| {
+        panic!("no Referenced jobs section for the cited job:\n{brief}");
+    });
+    let rest = &brief[start + 2..];
+    let section = &rest[..rest.find("\n# ").unwrap_or(rest.len())];
+    assert!(section.contains(&format!("Job {first}.")), "{section}");
+    assert!(section.contains("Deliverables it listed"), "{section}");
+    for line in &recorded {
+        assert!(section.contains(line.as_str()), "{line}\n{section}");
+    }
+    // The prior-result section holds one `Job ` line for the retried job and one for the cited job.
+    let prior = &brief[brief.find("# Previous result and change scope").unwrap()..];
+    let prior = &prior[..prior[2..].find("\n# ").map_or(prior.len(), |n| n + 2)];
+    for job in [&first, &second] {
+        let n = prior
+            .lines()
+            .filter(|l| l.starts_with(&format!("Job {job}:")))
+            .count();
+        assert_eq!(n, 1, "{job}\n{prior}");
+    }
+}
+
+#[test]
 fn a_job_with_no_earlier_case_says_so() {
     let model = Model::default();
     let (_fx, athena) = setup(&model);
