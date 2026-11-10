@@ -1184,3 +1184,122 @@ fn a_rejected_job_can_be_retried_twice() {
 
     assert_ne!(first.job, second.job);
 }
+
+/// The detail the driver gives an agent whose login expired, built by the code that builds it in production.
+fn expired_login_detail() -> String {
+    let line = json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": true,
+        "result": "Failed to authenticate. API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth access token has expired. Please obtain a new token or refresh your existing token.\"}}",
+    })
+    .to_string();
+    let mut state = athena_agent::stream::StreamState::default();
+    state.on_line(&line);
+    let result = state.result.expect("the line is a result event");
+    let at = jiff::Timestamp::UNIX_EPOCH;
+    athena_agent::claude::output_from_result(&result, "model", at, at, 0.0, Vec::new())
+        .detail
+        .expect("an error result has a detail")
+}
+
+#[test]
+fn retrying_a_login_expiry_stop_resumes_from_the_kept_work() {
+    // The first producer edits two files and then ends on an expired login; later producers record what
+    // they see and finish normally. The reading lists both files, so the retry's reading is accepted.
+    let fx = Fixture::new();
+    let scenario = Scenario {
+        reading: reading(
+            &[("README.md", "modify"), ("src/partial.rs", "create")],
+            &[
+                ("content", "README.md ends with a greeting line"),
+                ("behavior", "the tests still pass"),
+            ],
+        ),
+        ..Scenario::default()
+    };
+    let base = scenario.script();
+    let seen: Arc<Mutex<Vec<(bool, String)>>> = Arc::default();
+    let runs = Arc::new(Mutex::new(0u32));
+    let record = seen.clone();
+    let detail = expired_login_detail();
+    let script: Script = Box::new(move |spec| {
+        let mut turn = base(spec);
+        if spec.role == Role::Producer {
+            let mut runs = runs.lock().unwrap();
+            *runs += 1;
+            if *runs == 1 {
+                turn.outcome = InvocationOutcome::Error;
+                turn.structured = None;
+                turn.detail = Some(detail.clone());
+                turn.edits = vec![
+                    ("src/partial.rs".into(), Some("// half done\n".into())),
+                    ("README.md".into(), Some("# Demo\n\nHello\n".into())),
+                ];
+            } else {
+                record.lock().unwrap().push((
+                    spec.workdir.join("src/partial.rs").exists(),
+                    spec.user_prompt.clone(),
+                ));
+            }
+        }
+        turn
+    });
+    let athena = fx.athena(script);
+    let first = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let stopped = run_retry(&athena, first.job.as_str());
+    // An environment stop, with the producer's edits kept as a candidate.
+    assert_eq!(stopped.state, OutcomeState::Failed, "{}", stopped.reason);
+    assert!(
+        stopped
+            .reason
+            .starts_with("environment: producer login expired"),
+        "{}",
+        stopped.reason
+    );
+    let short = stopped
+        .reason
+        .split("kept as candidate ")
+        .nth(1)
+        .expect("the reason names the kept candidate")
+        .to_string();
+    assert!(
+        athena.check_history().unwrap().violations.is_empty(),
+        "the records of the stopped job pass the history check"
+    );
+
+    let (second, _) = athena.retry(first.job.as_str(), &Lines::default()).unwrap();
+    assert_ne!(second.job, first.job);
+    let done = run_retry(&athena, second.job.as_str());
+    assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "one producer ran after the stop");
+        let (had_file, brief) = &seen[0];
+        assert!(
+            *had_file,
+            "the earlier edit is in the retry's working directory"
+        );
+        assert!(brief.contains("## Resume"), "{brief}");
+        assert!(brief.contains(first.job.as_str()), "{brief}");
+        assert!(
+            brief.contains(&format!("kept as candidate {short}")),
+            "{brief}"
+        );
+        assert!(
+            brief.contains("src/partial.rs") && brief.contains("API Error: 401"),
+            "the progress note names the file and the cause: {brief}"
+        );
+        assert!(!brief.contains("reached its deadline"), "{brief}");
+    }
+    // The first run's file lands with the retry, and no work tree was moved aside.
+    assert_eq!(fx.file("src/partial.rs").as_deref(), Some("// half done\n"));
+    assert!(
+        !fx.state
+            .path()
+            .join("repo/kept")
+            .join(first.job.as_str())
+            .exists()
+    );
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}

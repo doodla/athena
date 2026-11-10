@@ -1,0 +1,173 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261028-112841-hx35",
+  "base_commit": "d6083bafe5a1842e617907fb5b3109db57e04c79",
+  "base_fingerprint": "sha256:0ac8790d9c50a32196c9a76324e59c857bd389dc6fffea65f63d60b5546a4225",
+  "previous_job": "20261027-203105-vznw",
+  "candidate_commit": "e47eb46be3150fbb3e9a7e9eb4dc3eb9669518fe",
+  "candidate_tree": "2cd4d8985a073e935cd49a9b2d2aaf7b887d65d4",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 411461
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 54100
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 48799
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 180986
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 86429
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 114304
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31929
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 317438
+    }
+  ],
+  "fingerprint": "sha256:da09beaeecfd272118f7efeb0ab9d3ca49602fe97937b76657a4c3f9da303341",
+  "violations": [],
+  "producer_report": {
+    "summary": "An expired model login (API Error 401) now ends a producer as an environment stop with its edits kept, and `athena retry` resumes from them. The driver also retries a 401 call once after 30 seconds.\n\nRoot cause: a non-deadline producer failure went to `self.failure(..)`, which keeps nothing, so a 401 after 30 minutes of work lost everything. The classification as an environment stop already existed in `StopCause`; only keeping the work and resuming were missing.\n\n- **Driver (`claude.rs`):**\n  - `invoke` now wraps a private `invoke_once`. If the call ends as an Error whose detail is a 401, it waits `auth_retry_wait` (30 s by default, polled in 1 s slices so `athena stop` ends it with `DriverError::Stopped`) and calls once more. A second 401 is returned as is.\n  - The two calls act as one invocation. The retry gets what the first left of the timeout and budget (`retry_spec`), and no retry happens if under 10 s or $0.01 is left.\n  - Usage, cost, models, turns, commands and denials are merged into one output. Cost is the sum only when both calls reported one; otherwise it is `None`, which the invocation record bounds by the cap.\n  - A sink adds the first call's totals to the second call's updates, so the stored partial usage never goes backwards.\n  - The retried prompt starts with a line saying an earlier attempt stopped when the login expired and its edits are in the working directory. This is needed because the CLI runs with `--no-session-persistence`.\n  - `api_error_status` moved here from `disk.rs`, so the driver and `StopCause::of` parse a 401 the same way.\n- **Keep work (`run/mod.rs`, `run/producer.rs`):**\n  - `keep_timed_out_work` is now `keep_unfinished_work(.., ended: Ended, ..)`.\n  - A deadline keeps its `timed_out` state and `the producer did not complete: ..` reason.\n  - A login expiry builds the same candidate commit and progress note. It closes Failed with `environment: producer login expired: ..; its edits are kept as candidate <short>`.\n  - A 429 and other failures still go to `self.failure` and keep nothing.\n- **Resume (`disk.rs`, `run/mod.rs`):** new `disk::keeps_unfinished_work` is true for a timed-out job, or a Failed job whose reason classifies as a login expiry. `timeout_seed` uses it. No resume mark is written, so the retry runs a producer on the kept work rather than going straight to checks and the verifier.\n- **Brief wording (`briefs.rs`):** the Resume section no longer says the earlier producer reached its deadline. It now says it stopped before finishing, and the note says which cause.\n- **CHANGELOG.md:** one Unreleased/Fixed entry.\n\nTests added:\n- **Driver (athena-agent):** a stand-in script with modes for one 401, two 401s, a stop during the wait, and a 429. Tests check:\n  - one retry that succeeds, with exactly 2 calls, the summed cost and usage, the reduced budget, and the retry note in the prompt;\n  - two 401s make 2 calls and no more;\n  - no retry when no time is left;\n  - a stop during the wait;\n  - a 429 is not retried;\n  - a pure `retry_spec` test.\n- **Core (athena-core):** the 401 stop keeps the README edit as a candidate and a progress note, writes no resume mark, and runs no verifier; the no-edit and 429 cases keep nothing; `timeout_seed` returns the kept commit only for the 401 job; a `keeps_unfinished_work` table test.\n- **Retry (athena-cli):** `retrying_a_login_expiry_stop_resumes_from_the_kept_work`.",
+    "files": [
+      "CHANGELOG.md",
+      "crates/athena-agent/src/claude.rs",
+      "crates/athena-cli/tests/retry.rs",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/disk.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/producer.rs",
+      "crates/athena-core/src/run/tests.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-agent --lib",
+        "result": "pass",
+        "note": "72 passed, including the 5 new stand-in tests and the retry_spec test"
+      },
+      {
+        "command": "cargo test -p athena-core --lib -- login_expiry timeout_seed kept_work",
+        "result": "pass",
+        "note": "the 3 new core tests, the new disk table test and the existing timeout_seed tests pass"
+      },
+      {
+        "command": "cargo test -p athena-cli --test retry login_expiry",
+        "result": "pass",
+        "note": "1 passed"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "after fixing field_reassign_with_default in the new retry.rs test"
+      },
+      {
+        "command": "cargo test --locked -q",
+        "result": "pass",
+        "note": "every target passed, including the existing deadline, 429, low-disk, lifecycle, drain and retry suites"
+      },
+      {
+        "command": "cargo test -p xtask --test policy -q",
+        "result": "pass",
+        "note": "22 passed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test using a fake driver that returns the 401 text (`Failed to authenticate. API Error: 401 ... OAuth access token has expired`) for every call, after the producer has edited files, ends the job Failed with a reason starting `environment: producer login expired`. The test asserts that the closing holds a candidate commit with the producer's edits. Run `cargo test -p athena-core` and check that this test passes.",
+        "status": "met",
+        "evidence": "`a_producer_login_expiry_keeps_its_edits_and_closes_as_an_environment_stop` in crates/athena-core/src/run/tests.rs passes (`cargo test -p athena-core --lib -- login_expiry`). It runs the fake producer with the production-built 401 detail, asserts state Failed, a reason starting `environment: producer login expired` and ending `; its edits are kept as candidate <short>`, and that the job's candidate commit holds README.md equal to the producer's edit. It also asserts a progress note, no resume mark, one producer call and no verifier."
+      },
+      {
+        "criterion": "A new test shows `athena retry <job>` on that stopped job resumes from the kept candidate (the retry's seed or resume names the earlier job, and the earlier edits are present) instead of starting from scratch. Run `cargo test` and check that this test passes.",
+        "status": "met",
+        "evidence": "`retrying_a_login_expiry_stop_resumes_from_the_kept_work` in crates/athena-cli/tests/retry.rs passes. After the 401 stop it calls `athena.retry(first)` and `go`. The retry's producer sees src/partial.rs in its working directory. Its brief has `## Resume`, the first job id, `kept as candidate <short>` and the 401 cause, and not `reached its deadline`. The retry lands with src/partial.rs. The core test `timeout_seed_resumes_a_login_expiry_stop_but_not_other_failures` shows the seed is returned only for the 401 job. The full `cargo test --locked -q` passed."
+      },
+      {
+        "criterion": "A new test shows a driver that returns a 401 once and then succeeds yields a successful invocation: exactly two driver calls were made and the job does not end as an environment stop. Run `cargo test -p athena-agent` and check that this test passes.",
+        "status": "met",
+        "evidence": "`a_login_expiry_is_retried_once_and_a_second_call_succeeds` in crates/athena-agent/src/claude.rs passes under `cargo test -p athena-agent --lib`. The count file is 2. The outcome is Success with no detail and the structured answer 42, so the caller has no 401 to turn into an environment stop. The test also checks the sums, the reduced second-call budget (0.25) and the retry note in the prompt."
+      },
+      {
+        "criterion": "A test shows two consecutive 401 results lead to only one retry (two calls in total, no more) before the environment stop. Run `cargo test` and check that this test passes.",
+        "status": "met",
+        "evidence": "`two_login_expiries_make_two_calls_and_return_the_error` in claude.rs passes: the stand-in is called exactly twice, the outcome is Error with a `success: Failed to authenticate. API Error: 401` detail, and the cost is 0.5 (both spends). The environment stop with kept work from that same Error output is covered by the core test in the first criterion. `cargo test --locked -q` passed."
+      },
+      {
+        "criterion": "The diff in crates/athena-agent/src/claude.rs adds the single retry after a short wait on a 401. crates/athena-core/src/run/mod.rs (with run/producer.rs if needed) keeps partial work for a 401 stop by reusing `keep_timed_out_work`. crates/athena-core/src/disk.rs changes only if the classification or resume rules need it. All three are listed in `git diff`.",
+        "status": "met",
+        "evidence": "`git status --short` lists claude.rs, run/mod.rs, run/producer.rs and disk.rs, plus briefs.rs, tests and CHANGELOG.md. claude.rs has `invoke_once`, `retry_after_login_expiry`, `retry_spec`, `OffsetSink`, `merge_outputs` and the 30 s `AUTH_RETRY_WAIT`. `keep_timed_out_work` was renamed `keep_unfinished_work`, with `Ended::Deadline` and `Ended::EnvironmentStop`, and has two call sites in producer.rs. disk.rs changed only for the moved `api_error_status` import, `keeps_unfinished_work` (a resume rule), doc comments and one table test."
+      },
+      {
+        "criterion": "The existing timeout path and the 429 and low-disk paths keep their behavior: the existing tests in crates/athena-core/src/run/tests.rs and crates/athena-cli/tests/retry.rs still pass under `cargo test`.",
+        "status": "met",
+        "evidence": "`cargo test --locked -q` passed in full. That includes the existing deadline tests (`a_deadline_keeps_a_candidate_and_timeout_seed_prefers_it_to_the_kept_directory`, lifecycle timed-out tests), the low-disk and check-timeout tests, all of retry.rs and the drain tests, with no existing assertion edited. The Deadline variant keeps the `timed_out` state and the `the producer did not complete: ` reason. The new 429 case shows a usage limit still keeps nothing."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry describing the 401 environment stop, the kept partial work with resume, and the single driver retry.",
+        "status": "met",
+        "evidence": "The diff adds one bullet under `[Unreleased]` / `### Fixed`. It covers the 2026-10-28 incident, the `environment: producer login expired` stop, the kept candidate and progress note, `athena retry` and the drain resuming from it, the Resume wording change, and the single driver retry (30 s wait, one invocation, remaining time and budget, both calls' cost and usage, the retry note)."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all --check` (clean), `cargo clippy --all-targets --locked -- -D warnings` (clean) and `cargo test --locked -q` (all targets ok); `cargo test -p xtask --test policy` also passed."
+      }
+    ],
+    "open_issues": [
+      "The 30 s wait may be shorter than the time the login takes to refresh (the incident says minutes). After a second 401, `athena retry` is the next step, which now resumes from the kept work.",
+      "If the second call is killed or times out, the merged cost is `None`, so the invocation record shows the cost as bounded by the cap, not the first call's known spend. This matches how a single killed call is recorded today."
+    ],
+    "mistakes": [
+      "First compile failed: `ModelUsage` has no `Default`, so I used `get_mut` and insert instead of `or_default` in `merge_outputs`.",
+      "First run of the core login-expiry test failed: it assumed an exact list of agent roles, but a third Reader call follows the closing. I changed it to count producers and assert no verifier ran.",
+      "Clippy `field_reassign_with_default` in the new retry.rs test, fixed with struct-update syntax.",
+      "I tried to write a scratch file outside the working directory; the policy hook denied it and nothing was written."
+    ],
+    "learnings": [
+      "The 401 text in the producer detail is `success: Failed to authenticate. API Error: 401 ...`: the CLI reports it as an error result with subtype `success`. `athena_agent::claude::output_from_result` builds it.",
+      "`timeout_seed` is the existing seed path for kept producer work. It needed only its state test replaced, not a resume mark; a resume mark would send the retry to checks and the verifier without running a producer.",
+      "The core crate cannot reach the agent crate's stand-in script (it is `#[cfg(test)]` in athena-agent), so the retry itself is tested in claude.rs and the stop and resume in athena-core and athena-cli.",
+      "`finished_job` in the core tests sees a third Reader call after the closing, so assert on producer and verifier counts, not an exact role list.",
+      "The shell tool in this environment rejects grep, tail, head, heredocs, `$?` and writes outside the working directory; use the Read, Grep and Glob tools and plain cargo commands."
+    ],
+    "desires": [
+      "A way to run a single test with output capture shown without a shell pipe, since grep and tail are denied."
+    ]
+  }
+}

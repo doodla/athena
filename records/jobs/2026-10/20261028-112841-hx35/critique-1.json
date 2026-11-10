@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-112841-hx35",
+  "round": 1,
+  "at": "2026-11-10T01:35:47.658008537Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The retried driver call drops the first call's spend and gets a fresh deadline and budget, so the job's caps and records can be exceeded or under-counted.",
+      "evidence": "The request's incident is a producer that ran 30 minutes and then got the 401, so the first call can carry a large cost. The plan's claim that \"a 401 is returned before model work\" (an estimate) contradicts this. In claude.rs:350, `let deadline = clock + spec.timeout;` is computed inside each call, so calling `invoke_once` twice allows up to 2 x `producer_timeout_s` plus the wait. The spec also carries `jc.config.budget.producer_usd` (producer.rs:334), which the second call would get in full again. `FileSink::update` (invocation.rs:75-81) overwrites the stored partial usage with the latest totals, so the second call's counters, which start from zero, replace the first call's in the state mirror. Only the second `AgentOutput` reaches `invoke_and_record`. The recorded invocation, the job totals and the scope guard's `cost_dollars` would all leave out the first call's spend. Fix: Keep the retry in claude.rs, but make the pair of calls act as one invocation. (a) Give the second call `spec.timeout` minus the time already used (the first call's run plus the wait). If nothing is left, skip the retry and return the first output. (b) Lower the second call's budget by the first call's reported cost. (c) Add the first call's usage, `cost_usd`, `models_used` and `commands_run` to the second output. Wrap the sink so the second call's updates are added on top of the first call's totals instead of replacing them. Add a stand-in test where the 401 result reports a cost (for example 0.002 with usage) and the second call succeeds. Assert that the returned cost and usage are the sum of both calls, and that the second call's timeout is the remainder. Remove the \"small loss\" risk.",
+      "location": "Plan Decision 4, Step 2 and Risks 2 (driver retry wrapper in crates/athena-agent/src/claude.rs `invoke`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The retried call starts a new conversation, so the model does not know about the edits already in its work tree.",
+      "evidence": "The CLI runs with `--no-session-persistence` (claude.rs:30, 112), so the earlier conversation cannot be resumed. After up to 30 minutes of edits, the second call gets the same brief. A resume through `athena retry` gets a progress note listing the changed files. The in-driver retry gets nothing. Fix: On the retry, add a short line to the prompt saying that an earlier attempt was cut off by an expired login and that its edits are already in the working directory, so check them before redoing work. Or name this limit plainly in the CHANGELOG entry.",
+      "location": "Plan Risks 1 (the retry re-runs a fresh conversation over the edited tree)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A resumed login-expiry job is told that the earlier producer \"reached its deadline\", which is false.",
+      "evidence": "The plan leaves the Resume section unchanged and relies on the quoted progress note to give the real cause. The brief would then state a false cause to the model, against the strangers default. Fix: Word the Resume section neutrally (for example \"That job's producer stopped before it finished\"), and update `a_resume_brief_carries_the_progress_note` if it checks the old wording. It is a one-line change in briefs.rs. List briefs.rs as a file and say why it is needed.",
+      "location": "Dependents: Resume brief wording (crates/athena-context/src/briefs.rs:564-579)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The drain's own second attempt at a failed item now resumes from the kept work too. The dependents list does not name this change.",
+      "evidence": "The drain treats an item as \"failed twice\" only after retrying it once. A 401 first attempt now leaves a candidate that `timeout_seed` will seed the drain's retry from. The plan lists drain.rs only for classification and runs `--test drain` only as a no-change check. Fix: Add the drain's retry path to the dependents list. Either say that the existing LOGIN_EXPIRED drain tests (drain.rs:8148-8489) cover it, or add an assertion that the drain's retry of a 401 item starts from the kept candidate.",
+      "location": "Dependents: drain (crates/athena-cli/src/drain.rs:2593-2611)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the source (Read and Grep only, nothing run), and almost all of it holds. `api_error_status` is private in disk.rs and used only there. `keep_timed_out_work` has one caller, at producer.rs:381. `timeout_seed` refuses any job whose state is not TimedOut (mod.rs:893). `tree_seed` accepts only Rejected jobs, and `resume_seed` needs a resume mark, so a Failed job with a kept candidate and no mark reaches the producer through `timeout_seed` without clashing with the other seed paths. The fake driver applies its scripted edits even when the outcome is Error (fake.rs:98-111). The scope guard, the drain and `resumable_stop` read only the reason prefix, so the \"kept as candidate\" suffix does not change how a stop is classified. The keep-work and resume half is sound. The driver retry is not. The plan assumes a 401 comes back before any model work, but the incident in the request is a producer that ran 30 minutes before the 401. The wrapper as designed would drop that first call's cost and usage. It would also give the second call a fresh full timeout and a fresh full producer budget, so one producer invocation could run past `producer_timeout_s` and `producer_usd` without the records showing it. That needs revising before code is written."
+}

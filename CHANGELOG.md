@@ -137,6 +137,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A producer whose model login expires no longer loses its work. On 2026-10-28 a producer ran 30 minutes and
+  then failed with `API Error: 401 OAuth access token has expired`; the login refreshed by itself minutes
+  later, but the job was closed as a plain failure, nothing it had edited was kept, and the retry started from
+  scratch. Now a 401 closes the job as an environment stop (`environment: producer login expired`, still
+  `failed`, still resumable) and keeps the producer's edits the way a deadline does: the run builds a candidate
+  commit from the work tree and a progress note, and the reason names the candidate. `athena retry` (and the
+  drain's second attempt) starts the next producer from that candidate, with the note in its brief; the
+  `## Resume` section no longer says the earlier producer reached its deadline, since either stop leads
+  there. A usage limit (429), low disk and other failures keep what they kept before. The driver also calls
+  again once, after a 30 second wait, when a call ends on a 401: the two calls count as one invocation, the
+  second gets the time and budget the first left, the cost and usage of both are recorded, and the retried
+  model is told that an earlier attempt stopped and its edits are in the working directory (the CLI keeps no
+  session, so it cannot remember them). If the second call fails on a 401 too, or too little time or budget
+  is left, the environment stop above applies, so `athena retry` is the next step. `athena stop` during the
+  wait ends the call. `api_error_status` moved from `disk.rs` to `athena_agent::claude`, so the driver and the
+  stop classification read a 401 the same way. Tests cover the driver (one retry and no more, the sums, the
+  remaining budget, no retry on a 429, a stop during the wait), the kept candidate and note, and a retry that
+  resumes from it.
 - `athena drain`'s closing summary now covers the whole run across rebuild re-execs. On 2026-10-27 a run landed
   four jobs but printed `landed 1`: each rebuild re-execs `athena drain`, and the new process started its
   tallies at zero, so the summary showed only the last pass. Now `drain::run_pass` writes the run's tallies so

@@ -90,6 +90,7 @@ use crate::commits::{NewFile, message};
 use crate::state::{StateDir, format_bytes};
 use crate::store::{JobState, Records};
 use crate::{Athena, Ui};
+use athena_agent::claude::api_error_status;
 use athena_data::records::{
     AnyRecord, BuildMeasurement, BuildPeak, OutcomeState, SccacheCounts, SccacheFigures,
 };
@@ -414,28 +415,6 @@ pub const USAGE_LIMIT: &str = "environment: usage limit reached";
 /// The start of the closing reason of a producer that stopped without a report.
 const PRODUCER_STOPPED: &str = "the producer did not complete: ";
 
-/// The HTTP status of an API error in the detail of a stopped agent, or `None` when the detail is not one.
-///
-/// The detail is built by `athena_agent::claude::output_from_result` as `<subtype>: <first 300 characters of
-/// the result text>`. An API error reads `success: Failed to authenticate. API Error: 401 {...}` or
-/// `success: API Error: 429 ...`: the CLI reports it as an error result whose subtype is `success`. Only that
-/// form counts, with a subtype of `success` or `error`; a model's own closing words under another subtype
-/// (`error_max_turns`, `error_during_execution`) are free prose and are never read. No word list is used.
-fn api_error_status(detail: &str) -> Option<u16> {
-    let rest = ["success: ", "error: "]
-        .iter()
-        .find_map(|subtype| detail.strip_prefix(subtype))
-        .unwrap_or(detail);
-    let rest = rest
-        .strip_prefix("Failed to authenticate. ")
-        .unwrap_or(rest);
-    let digits = rest.strip_prefix("API Error: ")?;
-    let end = digits
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(digits.len());
-    digits[..end].parse().ok()
-}
-
 /// Why an attempt stopped, as far as Athena can tell from the closing reason of its job.
 ///
 /// This is the one place that says which closing reasons are stops of the environment. The scope guard (which
@@ -451,7 +430,8 @@ pub enum StopCause {
     LowDisk,
     /// A check was killed at its deadline ([`CHECK_TIMEOUT`]).
     CheckTimeout,
-    /// The producer's login expired: an API error 401 ([`PRODUCER_AUTH`]).
+    /// The producer's login expired: an API error 401 ([`PRODUCER_AUTH`]). The producer's edits are kept
+    /// ([`keeps_unfinished_work`]).
     ProducerAuth,
     /// A usage limit was reached: an API error 429 ([`USAGE_LIMIT`]).
     UsageLimit,
@@ -499,6 +479,8 @@ impl StopCause {
 /// The closing reason for a producer that did not complete, from the detail of its invocation. An API error
 /// 401 (expired login) or 429 (usage limit) is an environment stop and gets the matching reason with the
 /// detail after it; anything else is `the producer did not complete: <detail>`. [`StopCause::of`] reads both.
+/// The run keeps the edits of a producer that stopped on a 401 as a candidate, as it does for a deadline, and
+/// appends `; its edits are kept as candidate <commit>` to the reason it gets here.
 pub fn producer_stop_reason(detail: &str) -> String {
     match api_error_status(detail) {
         Some(401) => format!("{PRODUCER_AUTH}: {detail}"),
@@ -523,6 +505,20 @@ pub fn resumable_stop(state: JobState, reason: Option<&str>) -> bool {
     match state {
         JobState::Closed(OutcomeState::Failed) => reason.is_some_and(is_environment_reason),
         JobState::Dispatched => true,
+        _ => false,
+    }
+}
+
+/// Whether a stopped job's producer left unfinished work that a retry resumes from: the job closed
+/// `timed_out`, or it closed failed because the producer's login expired ([`StopCause::ProducerAuth`]). The
+/// run builds a candidate commit and a progress note for both. A usage limit, low disk and every failure of
+/// the work keep nothing of the producer's.
+pub fn keeps_unfinished_work(state: JobState, reason: Option<&str>) -> bool {
+    match state {
+        JobState::Closed(OutcomeState::TimedOut) => true,
+        JobState::Closed(OutcomeState::Failed) => {
+            reason.is_some_and(|r| StopCause::of(r) == StopCause::ProducerAuth)
+        }
         _ => false,
     }
 }
@@ -1521,6 +1517,46 @@ mod tests {
             assert!(!resumable_stop(JobState::Closed(state), Some(&stored)));
             assert!(!resumable_stop(JobState::Closed(state), Some(&written)));
         }
+    }
+
+    #[test]
+    fn kept_work_is_resumed_only_for_a_timeout_or_a_login_expiry() {
+        let failed = JobState::Closed(OutcomeState::Failed);
+        let timed_out = JobState::Closed(OutcomeState::TimedOut);
+        let detail = expired_login_detail();
+        let login = producer_stop_reason(&detail);
+        let kept = format!("{login}; its edits are kept as candidate abc1234");
+        let old = format!("the producer did not complete: {detail}");
+        assert!(keeps_unfinished_work(
+            timed_out,
+            Some("the producer did not complete: deadline of 5s reached")
+        ));
+        assert!(keeps_unfinished_work(timed_out, None));
+        for reason in [&login, &kept, &old] {
+            assert!(keeps_unfinished_work(failed, Some(reason)), "{reason}");
+        }
+        let job = id(1);
+        let others = [
+            producer_stop_reason("success: API Error: 429 limit"),
+            LowDisk {
+                free: 0,
+                required: GB,
+            }
+            .text(),
+            check_timeout_reason("test", 5, 4, &job),
+            "the producer returned no valid report".to_string(),
+        ];
+        for reason in &others {
+            assert!(!keeps_unfinished_work(failed, Some(reason)), "{reason}");
+        }
+        assert!(!keeps_unfinished_work(failed, None));
+        for state in [OutcomeState::Rejected, OutcomeState::Landed] {
+            assert!(!keeps_unfinished_work(
+                JobState::Closed(state),
+                Some(&login)
+            ));
+        }
+        assert!(!keeps_unfinished_work(JobState::Dispatched, Some(&login)));
     }
 
     /// A builder that runs no cargo: it checks the worktree it is handed, writes a file of known length into

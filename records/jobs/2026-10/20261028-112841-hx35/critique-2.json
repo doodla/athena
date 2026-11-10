@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261028-112841-hx35",
+  "round": 2,
+  "at": "2026-11-10T01:42:52.581476007Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-context/src/briefs.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-context/src/briefs.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The assertion that the sink's last update equals the summed output usage would fail as written, and the sink's starting total is not defined.",
+      "evidence": "stream.rs:143 partial_usage sums the assistant messages' usage, and claude.rs:363 passes that running total to sink.update. The returned output's usage comes from the result event (output_from_result, claude.rs:275). In STAND_IN the assistant message has input 3 / output 7 / cache_write 100, and the result has 5 / 60 / 40 / 120. So first-result + second-partial (the sink's last update) is not first-result + second-result (the merged output). Step 4 says only 'base usage' without saying which. Fix: Set the OffsetSink starting total to the first call's output usage (or to its last running total) and say which. Change the test to assert that the last sink update equals that starting total plus the second call's running total, that it never decreases, and, separately, that the returned usage is the sum of both results.",
+      "location": "Demonstrations, Criterion 3 (test a_login_expiry_is_retried_once_and_a_second_call_succeeds); plan step 4 OffsetSink",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After a 401 followed by a success, the records do not show that the driver retried; one invocation record now covers two CLI calls with no trace of it.",
+      "evidence": "merge takes outcome and detail from the second call. A successful second call has detail None (claude.rs:253), and invocation_record hashes the composed prompt (invocation.rs:205), not the note-prefixed one actually sent. Nothing in the records shows the 401, the wait or the extra prompt line. Fix: Record the retry: for example, carry a short note such as 'retried once after API Error 401' into a record field or into the invocation detail, and add a sentence to docs/records.md saying one invocation may cover a retried call.",
+      "location": "Decision 1 / step 4 (merge)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/records.md says progress-note.md and kept work appear only for a timed_out job; after this change a failed job closed by a login expiry has them too.",
+      "evidence": "docs/records.md:146-151 describes progress-note.md and the kept work only for 'A producer that reaches its own deadline'. The plan states the docs 'stay true', but a failed job with a candidate and a progress note is now a new record shape that a reader of the records doc would not expect. Fix: Add one sentence to docs/records.md: a producer that stops on an expired login (API Error 401) closes failed with the 'environment: producer login expired' reason, the same progress-note.md and a kept candidate, and athena retry resumes from it.",
+      "location": "Dependents, 'documentation and configuration' (docs/records.md)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The rename leaves the old name in a design document that the dependents list does not mention.",
+      "evidence": "Grep finds keep_timed_out_work in docs/design/structure-pass.md:66 and docs/decisions.md:4097 and 4102, besides run/mod.rs:938 and producer.rs:381. The plan's risk entry says the function is used only at producer.rs:381. Fix: Update docs/design/structure-pass.md:66 to the new name (decisions.md is history and can stay), or keep the existing name and add only the Ended parameter.",
+      "location": "Step 6 (rename keep_timed_out_work to keep_unfinished_work)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The second call overwrites the first call's stderr-{seq}.log, system and settings files in the scratch directory.",
+      "evidence": "claude.rs:306-308 names the files by spec.seq, and the retry spec keeps the same seq, so the 401 call's stderr log is truncated by File::create at claude.rs:321. Fix: Give the retry its own file names (for example a '-retry' suffix) or append to the stderr log, so the first call's log is kept for diagnosis.",
+      "location": "Step 3/4 (invoke_once called twice with the same spec.seq)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Read-only review against the snapshot (Read and Grep; nothing run). The plan fixes the fault where it starts. producer.rs:379-391 sends a non-TimedOut failure, a 401 included, to self.failure, which keeps nothing. run/mod.rs:893 limits timeout_seed to TimedOut jobs. The plan sends a 401 (StopCause::ProducerAuth) to the generalised keep-work function and widens timeout_seed through one disk.rs predicate. It rightly writes no resume mark: resume_seed requires one and resume_candidate runs no producer. Moving api_error_status into athena-agent is sound: its only callers are in disk.rs, it uses nothing from core, and core depends on agent. The driver wrapper (remaining timeout and budget, totals-adding sink, merged output) keeps the caps and recorded spend correct. The --max-budget-usd argument is printed with {:.2}, so the test's \"0.25\" check holds. Every reader checked is covered by the dependents list: the drain's StopCause::of on the last reason (drain.rs:2606), resumable_job, settle_resume_marks, the kept-work cleanup in close.rs:152/439 and the driver() helper literal. timeout_note says only \"stopped: {reason}\", so the note stays true for a 401. Each demonstration runs production code (Athena::go and retry with the existing FakeAgentDriver; the real ClaudeCodeDriver with the existing stand-in child) and would fail without the change. No soundness problem rises above minor. Remaining items: a sink assertion that would fail as written, no record that a retry happened, docs/records.md not mentioning kept work on a failed job, a renamed function still named in a design doc, and the first call's error log being overwritten."
+}

@@ -378,15 +378,35 @@ impl Athena {
             closing.new_invocations.push(record.clone());
             if output.outcome == InvocationOutcome::TimedOut {
                 let reason = record.detail.clone().unwrap_or_default();
-                self.keep_timed_out_work(ctx, &snapshot, accepted, &reason, closing)?;
+                self.keep_unfinished_work(
+                    ctx,
+                    &snapshot,
+                    accepted,
+                    &reason,
+                    Ended::Deadline,
+                    closing,
+                )?;
                 return Ok(Flow::Stop);
             }
             if output.outcome != InvocationOutcome::Success {
-                closing.happened = self.failure(
-                    ctx,
-                    // An expired login or a usage limit is closed as an environment stop, not as work.
-                    &crate::disk::producer_stop_reason(&record.detail.clone().unwrap_or_default()),
-                );
+                let detail = record.detail.clone().unwrap_or_default();
+                let reason = crate::disk::producer_stop_reason(&detail);
+                // An expired login is an environment stop that leaves the work half done, like a deadline:
+                // its edits are kept as a candidate and `athena retry` resumes from them. A usage limit and
+                // any other failure keep nothing.
+                if crate::disk::StopCause::of(&reason) == crate::disk::StopCause::ProducerAuth {
+                    self.keep_unfinished_work(
+                        ctx,
+                        &snapshot,
+                        accepted,
+                        &detail,
+                        Ended::EnvironmentStop,
+                        closing,
+                    )?;
+                } else {
+                    // A usage limit is closed as an environment stop, not as work.
+                    closing.happened = self.failure(ctx, &reason);
+                }
                 return Ok(Flow::Stop);
             }
             // The producer ended while its last cargo command had waited out the build slot: its work could not
