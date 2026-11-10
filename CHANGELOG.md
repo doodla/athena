@@ -14,6 +14,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `validate_item` in `crates/athena-core/src/steward.rs` now refuses a repeated-failure or proposal item that cites
+  fewer than two distinct instances, so one instance is not treated as a general weakness (OLY-5-07). A repeated
+  failure counts distinct jobs only; a proposal counts distinct references other than its own source. Commit ids and
+  paths are not counted for a repeated failure, since neither is checked to exist. Blind spots are exempt. The rule
+  does not check that the jobs show the same failure, and the clause of OLY-5-07 on inappropriate universal rules is
+  not mechanized. The steward prompt is unchanged.
 - `missing_neighbor_cases` in `crates/athena-core/src/verify.rs` lists the neighboring cases (nested navigation,
   browser history, direct links, interrupted flows) that a navigation fix's added tests do not mention. It is the
   mechanism for OLY-4-03; it is a helper, not a gate rule, and changes no verdict.

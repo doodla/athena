@@ -840,6 +840,8 @@ pub const MAX_ITEMS: usize = 20;
 const MAX_TITLE: usize = 200;
 const MAX_KEY: usize = 120;
 const MAX_REQUEST: usize = 4000;
+/// The fewest distinct instances a non-blind-spot item may cite: one instance is not a general weakness.
+const MIN_EVIDENCE: usize = 2;
 
 fn ladder(rung: RungOutput) -> Ladder {
     match rung {
@@ -996,6 +998,30 @@ fn validate_item(
         .map(|e| check_reference(e.kind, &e.value, records))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("{key}: evidence: {e}"))?;
+    // One instance is not a general weakness. A repeated failure counts distinct jobs only, since a path or
+    // a commit id is not checked to exist; a proposal counts distinct references other than its own source,
+    // which says where the idea came from and not that the weakness is general.
+    let mut instances: Vec<&Reference> = Vec::new();
+    for reference in &evidence {
+        let counts = match item.kind {
+            StewardKindOutput::RepeatedFailure => reference.kind == RefKind::Job,
+            _ => *reference != source,
+        };
+        if counts && !instances.contains(&reference) {
+            instances.push(reference);
+        }
+    }
+    if instances.len() < MIN_EVIDENCE {
+        let unit = match item.kind {
+            StewardKindOutput::RepeatedFailure => "job instance(s)",
+            _ => "reference(s) other than its source",
+        };
+        return Err(format!(
+            "{key}: evidence holds {} distinct {unit}; one instance is not a general weakness, so cite at \
+             least {MIN_EVIDENCE}",
+            instances.len()
+        ));
+    }
     let rung = ladder(item.rung);
     let request = plain_boundary_text(item.request.unwrap_or_default().trim())
         .map_err(|e| format!("{key}: request: {e}"))?;
@@ -1883,7 +1909,10 @@ mod tests {
             "kind": "proposal", "key": "proposal:retry", "title": "Retry a failed check",
             "rung": "design-decisions",
             "source": { "kind": "path", "value": "records/jobs" },
-            "evidence": [{ "kind": "job", "value": "20261010-153012-k7q2" }],
+            "evidence": [
+                { "kind": "job", "value": "20261010-153012-k7q2" },
+                { "kind": "job", "value": "20261011-153012-k7q3" }
+            ],
             "request": null,
             "brief": {
                 "question": "Should the steward retry a failed check once?",
@@ -1967,16 +1996,26 @@ mod tests {
         assert!(item.validate().is_ok());
     }
 
-    fn records_with_job(id: &str) -> Records {
+    /// The second job `item()` cites.
+    const SECOND_JOB: &str = "20261011-153012-k7q3";
+
+    fn records_with_jobs(ids: &[&str]) -> Records {
         let mut records = Records::default();
-        records.jobs.insert(
-            id.to_string(),
-            crate::store::JobRecords {
-                id: Some(JobId::parse(id).unwrap()),
-                ..Default::default()
-            },
-        );
+        for id in ids {
+            records.jobs.insert(
+                id.to_string(),
+                crate::store::JobRecords {
+                    id: Some(JobId::parse(id).unwrap()),
+                    ..Default::default()
+                },
+            );
+        }
         records
+    }
+
+    /// The records `item()` cites: the given job and a second one.
+    fn records_with_job(id: &str) -> Records {
+        records_with_jobs(&[id, SECOND_JOB])
     }
 
     fn item(kind: StewardKindOutput, key: &str, rung: RungOutput) -> StewardItemOutput {
@@ -1989,10 +2028,16 @@ mod tests {
                 kind: RefKindOutput::Path,
                 value: "records/jobs".into(),
             },
-            evidence: vec![StewardRefOutput {
-                kind: RefKindOutput::Job,
-                value: "20261010-153012-k7q2".into(),
-            }],
+            evidence: vec![
+                StewardRefOutput {
+                    kind: RefKindOutput::Job,
+                    value: "20261010-153012-k7q2".into(),
+                },
+                StewardRefOutput {
+                    kind: RefKindOutput::Job,
+                    value: SECOND_JOB.into(),
+                },
+            ],
             request: Some("Add the convention.".into()),
             brief: Some(brief_output()),
         }
@@ -2018,9 +2063,10 @@ mod tests {
         assert_eq!(change.request, "Add the convention.");
         assert_eq!(
             change.evidence,
-            vec![Reference::job(
-                &JobId::parse("20261010-153012-k7q2").unwrap()
-            )]
+            vec![
+                Reference::job(&JobId::parse("20261010-153012-k7q2").unwrap()),
+                Reference::job(&JobId::parse(SECOND_JOB).unwrap()),
+            ]
         );
     }
 
@@ -2211,6 +2257,115 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    fn evidence_of(kind: RefKindOutput, value: &str) -> StewardRefOutput {
+        StewardRefOutput {
+            kind,
+            value: value.into(),
+        }
+    }
+
+    #[test]
+    fn one_instance_is_not_a_general_weakness() {
+        let role = steward(at());
+        let records = records_with_job("20261010-153012-k7q2");
+        let first = "20261010-153012-k7q2";
+        let job = |id: &str| evidence_of(RefKindOutput::Job, id);
+
+        // Each refused item has the evidence given, the kind given, and a valid key, request and rung.
+        let make = |kind: StewardKindOutput, evidence: Vec<StewardRefOutput>| {
+            let mut raw = item(kind, "weak:one", RungOutput::Implementation);
+            raw.evidence = evidence;
+            raw
+        };
+        let refused = [
+            // A repeated failure with one job.
+            make(StewardKindOutput::RepeatedFailure, vec![job(first)]),
+            // A proposal with one job.
+            make(StewardKindOutput::Proposal, vec![job(first)]),
+            // A path pads a repeated failure but is not a counted instance.
+            make(
+                StewardKindOutput::RepeatedFailure,
+                vec![
+                    job(first),
+                    evidence_of(RefKindOutput::Path, "docs/spec.toml"),
+                ],
+            ),
+            // A commit id is not checked to exist, so it is not counted either.
+            make(
+                StewardKindOutput::RepeatedFailure,
+                vec![job(first), evidence_of(RefKindOutput::Commit, "abcdef1")],
+            ),
+            // The same job twice, once with spaces around it, counts once.
+            make(
+                StewardKindOutput::RepeatedFailure,
+                vec![job(first), job(&format!(" {first} "))],
+            ),
+            // A proposal that echoes its own source (`records/jobs`) adds no instance.
+            make(
+                StewardKindOutput::Proposal,
+                vec![
+                    job(first),
+                    evidence_of(RefKindOutput::Path, " records/jobs "),
+                ],
+            ),
+        ];
+        for raw in refused {
+            let valid = validate_items(vec![raw.clone()], &role, &records);
+            assert!(
+                valid.changes.is_empty(),
+                "accepted {:?} with {:?}",
+                raw.kind,
+                raw.evidence
+            );
+            let reason = &valid.rejected[0];
+            assert!(reason.contains("weak:one"), "{reason}");
+            assert!(reason.contains("not a general weakness"), "{reason}");
+            assert!(reason.contains("1 distinct"), "{reason}");
+        }
+
+        let accepted = [
+            // A repeated failure with two distinct jobs.
+            make(
+                StewardKindOutput::RepeatedFailure,
+                vec![job(first), job(SECOND_JOB)],
+            ),
+            // A proposal with a job and a document.
+            make(
+                StewardKindOutput::Proposal,
+                vec![
+                    job(first),
+                    evidence_of(RefKindOutput::Path, "docs/spec.toml"),
+                ],
+            ),
+            // A proposal may rest on two documents.
+            make(
+                StewardKindOutput::Proposal,
+                vec![
+                    evidence_of(RefKindOutput::Path, "BRIEF.md"),
+                    evidence_of(RefKindOutput::Path, "docs/spec.toml"),
+                ],
+            ),
+        ];
+        for raw in accepted {
+            let valid = validate_items(vec![raw], &role, &records);
+            assert!(valid.rejected.is_empty(), "{:?}", valid.rejected);
+            assert_eq!(valid.changes.len(), 1);
+        }
+
+        // A blind spot is Athena's own report that a source cannot be read, so it needs no evidence.
+        let mut spot = item(
+            StewardKindOutput::BlindSpot,
+            "ignored",
+            RungOutput::OwnerGoals,
+        );
+        spot.source = evidence_of(RefKindOutput::Path, "github");
+        spot.evidence.clear();
+        spot.brief = None;
+        let valid = validate_items(vec![spot], &role, &records);
+        assert!(valid.rejected.is_empty(), "{:?}", valid.rejected);
+        assert_eq!(valid.changes.len(), 1);
     }
 
     #[test]
