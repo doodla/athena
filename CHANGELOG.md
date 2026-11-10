@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The root-cause request built for a repeated cause now asks first that the information the failing stage lacked
+  be given to it (its brief, the system facts or the reader's inputs). A new refusal rule is allowed only when
+  that cannot prevent the failure, and the request must then state the expected share of past accepted readings
+  it would refuse, so the replay can hold the rule against that number.
 - New design note `docs/design/direct-main-landing.md` for throughput review `20261110-024838-mch9`: build each
   verified job's landing commit on host main (`Git::merge_tree`, then `Git::commit_tree`) and push it, instead of
   staging it on the local landing branch. Predicts 5.0 minutes saved per landed job and says how the next review
