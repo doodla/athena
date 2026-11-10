@@ -170,6 +170,9 @@ A change that implements this design must cite throughput review `20261109-01461
 supersedes the citation of `20261108-183648-5eya` named in `per-job-landing-branches.md`; that file now points here.
 The next review scores the change by section 5.
 
+A later design, `overlap-ci-waits.md` (throughput review `20261110-191047-6szm`), pushes the candidate early for CI.
+That push is a candidate-only work branch; the landing cut in section 3 is still the only commit `land_pr` accepts.
+
 ## 8. Out of scope and build jobs
 
 Out of scope: any change to `crates/`, `xtask/`, `athena.toml`, `defaults.toml`, the workflows, `THROUGHPUT.md` or

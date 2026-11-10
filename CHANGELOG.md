@@ -14,6 +14,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/design/overlap-ci-waits.md`: a design note for running the base-commit CI wait and the candidate CI wait
+  alongside model work, from throughput review 20261110-191047-6szm. It states the predicted saving (an estimate
+  of 8.0 minutes per landed job against a 2708.1 median) and how the next review measures it.
+  `docs/design/per-job-main-landing.md` links to it. Design only; no code changes.
+
 - `filled_feedback_dimensions` in `crates/athena-core/src/introspect.rs`: reports which of the ten feedback
   dimensions (OLY-3-05) an introspection record fills. Recorded as the requirement's mechanism in
   `docs/spec.toml`.
