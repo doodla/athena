@@ -1,0 +1,112 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261028-140156-bz7g",
+  "n": 1,
+  "at": "2026-11-10T03:20:43.241867836Z",
+  "invocation_seq": 1,
+  "base_commit": "4218c8f32efa09c063f18abd6cd07dfb632fc3b1",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Shorten verify.rs judge below 200 lines by extracting helpers",
+  "summary": "Refactor `judge` in crates/athena-core/src/verify.rs (205 lines, limit 200) by moving the \"commands seen running\" computation into a private helper, with no behavior change. The goal is for code health to pass; the audience is the verifier and code health.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "cargo test and clippy criteria"
+    },
+    {
+      "id": "small",
+      "how": "single-function extraction in one file"
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/verify.rs: judge (lines 408-675) builds `ran` and `revert_runs` (lines 411-445, no format! strings), then findings; test `drift_haystack` (line ~3251) slices source from `\\npub fn judge(` to the first `\\n}\\n` and scans its format! literals, so strings carrying rule sources must stay in judge. No record files are added.",
+    "Extracting the ~35-line `ran`/`revert_runs` computation saves enough lines to get under 200; a file split is unnecessary since the file is 577 production lines.",
+    "The helper must not be placed so that the first `\\n}\\n` after `pub fn judge(` changes; the helper goes before judge."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "In crates/athena-core/src/verify.rs, `pub fn judge` spans at most 200 lines (Grep `pub fn judge(` and read to its closing brace in the diff/snapshot); no other production function exceeds 200 lines and the file stays under 2000 production lines.",
+      "kind": "content"
+    },
+    {
+      "text": "The extracted logic (building `ran` from commands_run and passing checks, and `revert_runs`) lives in a private helper in verify.rs, and its body is moved unchanged (diff shows only relocation and parameter plumbing).",
+      "kind": "content"
+    },
+    {
+      "text": "The `format!` strings that the drift test reads (including `must cite commands that ran (D43)`) remain inside the body of `judge`, so `drift_haystack` in the test module still finds them; the tests module is unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "No behavior change: `cargo test -p athena-core` passes, including verify::tests and rule_sources_appear_in_the_header_or_judge_format_strings.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check` and `cargo clippy --all-targets` report no issues, and `cargo test` passes.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    }
+  ],
+  "out_of_scope": [
+    "Splitting verify.rs into modules",
+    "Changing tests or verdict semantics",
+    "Changing limits or config"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.75,
+      "p_user_intervenes": 0.05,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1500.0,
+        "p90": 3600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.682,
+      "p_user_intervenes": 0.07197106690777576,
+      "cost_usd": {
+        "p10": 0.5699084000000001,
+        "p50": 1.5294943,
+        "p90": 5.0600062
+      },
+      "wall_time_s": {
+        "p10": 571.3970580596234,
+        "p50": 2121.6919287915994,
+        "p90": 4346.485890147909
+      }
+    }
+  },
+  "departures": "Small mechanical extraction with a known pitfall (drift test) identified, so slightly higher pass chance than the reference.",
+  "hard_reason": "Touches judge, the function that computes the final verdict gating other jobs, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
