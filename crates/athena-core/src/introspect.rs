@@ -1670,6 +1670,47 @@ impl Athena {
     }
 }
 
+/// The ten dimensions along which Athena analyses a feedback item (OLY-3-05), in order.
+pub const FEEDBACK_DIMENSIONS: [&str; 10] = [
+    "observation",
+    "expectation",
+    "reproduction",
+    "immediate defect",
+    "scope",
+    "cause",
+    "escape",
+    "systemic implication",
+    "prevention",
+    "validation",
+];
+
+/// The feedback dimensions an introspection record fills, in the order of [`FEEDBACK_DIMENSIONS`]. A dimension
+/// is filled when its field holds content: observation is `what_happened`, expectation the matched decisions,
+/// reproduction the earlier cases of the class, immediate defect the failure class, scope the intervention the
+/// event concerns, cause the cause, escape the prevention kind (the gate that would have caught it), systemic
+/// implication the proposed request, prevention the prevention text and validation the recorded model run.
+/// Text counts only when it is not blank.
+pub fn filled_feedback_dimensions(record: &IntrospectionRecord) -> Vec<&'static str> {
+    let text = |t: &Option<String>| t.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let filled = [
+        text(&record.what_happened),
+        !record.decisions_matched.is_empty(),
+        !record.earlier_cases.is_empty(),
+        record.failure_class.is_some(),
+        record.intervention.is_some(),
+        text(&record.cause),
+        record.prevention_kind.is_some(),
+        text(&record.proposed_request),
+        text(&record.prevention),
+        record.evidence.is_some(),
+    ];
+    FEEDBACK_DIMENSIONS
+        .into_iter()
+        .zip(filled)
+        .filter_map(|(name, on)| on.then_some(name))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1878,6 +1919,35 @@ mod tests {
             from_jev: false,
             jev: None,
         }
+    }
+
+    #[test]
+    fn feedback_dimensions_follow_the_fields_a_record_fills() {
+        let mut full = blank_record();
+        let other = RecordId::parse("20261014-170200-2abc").unwrap();
+        full.what_happened = Some("the job was rejected".into());
+        full.decisions_matched = vec!["D87".into()];
+        full.earlier_cases = vec![other.clone()];
+        full.failure_class = Some(other.clone());
+        full.intervention = Some(other);
+        full.cause = Some("a check was missing".into());
+        full.prevention_kind = Some(PreventionKind::CodeCheck);
+        full.proposed_request = Some("add the check".into());
+        full.prevention = Some("a check before dispatch".into());
+        full.evidence = Some(IntrospectionEvidence {
+            model: "m".into(),
+            cost_usd: 0.1,
+            input_tokens: 1,
+            output_tokens: 1,
+        });
+        assert_eq!(filled_feedback_dimensions(&full), FEEDBACK_DIMENSIONS);
+
+        let mut sparse = blank_record();
+        sparse.what_happened = Some("the job was rejected".into());
+        assert_eq!(filled_feedback_dimensions(&sparse), vec!["observation"]);
+
+        sparse.what_happened = Some("  ".into());
+        assert!(filled_feedback_dimensions(&sparse).is_empty());
     }
 
     fn boundary_answer(word: &str) -> Answer {
