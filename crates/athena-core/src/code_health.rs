@@ -711,35 +711,39 @@ pub struct CheckReport {
     pub landings: u32,
 }
 
+/// The lines that tell the user what one run of the check did.
+pub fn report_lines(report: &CheckReport) -> Vec<String> {
+    let mut said = format!(
+        "code health  {} file(s) measured, {} structural pass request(s) queued",
+        report.files_measured,
+        report.structural.len()
+    );
+    for (path, job) in &report.structural {
+        said.push_str(&format!("; {path} as {job}"));
+    }
+    let mut lines = vec![said];
+    if let Some(job) = &report.review {
+        lines.push(format!(
+            "code health  design review queued as {job} ({REVIEW_EVERY} landings since the last)"
+        ));
+    }
+    if report.first_baseline {
+        lines.push(format!(
+            "code health  baseline set at {} landings; the first design review is due {REVIEW_EVERY} landings later",
+            report.landings
+        ));
+    }
+    lines
+}
+
 impl Athena {
-    /// Runs the check after a landing and tells the user what it did. A failure is shown as a warning.
+    /// The landing hook: runs the recurring duties that are due after a landing (Hestia's sweep owns the
+    /// schedule, `docs/design/hestia.md` section 13) and tells the user what they did. The code-health check is
+    /// one of them; a failure of it is shown as a warning. Both landing paths call this for one landing, and the
+    /// second call finds nothing due because the landing total is recorded with each pass.
     pub fn code_health_after_landing(&self, ui: &dyn Ui) {
-        match self.code_health_check(crate::now()) {
-            Ok(report) => {
-                let mut said = format!(
-                    "code health  {} file(s) measured, {} structural pass request(s) queued",
-                    report.files_measured,
-                    report.structural.len()
-                );
-                for (path, job) in &report.structural {
-                    said.push_str(&format!("; {path} as {job}"));
-                }
-                ui.line(&said);
-                if let Some(job) = &report.review {
-                    ui.line(&format!(
-                        "code health  design review queued as {job} ({REVIEW_EVERY} landings since the last)"
-                    ));
-                }
-                if report.first_baseline {
-                    ui.line(&format!(
-                        "code health  baseline set at {} landings; the first design review is due {REVIEW_EVERY} landings later",
-                        report.landings
-                    ));
-                }
-            }
-            Err(problem) => ui.line(&format!(
-                "warning: could not check code health: {problem:#}"
-            )),
+        for line in self.run_due_duties(crate::hestia::Occasion::Landing, ui) {
+            ui.line(&line);
         }
     }
 

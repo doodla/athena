@@ -115,6 +115,69 @@ fn after_a_merge_the_branch_is_resynced_then_pages_watched_then_code_health_chec
 }
 
 #[test]
+fn a_host_squash_runs_the_code_health_duty_once_for_one_landing() {
+    let (_dir, _state, athena) = set_up();
+    let base = athena.head().unwrap();
+    land(
+        &athena,
+        &[("crates/x/src/big.rs", big_file())],
+        "j1",
+        crate::now(),
+        0,
+    );
+    let landed = athena.head().unwrap();
+    // The job-finish hook runs the duties that are due after the landing.
+    let first: Log = Rc::default();
+    athena.code_health_after_landing(&Said(first.clone()));
+    assert!(
+        first.borrow().iter().any(|l| l.starts_with("code health")),
+        "{:?}",
+        first.borrow()
+    );
+    // The host then squashes the landing into another commit that keeps the trailers, and the host-merge hook
+    // runs for the same landing.
+    let tree = athena.git.tree_of(&landed).unwrap();
+    let merged = athena
+        .git
+        .run([
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            &base,
+            "-m",
+            "Land j1 (#7)\n\nAthena-Job: j1\nAthena-Verified-Content: fp-j1\n",
+        ])
+        .unwrap()
+        .trim()
+        .to_string();
+    let second: Log = Rc::default();
+    athena
+        .after_merge(
+            &report(LinkState::Landed, Some(&merged)),
+            Some(&landed),
+            &Pages(second.clone()),
+            &poll(),
+            &Said(second.clone()),
+        )
+        .unwrap();
+    assert!(
+        !second.borrow().iter().any(|l| l.contains("code health")),
+        "the second hook for one landing ran nothing: {:?}",
+        second.borrow()
+    );
+    let records = crate::store::Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+    let code_health_runs = records
+        .hestia_sweeps
+        .iter()
+        .flat_map(|s| &s.checks)
+        .filter(|c| c.check == "code-health")
+        .count();
+    assert_eq!(code_health_runs, 1);
+    assert_eq!(records.code_health_baselines.len(), 1);
+    assert_eq!(open_requests(&athena).len(), 1);
+}
+
+#[test]
 fn a_pull_request_that_did_not_land_is_not_checked() {
     let (_dir, _state, athena) = set_up();
     land(

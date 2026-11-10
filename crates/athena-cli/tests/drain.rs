@@ -4619,7 +4619,46 @@ fn a_drain_runs_the_backfill_and_the_derivation_at_its_start_and_a_second_drain_
         "{second:?}"
     );
     assert!(second[1].contains("0 derived"), "{second:?}");
-    assert_eq!(fx.head(), head, "no commit and so no record was written");
+    // Both are drain-start duties, so the drain ran them again. Neither changed anything, and the only record
+    // written is the report of the pass: one sweep that names the two duties and the drain start.
+    let sweeps = assert_only_a_duty_pass_since(&fx, &head);
+    assert_eq!(sweeps.len(), 1);
+    let pass = sweeps[0].duty_pass.expect("the report is a duty pass");
+    assert_eq!(
+        pass.occasion,
+        athena_data::records::DutyOccasion::DrainStart
+    );
+    let ran: Vec<&str> = sweeps[0].checks.iter().map(|c| c.check.as_str()).collect();
+    assert_eq!(ran, ["error-review", "evidence-labels"]);
+    assert!(sweeps[0].checks.iter().all(|c| !c.errored));
+}
+
+/// Asserts that the one commit made since `head` holds only a Hestia sweep record, and returns the sweeps in it.
+fn assert_only_a_duty_pass_since(
+    fx: &Fixture,
+    head: &str,
+) -> Vec<athena_data::records::HestiaSweep> {
+    let count = fx
+        .git
+        .run(["rev-list", "--count", &format!("{head}..HEAD")])
+        .unwrap();
+    assert_eq!(count.trim(), "1", "the drain start made one commit");
+    let files = fx
+        .git
+        .run(["show", "--name-only", "--format=", "HEAD"])
+        .unwrap();
+    let files: Vec<&str> = files.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].starts_with("records/hestia-sweeps/"), "{files:?}");
+    let before = Records::load(&fx.git, head).unwrap().hestia_sweeps.len();
+    let after = Records::load(&fx.git, &fx.head()).unwrap().hestia_sweeps;
+    assert_eq!(after.len(), before + 1);
+    after
+        .into_iter()
+        .filter(|s| s.duty_pass.is_some())
+        .max_by_key(|s| (s.at, s.id.clone()))
+        .into_iter()
+        .collect()
 }
 
 fn real_steps_with<'a>(
@@ -5906,7 +5945,10 @@ fn drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_re
     let ui = Lines::default();
     let report = drain::drain(&steps, work_everything(), &ui).unwrap();
     assert_eq!(report.stop, Stop::QueueEmpty);
-    assert_eq!(fx.head(), head, "nothing was read or run");
+    // Nothing was read or run for the item. The drain start ran its duties, and the only record it wrote is the
+    // report of that pass.
+    let sweeps = assert_only_a_duty_pass_since(&fx, &head);
+    assert_eq!(sweeps[0].checks.len(), 2);
     let lines = ui.0.lock().unwrap().clone();
     let passed: Vec<&String> = lines
         .iter()

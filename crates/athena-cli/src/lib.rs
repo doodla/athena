@@ -98,6 +98,7 @@ mod hestia_tests {
                 age_seconds: 7200,
                 state: FindingState::Open,
             }],
+            duty_pass: None,
         }
     }
 

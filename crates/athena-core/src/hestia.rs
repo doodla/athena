@@ -6,7 +6,16 @@
 //! finding for that check and marks the check as errored. Hestia reports and never gates work (D127).
 //!
 //! The trigger is an explicit command: `athena hestia sweep` runs and records a sweep, and `athena hestia last`
-//! prints the newest one. Nothing runs a sweep on a timer or inside `athena drain`; D129 says why.
+//! prints the newest full one. Nothing runs a sweep on a timer; D129 says why. The recurring duties are the
+//! exception to "nothing runs inside `athena drain`": see the next paragraph.
+//!
+//! Hestia's sweep owns Athena's recurring duties (`docs/design/hestia.md` section 13): [`DUTIES`] lists each one
+//! with its cadence ([`Cadence`]: every drain start, every landing, every N landings) and where it runs. A pass
+//! over them starts from a drain start ([`Athena::review_passes`]), a landing
+//! ([`Athena::code_health_after_landing`]) or the sweep ([`Athena::hestia_sweep_with`]); all three go through
+//! [`Athena::execute_duties`], which runs the duties that are due ([`is_due`]) and the sweep record stores each
+//! duty that ran with the landing total (`duty_pass`). `athena status` shows [`duty_standings`] for every duty and
+//! flags the overdue ones.
 //!
 //! This skeleton ships no checks. [`default_checks`] is empty, and the checks of the design's rows 1 to 8 are
 //! later jobs that add themselves to it.
@@ -99,9 +108,10 @@ use athena_agent::env::Side;
 use athena_context::briefs::plain_boundary_text;
 use athena_context::{CONTRACT, Component, Composed, compose};
 use athena_data::records::{
-    AnyRecord, BuildMeasurement, HestiaCheckResult, IntrospectionRecord, IntrospectionStatus,
-    Invocation, InvocationOutcome, OutcomeState, PreventionKind, Role, ThroughputFollowup,
-    ThroughputProposal, ThroughputReview, ThroughputTrigger, WasteFigures,
+    AnyRecord, BuildMeasurement, CodeHealthBaseline, DutyPass, HestiaCheckResult,
+    IntrospectionRecord, IntrospectionStatus, Invocation, InvocationOutcome, OutcomeState,
+    PreventionKind, Role, ThroughputFollowup, ThroughputProposal, ThroughputReview,
+    ThroughputTrigger, WasteFigures,
 };
 use athena_data::{JobId, RecordId};
 use jiff::Timestamp;
@@ -149,51 +159,494 @@ pub fn run_sweep(checks: &[Box<dyn Check>], id: RecordId, at: Timestamp) -> Swee
     let mut results = Vec::new();
     let mut findings = Vec::new();
     for check in checks {
-        let check_id = check.id().to_string();
-        let outcome = check.run(at).and_then(|output| {
-            if output
-                .findings
-                .iter()
-                .any(|f| f.subject.trim().is_empty() || f.evidence.trim().is_empty())
-            {
-                bail!("a finding came back with no subject or no evidence");
-            }
-            Ok(output)
-        });
-        match outcome {
-            Ok(output) => {
-                results.push(CheckResult {
-                    check: check_id.clone(),
-                    examined: output.examined,
-                    count: output.findings.len() as u32,
-                    errored: false,
-                });
-                findings.extend(output.findings.into_iter().map(|f| Finding {
-                    check: check_id.clone(),
-                    ..f
-                }));
-            }
-            Err(error) => {
-                results.push(HestiaCheckResult {
-                    check: check_id.clone(),
-                    examined: 0,
-                    count: 1,
-                    errored: true,
-                });
-                findings.push(Finding {
-                    check: check_id.clone(),
-                    subject: check_id,
-                    evidence: format!("the check failed to run: {error:#}"),
-                    age_seconds: 0,
-                    state: FindingState::Open,
-                });
-            }
-        }
+        let (result, found) = settle(check.id(), check.run(at));
+        results.push(result);
+        findings.extend(found);
     }
     Sweep {
         id,
         at,
         checks: results,
+        findings,
+        duty_pass: None,
+    }
+}
+
+/// The result and findings a check or duty `check_id` leaves in a sweep, from what it returned. A finding with
+/// no subject or no evidence, or an error, makes the check errored with one open finding that says it failed to
+/// run. Whatever check id a finding carries, it is filed under `check_id`.
+fn settle(check_id: &str, outcome: Result<CheckOutput>) -> (CheckResult, Vec<Finding>) {
+    let outcome = outcome.and_then(|output| {
+        if output
+            .findings
+            .iter()
+            .any(|f| f.subject.trim().is_empty() || f.evidence.trim().is_empty())
+        {
+            bail!("a finding came back with no subject or no evidence");
+        }
+        Ok(output)
+    });
+    match outcome {
+        Ok(output) => (
+            CheckResult {
+                check: check_id.to_string(),
+                examined: output.examined,
+                count: output.findings.len() as u32,
+                errored: false,
+            },
+            output
+                .findings
+                .into_iter()
+                .map(|f| Finding {
+                    check: check_id.to_string(),
+                    ..f
+                })
+                .collect(),
+        ),
+        Err(error) => (
+            HestiaCheckResult {
+                check: check_id.to_string(),
+                examined: 0,
+                count: 1,
+                errored: true,
+            },
+            vec![Finding {
+                check: check_id.to_string(),
+                subject: check_id.to_string(),
+                evidence: format!("the check failed to run: {error:#}"),
+                age_seconds: 0,
+                state: FindingState::Open,
+            }],
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Recurring duties (`docs/design/hestia.md`, "Recurring duties")
+
+/// When a duty is due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cadence {
+    /// At every drain start.
+    DrainStart,
+    /// After every landing.
+    EveryLanding,
+    /// After every N landings since the last run.
+    EveryLandings(u32),
+}
+
+impl Cadence {
+    /// The cadence in the words `docs/design/hestia.md` uses in its duty table.
+    pub fn describe(self) -> String {
+        match self {
+            Cadence::DrainStart => "every drain start".into(),
+            Cadence::EveryLanding => "every landing".into(),
+            Cadence::EveryLandings(n) => format!("every {n} landings"),
+        }
+    }
+}
+
+/// How a duty runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum How {
+    /// The duty's runner does the work ([`DutyRunner`]).
+    Runner,
+    /// The work is part of the code-health check, which queues the review when its own landing counter says so.
+    /// The duty's last run and next due point are read from the code-health baselines.
+    WithCodeHealth,
+}
+
+/// One recurring duty and its owner, Hestia's sweep.
+#[derive(Debug, Clone, Copy)]
+pub struct Duty {
+    /// A short stable id: the check name its runs are recorded under.
+    pub id: &'static str,
+    pub name: &'static str,
+    pub cadence: Cadence,
+    pub how: How,
+    /// Where it runs, in words.
+    pub runs_in: &'static str,
+}
+
+/// The id of the keep-rule threshold check.
+pub const KEEP_RULE_CHECK_ID: &str = "keep-rule";
+
+/// Every recurring duty, in the order of the table in `docs/design/hestia.md` section 13.
+pub const DUTIES: [Duty; 6] = [
+    Duty {
+        id: "error-review",
+        name: "Error-review backlog pass",
+        cadence: Cadence::DrainStart,
+        how: How::Runner,
+        runs_in: "Athena::error_review_backfill, from the drain start and the sweep",
+    },
+    Duty {
+        id: "evidence-labels",
+        name: "Evidence-label derivation",
+        cadence: Cadence::DrainStart,
+        how: How::Runner,
+        runs_in: "Athena::derive_labels, from the drain start and the sweep",
+    },
+    Duty {
+        id: "code-health",
+        name: "Code-health check",
+        cadence: Cadence::EveryLanding,
+        how: How::Runner,
+        runs_in: "Athena::code_health_check, from the landing hook and the sweep",
+    },
+    Duty {
+        id: "design-review",
+        name: "Periodic design review",
+        cadence: Cadence::EveryLandings(crate::code_health::REVIEW_EVERY),
+        how: How::WithCodeHealth,
+        runs_in: "the code-health check, which queues the review",
+    },
+    Duty {
+        id: KEEP_RULE_CHECK_ID,
+        name: "Keep-rule threshold check",
+        cadence: Cadence::EveryLandings(10),
+        how: How::Runner,
+        runs_in: "the sweep and the landing hook, over the records",
+    },
+    Duty {
+        id: READING_RULES_CHECK_ID,
+        name: "Reading-rule refusal-rate check",
+        cadence: Cadence::EveryLandings(5),
+        how: How::Runner,
+        runs_in: "the sweep and the landing hook, over the records",
+    },
+];
+
+pub use athena_data::records::DutyOccasion as Occasion;
+
+/// What a pass over the duties knows when it decides: where it was started from, how many landings stand on the
+/// branch and the time. Passed in, so a test needs no landed commits and no clock.
+#[derive(Debug, Clone, Copy)]
+pub struct DutyContext {
+    pub occasion: Occasion,
+    pub landings: u32,
+    pub now: Timestamp,
+}
+
+/// What a duty's runner did: the check result and the lines to tell the user.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DutyOutput {
+    pub check: CheckOutput,
+    pub lines: Vec<String>,
+}
+
+/// Does the work of a duty.
+pub trait DutyRunner {
+    /// Runs `duty`. `Err` means it could not run, which is recorded as an errored check and retried.
+    fn run(&self, duty: &Duty, ui: &dyn Ui, now: Timestamp) -> Result<DutyOutput>;
+}
+
+/// What a pass over the duties did.
+#[derive(Debug, Clone, Default)]
+pub struct DutyReport {
+    pub results: Vec<CheckResult>,
+    pub findings: Vec<Finding>,
+    pub lines: Vec<String>,
+}
+
+/// What the records say about the past runs of one duty.
+#[derive(Debug, Clone, Copy, Default)]
+struct PastRuns {
+    /// The newest run that did not fail: when, and the landing total then.
+    ok: Option<(Timestamp, u32)>,
+    /// When the newest attempt was, if it failed.
+    failed_at: Option<Timestamp>,
+}
+
+/// The past runs of duty `id` in the duty passes among `sweeps`.
+fn past_runs(sweeps: &[Sweep], id: &str) -> PastRuns {
+    let mut attempts: Vec<(&Sweep, &CheckResult)> = sweeps
+        .iter()
+        .filter(|s| s.duty_pass.is_some())
+        .filter_map(|s| s.checks.iter().find(|c| c.check == id).map(|c| (s, c)))
+        .collect();
+    attempts.sort_by(|a, b| (a.0.at, &a.0.id).cmp(&(b.0.at, &b.0.id)));
+    PastRuns {
+        ok: attempts
+            .iter()
+            .rev()
+            .find(|(_, c)| !c.errored)
+            .and_then(|(s, _)| s.duty_pass.map(|p| (s.at, p.landings))),
+        failed_at: attempts
+            .last()
+            .filter(|(_, c)| c.errored)
+            .map(|(s, _)| s.at),
+    }
+}
+
+/// Whether a pass from `occasion` may run `duty` at all. A drain start runs the drain-start duties, a landing
+/// the landing duties, and a sweep every duty that has a runner.
+fn eligible(duty: &Duty, occasion: Occasion) -> bool {
+    if duty.how != How::Runner {
+        return false;
+    }
+    match occasion {
+        Occasion::Sweep => true,
+        Occasion::DrainStart => duty.cadence == Cadence::DrainStart,
+        Occasion::Landing => duty.cadence != Cadence::DrainStart,
+    }
+}
+
+/// How many landings must stand beyond the last run before a duty with `cadence` is due again; None for a
+/// drain-start duty.
+fn landings_needed(cadence: Cadence) -> Option<u32> {
+    match cadence {
+        Cadence::DrainStart => None,
+        Cadence::EveryLanding => Some(1),
+        Cadence::EveryLandings(n) => Some(n.max(1)),
+    }
+}
+
+/// Whether a pass with `ctx` runs `duty`, given its past runs. A duty that never ran, or whose newest attempt
+/// failed, is due at every pass that may run it. Otherwise a drain-start duty is due at a drain start, and a
+/// landing duty once its landings since the last run reach its cadence.
+fn is_due(duty: &Duty, past: &PastRuns, ctx: &DutyContext) -> bool {
+    if !eligible(duty, ctx.occasion) {
+        return false;
+    }
+    let Some((_, recorded)) = past.ok else {
+        return true;
+    };
+    if past.failed_at.is_some() {
+        return true;
+    }
+    match landings_needed(duty.cadence) {
+        None => ctx.occasion == Occasion::DrainStart,
+        Some(n) => ctx.landings.saturating_sub(recorded) >= n,
+    }
+}
+
+/// One duty as `athena status` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DutyStanding {
+    pub id: String,
+    pub name: String,
+    /// The cadence in words ([`Cadence::describe`]).
+    pub cadence: String,
+    pub runs_in: String,
+    /// When it last ran without failing; None when it never has (for the design review: was never queued).
+    pub last_run: Option<Timestamp>,
+    /// When its newest attempt failed; None when that attempt did not fail.
+    pub last_failed_at: Option<Timestamp>,
+    /// When the duty is next due, in words.
+    pub next_due: String,
+    /// True when the next sweep would run it: it never ran, its last attempt failed, or its cadence has passed.
+    /// A drain-start duty has no time limit: it is overdue only when never run or failed.
+    pub overdue: bool,
+}
+
+fn more_landings(n: u32) -> String {
+    format!("after {n} more landing{}", if n == 1 { "" } else { "s" })
+}
+
+/// The standing of every duty in `table`: last run, next due point and whether it is overdue. `sweeps` are the
+/// recorded sweeps, `baselines` the code-health baselines that count the design review, and `ctx` gives the
+/// landing total now (its occasion is ignored: overdue means the next sweep would run it).
+pub fn duty_standings(
+    table: &[Duty],
+    sweeps: &[Sweep],
+    baselines: &[CodeHealthBaseline],
+    ctx: &DutyContext,
+) -> Vec<DutyStanding> {
+    let ctx = DutyContext {
+        occasion: Occasion::Sweep,
+        ..*ctx
+    };
+    table
+        .iter()
+        .map(|duty| {
+            let mut standing = DutyStanding {
+                id: duty.id.to_string(),
+                name: duty.name.to_string(),
+                cadence: duty.cadence.describe(),
+                runs_in: duty.runs_in.to_string(),
+                last_run: None,
+                last_failed_at: None,
+                next_due: String::new(),
+                overdue: false,
+            };
+            if duty.how == How::WithCodeHealth {
+                let every = landings_needed(duty.cadence).unwrap_or(1);
+                standing.last_run = baselines
+                    .iter()
+                    .filter(|b| b.review_queued)
+                    .map(|b| b.at)
+                    .max();
+                match CodeHealthBaseline::latest(baselines) {
+                    None => {
+                        standing.overdue = true;
+                        standing.next_due =
+                            "due now (no code-health baseline yet; the code-health check sets it)"
+                                .into();
+                    }
+                    Some(baseline) => {
+                        let since = ctx.landings.saturating_sub(baseline.landings);
+                        standing.overdue = since >= every;
+                        standing.next_due = if standing.overdue {
+                            format!("due now ({since} landings since the last baseline)")
+                        } else {
+                            more_landings(every - since)
+                        };
+                    }
+                }
+                return standing;
+            }
+            let past = past_runs(sweeps, duty.id);
+            standing.last_run = past.ok.map(|(at, _)| at);
+            standing.last_failed_at = past.failed_at;
+            standing.overdue = is_due(duty, &past, &ctx);
+            standing.next_due = match (past.ok, past.failed_at) {
+                (None, None) => "due now (never run)".into(),
+                (_, Some(_)) => "due now (last attempt failed)".into(),
+                (Some((_, recorded)), None) => match landings_needed(duty.cadence) {
+                    None => "at the next drain start".into(),
+                    Some(n) => {
+                        let since = ctx.landings.saturating_sub(recorded);
+                        if since >= n {
+                            format!("due now ({since} landings since the last run)")
+                        } else if n == 1 {
+                            "at the next landing".into()
+                        } else {
+                            more_landings(n - since)
+                        }
+                    }
+                },
+            };
+            standing
+        })
+        .collect()
+}
+
+/// The line shown when duty `duty` could not run.
+fn duty_error_line(duty: &Duty, error: &anyhow::Error) -> String {
+    if duty.id == "code-health" {
+        return format!("warning: could not check code health: {error:#}");
+    }
+    let label = match duty.id {
+        "error-review" => "backfill",
+        "evidence-labels" => "evidence labels",
+        other => other,
+    };
+    format!("hestia     {label}: could not run: {error:#}")
+}
+
+/// The summary line of the error review backfill.
+fn backfill_line(r: &BackfillReport) -> String {
+    format!(
+        "hestia     backfill: {} repeated cause(s) · queued {} · re-queued {} · priority set {} · skipped {}",
+        r.lines.len(),
+        r.count(BackfillAction::Queued),
+        r.count(BackfillAction::Requeued),
+        r.count(BackfillAction::Reprioritised),
+        r.count(BackfillAction::Skipped)
+    )
+}
+
+/// The runner that does the real work of each duty.
+pub struct AthenaDuties<'a> {
+    pub athena: &'a Athena,
+}
+
+impl std::fmt::Debug for AthenaDuties<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AthenaDuties")
+    }
+}
+
+impl DutyRunner for AthenaDuties<'_> {
+    fn run(&self, duty: &Duty, ui: &dyn Ui, now: Timestamp) -> Result<DutyOutput> {
+        let athena = self.athena;
+        match duty.id {
+            "error-review" => {
+                let r = athena.error_review_backfill(ui)?;
+                Ok(DutyOutput {
+                    check: CheckOutput {
+                        examined: r.lines.len() as u32,
+                        findings: Vec::new(),
+                    },
+                    lines: vec![backfill_line(&r)],
+                })
+            }
+            "evidence-labels" => {
+                let s = athena.derive_labels()?;
+                Ok(DutyOutput {
+                    check: CheckOutput {
+                        examined: (s.derived + s.already_derived + s.reviewed + s.no_evidence)
+                            as u32,
+                        findings: Vec::new(),
+                    },
+                    lines: vec![format!(
+                        "hestia     evidence labels: {} derived · {} already derived · {} reviewed by a person · {} without evidence",
+                        s.derived, s.already_derived, s.reviewed, s.no_evidence
+                    )],
+                })
+            }
+            "code-health" => {
+                let report = athena.code_health_check(now)?;
+                Ok(DutyOutput {
+                    check: CheckOutput {
+                        examined: report.files_measured as u32,
+                        findings: Vec::new(),
+                    },
+                    lines: crate::code_health::report_lines(&report),
+                })
+            }
+            KEEP_RULE_CHECK_ID => {
+                let records = athena.current_records()?;
+                Ok(DutyOutput {
+                    check: keep_rule_output(&records),
+                    lines: Vec::new(),
+                })
+            }
+            READING_RULES_CHECK_ID => {
+                let head = athena.head()?;
+                Ok(DutyOutput {
+                    check: athena.reading_rules_check(&head).run(now)?,
+                    lines: Vec::new(),
+                })
+            }
+            other => bail!("duty {other} is not yet automated"),
+        }
+    }
+}
+
+/// What the keep-rule threshold check sees: one finding when the rule's verdict is a breach or says to turn
+/// planning off. The thresholds are the rule's own ([`crate::status::KEEP_RULE_TARGET_SHARE`] and its
+/// neighbours); this check reads the verdict and changes nothing.
+fn keep_rule_output(records: &Records) -> CheckOutput {
+    let Some(rule) = crate::status::keep_rule(records) else {
+        return CheckOutput::default();
+    };
+    let mut findings = Vec::new();
+    if matches!(
+        rule.verdict,
+        crate::status::KeepVerdict::Breach | crate::status::KeepVerdict::TurnOff
+    ) {
+        findings.push(Finding {
+            check: KEEP_RULE_CHECK_ID.into(),
+            subject: "job-planning keep rule".into(),
+            evidence: format!(
+                "the verdict is {:?}: {} of {} planned job(s) landed ({:.0}%, baseline {:.0}%){}",
+                rule.verdict,
+                rule.landed,
+                rule.planned,
+                rule.share * 100.0,
+                rule.baseline_share * 100.0,
+                rule.cost_per_landed_usd
+                    .map(|c| format!(", ${c:.2} per landed job"))
+                    .unwrap_or_default()
+            ),
+            age_seconds: 0,
+            state: FindingState::Open,
+        });
+    }
+    CheckOutput {
+        examined: rule.planned as u32,
         findings,
     }
 }
@@ -2627,30 +3080,118 @@ impl Athena {
         Ok(Some((job, cause)))
     }
 
-    /// Athena's own housekeeping, run at the start of every drain and in every sweep so that no person has to
-    /// run `athena hestia review --backfill` or `athena score-jev --derive` (both commands stay available).
-    /// Runs the error review backfill, then the evidence-label derivation, and returns one summary line for
-    /// each. Both are idempotent: over unchanged records they write nothing. A pass that fails is reported in
+    /// The records as `athena status` reads them: the `athena/records` worktree when it exists, else `records/`
+    /// at HEAD.
+    fn current_records(&self) -> Result<Records> {
+        let head = self.head()?;
+        let worktree = athena_data::paths::records_worktree(self.state.root());
+        Records::load_current(&self.git, &head, &worktree)
+    }
+
+    /// The context of a duty pass started from `occasion`: the landing total on HEAD now and the time.
+    pub fn duty_context(&self, occasion: Occasion) -> Result<DutyContext> {
+        let head = self.head()?;
+        Ok(DutyContext {
+            occasion,
+            landings: crate::code_health::landings(&self.git, &head)?.len() as u32,
+            now: crate::now(),
+        })
+    }
+
+    /// Runs the duties of `table` that are due under `ctx`, in table order, and returns their results. Which
+    /// duties are due is decided from the sweeps already recorded ([`is_due`]); nothing is written here.
+    pub fn execute_duties(
+        &self,
+        table: &[Duty],
+        runner: &dyn DutyRunner,
+        ctx: &DutyContext,
+        ui: &dyn Ui,
+    ) -> Result<DutyReport> {
+        let records = self.current_records()?;
+        let mut report = DutyReport::default();
+        for duty in table {
+            let past = past_runs(&records.hestia_sweeps, duty.id);
+            if !is_due(duty, &past, ctx) {
+                continue;
+            }
+            let outcome = runner.run(duty, ui, ctx.now);
+            let outcome = match outcome {
+                Ok(output) => {
+                    report.lines.extend(output.lines);
+                    Ok(output.check)
+                }
+                Err(error) => {
+                    report.lines.push(duty_error_line(duty, &error));
+                    Err(error)
+                }
+            };
+            let (result, findings) = settle(duty.id, outcome);
+            report.results.push(result);
+            report.findings.extend(findings);
+        }
+        Ok(report)
+    }
+
+    /// Runs the due duties of `table` with `runner`, prints their lines, and commits one sweep that lists `checks`
+    /// and the duties that ran, with the landing total of `ctx`. Commits a sweep even when no duty was due, so
+    /// the record shows when the sweep ran.
+    pub fn hestia_sweep_duties(
+        &self,
+        checks: &[Box<dyn Check>],
+        ui: &dyn Ui,
+        table: &[Duty],
+        runner: &dyn DutyRunner,
+        ctx: DutyContext,
+    ) -> Result<Sweep> {
+        let report = self.execute_duties(table, runner, &ctx, ui)?;
+        for line in &report.lines {
+            ui.line(line);
+        }
+        self.commit_sweep(checks, Some((report, ctx)))
+    }
+
+    /// Runs the duties of [`DUTIES`] that are due for a pass started from `occasion`, records the pass when any
+    /// ran, and returns the lines to tell the user. Never fails: a problem is a line.
+    pub fn run_due_duties(&self, occasion: Occasion, ui: &dyn Ui) -> Vec<String> {
+        match self.git.head() {
+            Ok(Some(_)) => {}
+            Ok(None) => return Vec::new(),
+            Err(e) => return vec![format!("hestia     duties: could not run: {e:#}")],
+        }
+        let ctx = match self.duty_context(occasion) {
+            Ok(ctx) => ctx,
+            Err(e) => return vec![format!("hestia     duties: could not run: {e:#}")],
+        };
+        let mut report =
+            match self.execute_duties(&DUTIES, &AthenaDuties { athena: self }, &ctx, ui) {
+                Ok(report) => report,
+                Err(e) => return vec![format!("hestia     duties: could not run: {e:#}")],
+            };
+        let mut lines = std::mem::take(&mut report.lines);
+        if !report.results.is_empty()
+            && let Err(e) = self.commit_sweep(&[], Some((report, ctx)))
+        {
+            lines.push(format!(
+                "hestia     the duty pass could not be recorded: {e:#}"
+            ));
+        }
+        lines
+    }
+
+    /// Athena's own housekeeping, run at the start of every drain so that no person has to run
+    /// `athena hestia review --backfill` or `athena score-jev --derive` (both commands stay available).
+    /// Runs the drain-start duties of [`DUTIES`] (the error review backfill and the evidence-label derivation),
+    /// records the pass, and returns one summary line for each, then the lines of [`Athena::extra_review_passes`].
+    /// Both duties are idempotent: over unchanged records they change nothing. A duty that fails is reported in
     /// its line and does not stop the other or the caller.
     pub fn review_passes(&self, ui: &dyn Ui) -> Vec<String> {
-        let backfill = match self.error_review_backfill(ui) {
-            Ok(r) => format!(
-                "hestia     backfill: {} repeated cause(s) · queued {} · re-queued {} · priority set {} · skipped {}",
-                r.lines.len(),
-                r.count(BackfillAction::Queued),
-                r.count(BackfillAction::Requeued),
-                r.count(BackfillAction::Reprioritised),
-                r.count(BackfillAction::Skipped)
-            ),
-            Err(e) => format!("hestia     backfill: could not run: {e:#}"),
-        };
-        let derive = match self.derive_labels() {
-            Ok(s) => format!(
-                "hestia     evidence labels: {} derived · {} already derived · {} reviewed by a person · {} without evidence",
-                s.derived, s.already_derived, s.reviewed, s.no_evidence
-            ),
-            Err(e) => format!("hestia     evidence labels: could not run: {e:#}"),
-        };
+        let mut lines = self.run_due_duties(Occasion::DrainStart, ui);
+        lines.extend(self.extra_review_passes(ui));
+        lines
+    }
+
+    /// The review passes that are not duties: the spec review and the throughput review.
+    fn extra_review_passes(&self, ui: &dyn Ui) -> Vec<String> {
         let spec = match self.spec_review(ui) {
             Ok(r) => {
                 let mut line = format!(
@@ -2667,7 +3208,7 @@ impl Athena {
             }
             Err(e) => format!("hestia     spec: could not run: {e:#}"),
         };
-        let mut lines = vec![backfill, derive, spec];
+        let mut lines = vec![spec];
         // The throughput review is due every ten landings or on a 20% slowdown, so most calls print nothing.
         match self.throughput_review(ui) {
             Ok(Some(r)) => {
@@ -2759,24 +3300,29 @@ impl Athena {
         }
     }
 
-    /// Runs `checks` and the reading rule check ([`ReadingRulesCheck`]), commits the report as a record, and
-    /// returns it. The review passes of [`Athena::review_passes`] run first and their summary lines go to `ui`,
-    /// then the build measurement pass ([`Athena::measure_build_pass`]) with the real builder. The reading rule
-    /// check prints no line; its result is in the record.
+    /// The sweep of `athena hestia sweep`. Runs the duties of [`DUTIES`] that are due (a duty that ran within its
+    /// cadence is not run again; see [`is_due`]) and `checks`, commits one report that lists them with the
+    /// landing total, and returns it. The duties' summary lines go to `ui`, then the lines of
+    /// [`Athena::extra_review_passes`], then the build measurement pass ([`Athena::measure_build_pass`]) with the
+    /// real builder.
     pub fn hestia_sweep_with(&self, checks: &[Box<dyn Check>], ui: &dyn Ui) -> Result<Sweep> {
-        if self.git.head()?.is_some() {
-            for line in self.review_passes(ui) {
-                ui.line(&line);
-            }
+        if self.git.head()?.is_none() {
+            return self.commit_sweep(checks, None);
+        }
+        let ctx = self.duty_context(Occasion::Sweep)?;
+        let sweep =
+            self.hestia_sweep_duties(checks, ui, &DUTIES, &AthenaDuties { athena: self }, ctx)?;
+        for line in self.extra_review_passes(ui) {
+            ui.line(&line);
         }
         self.report_build_measurement(ui, &CargoBuild);
-        self.commit_sweep(checks, true)
+        Ok(sweep)
     }
 
-    /// Runs `checks`, commits the report as a record, and returns it. Prints nothing; the sweep that also runs
-    /// the review passes is [`Athena::hestia_sweep_with`].
+    /// Runs `checks`, commits the report as a record, and returns it. Prints nothing and runs no duty; the sweep
+    /// that also runs the duties and the review passes is [`Athena::hestia_sweep_with`].
     pub fn hestia_sweep(&self, checks: &[Box<dyn Check>]) -> Result<Sweep> {
-        self.commit_sweep(checks, false)
+        self.commit_sweep(checks, None)
     }
 
     /// The reading rule check over the records at `head` (the `athena/records` worktree when it exists, as
@@ -2789,28 +3335,32 @@ impl Athena {
         ReadingRulesCheck::new(stats)
     }
 
-    /// Runs `checks`, and the reading rule check when `reading_rules` is set, and commits one report.
-    fn commit_sweep(&self, checks: &[Box<dyn Check>], reading_rules: bool) -> Result<Sweep> {
-        let (head, known) = match self.git.head()? {
-            Some(head) => {
-                let known = Records::load(&self.git, &head)?;
-                (head, known)
-            }
+    /// Runs `checks`, adds the results of a duty pass when there is one (its occasion and landing total are
+    /// stored in the record), and commits one report.
+    fn commit_sweep(
+        &self,
+        checks: &[Box<dyn Check>],
+        duties: Option<(DutyReport, DutyContext)>,
+    ) -> Result<Sweep> {
+        let known = match self.git.head()? {
+            Some(head) => Records::load(&self.git, &head)?,
             None => bail!(
                 "the repository has no commits yet; commit athena.toml and defaults.toml first"
             ),
         };
-        let now = crate::now();
+        let now = duties.as_ref().map_or_else(crate::now, |(_, ctx)| ctx.now);
         let mut id = RecordId::generate(now);
         while known.has_record_id(&id) {
             id = RecordId::generate(now);
         }
         let mut sweep = run_sweep(checks, id, now);
-        if reading_rules {
-            let extra: Vec<Box<dyn Check>> = vec![Box::new(self.reading_rules_check(&head))];
-            let more = run_sweep(&extra, sweep.id.clone(), now);
-            sweep.checks.extend(more.checks);
-            sweep.findings.extend(more.findings);
+        if let Some((report, ctx)) = duties {
+            sweep.checks.extend(report.results);
+            sweep.findings.extend(report.findings);
+            sweep.duty_pass = Some(DutyPass {
+                occasion: ctx.occasion,
+                landings: ctx.landings,
+            });
         }
         sweep.validate().map_err(|e| anyhow::anyhow!(e))?;
         let record = AnyRecord::HestiaSweep(Box::new(sweep.clone()));
@@ -2830,19 +3380,33 @@ impl Athena {
         Ok(sweep)
     }
 
-    /// The newest recorded sweep, or None when none was recorded.
+    /// The newest recorded sweep, or None when none was recorded. A drain-start or landing duty pass lists only
+    /// the duties that ran in it, so it does not replace the last full sweep; when every record is such a pass,
+    /// the newest of them is returned.
     pub fn last_sweep(&self) -> Result<Option<Sweep>> {
         let Some(head) = self.git.head()? else {
             return Ok(None);
         };
         let records = Records::load(&self.git, &head)?;
-        Ok(Sweep::latest(&records.hestia_sweeps).cloned())
+        let full: Vec<Sweep> = records
+            .hestia_sweeps
+            .iter()
+            .filter(|s| !s.is_duty_pass())
+            .cloned()
+            .collect();
+        let from = if full.is_empty() {
+            &records.hestia_sweeps
+        } else {
+            &full
+        };
+        Ok(Sweep::latest(from).cloned())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Quiet;
     use crate::state::StateDir;
     use athena_agent::fake::FakeAgentDriver;
     use athena_data::records::Build;
@@ -3257,7 +3821,23 @@ mod tests {
             }
         }
         commit_in_tree(&athena, &files);
-        let sweep = athena.hestia_sweep_with(&[], &Lines::default()).unwrap();
+        // The first sweep found the duty never run; the second runs it again only once five landings have
+        // passed since, so the landing total is advanced here (the repository holds no landed commit).
+        let ctx = DutyContext {
+            occasion: Occasion::Sweep,
+            landings: 5,
+            now: crate::now(),
+        };
+        let reading = [DUTIES[5]];
+        let sweep = athena
+            .hestia_sweep_duties(
+                &[],
+                &Lines::default(),
+                &reading,
+                &AthenaDuties { athena: &athena },
+                ctx,
+            )
+            .unwrap();
         let result = sweep
             .checks
             .iter()
@@ -5052,7 +5632,16 @@ mod tests {
         assert_eq!(second.request_jobs().len(), requests, "nothing queued");
         assert_eq!(second.class_labels.len(), labels, "no label written");
         assert_eq!(second.hestia_sweeps.len(), sweeps + 1, "only the report");
-        assert_eq!(ui.0.lock().unwrap().len(), 3, "one line per pass");
+        // The backfill and the derivation ran in the first sweep and are not due again at a sweep (they run at
+        // every drain start), so the second prints only the spec pass.
+        let lines = ui.0.lock().unwrap();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("spec:"), "{lines:?}");
+        let newest = Sweep::latest(&second.hestia_sweeps).unwrap();
+        assert!(
+            newest.checks.iter().all(|c| c.check == "alpha"),
+            "{newest:?}"
+        );
     }
 
     #[test]
@@ -6830,5 +7419,289 @@ mod tests {
         let found = improvement_of(&records(&athena));
         assert_eq!(found.items, [steward.as_str()]);
         assert!(!found.items.contains(&person.as_str().to_string()));
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // Recurring duties
+
+    /// A runner that does no work: it logs the ids it is asked to run, and fails the one it is told to.
+    #[derive(Default)]
+    struct CountingRunner {
+        log: std::cell::RefCell<Vec<String>>,
+        fail: std::cell::Cell<Option<&'static str>>,
+    }
+
+    impl CountingRunner {
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.log.borrow_mut())
+        }
+    }
+
+    impl DutyRunner for CountingRunner {
+        fn run(&self, duty: &Duty, _: &dyn Ui, _: Timestamp) -> Result<DutyOutput> {
+            self.log.borrow_mut().push(duty.id.to_string());
+            if self.fail.get() == Some(duty.id) {
+                bail!("this duty is broken");
+            }
+            Ok(DutyOutput {
+                check: CheckOutput {
+                    examined: 1,
+                    findings: Vec::new(),
+                },
+                lines: Vec::new(),
+            })
+        }
+    }
+
+    const fn test_duty(id: &'static str, cadence: Cadence) -> Duty {
+        Duty {
+            id,
+            name: "A test duty",
+            cadence,
+            how: How::Runner,
+            runs_in: "a test",
+        }
+    }
+
+    const A_DRAIN: Duty = test_duty("a-drain", Cadence::DrainStart);
+    const B_LANDING: Duty = test_duty("b-landing", Cadence::EveryLanding);
+    const C_THIRD: Duty = test_duty("c-third", Cadence::EveryLandings(3));
+
+    #[test]
+    fn a_sweep_runs_each_due_duty_records_the_last_run_and_a_second_sweep_runs_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let table = [A_DRAIN, B_LANDING, C_THIRD];
+        let runner = CountingRunner::default();
+        let mut clock = 0;
+        // One pass: the ids the runner was asked to run, and the sweep as committed and read back.
+        let mut pass = |occasion: Occasion, landings: u32| {
+            clock += 1;
+            let ctx = DutyContext {
+                occasion,
+                landings,
+                now: at(clock),
+            };
+            let sweep = athena
+                .hestia_sweep_duties(&[], &Quiet, &table, &runner, ctx)
+                .unwrap();
+            let committed = Sweep::latest(&records(&athena).hestia_sweeps)
+                .cloned()
+                .unwrap();
+            assert_eq!(committed, sweep, "the record read back is the one returned");
+            let listed: Vec<String> = sweep.checks.iter().map(|c| c.check.clone()).collect();
+            assert_eq!(runner.take(), listed, "the record lists what ran");
+            assert_eq!(
+                sweep.duty_pass,
+                Some(DutyPass { occasion, landings }),
+                "the pass stores its occasion and the landing total"
+            );
+            listed
+        };
+        // The first sweep finds every duty never run.
+        assert_eq!(
+            pass(Occasion::Sweep, 0),
+            ["a-drain", "b-landing", "c-third"]
+        );
+        // A second sweep within the cadence runs none.
+        assert!(pass(Occasion::Sweep, 0).is_empty());
+        // One landing: only the per-landing duty. The drain-start duty has no landing cadence.
+        assert_eq!(pass(Occasion::Sweep, 1), ["b-landing"]);
+        // Three landings since the first run: the every-3-landings duty is due as well.
+        assert_eq!(pass(Occasion::Sweep, 3), ["b-landing", "c-third"]);
+        assert!(pass(Occasion::Sweep, 3).is_empty());
+        // A drain start runs the drain-start duties and nothing else, every time.
+        assert_eq!(pass(Occasion::DrainStart, 3), ["a-drain"]);
+        assert_eq!(pass(Occasion::DrainStart, 3), ["a-drain"]);
+        // A landing runs the landing duties that are due: one landing since c-third last ran is not enough.
+        assert_eq!(pass(Occasion::Landing, 4), ["b-landing"]);
+        assert_eq!(pass(Occasion::Landing, 6), ["b-landing", "c-third"]);
+        // A duty that failed is not counted as run: it is due at the next pass that may run it.
+        runner.fail.set(Some("a-drain"));
+        assert_eq!(pass(Occasion::DrainStart, 6), ["a-drain"]);
+        let failed = Sweep::latest(&records(&athena).hestia_sweeps)
+            .cloned()
+            .unwrap();
+        assert!(failed.checks[0].errored);
+        assert!(failed.findings[0].evidence.contains("this duty is broken"));
+        runner.fail.set(None);
+        assert_eq!(pass(Occasion::Sweep, 6), ["a-drain"]);
+        assert!(pass(Occasion::Sweep, 6).is_empty());
+    }
+
+    #[test]
+    fn the_duty_table_matches_the_design_doc() {
+        let doc = include_str!("../../../docs/design/hestia.md");
+        let section: Vec<&str> = doc
+            .lines()
+            .skip_while(|l| !l.starts_with("## 13. Recurring duties"))
+            .skip(1)
+            .take_while(|l| !l.starts_with("## "))
+            .collect();
+        assert!(
+            !section.is_empty(),
+            "the doc has a Recurring duties section"
+        );
+        let rows: Vec<Vec<&str>> = section
+            .iter()
+            .filter(|l| l.trim_start().starts_with('|'))
+            .map(|l| {
+                l.trim()
+                    .trim_matches('|')
+                    .split('|')
+                    .map(str::trim)
+                    .collect()
+            })
+            .skip(2)
+            .collect();
+        assert_eq!(rows.len(), DUTIES.len(), "one row for each duty");
+        for (row, duty) in rows.iter().zip(DUTIES.iter()) {
+            assert_eq!(
+                row.len(),
+                5,
+                "id, duty, owner, cadence, where it runs: {row:?}"
+            );
+            assert_eq!(row[0].trim_matches('`'), duty.id);
+            assert!(
+                row[1].eq_ignore_ascii_case(duty.name),
+                "{} is named {:?} in the doc",
+                duty.id,
+                row[1]
+            );
+            assert_eq!(row[2], "Hestia's sweep", "{}", duty.id);
+            assert_eq!(row[3], duty.cadence.describe(), "{}", duty.id);
+            assert!(!row[4].is_empty(), "{} says where it runs", duty.id);
+        }
+        // The six duties of the brief, by name.
+        for name in [
+            "error-review backlog pass",
+            "evidence-label derivation",
+            "code-health check",
+            "periodic design review",
+            "keep-rule threshold check",
+            "reading-rule refusal-rate check",
+        ] {
+            assert!(
+                DUTIES.iter().any(|d| d.name.eq_ignore_ascii_case(name)),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_landing_pass_does_not_hide_the_last_full_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let runner = CountingRunner::default();
+        let ctx = |occasion, n| DutyContext {
+            occasion,
+            landings: 1,
+            now: at(n),
+        };
+        // Only duty passes so far: the newest of them is the last sweep.
+        let first = athena
+            .hestia_sweep_duties(
+                &[],
+                &Quiet,
+                &[B_LANDING],
+                &runner,
+                ctx(Occasion::Landing, 1),
+            )
+            .unwrap();
+        assert_eq!(athena.last_sweep().unwrap(), Some(first));
+        // A full sweep with a finding, then a landing pass that lists only the duty that ran.
+        let found: Vec<Box<dyn Check>> = vec![Box::new(Fixed {
+            id: "branches",
+            answer: Ok(CheckOutput {
+                examined: 2,
+                findings: vec![finding("branches", "old-branch")],
+            }),
+        })];
+        let full = athena
+            .hestia_sweep_duties(&found, &Quiet, &[], &runner, ctx(Occasion::Sweep, 2))
+            .unwrap();
+        assert_eq!(full.findings.len(), 1);
+        let landing = athena
+            .hestia_sweep_duties(
+                &[],
+                &Quiet,
+                &[B_LANDING],
+                &runner,
+                ctx(Occasion::Landing, 3),
+            )
+            .unwrap();
+        assert!(landing.is_duty_pass());
+        assert!(!full.is_duty_pass());
+        assert_eq!(athena.last_sweep().unwrap(), Some(full));
+        assert_eq!(records(&athena).hestia_sweeps.len(), 3);
+    }
+
+    #[test]
+    fn duty_commits_and_interventions_do_not_change_the_landing_total() {
+        use crate::code_health::tests::{land, set_up};
+        let (_dir, _state, athena) = set_up();
+        let total = |a: &Athena| {
+            crate::code_health::landings(&a.git, &a.head().unwrap())
+                .unwrap()
+                .len()
+        };
+        let base = athena.head().unwrap();
+        land(&athena, &[("a.txt", "a\n".into())], "j1", crate::now(), 2);
+        let landed = athena.head().unwrap();
+        assert_eq!(total(&athena), 1);
+        // The host squashes the landing: another commit with the landed content, trailers kept, on the base.
+        let tree = athena.git.tree_of(&landed).unwrap();
+        let merged = athena
+            .git
+            .run([
+                "commit-tree",
+                tree.trim(),
+                "-p",
+                &base,
+                "-m",
+                "Land j1 (#7)\n\nAthena-Job: j1\nAthena-Verified-Content: fp-j1\n",
+            ])
+            .unwrap()
+            .trim()
+            .to_string();
+        athena.git.run(["reset", "-q", "--hard", &merged]).unwrap();
+        assert_eq!(
+            total(&athena),
+            1,
+            "a squash that keeps the trailers is one landing"
+        );
+
+        let table = [B_LANDING];
+        let runner = CountingRunner::default();
+        // The first landing hook runs the per-landing duty.
+        let ctx = athena.duty_context(Occasion::Landing).unwrap();
+        assert_eq!(ctx.landings, 1);
+        athena
+            .hestia_sweep_duties(&[], &Quiet, &table, &runner, ctx)
+            .unwrap();
+        assert_eq!(runner.take(), ["b-landing"]);
+        // The pass itself is a records-only commit, and a person's fix carries no trailers: neither is a landing.
+        athena
+            .git
+            .run(["commit", "--allow-empty", "-q", "-m", "Fix by hand"])
+            .unwrap();
+        assert_eq!(total(&athena), 1);
+        // The second hook for the same landing finds nothing due.
+        let ctx = athena.duty_context(Occasion::Landing).unwrap();
+        let report = athena
+            .execute_duties(&table, &runner, &ctx, &Quiet)
+            .unwrap();
+        assert!(report.results.is_empty());
+        assert!(runner.take().is_empty());
+        // The next landing is counted.
+        land(&athena, &[("b.txt", "b\n".into())], "j2", crate::now(), 1);
+        assert_eq!(total(&athena), 2);
+        let ctx = athena.duty_context(Occasion::Landing).unwrap();
+        let report = athena
+            .execute_duties(&table, &runner, &ctx, &Quiet)
+            .unwrap();
+        assert_eq!(report.results.len(), 1);
     }
 }
