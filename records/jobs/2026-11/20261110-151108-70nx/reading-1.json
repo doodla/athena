@@ -1,0 +1,151 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261110-151108-70nx",
+  "n": 1,
+  "at": "2026-11-10T15:12:41.867827498Z",
+  "invocation_seq": 1,
+  "base_commit": "77cf3815903e3c1bd958f71d736279a1ac24a5b5",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Resolve every cited past job id to its recorded reading in the reader",
+  "summary": "Root cause: the reader brief resolves job ids (to recorded deliverables, criteria and changed files) only for ids written in the request text. Ids cited only by the retry's introspection (earlier cases, cause and prevention text) are never resolved, so readings invent fixtures and thresholds from an assumed shape. The change resolves those ids too, so the reader sees their recorded shape; it adds no refusal rule. It also addresses retried jobs 20261109-075120-7zqw, 20261029-111121-fzx0 and 20261110-124307-bn3c by dropping their candidates.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "Fixed where the ids are resolved (the reader inputs), not for one job."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that fail on the base and pass with the change."
+    },
+    {
+      "id": "tested",
+      "how": "fmt, clippy and test criterion."
+    },
+    {
+      "id": "small",
+      "how": "One focused change, no refusal rule."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the reader stage of Athena, and whoever judges its readings, must be given the recorded deliverables of every past job a request or its retry cause cites, instead of inventing a shape. The fix is information given to the reader, not a refusal rule, so no refusal rate applies.",
+    "Code survey: crates/athena-core/src/reading/topics.rs (referenced_jobs resolves only job_ids_in(request) and followed_up_ids(request), capped by MAX_REFERENCED_JOBS, via carry()); crates/athena-core/src/reading.rs read_once (builds ReaderInputs, passes attempt.introspection through earlier_attempt); crates/athena-context/src/briefs/reader.rs (EarlierAttempt already holds reading_deliverables, reading_criteria and changed_files; RetryCause.earlier_cases carry job ids; retry_cause_section prints only text for them; prior_result_section/referenced_jobs_section render the carried jobs). No record or data file is added under crates/, so check_record_file/AnyRecord are not affected.",
+    "Previous job 20261109-075120-7zqw (size check, rejected): its candidate's check_job_size, invented ZAJ2_SHAPE fixture and wrong doc claims are dropped, not kept; the finding that fixtures were invented is exactly this root cause, now fixed by resolving cited ids to recorded readings. The size-rule finding (bound too coarse) is out of scope as a separate rule.",
+    "Previous job 20261029-111121-fzx0 (acceptance-bullet coverage check, rejected) and 20261110-124307-bn3c (its retry, rejected): the coverage.rs module, the fake.rs and drain.rs edits and the checks.rs wiring are dropped. Their findings (word-stem scoring, code-fence parsing, false positives) concern a refusal rule not requested here, and no longer apply because that rule is not in this change. The fixtures they needed (recorded readings of cited jobs) are what this change supplies to the reader.",
+    "Referenced job ids are carried through the existing carry() path, redacted by the existing Redactor and bounded by MAX_REFERENCED_JOBS; jobs cited only by the introspection are listed after those named in the request so the cap never drops a request-named job. They are shown to the reader; continued_jobs still decides which must be accounted for, so the accounting rule check_prior_result_and_scope is unchanged.",
+    "Existing code: crates/athena-core/src/reading/topics.rs, crates/athena-context/src/briefs/reader.rs and crates/athena-core/src/reading.rs; the change extends referenced_jobs and ReaderInputs.referenced_jobs rather than adding a new resolver.",
+    "Consumers: none found (no config deliverable)."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new unit test in crates/athena-core/src/reading/topics.rs builds Records with a job A cited only in a retry's introspection earlier_cases (job field) or in its cause/prevention text, not in the request text, and asserts referenced_jobs (or its replacement) returns A with its recorded reading_deliverables. Run `cargo test -p athena-core referenced` to check; the test fails on the base code, which ignores such ids, and passes with the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test in crates/athena-context/src/briefs.rs builds a reader brief for a retry whose introspection cites a past job only by id, and asserts the brief contains that job's recorded deliverables, criteria and changed files under a heading for cited jobs. Run `cargo test -p athena-context brief` to check; it fails without the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows the cause is generic: with two different cited jobs (different ids, different deliverable lists) both appear in the brief with their own recorded deliverables, ids from the request text come first, and the MAX_REFERENCED_JOBS cap never drops a request-named job. Run `cargo test -p athena-core -p athena-context`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The doc comment on referenced_jobs in crates/athena-core/src/reading/topics.rs names the root cause (ids cited by introspection were never resolved to recorded deliverables, so fixtures and thresholds were invented), and the CHANGELOG.md Unreleased entry states it and lists jobs 20261109-075120-7zqw, 20261029-111121-fzx0 and 20261110-124307-bn3c as the instances. Check with Grep on both files.",
+      "kind": "content"
+    },
+    {
+      "text": "The change adds no new refusal or matching rule: `git diff` shows no new step! in refusing_check in crates/athena-core/src/reading/checks.rs and no new check function, so no newly refused share applies. check_prior_result_and_scope and continued_jobs behave as before; their existing tests still pass.",
+      "kind": "content"
+    },
+    {
+      "text": "The 'Referenced jobs' and 'Previous result and change scope' brief sections for cited-only jobs print the recorded deliverables, with no line starting with `Job ` added inside carried_work, and the reader prompt files are unchanged (git diff shows no prompt file edit; the reader prompt set has 2 tokens of headroom).",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading/topics.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.75
+    },
+    {
+      "path": "crates/athena-context/src/briefs/reader.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.85
+    }
+  ],
+  "out_of_scope": [
+    "Any new refusal rule: the size check (check_job_size), the acceptance-bullet coverage check (coverage.rs) and a replay harness; the dropped candidates of jobs 20261109-075120-7zqw, 20261029-111121-fzx0 and 20261110-124307-bn3c are discarded, including crates/athena-core/src/reading/checks.rs, crates/athena-core/src/reading/coverage.rs, crates/athena-agent/src/fake.rs and crates/athena-cli/tests/drain.rs.",
+    "Changing reader prompts, athena.toml, defaults.toml or .github/workflows.",
+    "Redoing the work of the earlier jobs (size bounds, bullet coverage); these stay separate requests.",
+    "Auto-splitting jobs or changing the small-job default."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 5.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6803921568627451,
+      "p_user_intervenes": 0.07069271758436944,
+      "cost_usd": {
+        "p10": 0.5592216999999999,
+        "p50": 1.5294943,
+        "p90": 5.221521
+      },
+      "wall_time_s": {
+        "p10": 576.6408871248716,
+        "p50": 2121.6919287915994,
+        "p90": 4363.440543859795
+      }
+    }
+  },
+  "departures": "Slightly lower acceptance and pass odds than the reference: three earlier attempts at this class were rejected, and the reading must name three prior jobs and their changed files."
+}
