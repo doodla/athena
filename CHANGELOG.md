@@ -14,6 +14,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `filled_feedback_dimensions` in `crates/athena-core/src/introspect.rs`: reports which of the ten feedback
+  dimensions (OLY-3-05) an introspection record fills. Recorded as the requirement's mechanism in
+  `docs/spec.toml`.
+
 - `crates/athena-core/src/exploration.rs`: a bounded-experiment model for Dionysus (OLY-2-15) that refuses
   empty or unbounded experiments and reports one that exceeds its bound as stopped. Recorded as the
   requirement's mechanism in `docs/spec.toml`.

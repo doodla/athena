@@ -1,0 +1,151 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261029-180927-z06n",
+  "candidate_commit": "0c65269346aeb2c88d049dfd612e3d18084db44d",
+  "verified_fingerprint": "sha256:153b56567419b2e717192fa55ea7c17da44d1fff4ed5272d48201c380bf8a9aa",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42877616157 for 0c65269346aeb2c88d049dfd612e3d18084db44d",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42877616157 for 0c65269346aeb2c88d049dfd612e3d18084db44d",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42877616157 for 0c65269346aeb2c88d049dfd612e3d18084db44d",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 4,
+  "criteria": [
+    {
+      "criterion": "docs/spec.toml requirement OLY-3-05 has mechanism naming the new function by path (crates/athena-core/src/introspect.rs), owner 'Athena' kept, and a measure that ends with 'status: not shown' and names the test; Grep of that function name finds it in introspect.rs.",
+      "kind": "content",
+      "met": true,
+      "evidence": "I read the diff of docs/spec.toml lines 463-468. The mechanism reads \"crates/athena-core/src/introspect.rs: filled_feedback_dimensions ...\", the owner is still \"Athena\", and the measure names feedback_dimensions_follow_the_fields_a_record_fills and ends with \"status: not shown\". A Grep for filled_feedback_dimensions finds `pub fn filled_feedback_dimensions` at introspect.rs:1693.",
+      "commands": [
+        "git diff HEAD~1 --stat"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test -p athena-core introspect`: the new test passes, asserting a full IntrospectionRecord yields all ten dimensions and a record with only what_happened yields only observation; the test fails if the function returns an empty or fixed set.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "25 tests passed, including introspect::tests::feedback_dimensions_follow_the_fields_a_record_fills. The test asserts that a full record gives all of FEEDBACK_DIMENSIONS, that a record with only what_happened gives exactly [\"observation\"], and that a blank what_happened gives an empty set. If the function returned an empty set, the full-record assertion would fail. If it returned any fixed set, the sparse assertion or the blank assertion would fail.",
+      "commands": [
+        "cargo test -p athena-core introspect",
+        "cargo test -p athena-core feedback_dimensions"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test` from the repository root; all pass, including the existing spec-consistency test that checks mechanism paths and measure labels.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded checks for 0c65269346ae (CI run 42877616157) show fmt, clippy and the full test suite all passing. The spec-consistency test is part of the full suite. I did not rerun the full suite.",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "git diff shows no change to crates/athena-data/src/records.rs, athena.toml, defaults.toml, or any records/ path.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The diff touches only CHANGELOG.md, crates/athena-core/src/introspect.rs and docs/spec.toml.",
+      "commands": [
+        "git diff HEAD~1 --stat"
+      ],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Some dimension-to-field mappings use metadata fields that are almost always set, so the function overstates coverage",
+      "evidence": "'validation' counts as filled whenever `record.evidence.is_some()`. introspect.rs:1396 sets evidence on every run where the model returned, including runs whose outcome is a failure, so a failed introspection still reports 'validation'. In the same way, 'scope' is just `intervention.is_some()`, which is a link set whenever an intervention triggered the run (line 1322), and 'escape' is just prevention_kind. A more honest version would map only the fields that actually carry a dimension's content and report the dimensions the record cannot hold (validation, scope) as never filled, or say so in the doc comment and the spec measure. The accepted reading let the producer adjust the mapping and ruled out schema changes, so I rate this minor.",
+      "location": "crates/athena-core/src/introspect.rs:1693-1712",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "Nothing calls the new function yet",
+      "evidence": "A Grep finds filled_feedback_dimensions only in its definition, its test, the spec and the changelog. It measures dimension coverage but does not make Athena analyse along the dimensions. The accepted reading asked only for a pure reporting function, and the measure honestly says 'status: not shown'.",
+      "location": "crates/athena-core/src/introspect.rs:1693",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "pass",
+  "final_verdict": "pass",
+  "reasons": [],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "This change passes. It adds `filled_feedback_dimensions` and `FEEDBACK_DIMENSIONS` to `crates/athena-core/src/introspect.rs`, records the function as OLY-3-05's mechanism in `docs/spec.toml` with owner \"Athena\", and writes a measure that names the test and ends with `status: not shown`. The new test passed when I ran `cargo test -p athena-core introspect`. It would fail if the function returned an empty set or any fixed set. Athena's recorded fmt, clippy and full test runs passed, and I did not rerun the full suite. The diff stays within the expected deliverables. The changelog entry sits under Unreleased → Added. There are two minor issues. First, some dimensions are filled from metadata that is almost always set: \"validation\" counts whenever the model ran, even if the run failed, and \"scope\" counts whenever an intervention triggered the run. Second, nothing calls the function yet. The accepted reading allowed both, so neither fails the change."
+}
