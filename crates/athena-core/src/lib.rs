@@ -94,6 +94,7 @@ pub mod commits;
 pub mod design_surface;
 pub mod disk;
 pub mod evidence_labels;
+pub mod exploration;
 pub mod fake;
 pub mod gate_counts;
 pub mod gh;
