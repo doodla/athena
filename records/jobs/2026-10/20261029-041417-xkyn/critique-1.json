@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-041417-xkyn",
+  "round": 1,
+  "at": "2026-11-10T08:36:39.082184321Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/code_health.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/code_health.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/display.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/display.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "\"Every N landings\" is counted by comparing commit times with the sweep's local time, in whole seconds. The code already stores landing counts elsewhere, which avoids this.",
+      "evidence": "code_health.rs:392-427: `Landing.at` is the commit time (`%ct`) in epoch seconds, which the host sets for host merges. The plan counts `t > last.at.as_second()` and treats equal seconds as already seen, so a landing in the same second as the previous duty sweep is not counted. Fast fixture runs can do this. gh/landing.rs:972-984: after a squash merge, `resync_onto_merge` replaces the local landed commit with the host's merge commit, then calls `code_health_after_landing` again. steward.rs:105 already ran the hook at job finish, and the merge commit's time is later than that first sweep. So the second hook counts one new landing and runs code-health again. That contradicts the plan's claim that \"the second hook for one landing runs nothing\". The code already stores counts instead: `CodeHealthBaseline.landings` (code_health.rs:771, `total >= baseline.landings + REVIEW_EVERY`) and `ThroughputReview.landings` (throughput.rs:104). Fix: Record the landing total when a duty runs. For example, add an optional `landings: Option<u32>` to `HestiaCheckResult` with a serde default; criterion 7 already covers that record change. Count due as `landings(..).len() - recorded`. Add one test that lands a real job through the fixture with a host-style squash merge (a realistic-branch fixture, as in gh/after_merge_tests.rs `set_up`). It should show both hooks for one landing run code-health once.",
+      "location": "Decision 2; Step 2 `landings_since`; Dependents entry for `code_health_after_landing`",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The design-review duty has two schedules: the code reviews are actually queued on (the code-health baseline) and the one the duty table and status show.",
+      "evidence": "code_health.rs:766-778: `code_health_check`, which runs on every landing as the code-health duty, queues the design review whenever `total >= baseline.landings + REVIEW_EVERY` and writes a new baseline. The plan's design-review duty only reports the cached report, but its due point is counted from its own last sweep record. The two counters start at different times: the first baseline versus the duty's first run. So status can show design-review as \"after 7 more landings\" when the review was queued at the last landing, or the reverse. The table claims the sweep owns this cadence, but the baseline logic owns it. Fix: Derive the design-review duty's last run and next due from `CodeHealthBaseline` records: last run is the newest with `review_queued` (or the first baseline), next due is `baseline.landings + REVIEW_EVERY`. Its \"run\" is then the code-health pass it is already part of. Alternatively, list design review in the table as part of the code-health row, with its cadence stated from the baseline.",
+      "location": "Decision 4; Decision 7 (design-review EveryLandings(10)); Step 3 design-review arm",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The 24-hour overdue rule for drain-start duties is a guess that the records could replace. It flags idle repositories and also changes what `athena hestia sweep` runs.",
+      "evidence": "The plan labels 24 h an estimate. Any repository not drained for a day shows the error-review and evidence-label duties as OVERDUE even though nothing was missed: a false positive by construction. Drain start always runs these duties (hestia.rs:2635 via drain.rs:3004), so after this change \"past its cadence\" can only mean a drain started and the duty failed. The records show that directly as an errored result newer than the last good one (the plan's `last_failed_at`). The 24 h rule also gates the Sweep occasion. Today, `hestia_sweep_with` (hestia.rs:2766-2771) runs backfill and derivation on every sweep. Under the plan they run only after 24 h, an unrequested behavior change; that is why the test at hestia.rs:5020 changes. Fix: Flag a drain-start duty as overdue when its newest attempt failed (`last_failed_at` newer than `last_run`), or when it has never run. Show next due as \"at the next drain start\". Drop the time limit, and keep `athena hestia sweep` running the drain-start duties every time, as it does now.",
+      "location": "Decision 3; Step 1 `DRAIN_DUTY_MAX_AGE_SECS`; Risks (24 h)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Partial sweep records written at drain start and at each landing become the \"latest sweep\", which changes what `athena hestia last` shows.",
+      "evidence": "`last_sweep` (hestia.rs:2834-2839) returns `HestiaSweep::latest` by `at`. `athena hestia last` reads it (crates/athena-cli/src/commands.rs:204; the plan's dependents list does not name this file). After every landing, the newest sweep would hold only the code-health result, so the last full sweep's branch and path findings no longer show. The field's doc comment says \"Every check that was registered, in order\" (throughput.rs:331); duty-only sweeps break that. The plan accepts this (\"the check list in the report says so\") without a test. Fix: Keep duty runs from shadowing the full sweep. Either make `last_sweep`/`hestia last` pick the newest sweep that ran the registered checks (or show both), or record duty runs in their own field or record. Add commands.rs:204 to the dependents list, with a test that a landing pass does not hide the previous full sweep's findings.",
+      "location": "Decision 1; Dependents entry for the `athena.hestia-sweep/1` record shape",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A drain test the change breaks is missing from the dependents list: drain.rs:5909 asserts that a drain commits nothing.",
+      "evidence": "crates/athena-cli/tests/drain.rs:5905-5909 runs `drain::drain(&steps, work_everything(), &ui)` with `real_steps_with`, then asserts `fx.head() == head` (\"nothing was read or run\"). `drain_with` calls `steps.review_passes()` at every drain start (drain.rs:3004), and `RealSteps::review_passes` calls `Athena::review_passes` (drain.rs:4354). Under the plan, the DrainStart duties are always due at that occasion and commit a sweep record, so the head moves and this test fails. The plan names only drain.rs:4622. Fix: Add drain.rs:5909 to the dependents list and Step 9. Change its assertion to allow exactly one duty sweep record and no other record. Grep the cli tests for other drains using `real_steps_with` that check head or record counts, and list each one.",
+      "location": "Dependents entry for `Athena::review_passes`; Step 9",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Every drain and every landing now writes a commit to the records branch, even when nothing changed.",
+      "evidence": "The second-drain test (drain.rs:4612-4622) states as a property that \"a second drain ... writes nothing\". The plan gives that up for every drain and every landing, which is two commits per landing in the host-merge flow (steward.rs:105 and gh/landing.rs:984). Fix: If last runs are stored as counts (finding 1) and drain-start failures carry the overdue signal (finding 3), commit a drain-start duty record only when a duty's outcome changed or it errored. Otherwise accept the cost explicitly and state it in the CHANGELOG entry.",
+      "location": "Risks, first entry; Decision 9 rejected alternative",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan covers every acceptance criterion. Its test seams exist: `athena_in`, `commit_sweep`, `last_sweep`, `run_sweep`, `code_health_after_landing`, `landings`, `keep_rule` and `REVIEW_EVERY` are all where it says. `HestiaSweep::validate` accepts a sweep with no checks, so committing a sweep where no duty ran works. I found five major problems, so the verdict is revise. (1) \"Every N landings\" is counted by comparing commit times with the sweep's local `at`, in whole seconds. The codebase's own pattern is to store a landing count (`CodeHealthBaseline.landings`, `ThroughputReview.landings`). Comparing times gives wrong answers on same-second landings and clock skew, and it breaks the plan's own claim that the second landing hook runs nothing: when the host squash-merges, the replacement commit has a later commit time than the first hook's sweep. (2) The design-review duty only reports a review that `code_health_check` queues on its own baseline counter. Its \"every 10 landings\" row and its status \"next due\" therefore follow a second counter that can drift from when reviews are really queued. (3) The 24-hour limit for drain-start duties is a guess that flags any idle repository as overdue. It also stops `athena hestia sweep` from running the backfill and evidence-label passes it runs today. (4) Drain and landing passes would write partial sweep records. These become the \"latest sweep\" that `athena hestia last` shows, which hides the full sweep's findings and contradicts the documented meaning of `HestiaSweep.checks`. (5) A drain test the change breaks, crates/athena-cli/tests/drain.rs:5909, is missing from the dependents list. Athena's three scope findings are justified as minor; the plan explains why each extra file is needed."
+}

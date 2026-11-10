@@ -215,6 +215,29 @@ fn later_harm_lines(h: &LaterHarm) -> String {
     out
 }
 
+/// Hestia's recurring duties (hestia.md section 13): one line each with the cadence, the last run, the next due
+/// point and an OVERDUE mark when the next sweep would run the duty. Empty when there are none.
+fn duties_lines(duties: &[athena_core::hestia::DutyStanding]) -> String {
+    let mut out = String::new();
+    for (i, d) in duties.iter().enumerate() {
+        let label = if i == 0 { "duties" } else { "" };
+        let last = d
+            .last_run
+            .map_or_else(|| "never".to_string(), |at| at.to_string());
+        let failed = d
+            .last_failed_at
+            .map(|at| format!(" · last attempt failed {at}"))
+            .unwrap_or_default();
+        let mark = if d.overdue { " · OVERDUE" } else { "" };
+        let _ = writeln!(
+            out,
+            "{label:<11} {} ({}) · last run {last}{failed} · next due {}{mark}",
+            d.id, d.cadence, d.next_due
+        );
+    }
+    out
+}
+
 /// The job-planning keep rule (job-planning.md section 9, D110): the measures, and a BREACH line with the
 /// numbers when planning is below the baseline or is to be turned off.
 fn keep_rule_lines(k: &KeepRule) -> String {
@@ -1244,6 +1267,7 @@ pub fn status(v: &StatusView) -> String {
     if let Some(rules) = &v.reading_rules {
         out.push_str(&rules.text());
     }
+    out.push_str(&duties_lines(&v.duties));
     if let Some(throughput) = &v.throughput {
         let _ = writeln!(out, "{}", throughput.text());
     }
@@ -2446,6 +2470,39 @@ mod tests {
             " · priority high · plan accepted r1"
         );
         assert_eq!(plan_suffix(&line(Priority::Normal)), " · plan accepted r1");
+    }
+
+    #[test]
+    fn status_shows_each_duty_with_its_last_run_and_next_due_and_marks_the_overdue_one() {
+        use athena_core::hestia::DutyStanding;
+        let duty = |id: &str, last: Option<&str>, next: &str, overdue: bool| DutyStanding {
+            id: id.into(),
+            name: "A duty".into(),
+            cadence: "every landing".into(),
+            runs_in: "somewhere".into(),
+            last_run: last.map(|t| t.parse().unwrap()),
+            last_failed_at: None,
+            next_due: next.into(),
+            overdue,
+        };
+        let text = duties_lines(&[
+            duty(
+                "code-health",
+                Some("2026-10-27T09:00:01Z"),
+                "at the next landing",
+                false,
+            ),
+            duty("keep-rule", None, "due now (never run)", true),
+        ]);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[0].starts_with("duties"), "{text}");
+        assert!(lines[0].contains("last run 2026-10-27T09:00:01Z"), "{text}");
+        assert!(lines[0].contains("next due at the next landing"), "{text}");
+        assert!(!lines[0].contains("OVERDUE"), "{text}");
+        assert!(lines[1].contains("last run never"), "{text}");
+        assert!(lines[1].ends_with("OVERDUE"), "{text}");
+        assert!(duties_lines(&[]).is_empty());
     }
 
     #[test]

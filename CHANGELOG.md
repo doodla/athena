@@ -9,6 +9,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Hestia's sweep now owns Athena's recurring duties and schedules them, so none depends on a person remembering.
+  `DUTIES` in `crates/athena-core/src/hestia.rs` and one table in `docs/design/hestia.md` (section 13, compared by a
+  test) list six: the error-review backlog pass and the evidence-label derivation (every drain start), the
+  code-health check (every landing), the periodic design review and the keep-rule threshold check (every 10
+  landings) and the reading-rule refusal-rate check (every 5 landings). A drain start, a landing and
+  `athena hestia sweep` each run the duties that are due and nothing else: a second sweep within the cadence runs
+  none (it no longer re-runs the backfill and the label derivation, which still run at every drain start). Each
+  duty that ran is recorded as a check named by its id in an `athena.hestia-sweep/1` record whose new optional
+  `duty_pass` field holds the occasion and the landing total, which "every N landings" counts from; older sweeps
+  still parse and make a duty read as never run. A duty that fails is recorded as errored and tried again at the
+  next pass. `athena status` (text and `--json`) gains a `duties` section: each duty with its cadence, last run,
+  next due point and an OVERDUE mark when the next sweep would run it (never run, last attempt failed, or its
+  landings reached). The design review is read from the code-health baselines, the counter that queues it.
+  `athena hestia last` skips drain-start and landing passes, which list only the duties that ran. Cost: every drain
+  start and every landing that runs a duty adds one small records-only commit (none when nothing was due; the
+  second landing hook for one landing runs nothing). The landing hook `code_health_after_landing` now goes through
+  this schedule.
 - A producer reply that says the weekly or session usage limit was hit (`You've hit your weekly limit · resets
   Nov 12, 3pm`) is now an environment stop, not a failure of the work. Before, only an `API Error: 429` was read as
   a usage limit, so this reply closed the job as `the producer did not complete` and counted against its line.

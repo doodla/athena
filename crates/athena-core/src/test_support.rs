@@ -530,6 +530,9 @@ impl CutoverFixture {
             go.go(cutover_job.as_str(), AcceptedBy::User, &Quiet),
             "the cutover job",
         )?;
+        // The landing hook recorded its duty pass in a records-only commit on top of the landing. This fixture
+        // pins the shape of the landing and of the history around it, so that local commit is dropped here.
+        git.run(["reset", "-q", "--hard", &cutover_local_landing])?;
 
         // The pull request: the real landing flow with the real records sink; only the host is faked.
         let records = crate::store::Records::load(&git, &cutover_local_landing)?;

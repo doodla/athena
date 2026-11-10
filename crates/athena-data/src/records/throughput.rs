@@ -328,12 +328,46 @@ pub struct HestiaCheckResult {
 pub struct HestiaSweep {
     pub id: RecordId,
     pub at: Timestamp,
-    /// Every check that was registered, in order, with its count.
+    /// Every check that was registered, in order, with its count. A drain-start or landing pass
+    /// (`duty_pass`) lists only the duties that ran in it.
     pub checks: Vec<HestiaCheckResult>,
     pub findings: Vec<HestiaFinding>,
+    /// Set by a pass over Hestia's recurring duties: where it was started from and the landing total at that
+    /// moment, which is what "every N landings" counts from. A duty ran in this pass when its id is listed in
+    /// `checks` and not errored. Absent in sweeps written before duties were scheduled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty_pass: Option<DutyPass>,
+}
+
+/// Where a pass over the recurring duties was started from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DutyOccasion {
+    /// The start of a drain.
+    DrainStart,
+    /// A job landed.
+    Landing,
+    /// An explicit `athena hestia sweep`.
+    Sweep,
+}
+
+/// The mark a duty pass leaves in a sweep record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DutyPass {
+    pub occasion: DutyOccasion,
+    /// How many landings stood on the branch when the pass ran.
+    pub landings: u32,
 }
 
 impl HestiaSweep {
+    /// Whether this record is a drain-start or landing pass, which lists only the duties that ran in it and so
+    /// is not a full sweep.
+    pub fn is_duty_pass(&self) -> bool {
+        self.duty_pass
+            .is_some_and(|p| matches!(p.occasion, DutyOccasion::DrainStart | DutyOccasion::Landing))
+    }
+
     /// The most recent of `sweeps`, by time and then id; None when there are none.
     pub fn latest(sweeps: &[HestiaSweep]) -> Option<&HestiaSweep> {
         sweeps

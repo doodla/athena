@@ -1,0 +1,83 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-041417-xkyn",
+  "round": 2,
+  "at": "2026-11-10T08:44:59.226317253Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-data/src/records/throughput.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-data/src/records/throughput.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/code_health.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/code_health.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/display.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/display.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/lib.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/lib.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/after_merge_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/after_merge_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The scheduler reads its last runs from the `athena/records` worktree when that directory exists, but writes sweeps onto the current branch, so once the worktree exists every duty would read as never run.",
+      "evidence": "`commit_records` (`commits.rs:240-276`) commits onto the current branch HEAD. `Records::load_current` (`store.rs:367-373`) reads only the worktree when it exists and does not fall back. The `code_health_check` baselines are read with `Records::load(head)` (`code_health.rs:750`), and so is `commit_sweep` (`hestia.rs:2796`). `docs/design/records-history.md:544` says nothing creates the worktree yet, so this is latent. Once the worktree exists, every duty reads as never run and re-runs at every pass. Fix: Make the due decision in `execute_duties` read through the writer's loader, `Records::load(&git, &head)`, as `commit_sweep` and `code_health_check` do. Or state the limit in the design doc. Keep `load_current` for the status display.",
+      "location": "Step 5 (execute_duties loads with Records::load_current) and the dependent 'Which loader reads the duty last runs'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The rule that keeps the design-review duty away from the runner is not stated or tested.",
+      "evidence": "Decision 5 says a landing runs the landing duties (`EveryLanding`, `EveryLandings(n)`). Design-review is `EveryLandings(REVIEW_EVERY)`, and step 4 says its runner arm returns `Err('not yet automated')`. If `eligible()` filters by cadence only, every 10th landing records an errored design-review check. That would also clash with decision 4 (never run separately). Fix: State that `eligible()` excludes duties that run with code health at every occasion. In the criterion 1 test or a small extra test, assert that a landing pass at 10 landings records no `design-review` check result.",
+      "location": "Decision 5 / Step 3 `eligible(duty, occasion)` / Step 4 design-review arm",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After the change, the test no longer runs the path `athena hestia sweep` uses, though its name says it does.",
+      "evidence": "The plan changes its second sweep from `hestia_sweep_with` (the path `commands.rs:201` uses) to `hestia_sweep_duties` with `[DUTIES[5]]` and an injected landing count. The test name and its assertion `last_sweep() == sweep` then describe a path the command does not take. Fix: Advance the real landing total (commit five landings with the `code_health::tests::land` helper) and keep calling `hestia_sweep_with`. Or rename the test to say it runs the reading-rule duty directly.",
+      "location": "Dependents, first entry: test hestia.rs:3228 `the_sweep_command_path_flags_the_rule_from_committed_invocation_records`",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A new optional field under `athena.hestia-sweep/1` makes an older Athena refuse the new records, because the struct uses `deny_unknown_fields`.",
+      "evidence": "`docs/design/squash-chain-landing.md:120-123` explains why the candidate record moved to version /2 for this reason. The sweep record is not read by the gate the way the candidate is, and 17 optional fields under /1 already exist in `records/*.rs`, so this is acceptable. Fix: Add one sentence to the hestia.md section or the CHANGELOG entry saying that older binaries refuse sweep records that carry `duty_pass`.",
+      "location": "Decision 1 / throughput.rs `HestiaSweep.duty_pass`",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 2 answers the earlier findings. Last runs are stored with a landing count in a new optional `duty_pass` field on the sweep record, not compared by commit time. So the second post-landing hook (`steward.rs:105`, then `gh/landing.rs:984` after the host squash) runs nothing. The design review is counted from the existing `CodeHealthBaseline`, so there is no second counter. `last_sweep` skips drain-start and landing passes, so they do not hide the last full sweep. The 24-hour limit on drain-start duties is gone. The commit-shape table and a realistic-branch test are present, and no landing-classification function changes. I checked the cited code by reading it: `run_sweep` (`hestia.rs:148/193`), `review_passes` (`:2635`), `commit_sweep` (`:2793`), `last_sweep` (`:2834`), `code_health_after_landing` (`code_health.rs:716`), `code_health_check` (`:748`, with the baseline cadence at `:766-780`), `landings` (`:399`), `HestiaSweep` (`throughput.rs:328`, `deny_unknown_fields`), `status()` (`status.rs:1129`, `load_current`), `tests/drain.rs:4622` and `:5909`, `hestia.rs:3228` and `:5020`, and the host-squash fixture in `after_merge_tests.rs:58-84`. A grep of the head-equality assertions in `crates/athena-cli/tests` found only `drain.rs:4622` and `:5909` with a drain. The other drain.rs hits are refusal tests with no drain. A grep for `hestia_sweep_with(` found only the four calls in hestia.rs tests and `commands.rs:201`, so the dependents list is complete for these readers. The demonstrations exercise production entry points (`hestia_sweep_duties`, `duty_standings`, `Athena::status`, `AnyRecord::parse`, `check_record_file`). Their only double is a runner that logs ids, so each test would fail without the cadence and overdue logic. Remaining issues are minor. The due decision reads records with `Records::load_current`, which reads the separate `athena/records` worktree when that directory exists. But the sweep is written with `commit_records` onto the current branch. This is harmless today because nothing creates the worktree yet. The rule that keeps the design-review duty out of the runner is implied, not stated or tested. One existing test (`hestia.rs:3228`) loses its command-path coverage. Athena's six scope findings stand as minor and are not repeated."
+}
