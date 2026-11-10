@@ -1,7 +1,9 @@
 # Hestia: the continuity role, with Hades's cleanup folded in
 
 Status: accepted design. Job 1 of section 9 (the sweep skeleton) is built in `crates/athena-core/src/hestia.rs`;
-the checks and later jobs are not. Decision: D129 in [`docs/decisions.md`](../decisions.md), status accepted.
+the checks and later jobs are not. Section 13 (recurring duties) is built too: the drain start and the landing hook
+now run the duties that are due, as well as the explicit command. Decision: D129 in
+[`docs/decisions.md`](../decisions.md), status accepted.
 Readers: Sri, the brain, and the producers who will build the jobs in section 9.
 
 ## 1. What this is
@@ -205,8 +207,9 @@ the split notice. Depends on: 7, 9.
 
 ## 10. Open points
 
-- The trigger is settled in D129: an explicit command (`athena hestia sweep`, `athena hestia last`). A drain hook
-  stays possible later on the same function; a timer is not built.
+- The trigger is settled in D129: an explicit command (`athena hestia sweep`, `athena hestia last`). Section 13
+  later added runs of the due duties at a drain start and after a landing, on the same function; a timer is not
+  built.
 - Every figure in sections 2, 4 and 5 is an estimate; the failures' own figures come from the request and were
   not re-measured.
 - The rules marked "prose only" above (the allow-list before job 6, the never-gates rule) have no code
@@ -388,3 +391,52 @@ review prints a line for each follow-up. A change that has not landed, or that n
 **Not covered.** The review does not change the error review or the code-health review, and it does not
 implement any change. A crash between queuing the request and committing the review record leaves an open
 request with no record: the next review names it as open, and that prediction gets no follow-up.
+
+## 13. Recurring duties
+
+Athena has duties that must happen again and again, and none may depend on a person remembering. Hestia's sweep
+owns them: this table is the list (`DUTIES` in `crates/athena-core/src/hestia.rs`; a test compares the ids and
+cadences below with it), and the sweep runs each duty on its cadence and records when it last ran.
+
+| id | duty | owner | cadence | where it runs |
+|---|---|---|---|---|
+| `error-review` | Error-review backlog pass | Hestia's sweep | every drain start | `Athena::error_review_backfill`, from the drain start and the sweep |
+| `evidence-labels` | Evidence-label derivation | Hestia's sweep | every drain start | `Athena::derive_labels`, from the drain start and the sweep |
+| `code-health` | Code-health check | Hestia's sweep | every landing | `Athena::code_health_check`, from the landing hook and the sweep |
+| `design-review` | Periodic design review | Hestia's sweep | every 10 landings | the code-health check, which queues the review |
+| `keep-rule` | Keep-rule threshold check | Hestia's sweep | every 10 landings | the sweep and the landing hook, over the records |
+| `reading-rule-refusals` | Reading-rule refusal-rate check | Hestia's sweep | every 5 landings | the sweep and the landing hook, over the records |
+
+The cadence kinds are "every drain start", "every landing" and "every N landings". The values of N (10 and 5) are
+a choice made here; the design review's 10 is the code-health cadence (`code_health::REVIEW_EVERY`), and the
+throughput review and the spec review are not duties: they keep their own triggers (sections 9 and 12).
+
+**Occasions.** A pass over the duties starts from one of three places, and the place decides which duties may run.
+At a drain start (`Athena::review_passes`) the drain-start duties run, every time. After a landing
+(`Athena::code_health_after_landing`, called on both landing paths) the landing duties that are due run. An explicit
+`athena hestia sweep` runs every duty that is due. Whether a duty that may run is due is decided from the stored
+runs, never from the place alone.
+
+**Last run.** A pass that ran at least one duty commits one `athena.hestia-sweep/1` record. Each duty that ran is
+a check in it, named by the duty's id; the record's `duty_pass` field holds the occasion (`drain_start`, `landing`
+or `sweep`) and the landing total at that moment. "Every N landings" is the landing total now minus the total stored
+with the duty's last run, so it does not depend on commit times, and a host squash that replaces the landed commit
+and keeps its trailers leaves the total unchanged: the second landing hook for one landing runs nothing. Commits
+that carry no job trailers (a duty pass, a code-health baseline, a person's fix) are not landings. A duty that
+failed to run is recorded as an errored check with the usual finding and does not count as a run, so it is due at
+the next pass that may run it. Sweeps written before this field existed have no `duty_pass`; a duty then reads as
+never run and runs once. `athena hestia last` skips drain-start and landing passes, which list only the duties
+that ran, so they never hide the findings of the last full sweep.
+
+**Due and overdue.** A duty that never ran, or whose newest attempt failed, is due at every pass that may run it. A
+drain-start duty that ran is due at the next drain start and, at a sweep, not before: a sweep within the cadence
+runs none. A landing duty is due once its landings since the last run reach its N. `athena status` shows each duty
+with its last run, its next due point and an OVERDUE mark, and a duty is overdue when the next sweep would run it.
+A drain-start duty has no time limit, so it is overdue only when it never ran or its last attempt failed. The
+design review is not run by itself: the code-health check queues it when ten landings stand beyond the latest code-health
+baseline, so its last run is the newest baseline that queued a review and its next due point counts from the latest
+baseline, the same counter that queues the review. A repository whose first baseline queued no review shows "never
+reviewed" and is not overdue until ten landings have passed.
+
+**Cost.** Every drain start and every landing that runs a duty adds one small records-only commit. Nothing is
+committed when no duty was due.

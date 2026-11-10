@@ -1,0 +1,146 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261029-041417-xkyn",
+  "n": 1,
+  "at": "2026-11-10T08:22:28.437937845Z",
+  "invocation_seq": 1,
+  "base_commit": "374134fe0594b80d321232ffbca4382a8ad9cf2e",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make Hestia's sweep own and schedule Athena's recurring duties",
+  "summary": "Add a duty table (docs/design/hestia.md and a matching code table in hestia.rs) listing the error-review pass, evidence-label derivation, code-health check, periodic design review and threshold checks with cadence (drain start, landing, every N landings) and where each runs. The sweep runs each due duty and records its last run; `athena status` shows last run and next due for each duty and flags overdue ones. Audience: the owner/operator reading status and design doc.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests and fmt/clippy/test criteria included."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests exercising cadence and overdue behavior."
+    },
+    {
+      "id": "strangers",
+      "how": "Design doc table and changelog written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/hestia.rs (Check trait, default_checks, run_sweep, ReadingRulesCheck), crates/athena-core/src/status.rs (StatusView, ReadingRuleStats, status()) and the record types in crates/athena-data/src/records.rs (AnyRecord, HestiaSweep). run_sweep runs all checks every time with no cadence; last-run state has to be persisted, most likely as a new field or record in athena-data; if a new record file is added it must pass check_record_file, AnyRecord and the round-trip test.",
+    "Last-run is stored as records (a duty-run record or a field on the sweep record) and 'every N landings' is counted from landed jobs in records; the exact mechanism is the producer's call after reading the code.",
+    "Duties are run through the existing Check trait or a thin Duty wrapper; existing implementations of the error review, throughput and reading-rule checks are reused, and duties with no implementation yet are registered with a clear 'not yet automated' outcome rather than invented.",
+    "No change to athena.toml, defaults.toml or workflows is needed; none is a deliverable.",
+    "Cadence N values are chosen by the producer and documented in the table."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in crates/athena-core/src/hestia.rs, run by `cargo test -p athena-core`, builds a duty table with a drain-start, a per-landing and an every-N-landings duty. It shows one sweep runs each due duty and records its last run, and a second sweep within the cadence runs none.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test in crates/athena-core/src/status.rs, run by `cargo test -p athena-core`, shows the status view flags a duty whose last run is past its cadence as overdue and does not flag a duty within its cadence. It also shows each duty with last run and next due point.",
+      "kind": "behavior"
+    },
+    {
+      "text": "docs/design/hestia.md has one table listing every duty (error-review backlog pass, evidence-label derivation, code-health check, periodic design review, keep-rule threshold check, reading-rule refusal-rate check) with owner Hestia's sweep, cadence and where it runs. Grep of the file finds each duty name.",
+      "kind": "content"
+    },
+    {
+      "text": "The duty table in hestia.rs lists the same duties and cadences as the table in docs/design/hestia.md, checked by a diff read or a test comparing ids.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the duty schedule, last-run records and status overdue flag.",
+      "kind": "content"
+    },
+    {
+      "text": "Any new or changed record type under crates/athena-data is covered by `check_record_file`, `AnyRecord` and the round-trip test in records.rs, and old records still parse.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/design/hestia.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Building new implementations of duties that do not exist yet beyond registering them",
+    "Changing the threshold values of the keep rule or reading-rule refusal flags",
+    "Changes to athena.toml, defaults.toml or CI workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2400.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6831683168316832,
+      "p_user_intervenes": 0.07132616487455197,
+      "cost_usd": {
+        "p10": 0.5604083908971385,
+        "p50": 1.5164948072931013,
+        "p90": 5.076937522989435
+      },
+      "wall_time_s": {
+        "p10": 572.5156181319999,
+        "p50": 2120.547459108001,
+        "p90": 4352.680908654998
+      }
+    }
+  },
+  "departures": "Larger than the reference: touches the sweep, status, a record type and the design doc, and needs persisted state.",
+  "hard_reason": "Changes the Hestia sweep, which runs recurring checks and flags overdue work, and the status view that reports it, so a mistake would be hard to see.",
+  "producer_effort": "high"
+}

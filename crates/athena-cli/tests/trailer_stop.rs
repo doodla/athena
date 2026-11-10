@@ -115,6 +115,9 @@ fn land_post_c0_job() -> PostC0 {
     );
     assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
     let landed = done.landed_commit.unwrap();
+    // The landing hook recorded its duty pass in a records-only commit on top of the landing. This test pins the
+    // shape of the pull request, so that local commit is dropped here.
+    fx.git.run(["reset", "-q", "--hard", &landed]).unwrap();
     let fingerprint = verified_fingerprint(&fx.git, &landed, &proposal.job);
     let report = land_through_pr(
         &fx.git,

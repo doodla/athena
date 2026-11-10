@@ -2569,7 +2569,62 @@ mod tests {
                 age_seconds: 0,
                 state: HestiaFindingState::Open,
             }],
+            duty_pass: None,
         }
+    }
+
+    #[test]
+    fn a_hestia_sweep_with_a_duty_pass_round_trips_and_an_old_sweep_still_parses() {
+        let mut sweep = sweep_with("20261026-090000-5abc");
+        sweep.checks[0].check = "code-health".into();
+        sweep.checks[1].check = "keep-rule".into();
+        sweep.findings[0].check = "keep-rule".into();
+        sweep.duty_pass = Some(DutyPass {
+            occasion: DutyOccasion::Landing,
+            landings: 7,
+        });
+        let record = AnyRecord::HestiaSweep(Box::new(sweep.clone()));
+        let json = record.to_json();
+        assert!(
+            json.contains("\"occasion\": \"landing\"") || json.contains("\"occasion\":\"landing\"")
+        );
+        let parsed = AnyRecord::parse(&record.canonical_path(), json.as_bytes()).unwrap();
+        assert_eq!(parsed, record);
+        assert!(check_record_file(&record.canonical_path(), json.as_bytes()).is_ok());
+        assert!(sweep.is_duty_pass());
+        // The three occasions are written by name; only drain-start and landing passes are duty passes.
+        for (occasion, name, duty_pass) in [
+            (DutyOccasion::DrainStart, "drain_start", true),
+            (DutyOccasion::Landing, "landing", true),
+            (DutyOccasion::Sweep, "sweep", false),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&occasion).unwrap(),
+                format!("\"{name}\"")
+            );
+            let mut s = sweep.clone();
+            s.duty_pass = Some(DutyPass {
+                occasion,
+                landings: 0,
+            });
+            assert_eq!(s.is_duty_pass(), duty_pass);
+        }
+        // A sweep as written before the field existed parses, with no duty pass.
+        let old = r#"{"schema":"athena.hestia-sweep/1","id":"20261026-090000-5abc","at":"2026-10-26T09:00:00Z","checks":[{"check":"branches","examined":4,"count":0,"errored":false}],"findings":[]}"#;
+        let path = "records/hestia-sweeps/2026-10/20261026-090000-5abc.json";
+        let AnyRecord::HestiaSweep(parsed_old) = AnyRecord::parse(path, old.as_bytes()).unwrap()
+        else {
+            panic!("an old sweep parses as a sweep");
+        };
+        assert!(parsed_old.duty_pass.is_none());
+        assert!(!parsed_old.is_duty_pass());
+        assert!(check_record_file(path, old.as_bytes()).is_ok());
+        // A repeated check id is still refused, and so is an unknown field in the pass.
+        let mut twice = sweep.clone();
+        twice.checks[1].check = "code-health".into();
+        assert!(twice.validate().is_err());
+        let unknown = json.replace("\"landings\"", "\"landing_total\"");
+        assert!(AnyRecord::parse(&record.canonical_path(), unknown.as_bytes()).is_err());
     }
 
     #[test]

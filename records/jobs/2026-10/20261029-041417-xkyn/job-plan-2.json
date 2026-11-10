@@ -1,0 +1,424 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261029-041417-xkyn",
+  "round": 2,
+  "at": "2026-11-10T08:41:58.382112191Z",
+  "invocation_seq": 5,
+  "approach": "The duty table, the due rule, the runner seam and the standings live in hestia.rs. A pass over the duties records its result in the existing `athena.hestia-sweep/1` record: each duty that ran is a check result named by its id, and one new optional sweep-level field `duty_pass { occasion, landings }` stores the landing total at that moment. \"Every N landings\" is then `total landings now - recorded total`, so it does not depend on commit times. The total is `code_health::landings(..).len()`, which a host squash merge leaves unchanged, so the second landing hook for one landing runs nothing. Three occasions go through one scheduler, `Athena::execute_duties`:\n\n- Drain start (`review_passes`) runs the two drain-start duties every time.\n- A landing (`code_health_after_landing`) runs the landing duties that are due.\n- `athena hestia sweep` runs every duty that is due. A drain-start duty is due there only if it never ran or its last attempt failed.\n\n`athena status` shows every duty with its last run and next due point. Overdue means \"the next sweep would run it\". For drain-start duties that is never run or last attempt failed, with no time limit. For landing duties it is never run, last attempt failed, or at least N landings since the last run. The design-review duty is not run separately. It is part of the code-health pass, so its last run and next due point come from the `CodeHealthBaseline` records, the counter that actually queues the review. `athena hestia last` skips drain-start and landing passes, so they never hide the last full sweep. Every drain start and every landing that ran a duty commits one small sweep record. The plan accepts that cost and states it in the CHANGELOG.\n\nCommit-shape table. The plan changes no classification function; `code_health::landings` keeps its rule (first-parent commits holding both an `Athena-Job:` and an `Athena-Verified-Content:` trailer):\n\n| Shape on the branch | Counted as a landing | Outcome for the duty rule |\n|---|---|---|\n| Job landing, both trailers | yes | total +1; code-health and design-review count it |\n| Host squash merge that replaces the landed commit, trailers kept | yes, one | total unchanged, so the second hook (gh/landing.rs:984) runs nothing |\n| Records-only commit (duty sweep, code-health baseline) | no | not counted |\n| Intervention commit with no trailers | no | not counted |\n| Retry-after-block landing | yes, once when it lands | counted once |\n| Rejected or failed job | no commit on main | no hook fires (steward.rs:104) |\n\nThe realistic-branch test `duty_commits_and_interventions_do_not_change_the_landing_total` (step 9) builds this branch.",
+  "decisions": [
+    {
+      "choice": "Record the landing total in the record, as a sweep-level optional field `duty_pass: Option<DutyPass { occasion: DutyOccasion (drain_start | landing | sweep), landings: u32 }>` on `HestiaSweep`, with serde default and skip-if-none. A duty ran when the newest sweep with `duty_pass` lists its id with `errored == false`. The count is `landings_now.saturating_sub(that sweep's duty_pass.landings)`.",
+      "reason": "Answers finding 4. Commit time is not used, so a landing in the same second as the previous pass cannot be lost. A host squash that replaces the landed commit (steward.rs:105, then gh/landing.rs:984 via `resync_onto_merge`) leaves `landings().len()` unchanged, so the second hook runs nothing. This is the same stored-count approach `CodeHealthBaseline.landings` (code_health.rs:771) and `ThroughputReview.landings` already use. The total belongs to the whole pass, so one sweep-level field is enough, with no change to `HestiaCheckResult`. The same field marks drain-start and landing passes, which answers finding 7. Old sweeps have no `duty_pass`, so they parse and are ignored as duty runs. The duty then reads 'never run' and runs once.",
+      "rejected": [
+        {
+          "option": "Compare landing commit times with the sweep time (the earlier plan)",
+          "why": "Loses a landing in the same second as the last pass, and counts the host merge commit as new."
+        },
+        {
+          "option": "`landings: Option<u32>` on every `HestiaCheckResult`",
+          "why": "The total is the same for every duty in a pass. It would break every check literal (cli lib.rs:81,87, records.rs tests, hestia.rs) and gives no way to tell a duty-only pass from a full sweep."
+        },
+        {
+          "option": "A new `athena.duty-run/1` record kind",
+          "why": "Touches `AnyRecord`, `canonical_path`, store.rs loading and `has_record_id` for the same information."
+        }
+      ]
+    },
+    {
+      "choice": "`athena hestia last` (commands.rs:204 -> `Athena::last_sweep`) returns the newest sweep that is not a drain-start or landing pass (`HestiaSweep::is_duty_pass()`: `duty_pass.occasion` is drain_start or landing). If every sweep is such a pass, it returns the newest overall.",
+      "reason": "Answers finding 7. A landing pass holding only the code-health result must not replace the last full sweep's findings, and the field's doc says 'every check that was registered' (throughput.rs:331). Explicit `athena hestia sweep` records, with occasion sweep or none, stay eligible. A test commits a full sweep with a finding, then a landing pass, and asserts `last_sweep` still returns the full one.",
+      "rejected": [
+        {
+          "option": "Show both sweeps in `hestia last`",
+          "why": "Changes the report format and the cli `hestia_report` tests for no need."
+        },
+        {
+          "option": "Leave `last_sweep` as it is and accept shadowing",
+          "why": "A landing would hide the previous branch and path findings."
+        }
+      ]
+    },
+    {
+      "choice": "Drop the 24-hour rule. A drain-start duty runs at every drain start. At `athena hestia sweep` it is due only if it never ran or its newest attempt failed. Status marks it overdue under exactly that rule and shows next due as 'at the next drain start'.",
+      "reason": "Answers finding 6. Drain start always runs these duties (drain.rs:3004), so 'past cadence' can only mean none was recorded or the last run failed. A time limit would flag an idle repository by construction. Acceptance criterion 1 requires that a second sweep within the cadence runs none, so the sweep cannot re-run a drain-start duty that succeeded. That is the one deliberate change to today's sweep, which re-ran backfill and labels each time (hestia.rs:2768). Drain start still runs them every time, and the existing test at hestia.rs:5020 is updated to say so.",
+      "rejected": [
+        {
+          "option": "The sweep runs drain-start duties every time (the critic's suggestion)",
+          "why": "Contradicts criterion 1 (the second sweep must run none)."
+        },
+        {
+          "option": "A 24-hour age limit",
+          "why": "A guess that flags idle repositories as overdue."
+        }
+      ]
+    },
+    {
+      "choice": "The design-review duty is derived from `CodeHealthBaseline` records and is never run by a separate runner. `Duty` carries `how: Runner | WithCodeHealth`. For `WithCodeHealth`, `duty_standings` takes the baselines. Last run is the newest baseline with `review_queued` (none: 'never reviewed'). Next due is `baseline.landings + REVIEW_EVERY` against the total. Overdue is no baseline at all, or `total >= baseline.landings + REVIEW_EVERY`. The code-health duty's runner already queues the review inside `code_health_check` (code_health.rs:771-778). The code-health duty keeps `code_health_check` unchanged.",
+      "reason": "Answers finding 5. One counter, the baseline, owns the review cadence, so the table, the status line and the queued review can never disagree. The first baseline makes `review_queued` false, so a repository that has never had a review shows 'never reviewed' with a next-due point. It is not overdue until the cadence passes.",
+      "rejected": [
+        {
+          "option": "A separate design-review runner with its own last-run count (the earlier plan)",
+          "why": "Two counters starting at different times; status could contradict the review actually queued."
+        },
+        {
+          "option": "Fold design review into the code-health row",
+          "why": "The brief and criterion 3 list it as its own duty."
+        }
+      ]
+    },
+    {
+      "choice": "Cadence and eligibility: an occasion decides which duties are eligible, and the stored data decides whether an eligible one is due. Drain start runs only drain-start duties, always. Landing runs the landing duties (`EveryLanding`, `EveryLandings(n)`), each due when never run, last attempt failed, or `since >= n`. Sweep runs every runner duty by the same due rule, where a drain-start duty is due only if never run or failed.",
+      "reason": "A drain therefore runs what it runs today and does not suddenly run code-health, keep-rule or reading-rule on first drain, which would queue structural-pass requests in drain fixtures.",
+      "rejected": [
+        {
+          "option": "Every occasion runs every due duty",
+          "why": "The first drain would write a code-health baseline and queue requests, changing drain fixtures."
+        }
+      ]
+    },
+    {
+      "choice": "A failed duty is recorded as an errored check result with the usual 'the check failed to run' finding, and is not a run. It is due again at the next pass that can run it. Status shows `last_failed_at` when the newest attempt failed.",
+      "reason": "The failure shows in `athena hestia last` (an explicit sweep) and is retried. For drain-start duties it is the only overdue signal besides never-run.",
+      "rejected": [
+        {
+          "option": "Treat a failed attempt as a run",
+          "why": "A broken duty would look healthy for a whole cadence."
+        }
+      ]
+    },
+    {
+      "choice": "Accept one small sweep record per drain start and per landing that ran a duty. No record is written when no duty ran. The CHANGELOG states it, and the drain-start tests are updated.",
+      "reason": "Answers finding 9. Skipping no-op drain-start records would show a stale last run, which is the failure this job removes. The counted design keeps landings at one record, since the second hook runs nothing. A drain start commits one records-only commit. These are already routine (code-health baselines, sweeps), and `landings()` ignores them because they carry no job trailers.",
+      "rejected": [
+        {
+          "option": "Commit a drain-start record only when the outcome changed or errored",
+          "why": "The status 'last run' would be wrong for every no-op drain."
+        }
+      ]
+    },
+    {
+      "choice": "Seam: `trait DutyRunner { fn run(&self, duty: &Duty, ui: &dyn Ui, now: Timestamp) -> Result<DutyOutput> }`. `Athena::hestia_sweep_duties(checks, ui, table: &[Duty], runner, ctx: DutyContext) -> Result<Sweep>` runs the due duties, prints their lines, commits one sweep and returns it. Production uses `DUTIES`, `AthenaDuties` and `duty_context(occasion)`. `DutyContext { occasion, landings: u32, now }` is injected. The cadence test's double only logs ids (and can be told to fail one).",
+      "reason": "Due calculation, recording, the commit and the read-back are production code. The double holds no cadence logic.",
+      "rejected": [
+        {
+          "option": "Run the six real duties in the cadence test",
+          "why": "They need model drivers and record fixtures and hide the cadence logic."
+        }
+      ]
+    },
+    {
+      "choice": "Cadences: error-review and evidence-labels every drain start; code-health every landing; design-review every 10 landings (`REVIEW_EVERY`); keep-rule every 10 landings; reading-rule-refusals every 5 landings. Ids: error-review, evidence-labels, code-health, design-review, keep-rule, reading-rule-refusals (`READING_RULES_CHECK_ID`). keep-rule runs `keep_rule(&records)` (status/planning.rs:242) and files a finding under check `keep-rule` for a Breach or TurnOff verdict; thresholds are untouched. A runner arm for an unknown id returns `Err('not yet automated')`, which is an errored check.",
+      "reason": "Every listed duty has code today, so none is invented. The brief fixes the cadence kinds, and N is the producer's choice, documented in the table.",
+      "rejected": [
+        {
+          "option": "Weekly cadence for the keep rule (hestia.md section 2 row 6)",
+          "why": "That table is the original estimate; the brief allows only drain start, landing and every N landings."
+        }
+      ]
+    },
+    {
+      "choice": "The landing hook `code_health_after_landing` (code_health.rs:716) becomes a delegate to `run_due_duties(Landing, ui)`. The code-health duty keeps the old line texts and prints the old `warning: could not check code health: ...` on failure. `code_health_check` and its tests are unchanged.",
+      "reason": "Both landing paths call it (steward.rs:105, gh/landing.rs:984), so the sweep owns the landing cadence only by changing it. No other file needs editing.",
+      "rejected": [
+        {
+          "option": "Leave the hook alone and run code-health from the sweep too",
+          "why": "Two owners of one duty; the sweep could not claim a second pass runs none."
+        }
+      ]
+    },
+    {
+      "choice": "Scope (findings 1-3). Files beyond the six deliverables are each unavoidable: code_health.rs (the hook above), display.rs (the only renderer of `athena status`), tests/drain.rs (two existing assertions the change falsifies), throughput.rs (where `HestiaSweep` is defined, the record change criterion 7 expects), cli lib.rs (its test builds a `Sweep` literal), gh/after_merge_tests.rs (the realistic squash test finding 4 asks for).",
+      "reason": "Each is the smallest edit that keeps the build and the tests passing or makes the feature visible. No governance file is touched.",
+      "rejected": [
+        {
+          "option": "Leave status display to `--json` only",
+          "why": "The brief says `athena status` shows each duty; the text view is display.rs."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "Duty table (`Cadence`, `Duty`, `DUTIES`, `Occasion`, `DutyContext`), `duty_due`, `duty_standings`, `DutyRunner`, `AthenaDuties`, `execute_duties`, `hestia_sweep_duties`, `run_due_duties`; route `review_passes` and `hestia_sweep_with` through it; `commit_sweep` takes the duty report; `last_sweep` skips duty passes; module header; tests for criteria 1 and 4 and the changed tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "`StatusView.duties: Vec<DutyStanding>`, built in `status()` with `crate::code_health::landings`; criterion 2 tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/hestia.md",
+      "action": "modify",
+      "purpose": "New section 13 'Recurring duties' with one table (id, duty, owner Hestia's sweep, cadence, where it runs) and text on occasions, how a run is recorded, the overdue rule and the cost of the records.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under Unreleased / Added: duty schedule, last-run records (`duty_pass`), `athena status` duties and overdue flag, the extra records at drain start and landing.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Tests for the changed sweep record: round trip with `duty_pass`, `check_record_file`, old JSON parses, duplicate check id still refused.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records/throughput.rs",
+      "action": "modify",
+      "purpose": "Add `DutyOccasion`, `DutyPass` and `HestiaSweep.duty_pass: Option<DutyPass>` (serde default, skip if none, `deny_unknown_fields` kept); `HestiaSweep::is_duty_pass()`. This is where `HestiaSweep` is defined; records.rs only re-exports it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Help text of `athena hestia` and `hestia sweep`: the sweep runs the due duties and records their last run.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/code_health.rs",
+      "action": "modify",
+      "purpose": "`code_health_after_landing` delegates to the duty scheduler; line helpers for the existing texts. `code_health_check` unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Render the duties section of `athena status`: id, cadence, last run or never, next due, OVERDUE mark.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/lib.rs",
+      "action": "modify",
+      "purpose": "Test fixture `sweep()` (line 77) gains `duty_pass: None`. No production change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Update the two assertions that the head or records do not move across a drain (:4622 and :5909); a drain start now records its duty pass.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/after_merge_tests.rs",
+      "action": "modify",
+      "purpose": "Add the host-squash test: both hooks for one landing run the code-health duty once.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "1. Data crate (throughput.rs): add `enum DutyOccasion { DrainStart, Landing, Sweep }` (serde snake_case) and `struct DutyPass { occasion, landings: u32 }` (`deny_unknown_fields`). Add `pub duty_pass: Option<DutyPass>` to `HestiaSweep` with `#[serde(default, skip_serializing_if = \"Option::is_none\")]`. Add `HestiaSweep::is_duty_pass()` (occasion is DrainStart or Landing). Update the doc of `checks` to say a drain-start or landing pass lists only the duties that ran. Add `duty_pass: None` to the literals: records.rs `sweep_with` (:2548), cli lib.rs:77, hestia.rs `run_sweep` (:193) and the hestia.rs test literals. Re-export `DutyPass` and `DutyOccasion` from records.rs if `HestiaSweep` is re-exported by name there.",
+    "2. hestia.rs, duty block under a new section header. `enum Cadence { DrainStart, EveryLanding, EveryLandings(u32) }` with `describe()` returning 'every drain start', 'every landing', 'every N landings' (N substituted). `enum How { Runner, WithCodeHealth }`. `#[derive(Clone, Copy)] struct Duty { id, name, cadence, how, runs_in }`. `pub const DUTIES: [Duty; 6]` in the order error-review, evidence-labels, code-health, design-review (`EveryLandings(REVIEW_EVERY)`, `WithCodeHealth`), keep-rule (10), reading-rule-refusals (5, id `READING_RULES_CHECK_ID`). `enum Occasion { DrainStart, Landing, Sweep }` mapped to `DutyOccasion`. `struct DutyContext { occasion, landings: u32, now: Timestamp }`.",
+    "3. Pure functions: `last_ok(sweeps, id) -> Option<(Timestamp, u32)>` (newest sweep with `duty_pass` listing `id` with `errored == false`, giving `at` and the recorded total). `last_attempt_failed(sweeps, id)` (newest sweep with `duty_pass` listing `id`, and it is errored, and it is newer than `last_ok`). `eligible(duty, occasion)`. `duty_due(duty, sweeps, ctx)`: never run -> due; last attempt failed -> due; DrainStart cadence -> due on DrainStart occasion only; landing cadences -> `ctx.landings.saturating_sub(recorded) >= n` (1 for EveryLanding). `DutyStanding { id, name, cadence: String, runs_in, last_run: Option<Timestamp>, last_failed_at: Option<Timestamp>, next_due: String, overdue: bool }` (Serialize) and `duty_standings(table, sweeps, baselines, ctx)`. Overdue is `duty_due` under the Sweep occasion for `Runner` duties. For `WithCodeHealth` it is derived from the baselines (see decision 4). `next_due` reads 'due now (never run)', 'due now (last attempt failed)', 'at the next drain start', 'at the next landing', 'after N more landing(s)'.",
+    "4. Runner seam: `struct DutyOutput { check: CheckOutput, lines: Vec<String> }`, `trait DutyRunner`, and production `AthenaDuties { athena }`. Its match on `duty.id`:\n- error-review calls `error_review_backfill` and prints the existing backfill string.\n- evidence-labels calls `derive_labels` and prints the existing evidence-labels string. The two format strings move out of `review_passes` into helpers with unchanged text.\n- code-health runs `code_health_check(now)` and returns the existing lines (helpers in code_health.rs). `examined` is the files measured.\n- keep-rule calls `keep_rule(&records)` and files a finding for a Breach or TurnOff verdict.\n- reading-rule-refusals runs `reading_rules_check(head).run(now)`.\n- Any other id, and design-review (never run by the runner), return `Err('not yet automated')`.",
+    "5. Scheduler: factor the per-check body of `run_sweep` (hestia.rs:151-191) into `settle(check_id, outcome) -> (CheckResult, Vec<Finding>)`. Add `Athena::duty_context(occasion)` (total from `crate::code_health::landings(&self.git, &head)?.len()`, `now = crate::now()`). Add `execute_duties(table, runner, ctx, ui) -> Result<DutyReport { results, findings, lines }>`. It loads records with `Records::load_current(&git, &head, &records_worktree(state.root()))`, the call `status()` and `reading_rules_check` make. For each eligible and due duty in table order it runs the runner, settles the result and collects the lines. An `Err` becomes an errored result plus the line `hestia     <id>: could not run: <error>`; the code-health duty keeps the old `warning: could not check code health: ...` text.",
+    "6. Commits and callers. `commit_sweep(checks, duties: Option<(DutyReport, DutyContext)>)` merges the duty results and findings into the swept checks, sets `duty_pass` to `{ occasion, landings }`, validates and commits. `hestia_sweep(checks)` passes None (old shape, no duties). Add `hestia_sweep_duties(checks, ui, table, runner, ctx)` (always commits one sweep) and `run_due_duties(occasion, ui) -> Vec<String>` (uses `DUTIES` and `AthenaDuties`; returns no lines and commits nothing when the repository has no commits or no duty ran; a commit error becomes a line). `review_passes` returns `run_due_duties(DrainStart)` lines, then the unchanged spec and throughput lines (moved into `extra_review_passes`). `hestia_sweep_with` runs `hestia_sweep_duties` with the Sweep occasion, then `extra_review_passes`, then the build measurement, in the old order of lines. `last_sweep` filters `is_duty_pass()` as in decision 2. Update the module header (lines 1-82).",
+    "7. code_health.rs: `code_health_after_landing` calls `self.run_due_duties(Occasion::Landing, ui)` and prints each line. The existing line texts (:720-742) become helpers the code-health duty uses. status.rs: add `pub duties: Vec<DutyStanding>` to `StatusView`; in `status()` build it with `duty_standings(&DUTIES, &records.hestia_sweeps, &records.code_health_baselines, ctx)`, with the Sweep occasion, `landings(&git, &head)?.len()` and `crate::now()`. display.rs: add the duties section after the reading-rule and throughput lines. main.rs: update the two help texts.",
+    "8. docs/design/hestia.md section 13 'Recurring duties': one table with the six rows (id, duty, owner Hestia's sweep, cadence text exactly as `describe()`, where it runs). Short text on the three occasions, that a run is a check named by the duty id plus `duty_pass.landings`, the overdue rule, that design review is counted from the code-health baseline, that the throughput and spec passes are not duties, and that every drain start and landing that runs a duty adds one records-only commit. Update the header notes that say nothing runs a sweep inside `athena drain`. Add the CHANGELOG entry.",
+    "9. Tests (names in demonstrations). hestia.rs: the criterion 1 test; `the_duty_table_matches_the_design_doc`; `a_landing_pass_does_not_hide_the_last_full_sweep`; `duty_commits_and_interventions_do_not_change_the_landing_total`; changed 3228 and 5020. status.rs: criterion 2 tests. records.rs: criterion 7 tests. after_merge_tests.rs: the squash test. tests/drain.rs :4622 asserts exactly one new commit holding one sweep record with `duty_pass.occasion == drain_start` and the two drain-start checks, and no other record. :5909 compares `Records` before and after with `hestia_sweeps` excluded and requires `hestia_sweeps.len() + 1`.",
+    "10. Gate: run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Also run `cargo test -p athena-data`, `-p athena-core` and `-p athena-cli`. For any other drain test in crates/athena-cli/tests that fails on head or commit equality, apply the same rule as :5909 (compare records with sweeps excluded). The searches found 78 `fx.head()` uses and 122 `drain::drain` calls in tests/drain.rs; only :4622 and :5909 compare the head across a drain."
+  ],
+  "risks": [
+    {
+      "risk": "Every drain start and every landing that runs a duty commits a small records-only sweep commit, so tests that assert the head does not move across a drain fail.",
+      "mitigation": "Accepted openly and stated in the CHANGELOG. Nothing is committed when no duty ran, and the second landing hook for one landing runs nothing because the count is stored. The two known assertions (tests/drain.rs:4622 and :5909) are updated in step 9, and step 10 gives the rule for any other (compare records with sweeps excluded). The commits carry no job trailers, so `landings()` ignores them."
+    },
+    {
+      "risk": "The squash-merge replacement changes the first-parent history so the landing total drops or shifts. Then the stored count could exceed the current total.",
+      "mitigation": "The count uses `saturating_sub`, so a smaller total means zero new landings and the duty simply waits. The test squashes with the existing `commit-tree` pattern (after_merge_tests.rs:71-84) and shows the total is unchanged."
+    },
+    {
+      "risk": "The first sweep, or the first landing on an old repository, runs several duties at once (code-health writes the baseline, keep-rule and reading-rule read records). Old sweeps have no `duty_pass`, so already-run duties show as never run once.",
+      "mitigation": "Code-health keeps its first-baseline behavior (code_health.rs:766-770, tests at 1421-1474). Drain start runs only the two drain-start duties, so drain fixtures gain only those. Each duty is idempotent over unchanged records."
+    },
+    {
+      "risk": "A drain-start duty is flagged overdue only when never run or when its last attempt failed, so a drain that skips the duty silently (no drain started) is not flagged.",
+      "mitigation": "By the cadence definition no drain start means no due run. The status text says 'at the next drain start', and a failed run is flagged and retried at the next sweep."
+    },
+    {
+      "risk": "hestia.rs is about 288 KB and grows, and the code-health file-size check may queue a structural pass for it.",
+      "mitigation": "The brief names hestia.rs as the home of the table and tests. The duty code is one contiguous block under its own section header, so a later split into a submodule is a pure move."
+    },
+    {
+      "risk": "A sweep with no registered checks and only duty results looks like a duty pass to a reader. This is why the flag is the explicit `occasion`, not the shape of the checks.",
+      "mitigation": "Only occasions drain_start and landing are skipped by `last_sweep`. An explicit sweep records occasion sweep, so it stays the 'last sweep' even when `default_checks()` is empty (it is empty today, hestia.rs:141)."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "The sweep runs the due duties instead of the reading-rule check unconditionally",
+      "dependent": "crates/athena-core/src/hestia.rs `commit_sweep`, `hestia_sweep`, `hestia_sweep_with`, `hestia_sweep_measuring`, `run_sweep` (code)",
+      "kind": "code",
+      "test": "hestia.rs:3228 `the_sweep_command_path_flags_the_rule_from_committed_invocation_records`: its first sweep finds the duty never run. Its second sweep is changed to call `hestia_sweep_duties` with `[DUTIES[5]]`, the real runner and a landing total advanced by 5. The assertions on examined 20 and count 1 stay. `hestia_sweep(&[])` keeps its output (no duties, `duty_pass` None), so hestia.rs:3049-3064, 3278 and the `hestia_sweep_measuring` tests at 4918-5014 are unchanged. Test at hestia.rs:5020: the second sweep now prints one line, not three (backfill and labels are not due at a sweep once they succeeded), so the line count at :5055 changes. The nothing-queued assertions stay.",
+      "reason": null
+    },
+    {
+      "name": "Drain start runs the drain-start duties through the scheduler and records a duty pass",
+      "dependent": "`Athena::review_passes` at drain start: crates/athena-cli/src/drain.rs:3004 (`steps.review_passes()`), :4354 (`RealSteps::review_passes`); hestia.rs:3515; crates/athena-cli/tests/drain.rs:4583-4623 and :5905-5909 (code)",
+      "kind": "code",
+      "test": "Lines are unchanged and first (`hestia     backfill: ...`, `hestia     evidence labels: ...`, then spec and throughput), so hestia.rs:3515 and tests/drain.rs:4601-4604 and 4618-4621 stay, because the duties run at every drain start. Two assertions change. tests/drain.rs:4622 now asserts exactly one new commit holding one `athena.hestia-sweep/1` record with `duty_pass.occasion == drain_start` and the two checks, and no other record. tests/drain.rs:5909 (finding 8) compares records before and after with sweeps excluded and requires one more sweep. drain.rs:5028 `Housekeeping` is unaffected because it replaces `review_passes`. Other drain tests are driven by `cargo test -p athena-cli`; the other head comparisons found in the cli tests (lifecycle, retry, auditor, review) do not call drain.",
+      "reason": null
+    },
+    {
+      "name": "The landing hook runs through the duty scheduler",
+      "dependent": "`code_health_after_landing`, called from crates/athena-core/src/steward.rs:105 and crates/athena-core/src/gh/landing.rs:984; crates/athena-cli/tests/code_health_hooks.rs:70-133; gh/after_merge_tests.rs:58 (code)",
+      "kind": "code",
+      "test": "New test in gh/after_merge_tests.rs, `a_host_squash_runs_the_code_health_duty_once_for_one_landing`. With `set_up`, `land` and the existing host-squash `commit-tree` commit (:71-84), it calls `athena.code_health_after_landing(&Said)` (the job-finish hook), then `athena.after_merge(&report(Landed, Some(&merged)), Some(&landed), ..)` (the host-merge hook). It asserts the records hold one sweep listing `code-health`, one baseline and one structural request, and that the second call printed no `code health` line. `code_health_check` is unchanged, so code_health.rs:1241-1499 are unaffected. code_health_hooks.rs asserts one baseline, one structural request and lines starting with `code health`; after_merge_tests.rs:58 asserts the line order (resync, pages, code health). Both are re-run, and a rejected job fires no hook (code_health_hooks.rs:113-133).",
+      "reason": null
+    },
+    {
+      "name": "`Athena::last_sweep` skips drain-start and landing duty passes",
+      "dependent": "`athena hestia last` and `hestia_report`: crates/athena-cli/src/commands.rs:204, crates/athena-cli/src/lib.rs:30 (finding 7) (code)",
+      "kind": "code",
+      "test": "hestia.rs `a_landing_pass_does_not_hide_the_last_full_sweep`: commit a full sweep with a finding (occasion sweep), then a landing pass; `last_sweep()` returns the full one, and with only duty passes it returns the newest. The cli `hestia_tests` in lib.rs:104-130 pass with `duty_pass: None` added to the fixture.",
+      "reason": null
+    },
+    {
+      "name": "New `duties` field on the status view",
+      "dependent": "`StatusView` gains `duties`: crates/athena-core/src/status.rs (one construction site, in `status()`); crates/athena-cli/src/display.rs:1159; `athena status --json`; cli tests that read status JSON (for example crates/athena-cli/tests/job_plan.rs) (code)",
+      "kind": "code",
+      "test": "The new status.rs tests of criterion 2 and `cargo test -p athena-cli`. The field is additive: consumers read other keys by name, and `next` is unchanged. display.rs gets one new section; its tests (display.rs:2431-2523, code_health_hooks.rs:136) assert on lines they find, not the whole output.",
+      "reason": null
+    },
+    {
+      "name": "New optional `duty_pass` field",
+      "dependent": "`athena.hestia-sweep/1`: crates/athena-data/src/records.rs (`AnyRecord::HestiaSweep` :1132, `validate` :1232, `check_record_file` :1333, schema :1384), crates/athena-core/src/store.rs:249, 414, 461, 566, docs/records.md:62 (code)",
+      "kind": "code",
+      "test": "records.rs tests of criterion 7. Old records parse because the field defaults to None, and unknown fields are still denied. The path and schema of docs/records.md:62 do not change. store.rs loads and indexes the record by id and does not read the field.",
+      "reason": null
+    },
+    {
+      "name": "Which loader reads the duty last runs",
+      "dependent": "`Records::load` (`last_sweep`, `commit_sweep`) versus `Records::load_current` (`status()`, `reading_rules_check`) (code)",
+      "kind": "code",
+      "test": "`execute_duties` and `status()` both use `Records::load_current(&git, &head, &records_worktree(state.root()))` (status.rs:1135, hestia.rs:2786), so the scheduler and status agree. The criterion 2 case B test commits a sweep with `commit_in_tree` and reads it through `status()`. `last_sweep` keeps its existing `Records::load`.",
+      "reason": null
+    },
+    {
+      "name": "Landing classification and history rules",
+      "dependent": "`code_health::landings`, `CodeHealthBaseline`, `check_history` and the history classification (crates/athena-core/src/code_health.rs:399, :766; crates/athena-cli/tests/lifecycle.rs `check_history` callers) (code)",
+      "kind": "code",
+      "test": "Not changed. The commit-shape table in the approach lists each shape. hestia.rs `duty_commits_and_interventions_do_not_change_the_landing_total` uses the `code_health::tests` helpers (`set_up`, `land`). Its branch holds a landing, a records-only duty-sweep commit, a no-trailer intervention commit and a host-style squash replacement. It asserts the total from `landings()` is the same before and after the duty commits. It differs from the real repository in that records live on the main branch here, where the real records branch `athena/records` is not in main's first-parent log at all. The lifecycle `check_history` tests are re-run in `cargo test -p athena-cli`.",
+      "reason": null
+    },
+    {
+      "name": "Called by the new runner, not changed",
+      "dependent": "Existing duty implementations: hestia.rs `error_review_backfill` (:2450), crates/athena-core/src/evidence_labels.rs `derive_labels` (:439), crates/athena-core/src/status/planning.rs `keep_rule` (:242), `ReadingRulesCheck` (hestia.rs:254) and `athena hestia review --backfill`, `athena score-jev --derive` (code)",
+      "kind": "code",
+      "test": "Existing tests of those functions run unchanged.",
+      "reason": "They are called, not edited. The command forms stay available."
+    },
+    {
+      "name": "Status measure labels",
+      "dependent": "crates/athena-core/src/status.rs `STATUS_MEASURE_LABELS` (:305) and the spec tests over docs/spec.toml in xtask (rule)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No label is added or removed. The duties section is not a measure named in docs/spec.toml (it mentions the sweep only at lines 23 and 2102), and the xtask search found no reader of `HestiaCheckResult`, `hestia-sweep` or `errored`."
+    },
+    {
+      "name": "`athena hestia sweep` description",
+      "dependent": "crates/athena-cli/src/main.rs `HestiaAction::Sweep` and `Command::Hestia` help text, and the clap parse test near main.rs:1398 (code)",
+      "kind": "code",
+      "test": "`cargo test -p athena-cli` covers the parse tests, which do not read the help text.",
+      "reason": null
+    },
+    {
+      "name": "Where duties run",
+      "dependent": "Documentation of the sweep: docs/design/hestia.md header notes and the hestia.rs module header (D129: nothing runs a sweep inside `athena drain`) (rule)",
+      "kind": "rule",
+      "test": "the_duty_table_matches_the_design_doc is the only reader of hestia.md found (searched xtask, crates tests and docs/spec.toml).",
+      "reason": null
+    },
+    {
+      "name": "Two passes at once",
+      "dependent": "Concurrent landings (the `[parallel] max_concurrency` path into landing) reaching the hook (code)",
+      "kind": "code",
+      "test": null,
+      "reason": "The write path is `commit_records`, the same one the code-health baseline uses. Two simultaneous passes could each run a duty once and write two records. Each duty's check ids stay unique within a record, `code_health_check` skips a file with an open structural request (`structural_pass_open`), and Hestia gates nothing. The cost is one duplicated run."
+    },
+    {
+      "name": "Refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (rule)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan adds or changes no parser, stem list, stop list or reading check, so there is no corpus case to add."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test `a_sweep_runs_each_due_duty_records_the_last_run_and_a_second_sweep_runs_none` in hestia.rs `mod tests`, in a temp repository from `athena_in(dir, state)`. The table holds three test duties: A DrainStart, B EveryLanding, C EveryLandings(3). A `CountingRunner` implements `DutyRunner`, logs the ids it is asked to run, and can be told to fail one id. The test calls `athena.hestia_sweep_duties(&[], &Quiet, &table, &runner, ctx)` with an injected `DutyContext { occasion, landings, now }`. After each call it loads the committed sweeps and reads the newest. Steps:\n(1) Sweep, landings 0: A, B, C run; the record lists three non-errored checks and `duty_pass.landings == 0`.\n(2) Sweep, landings 0: none run; the record lists no checks.\n(3) Sweep, landings 1: B only.\n(4) Sweep, landings 3: B and C.\n(5) Sweep, landings 3: none.\n(6) DrainStart occasion: A only.\n(7) Landing occasion, landings 4: B only.\n(8) The runner fails A at a DrainStart. A is recorded errored. A Sweep then re-runs A only. The next Sweep runs none.",
+      "command": "cargo test -p athena-core a_sweep_runs_each_due_duty",
+      "observes": "The runner's call log matches each expectation above. The committed records, read back from git, list exactly the ids that ran, with the landing total at that time. The second sweep's record lists no checks.",
+      "fails_without": "A sweep that ignores cadence would run all three at step 2. One that records no check ids or totals would re-run everything. A wrong landing count would run the wrong duties at steps 3, 4 and 7. An errored run counted as a run would not retry at step 8.",
+      "seam": "Production entry `Athena::hestia_sweep_duties` (added by step 6). Fixture `athena_in` exists (hestia.rs:2984). The double `CountingRunner` implements the production trait `DutyRunner` (step 4) and only logs ids and fails on request. `DutyContext` carries injected landings and `now`, so no landed commits and no clock are needed. The commit and the read-back run through the real `commit_sweep` and `Records::load_current`, which exist."
+    },
+    {
+      "criterion": 2,
+      "method": "Tests in status.rs `mod tests`.\nCase A calls the pure `crate::hestia::duty_standings(&DUTIES, sweeps, baselines, ctx)` with `HestiaSweep` literals that carry `duty_pass`, built at injected times. Checked: an EveryLanding duty recorded at total 4 with the total now 5 is overdue; an EveryLandings(5) duty recorded at 0 with 4 landings is not overdue and says 'after 1 more landing'; at 5 it is overdue; a never-run duty is overdue with last run None; a drain-start duty that ran is not overdue however old; a drain-start duty whose newest attempt errored is overdue and shows `last_failed_at`; design-review with a baseline at 2 and total 11 is not overdue, and at 12 it is.\nCase B calls `Athena::status()` over a repository where a sweep was committed with `commit_in_tree`. Checked: `view.duties` lists all six ids with last run and next due text; the duties in the sweep are not overdue and the rest are; `serde_json::to_value(&view)` has `duties`.",
+      "command": "cargo test -p athena-core duty_standings",
+      "observes": "Every duty has a last run (or 'never') and a next due text. Exactly the late duties have `overdue == true` and the in-cadence ones false. The JSON view carries the list.",
+      "fails_without": "If overdue were never computed the late assertions fail. If it were always true the in-cadence assertions fail. If `status()` did not build the field, case B finds no `duties`.",
+      "seam": "Production entries `crate::hestia::duty_standings` and `Athena::status()` (status.rs:1129; the field is added by step 7). Sweep fixture: `status::records_worktree_tests::commit_in_tree` with `athena_in`, both existing. In case A the landing total, baselines and `now` are plain arguments, injected directly. The cases with landings go through the pure function because the real repository in case B has no landings, and nothing inside it is mocked."
+    },
+    {
+      "criterion": 3,
+      "method": "Show the new section 13 of docs/design/hestia.md with the diff and with the test of criterion 4. The test also asserts every owner cell is \"Hestia's sweep\", the six ids appear in order, and the duty names (error-review backlog pass, evidence-label derivation, code-health check, periodic design review, keep-rule threshold check, reading-rule refusal-rate check) appear in the row text.",
+      "command": "git diff -- docs/design/hestia.md",
+      "observes": "One table with columns id, duty, owner, cadence, where it runs. Its six rows are error-review, evidence-labels, code-health, design-review, keep-rule and reading-rule-refusals. Every owner cell is Hestia's sweep. The cadences read: every drain start (two rows), every landing, every 10 landings (two rows), every 5 landings.",
+      "fails_without": "A missing or renamed row fails `the_duty_table_matches_the_design_doc`.",
+      "seam": "Content criterion. The test in criterion 4 reads the real file through `include_str!(\"../../../docs/design/hestia.md\")`. No double."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit test `the_duty_table_matches_the_design_doc` in hestia.rs. It finds the line `## 13. Recurring duties`, takes the table rows up to the next `## ` heading, and compares each row's id (backticks stripped) and cadence cell with `DUTIES[i].id` and `DUTIES[i].cadence.describe()`. It also asserts the row count equals `DUTIES.len()`.",
+      "command": "cargo test -p athena-core the_duty_table_matches_the_design_doc",
+      "observes": "Doc ids in order equal the code ids, and each cadence text equals the code's description.",
+      "fails_without": "A renamed id or a changed N on either side makes the comparison fail.",
+      "seam": "Production values `DUTIES` and `Cadence::describe` (step 2) against the real doc (step 8). No double."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three gate commands over the workspace. The changed paths are driven by existing fixtures. `athena_in` in hestia.rs drives `hestia_sweep_with` and `review_passes` (:3228, :5020, :3515). The cli `Fixture` with `real_steps_with` in crates/athena-cli/tests/drain.rs drives `Athena::review_passes` through `drain::drain` (:4583, :5909 and the other drains). `Fixture` and `run_job` in crates/athena-cli/tests/code_health_hooks.rs drive `code_health_after_landing`, as does `set_up` in gh/after_merge_tests.rs (:58). Also run `cargo test -p athena-data`, `-p athena-core` and `-p athena-cli`.",
+      "command": "cargo test --locked",
+      "observes": "`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` each exit 0.",
+      "fails_without": "A sweep that no longer runs a check an existing test expects, a changed drain or code-health line, a missing `duty_pass` in a `HestiaSweep` literal, or a `StatusView` built without `duties` fails the build or a test.",
+      "seam": "Existing production entries listed above. No double is added. The fakes are the existing agent drivers (`Scenario`, `FakeAgentDriver`), `RecordingLander` and the `Pages` fake, all of which exist."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the CHANGELOG.md entry under `## [Unreleased]`, `### Added`. It names the duty table (`DUTIES`, hestia.md section 13), the `duty_pass` field of the sweep record (old sweeps still parse), that drain start, landing and `athena hestia sweep` run the due duties, the `athena status` duties section with last run, next due and the overdue flag, and the cost of one extra records-only commit per drain start or landing that ran a duty.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One new entry that mentions the duty schedule, the last-run records and the overdue flag.",
+      "fails_without": "No entry means the diff is empty.",
+      "seam": "Content criterion; the diff of the real file. No double."
+    },
+    {
+      "criterion": 7,
+      "method": "Tests in records.rs extend `sweep_with` and `a_hestia_sweep_has_a_path_a_schema_and_round_trips` (:2576) and add `a_hestia_sweep_with_a_duty_pass_round_trips_and_an_old_sweep_still_parses`. A sweep with `duty_pass { occasion: landing, landings: 7 }` and checks named like duties (one errored with its finding) round-trips through `AnyRecord::parse` and `to_json`. `check_record_file` accepts its canonical path. `validate` still refuses a repeated check id. A literal sweep JSON as written before this change (no `duty_pass`) parses with `duty_pass == None`. JSON with an unknown field is still refused. The three occasion names serialize as drain_start, landing and sweep. A hestia.rs test for `is_duty_pass` covers the three occasions.",
+      "command": "cargo test -p athena-data hestia_sweep",
+      "observes": "The new sweep round-trips and passes `check_record_file`. The old JSON parses. A duplicate check id is refused.",
+      "fails_without": "If the new field broke old records, the old-JSON assertion fails. If `check_record_file` or `AnyRecord` did not cover it, the path assertion fails.",
+      "seam": "Production `AnyRecord::parse`, `check_record_file` and `HestiaSweep::validate` (records.rs:1232, :1333; throughput.rs:345), all existing. Fixture `sweep_with` exists (records.rs:2547) and gains the field. No double."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "4a6ba67f619948b1e56641b2d6a2340415d0320ff312ac7bdcda99626e8e4528"
+}

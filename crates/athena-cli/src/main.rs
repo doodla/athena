@@ -166,8 +166,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Hestia, the continuity role: sweep the system's upkeep checks into one recorded report, or print the
-    /// last report. Reports only; nothing is fixed, deleted or blocked.
+    /// Hestia, the continuity role: owns Athena's recurring duties. The sweep runs each duty that is due and
+    /// records when it last ran; the drain start and each landing run the duties that fall to them. Prints the
+    /// last full report. Reports only; nothing is fixed, deleted or blocked.
     Hestia {
         #[command(subcommand)]
         action: HestiaAction,
@@ -527,8 +528,9 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
 
 #[derive(Subcommand, Debug)]
 enum HestiaAction {
-    /// Run every registered check, record the report, and print it. The skeleton registers no checks yet, and
-    /// then the report says so.
+    /// Run the recurring duties that are due (docs/design/hestia.md, "Recurring duties"), record the report with
+    /// the time and landing total of each run, and print it. A duty that ran within its cadence is not run again;
+    /// `athena status` shows each duty with its last run and next due point, and flags the overdue ones.
     Sweep {
         #[arg(long)]
         json: bool,

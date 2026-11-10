@@ -412,6 +412,9 @@ pub struct StatusView {
     /// [`READING_WINDOW`] first readings. Absent when no reader invocation has recorded a reading attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reading_rules: Option<ReadingRuleStats>,
+    /// Hestia's recurring duties: each with its cadence, last run, next due point and whether it is overdue
+    /// (`crate::hestia::DUTIES`, `docs/design/hestia.md` section 13).
+    pub duties: Vec<crate::hestia::DutyStanding>,
     /// Landed jobs per day, median minutes per landed job by stage, idle time between jobs and time spent on
     /// jobs that did not land, computed from the job records; absent until a request job has landed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1212,6 +1215,17 @@ impl Athena {
             .ok()
             .map(|health| health.shown());
         let stale_build = stale_build_line(&self.git, &self.build.source_commit, &head);
+        let duty_ctx = crate::hestia::DutyContext {
+            occasion: crate::hestia::Occasion::Sweep,
+            landings: crate::code_health::landings(&self.git, &head)?.len() as u32,
+            now: crate::now(),
+        };
+        let duties = crate::hestia::duty_standings(
+            &crate::hestia::DUTIES,
+            &records.hestia_sweeps,
+            &records.code_health_baselines,
+            &duty_ctx,
+        );
         Ok(StatusView {
             repository: self.git.dir().display().to_string(),
             branch: self.git.current_branch()?,
@@ -1233,6 +1247,7 @@ impl Athena {
             check_durations,
             gate_counts: crate::gate_counts::gate_counts(&records),
             reading_rules: ReadingRuleStats::compute(&records),
+            duties,
             throughput: Throughput::compute(&records),
             build_measurement: build_measurement_line(BuildMeasurement::latest(
                 &records.build_measurements,
@@ -3847,6 +3862,213 @@ pub(crate) mod reading_rule_tests {
         );
         let json = serde_json::to_value(&view).unwrap();
         assert_eq!(json["reading_rules"]["first_readings"], 10);
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // Hestia's recurring duties
+
+    use crate::hestia::{DUTIES, DutyContext, DutyStanding, Occasion, duty_standings};
+    use athena_data::records::{
+        AnyRecord, CodeHealthBaseline, DutyPass, HestiaCheckResult, HestiaFinding,
+        HestiaFindingState, HestiaSweep,
+    };
+
+    fn duty_time(second: u32) -> jiff::Timestamp {
+        format!("2026-10-27T09:00:{second:02}Z").parse().unwrap()
+    }
+
+    /// A duty pass at `second` with the landing total `landings`, listing `ran` as (duty id, errored).
+    fn duty_sweep(second: u32, landings: u32, ran: &[(&str, bool)]) -> HestiaSweep {
+        HestiaSweep {
+            id: athena_data::RecordId::parse(&format!("20261027-0900{second:02}-aaaa")).unwrap(),
+            at: duty_time(second),
+            checks: ran
+                .iter()
+                .map(|(id, errored)| HestiaCheckResult {
+                    check: (*id).into(),
+                    examined: 1,
+                    count: u32::from(*errored),
+                    errored: *errored,
+                })
+                .collect(),
+            findings: ran
+                .iter()
+                .filter(|(_, errored)| *errored)
+                .map(|(id, _)| HestiaFinding {
+                    check: (*id).into(),
+                    subject: (*id).into(),
+                    evidence: "the check failed to run: broken".into(),
+                    age_seconds: 0,
+                    state: HestiaFindingState::Open,
+                })
+                .collect(),
+            duty_pass: Some(DutyPass {
+                occasion: Occasion::Sweep,
+                landings,
+            }),
+        }
+    }
+
+    fn baseline(second: u32, landings: u32, review_queued: bool) -> CodeHealthBaseline {
+        CodeHealthBaseline {
+            id: athena_data::RecordId::parse(&format!("20261027-0901{second:02}-bbbb")).unwrap(),
+            at: duty_time(second),
+            landings,
+            review_queued,
+        }
+    }
+
+    fn standing<'a>(all: &'a [DutyStanding], id: &str) -> &'a DutyStanding {
+        all.iter().find(|s| s.id == id).unwrap()
+    }
+
+    fn standings(
+        sweeps: &[HestiaSweep],
+        baselines: &[CodeHealthBaseline],
+        landings: u32,
+    ) -> Vec<DutyStanding> {
+        let ctx = DutyContext {
+            occasion: Occasion::Sweep,
+            landings,
+            now: duty_time(59),
+        };
+        duty_standings(&DUTIES, sweeps, baselines, &ctx)
+    }
+
+    #[test]
+    fn duty_standings_flag_a_duty_past_its_cadence_and_not_one_within_it() {
+        let sweeps = [
+            duty_sweep(
+                1,
+                0,
+                &[
+                    ("error-review", false),
+                    ("evidence-labels", false),
+                    ("keep-rule", false),
+                    ("reading-rule-refusals", false),
+                ],
+            ),
+            // The newest attempt of the evidence labels failed.
+            duty_sweep(2, 4, &[("evidence-labels", true), ("code-health", false)]),
+        ];
+        let baselines = [baseline(1, 2, true)];
+        let all = standings(&sweeps, &baselines, 5);
+        assert_eq!(
+            all.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            DUTIES.iter().map(|d| d.id).collect::<Vec<_>>(),
+            "every duty is shown, in table order"
+        );
+
+        // A drain-start duty that ran is never overdue by age, and says when it runs next.
+        let review = standing(&all, "error-review");
+        assert_eq!(review.last_run, Some(duty_time(1)));
+        assert!(!review.overdue);
+        assert_eq!(review.next_due, "at the next drain start");
+        // One whose newest attempt failed is overdue and shows when it failed; it still has its last good run.
+        let labels = standing(&all, "evidence-labels");
+        assert!(labels.overdue);
+        assert_eq!(labels.last_failed_at, Some(duty_time(2)));
+        assert_eq!(labels.last_run, Some(duty_time(1)));
+        assert_eq!(labels.next_due, "due now (last attempt failed)");
+        // A per-landing duty recorded at 4 landings with 5 now is past its cadence.
+        let health = standing(&all, "code-health");
+        assert!(health.overdue);
+        assert_eq!(health.last_run, Some(duty_time(2)));
+        assert!(
+            health.next_due.starts_with("due now"),
+            "{}",
+            health.next_due
+        );
+        // Every 10 landings, recorded at 0, with 5 now: within the cadence.
+        let keep = standing(&all, "keep-rule");
+        assert!(!keep.overdue);
+        assert_eq!(keep.next_due, "after 5 more landings");
+        // Every 5 landings, recorded at 0: 5 now is past it, 4 is not.
+        assert!(standing(&all, "reading-rule-refusals").overdue);
+        let early = standings(&sweeps, &baselines, 4);
+        let reading = standing(&early, "reading-rule-refusals");
+        assert!(!reading.overdue);
+        assert_eq!(reading.next_due, "after 1 more landing");
+        // The same total with the duty never run: overdue with no last run.
+        let none = standings(&[], &baselines, 4);
+        let never = standing(&none, "reading-rule-refusals");
+        assert!(never.overdue);
+        assert_eq!(never.last_run, None);
+        assert_eq!(never.next_due, "due now (never run)");
+        // An old sweep that carries no duty pass counts as no run.
+        let mut old = duty_sweep(3, 0, &[("keep-rule", false)]);
+        old.duty_pass = None;
+        assert!(standing(&standings(&[old], &baselines, 0), "keep-rule").overdue);
+    }
+
+    #[test]
+    fn the_design_review_is_counted_from_the_code_health_baseline() {
+        // A baseline at 2 landings that queued a review: 11 landings is 9 later, within the cadence of 10.
+        let reviewed = [baseline(1, 2, true)];
+        let within = standings(&[], &reviewed, 11);
+        let review = standing(&within, "design-review");
+        assert!(!review.overdue);
+        assert_eq!(review.last_run, Some(duty_time(1)));
+        assert_eq!(review.next_due, "after 1 more landing");
+        // At 12 landings the review is due.
+        assert!(standing(&standings(&[], &reviewed, 12), "design-review").overdue);
+        // A first baseline queued no review: never reviewed, and not overdue until the cadence passes.
+        let first = [baseline(2, 3, false)];
+        let fresh = standings(&[], &first, 4);
+        let review = standing(&fresh, "design-review");
+        assert_eq!(review.last_run, None);
+        assert!(!review.overdue);
+        assert!(standing(&standings(&[], &first, 13), "design-review").overdue);
+        // No baseline at all: the code-health check has not run, so nothing counts the review yet.
+        assert!(standing(&standings(&[], &[], 0), "design-review").overdue);
+    }
+
+    #[test]
+    fn status_shows_each_duty_with_its_last_run_and_next_due_point_and_flags_the_late_ones() {
+        use super::records_worktree_tests::commit_in_tree;
+        let (_dir, _state, athena) = crate::code_health::tests::set_up();
+        // Nothing recorded yet: every duty is shown, and every duty is overdue because none has run.
+        let view = athena.status().unwrap();
+        assert_eq!(view.duties.len(), DUTIES.len());
+        assert!(
+            view.duties
+                .iter()
+                .all(|d| d.overdue && d.last_run.is_none())
+        );
+        // A sweep that ran the drain-start duties and the code-health check, with no landing yet.
+        let sweep = duty_sweep(
+            1,
+            0,
+            &[
+                ("error-review", false),
+                ("evidence-labels", false),
+                ("code-health", false),
+            ],
+        );
+        commit_in_tree(&athena, &[AnyRecord::HestiaSweep(Box::new(sweep.clone()))]);
+        let view = athena.status().unwrap();
+        for id in ["error-review", "evidence-labels", "code-health"] {
+            let duty = standing(&view.duties, id);
+            assert_eq!(duty.last_run, Some(sweep.at), "{id}");
+            assert!(!duty.overdue, "{id} ran within its cadence");
+            assert!(
+                !duty.next_due.starts_with("due now"),
+                "{id}: {}",
+                duty.next_due
+            );
+        }
+        for id in ["keep-rule", "reading-rule-refusals", "design-review"] {
+            let duty = standing(&view.duties, id);
+            assert!(duty.overdue, "{id} never ran");
+            assert_eq!(duty.last_run, None, "{id}");
+        }
+        let json = serde_json::to_value(&view).unwrap();
+        let listed = json["duties"].as_array().unwrap();
+        assert_eq!(listed.len(), DUTIES.len());
+        assert_eq!(listed[0]["id"], "error-review");
+        assert_eq!(listed[0]["overdue"], false);
+        assert_eq!(listed[3]["id"], "design-review");
+        assert_eq!(listed[3]["overdue"], true);
     }
 }
 
