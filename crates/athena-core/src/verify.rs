@@ -845,6 +845,31 @@ pub fn is_test_path(path: &str) -> bool {
         || stem.starts_with("test_")
 }
 
+/// The neighboring cases of a navigation fix, each with the words that show a test covers it.
+const NEIGHBOR_CASES: [(&str, &[&str]); 4] = [
+    ("nested navigation", &["nested", "sub-route", "subroute"]),
+    (
+        "browser history",
+        &["history", "back button", "go_back", "goback"],
+    ),
+    (
+        "direct links",
+        &["direct link", "deep link", "direct_link", "deeplink"],
+    ),
+    ("interrupted flows", &["interrupt", "abort", "cancel"]),
+];
+
+/// The neighboring cases (nested navigation, browser history, direct links, interrupted flows)
+/// that none of the added test text mentions. Empty when all four are covered.
+pub fn missing_neighbor_cases(added_test_text: &str) -> Vec<&'static str> {
+    let text = added_test_text.to_lowercase();
+    NEIGHBOR_CASES
+        .iter()
+        .filter(|(_, words)| !words.iter().any(|w| text.contains(w)))
+        .map(|(name, _)| *name)
+        .collect()
+}
+
 /// The files `mod <module>;` can mean when declared in the Rust file `parent`.
 pub fn declared_module_paths(parent: &str, module: &str) -> Vec<String> {
     let (dir, file) = parent.rsplit_once('/').unwrap_or(("", parent));
@@ -1413,6 +1438,26 @@ mod tests {
         assert!(groups[0].argv.is_some());
         assert_eq!(groups[1].criteria, [5]);
         assert!(groups[1].argv.is_none());
+    }
+
+    #[test]
+    fn neighbor_cases_reports_what_tests_leave_out() {
+        let all = vec![
+            "nested navigation",
+            "browser history",
+            "direct links",
+            "interrupted flows",
+        ];
+        assert_eq!(
+            missing_neighbor_cases("fn opens_page_from_direct_click() {}"),
+            all
+        );
+        let covered = "nested menu; history back; direct link; interrupted by cancel";
+        assert!(missing_neighbor_cases(covered).is_empty());
+        assert_eq!(
+            missing_neighbor_cases("nested, history, deep link"),
+            vec!["interrupted flows"]
+        );
     }
 
     #[test]

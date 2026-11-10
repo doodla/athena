@@ -14,6 +14,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `missing_neighbor_cases` in `crates/athena-core/src/verify.rs` lists the neighboring cases (nested navigation,
+  browser history, direct links, interrupted flows) that a navigation fix's added tests do not mention. It is the
+  mechanism for OLY-4-03; it is a helper, not a gate rule, and changes no verdict.
 - `feedback_dimension_counts` in `crates/athena-core/src/introspect.rs` reports how many hypotheses or work items
   an introspection record holds for each feedback dimension (OLY-3-06); list fields count one per entry.
 - The drain holds a line of work after two attempts that did not land, and does not retry it. A line is the
