@@ -44,8 +44,9 @@ use athena_data::records::{
     AnyRecord, Correction, CorrectionKind, Criterion, CriterionKind, CritiqueVerdict,
     DefaultApplied, Deliverable, DeliverableAction, Finding, FocusRecord, Forecast, Forecasts,
     Intervention, InterventionCategory, InterventionSource, IntrospectionRecord,
-    IntrospectionStatus, IntrospectionTrigger, Invocation, OutcomeState, PreventionKind,
-    PriorityRecord, Quantiles, Reading, Replay, ReplayRefusal, Request, Role,
+    IntrospectionStatus, IntrospectionTrigger, Invocation, OTHER_READING_RULE, OutcomeState,
+    PreventionKind, PriorityRecord, Quantiles, Reading, ReadingAttempt, ReadingRefusal, Replay,
+    ReplayRefusal, Request, Role,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::redact::Redactor;
@@ -206,7 +207,8 @@ pub struct Proposal {
 enum ReadError {
     /// The reader did not complete or returned nothing. Another run would not repair it.
     Failed(String),
-    /// The reader returned a reading that a reading rule refused. The text says what to fix.
+    /// The reader returned a reading that a reading rule refused. The text says what to fix; the rule that
+    /// refused it is kept in the invocation record's `reading_attempt`.
     Refused(String),
 }
 
@@ -217,6 +219,22 @@ impl ReadError {
         }
     }
 }
+
+/// A refusal raised while the reader's output is built into a reading, with the name of the rule that
+/// raised it. Its text is the rule's own text, unchanged.
+#[derive(Debug)]
+struct NamedRefusal {
+    rule: &'static str,
+    text: String,
+}
+
+impl std::fmt::Display for NamedRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl std::error::Error for NamedRefusal {}
 
 /// The reader's system prompt: contract, frame, defaults model, capability catalog.
 pub fn reader_system_prompt(athena: &Athena, jc: &JobConfig) -> Composed {
@@ -659,7 +677,7 @@ impl Athena {
             config: &jc.config,
             fake: self.is_fake(),
         };
-        let (output, record) = match self.invoke_and_record(&facts, redactor)? {
+        let (output, mut record) = match self.invoke_and_record(&facts, redactor)? {
             Ok(done) => done,
             Err(error) => bail!("the reader could not run: {error}"),
         };
@@ -680,7 +698,7 @@ impl Athena {
                 )),
             ));
         };
-        match self.build_reading(
+        let judged = match self.build_reading(
             jc,
             records,
             job,
@@ -701,24 +719,47 @@ impl Athena {
                     .into_iter()
                     .map(|entry| entry.path)
                     .collect();
-                match check_reading_acceptance(
+                match refusing_check(
                     &reading,
                     &request.text,
                     attempt,
                     &referenced_jobs,
                     Some(&repo_files),
                 ) {
-                    Ok(()) => Ok((Some(reading), record, None)),
-                    Err(e) => Ok((None, record, Some(ReadError::Refused(format!("{e:#}"))))),
+                    None => Ok(reading),
+                    Some((rule, e)) => Err((rule, format!("{e:#}"))),
                 }
             }
-            Err(e) => Ok((
-                None,
-                record,
-                Some(ReadError::Refused(format!(
-                    "the reader's output was invalid: {e:#}"
-                ))),
-            )),
+            Err(e) => {
+                let rule = e
+                    .downcast_ref::<NamedRefusal>()
+                    .map_or(OTHER_READING_RULE, |named| named.rule);
+                Err((rule, format!("the reader's output was invalid: {e:#}")))
+            }
+        };
+        // The second reading of a run is the one made with a refusal as its correction.
+        let attempt_number = if refusal.is_some() { 2 } else { 1 };
+        match judged {
+            Ok(reading) => {
+                record.reading_attempt = Some(ReadingAttempt {
+                    attempt: attempt_number,
+                    refusal: None,
+                });
+                Ok((Some(reading), record, None))
+            }
+            Err((rule, text)) => {
+                // The text can quote the request or the reading, so the stored copy is redacted.
+                let mut stored = vec![text.clone()];
+                redactor.redact_all(&mut stored)?;
+                record.reading_attempt = Some(ReadingAttempt {
+                    attempt: attempt_number,
+                    refusal: Some(ReadingRefusal {
+                        rule: rule.to_string(),
+                        text: stored.remove(0),
+                    }),
+                });
+                Ok((None, record, Some(ReadError::Refused(text))))
+            }
         }
     }
 
@@ -773,7 +814,11 @@ impl Athena {
                 &reader,
                 config.budget.producer_timeout_s,
                 config.budget.verifier_timeout_s,
-            )?;
+            )
+            .map_err(|e| NamedRefusal {
+                rule: "check_reading_size",
+                text: format!("{e:#}"),
+            })?;
         }
         let (reference, _) =
             crate::scoring::reference(&config.forecast.reference, &out.class_of_work, records);
@@ -1690,6 +1735,28 @@ mod tests {
         assert!(error.contains("pick one deliverable"), "{error}");
         assert!(error.contains("follow-up request"), "{error}");
         assert!(error.contains("producer_timeout_s of 3000s"), "{error}");
+    }
+
+    #[test]
+    fn a_size_refusal_carries_its_rule_name_and_any_other_invalid_output_does_not() {
+        // The rule is read from the error by `read_once`; the text is the rule's own, unchanged.
+        let size = build_sized(sized_reading(5000.0, Some("study")), 3000, 10_000).unwrap_err();
+        let named = size
+            .downcast_ref::<NamedRefusal>()
+            .expect("a named refusal");
+        assert_eq!(named.rule, "check_reading_size");
+        assert!(
+            named.text.contains("pick one deliverable"),
+            "{}",
+            named.text
+        );
+        assert_eq!(size.to_string(), named.text);
+        // A reading with an unknown class fails earlier and names no rule: `read_once` files it as `other`.
+        let mut bad_class = sized_reading(30.0, Some("study"));
+        bad_class["class_of_work"] = serde_json::json!("not-a-class");
+        let other = build_sized(bad_class, 3000, 2400).unwrap_err();
+        assert!(other.downcast_ref::<NamedRefusal>().is_none(), "{other:#}");
+        assert_eq!(OTHER_READING_RULE, "other");
     }
 
     #[test]

@@ -319,6 +319,7 @@ mod tests {
             turns: Some(3),
             commands_run: vec![],
             policy_denials: vec![],
+            reading_attempt: None,
         })))
     }
 
