@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-233442-hyv6",
+  "round": 2,
+  "at": "2026-11-09T22:08:22.470604942Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The duplicate-check key is built from the checker's own `file` field, which nothing validates and whose form the prompt invites to vary, so the same fault can be queued again and the request can name a path that does not exist.",
+      "evidence": "I read pin.rs. The prompt lists each file as `- `page-text/<name>`` (line 336) and tells the checker that \"Every problem names its `file` (as listed above)\" (line 355). The problem string is then built from the model's unchecked `p.file` (`{study.name}/{p.file}: ...`, line 490). Only `files_checked` is compared exactly with the bare `file.name` (line 496). A real checker may therefore write `model.json` on one run and `page-text/model.json` on another. The marker would be `studies/demo/model.json` once and `studies/demo/page-text/model.json` the next, so the duplicate check misses and a second request is queued: the very defect being fixed. The prefixed form also puts a nonexistent path on the request's Files line. Decision 2 already rejected statement-based keys because model output drifts, but the file part of the key has the same weakness. The fake `judge` in tests/drain.rs uses bare names (e.g. line 6832 `\"file\": \"intro.json\"`), so no planned test would catch this. Fix: In `source_findings`, normalize the reported file against the study's real page-text names: strip a leading `page-text/` (PAGE_TEXT_DIR, pin.rs:235) and require the result to be one of `study.files`. A finding whose file does not match should not become an invented path. Either key it as study-level (`studies/<name>/ (<kind>)`) or keep it out of the queued request. Add parse tests for `demo/page-text/model.json` and for an unknown file. Make the integration test's judge report one finding with the prefixed form, then show that the second drain still queues none.",
+      "location": "Decision 1 and 2 (`source_findings` parse, marker `Source finding: <study file path> (<kind>)`); crates/athena-core/src/pin.rs:336, 355, 489-492, 496",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Turning the checker's structured output into a string and parsing it back is the more fragile design; the plan already changes files outside the request's list, so keeping pin.rs out on scope grounds is a weak reason.",
+      "evidence": "pin.rs:485-494 builds strings from the typed `CheckerProblem {file, kind, statement, evidence}`, and the plan parses them back with a shape matcher. The deliverables already add steward.rs, claims.json and tests/drain.rs beyond the request's list. A `findings: Vec<...>` field on `SourceReport` (pin.rs:283) would carry file, kind, statement and evidence with no parsing at all. Fix: Either add structured findings to `SourceReport` (a small, additive field, with `problems` unchanged) and drop the parse, or record in the plan why string parsing is still preferred despite this. If the parse stays, it is also the place to apply the file normalization above.",
+      "location": "Decision 1, rejected alternative (structured findings in pin.rs)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Claim c45's citation is very likely wrong, yet the plan treats the fix as conditional. Criterion 1 asks for a citation of the source lines, and the drain source check (criterion 3) will probably keep failing on it.",
+      "evidence": "claims.json:348 cites bin/fm-teardown.sh lines 3894-3896 with the one-word quote \"Queued\". Every other citation of that file is at line 184 or earlier (claims.json:95-341), and it is a header-documented shell script. The plan notes this itself but keeps the c45 edit conditional on a host run. Fix: Treat the c45 correction as an expected deliverable. Make the host validation step a required gate before criteria 1 and 3 count as met, not an optional branch. Say in the CHANGELOG entry whether c45 was re-cited.",
+      "location": "Decision 6/7, Step 8, claims.json c45 (lines 345-350)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say that in production the fix request is picked up and worked in the same drain run that queued it.",
+      "evidence": "drain.rs:3084-3090 re-reads `steps.queue()` after every wave and rebuilds the plan, and `RealSteps::queue` reads `queued_work` over DRAINED_CHANNELS, which includes `cli` (steward.rs:338-342). So a request queued inside `rate()` becomes a candidate later in the same run. This only stays out of the tests because `WithRealCheck::queue` delegates to the stub (tests/drain.rs:7085). Fix: State this as intended behavior in the module doc and the CHANGELOG entry: the fix is read and worked in the same run, within budget, and the duplicate check stops a re-queue if the check fails again. Optionally assert it in a unit test with a stub whose `queue()` returns stored requests.",
+      "location": "Dependents: 'A new request on channel cli appears in the drain queue'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The text says `drain()` runs three times, then describes four runs.",
+      "evidence": "\"Run `drain()` three times on one stub: first ... second ... a third ... a fourth with a finding for another file\". Fix: Say four runs, or split the other-file case into its own test.",
+      "location": "Demonstrations, criterion 4 (1)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's claims by reading the snapshot. The base already satisfies part (1): model.json:10 marks reopened as `waiting`, and transition t12 at model.json:110 goes reopened -> queued. intro.json:115 says the item goes back to Queued, and the only `final state` match left is the done term at intro.json:83. HISTORY.txt:633 records the fixing commit, 30642c0. Leaving the study text alone and pinning it with tests is therefore sound. Part (2) also checks out: `Drain::rate` (drain.rs:2457-2463) stores the failure detail in `held_back` and queues nothing. `Athena::queue` (reading.rs:919) and `StewardRequest::new` (steward.rs:535-595) behave as the plan says, and `cli` is one of the channels the drain works (steward.rs:338-342). Both new `Steps` methods have no-op defaults, so the existing test stubs compile unchanged. The unit and integration tests drive the real `rate` and duplicate-check code, not just a fake. One major soundness problem remains. Duplicates are keyed on the study file and finding kind, but the file comes straight from the checker's unvalidated `file` field. The prompt invites that field to be written as either `page-text/<name>` or `<name>` (pin.rs:336, 355), and only `files_checked` is checked exactly. Across runs the key can change, so the same fault would be queued again and the request could name a path that does not exist. The fix is cheap: normalize the reported file against the study's real file names. Minor points: parsing the formatted strings back instead of carrying structured findings from pin.rs, the likely-wrong citation in claim c45 (bin/fm-teardown.sh lines 3894-3896, quote \"Queued\") being fixed only if a host check fails, and the unstated fact that the fix request is worked in the same drain run that queued it. Verdict: revise."
+}

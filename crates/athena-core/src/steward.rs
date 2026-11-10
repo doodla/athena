@@ -810,6 +810,86 @@ fn blind_spot_request(source: &str, title: &str) -> String {
     .render()
 }
 
+/// The start of the first line of a source-fix request.
+pub const SOURCE_FIX_MARKER: &str = "Source fix: ";
+
+/// The most characters of the statement, and of the evidence, that a source-fix request carries.
+const SOURCE_FIX_QUOTE: usize = 600;
+
+/// The first line of the request for a statement the drain's source check reported: `Source fix: studies/<study>/<file>
+/// <kind> <anchor>`. The anchor names the study entry that holds the statement ([`crate::pin::finding_anchor`]), so
+/// the same contradiction gets the same line however the checker words it, and a different contradiction in the
+/// same file gets a different one. The line is the request's title, the key that finds an open request
+/// ([`citing_request`]) and the key of the drain's once-per-run set, all built here once and passed through the
+/// same boundary rewording that [`StewardRequest::new`] applies, so it is equal to the stored first line.
+pub fn finding_marker(finding: &crate::pin::SourceFinding) -> Result<String, String> {
+    plain_boundary_text(&format!(
+        "{SOURCE_FIX_MARKER}studies/{}/{} {} {}",
+        finding.study, finding.file, finding.kind, finding.anchor
+    ))
+}
+
+/// The words of `text` on one line, cut to `limit` characters, with every path-like word written with spaces
+/// around its `/` and `.`, so the request names no file but its own.
+fn quoted_words(text: &str, limit: usize) -> String {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|word| {
+            if crate::reading::looks_like_path(word) {
+                word.replace('/', " / ").replace('.', " . ")
+            } else {
+                word.to_string()
+            }
+        })
+        .collect();
+    let joined = words.join(" ");
+    let joined = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+    joined.chars().take(limit).collect()
+}
+
+/// The request to correct, or re-cite, one statement the source check reported, built through
+/// [`StewardRequest`]. Its first line is [`finding_marker`]; it touches only the study file.
+pub fn source_fix_request(finding: &crate::pin::SourceFinding) -> Result<String, String> {
+    let marker = finding_marker(finding)?;
+    let body = format!(
+        "The drain's source check read the page text of the study {} against its pinned source and reported a {} \
+         statement. Statement: \"{}\". What the source says: {}. Correct the statement, or cite the lines of the \
+         source that support it, so the check passes.",
+        finding.study,
+        finding.kind,
+        quoted_words(&finding.statement, SOURCE_FIX_QUOTE),
+        quoted_words(&finding.evidence, SOURCE_FIX_QUOTE),
+    );
+    let acceptance = [
+        "The statement is corrected or re-cited so that it matches the pinned source".to_string(),
+        "cargo run -p xtask -- site builds the study".to_string(),
+        "fmt, clippy and test pass".to_string(),
+    ];
+    let file = format!("studies/{}/{}", finding.study, finding.file);
+    StewardRequest::new(None, &marker, &body, &acceptance, &[file]).map(|r| r.render())
+}
+
+/// The first line of a request job's text, trimmed.
+fn request_first_line(job: &JobRecords) -> &str {
+    job.request
+        .as_ref()
+        .and_then(|r| r.text.lines().next())
+        .unwrap_or("")
+        .trim()
+}
+
+/// The open request whose first line is `marker`, if any. A request that was closed with any outcome (landed,
+/// rejected, failed or abandoned) is not open.
+pub fn citing_request(records: &Records, marker: &str) -> Option<JobId> {
+    records
+        .request_jobs()
+        .into_iter()
+        .find(|job| {
+            request_first_line(job) == marker && !matches!(job.state(), JobState::Closed(_))
+        })
+        .map(|job| job.id().clone())
+}
+
 /// Jobs that ended rejected or failed, grouped by class of work. Only groups of two or more repeat. The
 /// steward is given this count as an input; it decides what the repeats mean.
 pub fn repeated_failures(records: &Records) -> BTreeMap<String, Vec<JobId>> {
@@ -2708,5 +2788,126 @@ mod tests {
         release.send(()).unwrap();
         finished.recv().unwrap();
         wait_for_background();
+    }
+
+    fn finding(anchor: &str, kind: &str, statement: &str) -> crate::pin::SourceFinding {
+        crate::pin::SourceFinding {
+            study: "demo".into(),
+            file: "claims.json".into(),
+            kind: kind.into(),
+            statement: statement.into(),
+            evidence: "pinned-source/bin/x.sh lines 30-33 say the row is closed".into(),
+            anchor: anchor.into(),
+        }
+    }
+
+    #[test]
+    fn source_fix_marker_is_the_same_for_the_same_entry_however_the_checker_words_it() {
+        let one = finding("c1", "contradicted", "closes a task");
+        let mut two = finding("c1", "contradicted", "CLOSES a task, and more words");
+        two.evidence = "other evidence".into();
+        assert_eq!(finding_marker(&one).unwrap(), finding_marker(&two).unwrap());
+        assert_eq!(
+            finding_marker(&one).unwrap(),
+            "Source fix: studies/demo/claims.json contradicted c1"
+        );
+        assert_ne!(
+            finding_marker(&one).unwrap(),
+            finding_marker(&finding("c2", "contradicted", "closes a task")).unwrap()
+        );
+        assert_ne!(
+            finding_marker(&one).unwrap(),
+            finding_marker(&finding("c1", "omitted", "closes a task")).unwrap()
+        );
+    }
+
+    #[test]
+    fn source_fix_request_starts_with_the_marker_and_touches_only_the_study_file() {
+        let f = finding(
+            "c1",
+            "contradicted",
+            "A task closes. See bin/fm-teardown.sh.",
+        );
+        let text = source_fix_request(&f).unwrap();
+        assert_eq!(text.lines().next().unwrap(), finding_marker(&f).unwrap());
+        assert_eq!(
+            crate::reading::request_text_touches(&text),
+            vec!["studies/demo/claims.json".to_string()]
+        );
+        assert_eq!(crate::reading::request_text_acceptance(&text).len(), 3);
+        assert!(text.contains("Acceptance:"), "{text}");
+        assert!(text.contains("Files: studies/demo/claims.json"), "{text}");
+        assert!(text.contains("A task closes."), "{text}");
+        assert!(
+            text.contains("pinned-source / bin / x . sh"),
+            "the evidence names no file: {text}"
+        );
+    }
+
+    #[test]
+    fn source_fix_request_cuts_a_long_statement_and_reads_no_line_as_acceptance() {
+        let long = format!("- {}", "word ".repeat(400));
+        let f = finding("c1", "behavior", &long);
+        let text = source_fix_request(&f).unwrap();
+        let body = text.lines().nth(2).unwrap();
+        assert!(body.chars().count() < 1500, "{}", body.chars().count());
+        assert_eq!(crate::reading::request_text_acceptance(&text).len(), 3);
+    }
+
+    #[test]
+    fn source_fix_open_request_is_found_and_a_closed_one_is_not() {
+        let mut records = Records::default();
+        let f = finding("c1", "contradicted", "closes a task");
+        let marker = finding_marker(&f).unwrap();
+        fn add(records: &mut Records, id: &str, text: &str, closed: bool) {
+            let job = JobId::parse(id).unwrap();
+            let at: Timestamp = "2026-11-01T12:00:00Z".parse().unwrap();
+            let outcome = closed.then(|| athena_data::records::Outcome {
+                job: job.clone(),
+                state: OutcomeState::Failed,
+                reason: "closed".into(),
+                at,
+                totals: None,
+                branch: None,
+                base_commit: None,
+                candidate_commit: None,
+                after_blocked: false,
+                through_commit: None,
+            });
+            records.jobs.insert(
+                id.to_string(),
+                JobRecords {
+                    id: Some(job.clone()),
+                    request: Some(Request {
+                        job,
+                        text: text.into(),
+                        received_at: at,
+                        channel: USER_QUEUE_CHANNEL.into(),
+                    }),
+                    outcome,
+                    ..Default::default()
+                },
+            );
+        }
+        let text = source_fix_request(&f).unwrap();
+        add(&mut records, "20261101-120000-aaaa", &text, true);
+        assert_eq!(
+            citing_request(&records, &marker),
+            None,
+            "a closed one is not open"
+        );
+        add(&mut records, "20261101-120100-bbbb", &text, false);
+        add(
+            &mut records,
+            "20261101-120200-cccc",
+            "Do something else.",
+            false,
+        );
+        assert_eq!(
+            citing_request(&records, &marker).map(|j| j.as_str().to_string()),
+            Some("20261101-120100-bbbb".to_string())
+        );
+        let other = finding_marker(&finding("c2", "contradicted", "x")).unwrap();
+        assert_eq!(citing_request(&records, &other), None);
     }
 }

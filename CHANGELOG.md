@@ -9,6 +9,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The drain's source check now queues one fix request for each statement the checker reports, and the
+  `firstmate-work-handling` study's one citation for the return to Queued is replaced.
+  - Study: `claims.json` claim c45 (a reopened backlog item goes back to Queued) cited `bin/fm-teardown.sh`
+    lines 3894-3896 with the one-word quote "Queued", which no checker can place. It now cites the two reopen
+    lines already checked in this file (`bin/fm-teardown.sh` line 30 and `bin/fm-backlog-transition-lib.sh` line
+    54), with their quotes copied from the claims that cite them. **What was not checked:** the pinned source
+    (commit 6407052f) is not in this working copy, so `cargo test -p athena-cap-study every_study_follows --
+    --nocapture` printed `firstmate-work-handling: conventions only`, not a full validation, and those two lines
+    say the item is reopened, not that the row is set to Queued. The Queued return is therefore still
+    unchecked against the source; a host with the pinned source mounted should run that test again, and the real
+    source check may report c45 until a line that sets the row to Queued is cited. The model (t9 ready to
+    reopened, t12 reopened to queued, `reopened` a waiting state), the intro lead-in, the t12 transition text and
+    the glossary entry already say the item returns to Queued and no text says reopened is final, so they are
+    verified, not rewritten.
+  - Drain: `SourceReport.findings` (`athena-core`, `pin.rs`) lists the statements the checker itself reported (a
+    file it did not read is a process failure and is not a finding), each with an anchor from
+    `finding_anchor`: every string at any depth of the named JSON file is credited to its nearest ancestor with
+    an `id`, a `term` or a `name`, else to its top-level key, and a candidate matches the statement one way
+    (it contains the statement, or the statement contains it and it covers at least half of it) after
+    lower-casing and collapsing white space. One to three matching owners give the anchor; no match, a file that
+    is not JSON, or more than three owners give a hash of the statement. `steward::finding_marker` builds the
+    request's first line, `Source fix: studies/<study>/<file> <kind> <anchor>`; `steward::source_fix_request`
+    builds the request through `StewardRequest`, citing the statement and the evidence with path-like words
+    spaced out so it touches only the study file; `steward::citing_request` finds an open request by that line.
+    `RealSteps::check_page` skips a finding while such a request is open, and queues a different contradiction
+    in the same file. The check still passes or fails as before.
+  - A fix that lands is closed, and its own landing is a change under `studies/`, which triggers the next
+    check; so each first line is also queued at most once per drain run. The set is carried across a rebuild in
+    `drain.carry` (`Carried::source_fix_queued`, filled and restored by `run_pass`; a carry file without the
+    field still reads, and a fresh start drops a stale carry). A request queued this way is on the `cli`
+    channel, so the same run works it when the budget fits. A fix that failed or landed without removing the
+    contradiction is asked for again by a later run, and so is a marker after a drain was stopped and started
+    again by hand. A statement the checker words so that it matches no entry gets a hash anchor and may be
+    queued again in a later run.
 - Records-history step 7b (D111), first slice: readers can now read the current records from the `athena/records`
   worktree. `athena_data::paths::records_worktree(state_dir)` is the one place that builds the worktree path
   (`<state>/records-worktree`). `Records::load_current` (`athena-core`, `store.rs`) and `RecordSet::load_current`

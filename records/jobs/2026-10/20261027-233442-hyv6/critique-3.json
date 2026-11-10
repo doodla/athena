@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-233442-hyv6",
+  "round": 3,
+  "at": "2026-11-09T22:12:39.23778607Z",
+  "invocation_seq": 8,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/pin.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/pin.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The line numbers given for the Steps implementors in tests/drain.rs are wrong",
+      "evidence": "I grepped crates/athena-cli/tests/drain.rs for `impl Steps for`. The implementors are at 127 (Stub), 1759 (Unaccepted), 6157 (Replay), 7081 (WithRealCheck), 7709 (Shared) and 8626 (Rebasing). The plan gives 292, 1806, 6204, 7106, 7823 and 8703. The new hooks have defaults, so nothing breaks, but the producer will look in the wrong places. Fix: Use the real line numbers, or name the implementors by type.",
+      "location": "Dependents, Steps trait entry; Demonstrations, criterion 5 seam",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The producer almost certainly cannot read the source, so claims.json will most likely ship unchanged",
+      "evidence": "rules.rs:1837 says ATHENA_PIN_URL/SHA are set by the pinning step of a study job, and this is a change job. The system facts say the producer snapshot holds only the base commit. A Glob found no pinned-source/. That makes the fallback (leave c45 alone, report it unverified) the likely outcome, while the reading lists claims.json as a deliverable. Fix: Say plainly in the plan and the result that this is the expected path. List c45 as an open host gate, not a missing deliverable. Also note that once this change lands, a live drain whose check flags c45 will queue its own fix request, so a later study job with the pinned source can re-cite it.",
+      "location": "Decision 7 / Step 8 (c45 re-citation)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Use the existing request-job walk instead of adding a new one",
+      "evidence": "store.rs:503 already provides `Records::request_jobs()`. code_health.rs:573-579 (`structural_pass_open`) and hestia.rs:838 (`open_spec_requests`) both find open marker requests with it plus `!matches!(job.state(), JobState::Closed(_))`. The plan describes a new walk over request jobs. Fix: Build `open_requests` on `records.request_jobs()` with the same not-Closed test, so the three marker dedupes agree on what counts as open.",
+      "location": "Step 3, `open_requests`",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The fix request goes on channel `cli`, not the steward channel",
+      "evidence": "The StewardRequest doc (steward.rs:513) describes a request Athena writes for itself on the steward channel, and `improvement_requests` (steward.rs:376) gives only that channel a guaranteed turn. `Athena::queue` always records `cli` (reading.rs:937). hestia and code_health do the same, so this follows existing practice. Fix: Mention in the module doc or CHANGELOG that the request is queued as a `cli` request like the code-health and spec requests, so it gets no guaranteed steward turn.",
+      "location": "Decision 4 (channel)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan relies on, and its main claims check out. The reopened fix is already in the base: model.json:10 marks reopened as \"waiting\", model.json:110 has t12 reopened -> queued, intro.json:54 and :115 say it goes back to Queued, and commit 30642c0 is at HISTORY.txt:633. Claim c45 cites bin/fm-teardown.sh lines 3894-3896 with the quote \"Queued\" (claims.json:348). In pin.rs the checker's typed `CheckerProblem` list is turned into strings at 485-494, and the `file` field is never checked against the study's files; only `files_checked` is (496). drain.rs has one `check_page` call site (2451), and the failure branch (2457-2463) queues nothing. The plan's queueing follows existing practice: hestia and code_health also queue StewardRequest text through `Athena::queue`, and they dedupe with a marker line on request jobs that are not Closed (`structural_pass_open`, `open_spec_requests`). So the path-and-kind marker is a sound, already-used design, not a crude heuristic. Normalizing `page-text/` prefixes against `study.files` fixes a real gap: the prompt names files as page-text/<name>, and the reported file is never checked. Criterion 4 runs against real seams: the unit test drives the real `Drain::rate` through a storage-only `Steps` double, and the integration test runs `drain::drain` over `WithRealCheck` with the real check, open-request lookup and queue in a `commit_study` repository. Both would fail without the queueing and without the dedupe. The dependents list covers the readers of `SourceReport` (only drain.rs:4711), `Check`, the `Steps` trait (the new hooks have inert defaults) and the two existing tests that drain with a real check. It also includes the commit-shape table. The criterion 3 caveat is honest: neither the cap-study host gate nor the model-backed check can run here. The remaining findings are minor."
+}

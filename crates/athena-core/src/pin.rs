@@ -282,8 +282,25 @@ pub struct StudyText {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SourceReport {
     pub problems: Vec<String>,
+    /// The statements the checker itself reported (not a process failure such as an unread file), in order,
+    /// each with a stable anchor. The drain queues one fix request for each.
+    pub findings: Vec<SourceFinding>,
     /// What the model call cost, even when the check failed.
     pub cost_usd: f64,
+}
+
+/// One statement the checker reported, with an anchor that names the study entry that holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFinding {
+    pub study: String,
+    /// The file as the checker named it, relative to the study directory.
+    pub file: String,
+    /// `contradicted`, `omitted` or `behavior`.
+    pub kind: String,
+    pub statement: String,
+    pub evidence: String,
+    /// See [`finding_anchor`].
+    pub anchor: String,
 }
 
 /// The checker's report: the files it read and what it found.
@@ -301,6 +318,144 @@ struct CheckerProblem {
     kind: String,
     statement: String,
     evidence: String,
+}
+
+/// FNV-1a, 64 bits: a hash that is the same in every build, so an anchor never changes between runs.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// A statement or entry text for comparison: lower case, white space collapsed, quote marks trimmed.
+fn normalise_text(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let joined = words.join(" ").to_lowercase();
+    joined
+        .trim_matches(|c: char| {
+            c.is_whitespace() || "\"'`\u{201c}\u{201d}\u{2018}\u{2019}".contains(c)
+        })
+        .to_string()
+}
+
+/// Whether `text` can stand in an anchor as it is: at most 40 characters of `[A-Za-z0-9._-]` that no one
+/// would read as a file name.
+fn is_anchor_word(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 40
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+        && !crate::reading::looks_like_path(text)
+}
+
+/// The anchor key of an entry's own id, term or name: the text itself when it is a plain word, else `n` and
+/// the hash of its normalised text.
+fn owner_key(text: &str) -> String {
+    if is_anchor_word(text) {
+        text.to_string()
+    } else {
+        format!("n{:016x}", fnv1a64(normalise_text(text).as_bytes()))
+    }
+}
+
+/// Collects, into `owners`, the owner of every string under `value` that matches `wanted` (a normalised
+/// statement). Every string at any depth is credited to its nearest ancestor object with an `id`, else a
+/// `term`, else a `name`; a string with no such ancestor is credited to its top-level key. The values of
+/// `id`, `term` and `name` themselves, and `claims` arrays, are not candidates.
+fn collect_owners(
+    value: &serde_json::Value,
+    top: Option<&str>,
+    owner: Option<&str>,
+    wanted: &str,
+    owners: &mut std::collections::BTreeSet<String>,
+) {
+    use serde_json::Value;
+    let credit = |text: &str, owners: &mut std::collections::BTreeSet<String>| {
+        let Some(key) = owner.map(String::from).or_else(|| top.map(String::from)) else {
+            return;
+        };
+        let candidate = normalise_text(text);
+        let (c, w) = (candidate.chars().count(), wanted.chars().count());
+        let contains = w >= 12 && candidate.contains(wanted);
+        let covered = c >= 12 && c * 2 >= w && wanted.contains(candidate.as_str());
+        if contains || covered {
+            owners.insert(key);
+        }
+    };
+    match value {
+        Value::String(text) => credit(text, owners),
+        Value::Array(items) => {
+            for item in items {
+                collect_owners(item, top, owner, wanted, owners);
+            }
+        }
+        Value::Object(map) => {
+            let own = ["id", "term", "name"]
+                .iter()
+                .find_map(|k| map.get(*k).and_then(Value::as_str))
+                .map(owner_key);
+            let here = own.as_deref().or(owner);
+            for (key, child) in map {
+                if matches!(key.as_str(), "id" | "term" | "name") && child.is_string() {
+                    continue;
+                }
+                if key == "claims" {
+                    continue;
+                }
+                let top = top.or_else(|| is_anchor_word(key).then_some(key.as_str()));
+                collect_owners(child, top, here, wanted, owners);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The anchor of a reported statement: a short word-free key for the study entry that holds it, so the same
+/// contradiction gets the same anchor however the checker words its statement or evidence.
+///
+/// `file` is parsed as JSON. Every string at any depth is credited to its nearest ancestor object with an
+/// `id`, else a `term`, else a `name` (an owner text that is not a plain word becomes `n` and 16 hex digits of
+/// its hash), and a string with no such ancestor to its top-level key. A candidate matches the statement one
+/// way only, after lower-casing, collapsing white space and trimming quote marks: the candidate contains the
+/// statement (the statement being at least 12 characters), or the statement contains the candidate, which is at
+/// least 12 characters and covers at least half of the statement. The anchor is the sorted owners of all
+/// matches joined with `+` when there are one to three. With no match, a file that is not JSON, or more than
+/// three owners (a broad statement), it is `h` and 16 hex digits of the hash of the normalised statement.
+pub fn finding_anchor(study: &StudyText, file: &str, statement: &str) -> String {
+    let wanted = normalise_text(statement);
+    let fallback = || format!("h{:016x}", fnv1a64(wanted.as_bytes()));
+    let Some(text) = study.files.iter().find(|f| f.name == file) else {
+        return fallback();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text.text) else {
+        return fallback();
+    };
+    let mut owners = std::collections::BTreeSet::new();
+    collect_owners(&value, None, None, &wanted, &mut owners);
+    if (1..=3).contains(&owners.len()) {
+        owners.into_iter().collect::<Vec<_>>().join("+")
+    } else {
+        fallback()
+    }
+}
+
+/// The findings of a checker's reported problems, in order, each with its anchor.
+fn findings_of(study: &StudyText, problems: &[CheckerProblem]) -> Vec<SourceFinding> {
+    problems
+        .iter()
+        .map(|p| SourceFinding {
+            study: study.name.clone(),
+            file: p.file.clone(),
+            kind: p.kind.clone(),
+            statement: p.statement.clone(),
+            evidence: p.evidence.clone(),
+            anchor: finding_anchor(study, &p.file, &p.statement),
+        })
+        .collect()
 }
 
 fn checker_schema() -> serde_json::Value {
@@ -380,7 +535,10 @@ impl crate::Athena {
     pub fn check_study_text(&self, study: &StudyText) -> SourceReport {
         let mut report = SourceReport::default();
         match self.check_study_text_inner(study, &mut report.cost_usd) {
-            Ok(problems) => report.problems = problems,
+            Ok((problems, findings)) => {
+                report.problems = problems;
+                report.findings = findings;
+            }
             Err(error) => report.problems.push(format!(
                 "{}: the text could not be checked against the source: {error:#}",
                 study.name
@@ -389,7 +547,11 @@ impl crate::Athena {
         report
     }
 
-    fn check_study_text_inner(&self, study: &StudyText, cost: &mut f64) -> Result<Vec<String>> {
+    fn check_study_text_inner(
+        &self,
+        study: &StudyText,
+        cost: &mut f64,
+    ) -> Result<(Vec<String>, Vec<SourceFinding>)> {
         use crate::capability::{JobConfig, ToolGrant};
         use athena_agent::env::Side;
         use athena_context::{Component, compose};
@@ -500,7 +662,7 @@ impl crate::Athena {
                 ));
             }
         }
-        Ok(problems)
+        Ok((problems, findings_of(study, &found.problems)))
     }
 }
 
@@ -550,6 +712,213 @@ mod tests {
         ] {
             assert!(brief.contains(needle), "{needle}: {brief}");
         }
+    }
+
+    fn study_with(files: &[(&str, &str)]) -> StudyText {
+        StudyText {
+            name: "demo".into(),
+            repository_url: "https://example.com/r.git".into(),
+            sha: "a".repeat(40),
+            files: files
+                .iter()
+                .map(|(name, text)| TextFile {
+                    name: (*name).into(),
+                    text: (*text).into(),
+                })
+                .collect(),
+        }
+    }
+
+    const CLAIMS: &str = r#"[
+      {"id": "c1", "text": "Teardown closes a task, and a closed task can reopen.",
+       "sources": [{"path": "bin/a.sh", "quote": "closes the backlog row when the task is done"}]},
+      {"id": "c2", "text": "A worker slot is released when its pull request is ready.", "sources": []}
+    ]"#;
+
+    const INTRO: &str = r#"{
+      "intro": [{"text": "A reopened item goes back to the queue for the captain.", "claims": ["c1"]}],
+      "glossary": [{"term": "reopened", "definition": "The item goes back to Queued for the captain's answer.", "claims": ["c1"]}]
+    }"#;
+
+    const MODEL: &str = r#"{
+      "transitions": [
+        {"id": "t2", "from": "a", "to": "b",
+         "retry": {"changes": "the attempt counter goes up by one on every failed close"}},
+        {"id": "t12", "from": "reopened", "to": "queued", "guard": "the reopen was recorded for an open captain call"}
+      ],
+      "unhandled": {"failures": [{"name": "A failed close that frees the slot", "note": "the slot is released at once"}]}
+    }"#;
+
+    #[test]
+    fn source_finding_anchor_is_the_claim_whatever_the_case_spacing_or_quotes() {
+        let study = study_with(&[("claims.json", CLAIMS)]);
+        for statement in [
+            "closes a task, and a closed task",
+            "  \"CLOSES   a task,\n and a closed task\" ",
+            "Teardown closes a task, and a closed task can reopen.",
+        ] {
+            assert_eq!(
+                finding_anchor(&study, "claims.json", statement),
+                "c1",
+                "{statement:?}"
+            );
+        }
+        assert_eq!(
+            finding_anchor(
+                &study,
+                "claims.json",
+                "A worker slot is released when its pull request"
+            ),
+            "c2"
+        );
+    }
+
+    #[test]
+    fn source_finding_a_fragment_of_one_entry_is_credited() {
+        // The candidate (the quote of the source) contains the statement.
+        let study = study_with(&[("claims.json", CLAIMS)]);
+        assert_eq!(
+            finding_anchor(
+                &study,
+                "claims.json",
+                "closes the backlog row when the task"
+            ),
+            "c1"
+        );
+    }
+
+    #[test]
+    fn source_finding_a_statement_that_contains_the_entry_and_a_little_more_is_credited() {
+        let study = study_with(&[("claims.json", CLAIMS)]);
+        let statement = "Teardown closes a task, and a closed task can reopen. (c1)";
+        assert_eq!(finding_anchor(&study, "claims.json", statement), "c1");
+    }
+
+    #[test]
+    fn source_finding_a_short_unrelated_definition_is_not_credited() {
+        let study = study_with(&[(
+            "intro.json",
+            r#"{"glossary": [
+                {"term": "gate", "definition": "the merge check rule"},
+                {"term": "slot", "definition": "A worker slot is released when its pull request is ready, and a failed close frees it at once."}
+            ]}"#,
+        )]);
+        let statement = "the merge check rule is wrong: A worker slot is released when its pull request is ready, and a failed close frees it at once, the gate is not mentioned";
+        let anchor = finding_anchor(&study, "intro.json", statement);
+        assert!(anchor.starts_with('h') || anchor == "slot", "{anchor}");
+        assert_ne!(anchor, "gate");
+        assert_ne!(anchor, "gate+slot");
+    }
+
+    #[test]
+    fn source_finding_anchor_from_a_glossary_term_and_the_intro_key() {
+        let study = study_with(&[("intro.json", INTRO)]);
+        assert_eq!(
+            finding_anchor(
+                &study,
+                "intro.json",
+                "goes back to Queued for the captain's answer"
+            ),
+            "reopened"
+        );
+        assert_eq!(
+            finding_anchor(
+                &study,
+                "intro.json",
+                "goes back to the queue for the captain"
+            ),
+            "intro"
+        );
+    }
+
+    #[test]
+    fn source_finding_anchor_from_a_transition_and_a_nested_string() {
+        let study = study_with(&[("model.json", MODEL)]);
+        assert_eq!(
+            finding_anchor(
+                &study,
+                "model.json",
+                "the reopen was recorded for an open captain call"
+            ),
+            "t12"
+        );
+        assert_eq!(
+            finding_anchor(&study, "model.json", "the attempt counter goes up by one"),
+            "t2"
+        );
+    }
+
+    #[test]
+    fn source_finding_anchor_from_a_name_keyed_entry_is_word_free_and_stable() {
+        let study = study_with(&[("model.json", MODEL)]);
+        let one = finding_anchor(&study, "model.json", "the slot is released at once");
+        let two = finding_anchor(&study, "model.json", "THE slot is   released at once");
+        assert_eq!(one, two);
+        assert!(one.starts_with('n') && one.len() == 17, "{one}");
+        assert!(one[1..].chars().all(|c| c.is_ascii_hexdigit()), "{one}");
+    }
+
+    #[test]
+    fn source_finding_anchor_falls_back_to_a_hash() {
+        let study = study_with(&[
+            ("claims.json", CLAIMS),
+            (
+                "notes.md",
+                "Teardown closes a task, and a closed task can reopen.",
+            ),
+            (
+                "many.json",
+                r#"[{"id":"a","text":"the same long sentence here"},{"id":"b","text":"the same long sentence here"},
+                    {"id":"c","text":"the same long sentence here"},{"id":"d","text":"the same long sentence here"}]"#,
+            ),
+        ]);
+        let none = finding_anchor(&study, "claims.json", "nothing like any entry here at all");
+        assert!(none.starts_with('h') && none.len() == 17, "{none}");
+        let text = finding_anchor(&study, "notes.md", "closes a task, and a closed task");
+        assert!(text.starts_with('h'), "{text}");
+        let broad = finding_anchor(&study, "many.json", "the same long sentence here");
+        assert!(broad.starts_with('h'), "four owners: {broad}");
+        let missing = finding_anchor(&study, "absent.json", "closes a task, and a closed task");
+        assert!(missing.starts_with('h'), "{missing}");
+        assert_eq!(
+            none,
+            finding_anchor(
+                &study,
+                "claims.json",
+                "  NOTHING like any entry   here at all"
+            )
+        );
+    }
+
+    #[test]
+    fn source_finding_two_claims_in_one_file_have_different_anchors() {
+        let study = study_with(&[("claims.json", CLAIMS)]);
+        let one = finding_anchor(&study, "claims.json", "closes a task, and a closed task");
+        let two = finding_anchor(&study, "claims.json", "A worker slot is released when its");
+        assert_ne!(one, two);
+    }
+
+    #[test]
+    fn source_finding_findings_of_carries_study_file_and_kind() {
+        let study = study_with(&[("claims.json", CLAIMS)]);
+        let problems = vec![CheckerProblem {
+            file: "claims.json".into(),
+            kind: "contradicted".into(),
+            statement: "closes a task, and a closed task".into(),
+            evidence: "src/x.sh lines 3-4".into(),
+        }];
+        let found = findings_of(&study, &problems);
+        assert_eq!(
+            found,
+            vec![SourceFinding {
+                study: "demo".into(),
+                file: "claims.json".into(),
+                kind: "contradicted".into(),
+                statement: "closes a task, and a closed task".into(),
+                evidence: "src/x.sh lines 3-4".into(),
+                anchor: "c1".into(),
+            }]
+        );
     }
 
     fn run(dir: &Path, args: &[&str]) -> String {
