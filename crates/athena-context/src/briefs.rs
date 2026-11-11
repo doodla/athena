@@ -3489,6 +3489,43 @@ mod tests {
         );
     }
 
+    /// The size of the reader's reading rules section before the real-records rule line was added.
+    const READING_RULES_BASELINE_BYTES: usize = 3045;
+
+    /// The size of the planner brief's Report section with empty inputs before the real-records rule was
+    /// added (bytes after the `## Report` heading).
+    const PLANNER_REPORT_BASE_BYTES: usize = 1749;
+
+    #[test]
+    fn the_planner_brief_states_the_real_records_rule_once_within_its_bound() {
+        use super::planner::REAL_RECORDS_RULE;
+        let brief = planner_brief(&planner_inputs(None));
+        let report = brief.split("## Report").nth(1).expect("report section");
+        assert_eq!(report.matches(REAL_RECORDS_RULE).count(), 1, "{report}");
+        assert!(!REAL_RECORDS_RULE.contains('\n'));
+        assert!(
+            REAL_RECORDS_RULE.len() <= 200,
+            "{} bytes",
+            REAL_RECORDS_RULE.len()
+        );
+        for needle in [
+            "measure computed from records",
+            "real records",
+            "expected range",
+            "independent source",
+        ] {
+            assert!(REAL_RECORDS_RULE.contains(needle), "{needle}");
+        }
+        // The Report grew by the rule and its paragraph break and nothing else.
+        assert!(
+            report.len() <= PLANNER_REPORT_BASE_BYTES + REAL_RECORDS_RULE.len() + 4,
+            "{} > {} + {} + 4",
+            report.len(),
+            PLANNER_REPORT_BASE_BYTES,
+            REAL_RECORDS_RULE.len()
+        );
+    }
+
     #[test]
     fn the_reader_brief_names_each_reading_rule_in_one_short_line() {
         let brief = reader_brief(&reader_inputs(&reading()));
@@ -3510,11 +3547,25 @@ mod tests {
             "check_environment_reach",
             "check_defined_terms",
             "check_scope_limit",
+            "check_records_measure",
             "build_reading",
         ] {
             assert!(section.contains(check), "no rule for {check}:\n{section}");
         }
-        assert_eq!(READING_RULES.len(), 11);
+        assert_eq!(READING_RULES.len(), 12);
+        // Exactly one line states the real-records rule: a records-computed measure, real records, an
+        // expected range and an independent source.
+        let records_lines: Vec<&&str> = lines
+            .iter()
+            .filter(|l| {
+                l.contains("`check_records_measure`")
+                    && l.contains("real records")
+                    && l.contains("expected range")
+                    && l.contains("independent source")
+                    && l.contains("landing time")
+            })
+            .collect();
+        assert_eq!(records_lines.len(), 1, "{section}");
         assert!(
             lines.iter().any(|l| l.contains("`Consumers:")
                 && l.contains("CHANGELOG.md")
@@ -3552,10 +3603,18 @@ mod tests {
                     && l.contains("`check_design_existing_code`")),
             "no rule line names Existing code: and its check:\n{section}"
         );
-        // The section adds little to the brief: eleven rule lines and the code survey guide paragraph. The
+        // The section adds little to the brief: twelve rule lines and the code survey guide paragraph. The
         // section was about 2540 bytes with eight rules, measured 2718 with the ninth and 3045 with the
-        // eleventh.
+        // eleventh. The twelfth (the real-records rule) replaced wording in the other lines, so the section
+        // does not grow past the 3045 bytes measured before it. The bound below is this section's own limit
+        // of 3150 bytes, not the reader's prompt budget set: `BudgetSet` in `lib.rs` composes only the
+        // contract, frames, defaults and catalog, so the brief text sits outside it.
         assert!(section.len() < 3150, "{} bytes", section.len());
+        assert!(
+            section.len() <= READING_RULES_BASELINE_BYTES,
+            "the reading rules section grew past its baseline: {} > {READING_RULES_BASELINE_BYTES} bytes",
+            section.len()
+        );
     }
 
     #[test]
