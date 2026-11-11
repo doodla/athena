@@ -317,6 +317,7 @@ pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
     ("audience", "audience"),
     ("requirement", "spec_gaps"),
     ("readings", "reading_rules"),
+    ("role need", "role_need"),
 ];
 
 /// The line `athena status` prints for the latest build measurement (`athena measure-build`): T (one cold
@@ -453,6 +454,10 @@ pub struct StatusView {
     pub build_measurement: String,
     /// Whether the records show the final acceptance chain, as one printed line ([`improvement_cycle_line`]).
     pub improvement_cycle: String,
+    /// Roles with no run in the newest closed jobs, counted over every run source ([`crate::role_need`]);
+    /// absent when no role is a retire candidate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_need: Option<crate::role_need::RoleNeed>,
     /// Classes of work whose minutes per landed job fell or rose between their older and newer landed jobs,
     /// with the job after which a rising class got worse; absent until a class has enough landed jobs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1306,6 +1311,7 @@ impl Athena {
                 &records.introspections,
                 &crate::proposals::current(&records.proposals),
             )),
+            role_need: crate::role_need::RoleNeed::shown(&records),
             class_trend: crate::class_trend::ClassTrend::compute(&records),
             interventions_by_category: by_category,
             interventions_by_class: by_class,
