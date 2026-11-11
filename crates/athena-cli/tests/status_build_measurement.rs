@@ -33,6 +33,37 @@ fn measurement() -> BuildMeasurement {
 }
 
 #[test]
+fn status_prints_the_improvement_cycle_line_for_shown_and_not_shown() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+
+    // No records: never shown.
+    let mut view = athena.status().unwrap();
+    let text = athena_cli::display::status(&view);
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("improvement cycle:"))
+        .unwrap_or_else(|| panic!("no improvement cycle line in:\n{text}"));
+    assert!(line.starts_with("improvement cycle: not shown"), "{line}");
+    assert!(line.contains("repair"), "{line}");
+
+    // A complete chain prints as shown.
+    let all = athena_data::records::ImprovementCycle {
+        repair: true,
+        finding: true,
+        candidate: true,
+        decision: true,
+    };
+    view.improvement_cycle = all.line();
+    let text = athena_cli::display::status(&view);
+    assert!(
+        text.lines().any(|l| l == "improvement cycle: shown"),
+        "{text}"
+    );
+    assert!(!text.contains("improvement cycle: not shown"), "{text}");
+}
+
+#[test]
 fn status_prints_the_latest_build_measurement_line() {
     let fx = Fixture::new();
     let athena = fx.athena(Scenario::default().script());

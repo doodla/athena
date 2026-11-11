@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `improvement_cycle` in `athena-data` (requirement OLY-10-02): reports whether a landed job has a supported
+  finding, an evaluated candidate and an adoption decision on record; `athena status` prints it as the
+  `improvement cycle:` line, and an empty record set is never shown.
 - `role_value` in `athena-core` (requirement OLY-9-12): judges a new role against a simpler alternative by reusing
   `method_experiment::compare`, and allows retiring a role only when all its knowledge items are recorded elsewhere.
 

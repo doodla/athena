@@ -573,3 +573,249 @@ impl ProposalRecord {
         }
     }
 }
+
+/// The four stages of the final acceptance chain (spec OLY-10-02) for one job, each present or missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct ImprovementCycle {
+    /// The job's repair landed.
+    pub repair: bool,
+    /// A recorded introspection of the job names a failure class, a cause and a prevention, and code flagged
+    /// nothing in it.
+    pub finding: bool,
+    /// A defaults proposal cites the job and at least one other job, so it rests on more than one case.
+    pub candidate: bool,
+    /// That proposal's newest record is accepted, or rejected with a reason.
+    pub decision: bool,
+}
+
+impl ImprovementCycle {
+    /// True only when all four stages are present. The default (nothing recorded) is not shown.
+    pub fn shown(&self) -> bool {
+        self.repair && self.finding && self.candidate && self.decision
+    }
+
+    fn present(&self) -> usize {
+        [self.repair, self.finding, self.candidate, self.decision]
+            .into_iter()
+            .filter(|s| *s)
+            .count()
+    }
+
+    /// The names of the stages that are missing.
+    pub fn missing(&self) -> Vec<&'static str> {
+        [
+            (self.repair, "repair"),
+            (self.finding, "supported finding"),
+            (self.candidate, "evaluated candidate"),
+            (self.decision, "adoption decision"),
+        ]
+        .into_iter()
+        .filter(|(present, _)| !present)
+        .map(|(_, name)| name)
+        .collect()
+    }
+
+    /// The line `athena status` prints: `improvement cycle: shown`, or `improvement cycle: not shown` and
+    /// the stages that are missing.
+    pub fn line(&self) -> String {
+        if self.shown() {
+            "improvement cycle: shown".into()
+        } else {
+            format!(
+                "improvement cycle: not shown (missing: {})",
+                self.missing().join(", ")
+            )
+        }
+    }
+}
+
+/// Whether the records show the final acceptance chain for any one of the `repaired` jobs (the jobs whose
+/// repair landed). The result is the job with the most stages present; with no repaired job nothing is
+/// present, so an empty record set is never shown.
+pub fn improvement_cycle(
+    repaired: &[JobId],
+    introspections: &[IntrospectionRecord],
+    proposals: &[ProposalRecord],
+) -> ImprovementCycle {
+    // The newest record of each proposal id is its current state.
+    let mut newest: std::collections::BTreeMap<&str, &ProposalRecord> = Default::default();
+    for p in proposals {
+        if newest.get(p.id.as_str()).is_none_or(|have| have.at <= p.at) {
+            newest.insert(p.id.as_str(), p);
+        }
+    }
+    let mut best = ImprovementCycle::default();
+    for job in repaired {
+        let finding = introspections.iter().any(|i| {
+            i.job.as_ref() == Some(job)
+                && i.status == IntrospectionStatus::Recorded
+                && i.failure_class.is_some()
+                && i.cause.is_some()
+                && i.prevention.is_some()
+                && i.flags.is_empty()
+        });
+        let candidates: Vec<&ProposalRecord> = newest
+            .values()
+            .copied()
+            .filter(|p| p.sources.iter().any(|s| &s.job == job))
+            .filter(|p| {
+                let mut jobs: Vec<&JobId> = p.sources.iter().map(|s| &s.job).collect();
+                jobs.sort();
+                jobs.dedup();
+                jobs.len() >= 2
+            })
+            .collect();
+        let decision = candidates.iter().any(|p| match &p.status {
+            ProposalStatus::Accepted { .. } => true,
+            ProposalStatus::Rejected { reason } => !reason.trim().is_empty(),
+            ProposalStatus::Pending | ProposalStatus::Withdrawn => false,
+        });
+        let cycle = ImprovementCycle {
+            repair: true,
+            finding,
+            candidate: !candidates.is_empty(),
+            decision,
+        };
+        if cycle.present() > best.present() {
+            best = cycle;
+        }
+    }
+    best
+}
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+
+    fn job(n: u32) -> JobId {
+        JobId::parse(&format!("20261029-00000{n}-abcd")).unwrap()
+    }
+
+    fn introspection(of: &JobId, flags: Vec<String>) -> IntrospectionRecord {
+        IntrospectionRecord {
+            id: RecordId::parse("20261029-000001-1abc").unwrap(),
+            at: jiff::Timestamp::UNIX_EPOCH,
+            trigger: IntrospectionTrigger::Failure,
+            job: Some(of.clone()),
+            intervention: None,
+            class_of_work: "change".into(),
+            category: "failed".into(),
+            what_happened: Some("a gate ended it".into()),
+            failure_class: Some(RecordId::parse("20261029-000002-2abc").unwrap()),
+            new_class: false,
+            earlier_cases: Vec::new(),
+            decisions_matched: Vec::new(),
+            cause: Some("c".into()),
+            other_causes: Vec::new(),
+            open_hypotheses: Vec::new(),
+            contradictions: Vec::new(),
+            prevention_kind: Some(PreventionKind::CodeCheck),
+            prevention: Some("p".into()),
+            proposed_request: Some("r".into()),
+            evidence: None,
+            status: IntrospectionStatus::Recorded,
+            failure: None,
+            flags,
+            dropped_ids: Vec::new(),
+            planning_stopped: false,
+            from_jev: false,
+            jev: None,
+        }
+    }
+
+    fn proposal(jobs: &[&JobId], status: ProposalStatus, secs: i64) -> ProposalRecord {
+        let at = jiff::Timestamp::from_second(secs).unwrap();
+        ProposalRecord {
+            record: RecordId::parse("20261029-000003-3abc").unwrap(),
+            at,
+            id: "D1".into(),
+            kind: ProposalKind::Add,
+            statement: "s".into(),
+            applies_to: vec!["change".into()],
+            version: ProposalVersion { from: 1, to: 2 },
+            sources: jobs
+                .iter()
+                .map(|j| ProposalSource {
+                    introspection: RecordId::parse("20261029-000001-1abc").unwrap(),
+                    intervention: None,
+                    job: (*j).clone(),
+                    at,
+                })
+                .collect(),
+            failure_class: RecordId::parse("20261029-000002-2abc").unwrap(),
+            status,
+            candidate_sha256: "0".repeat(64),
+            notes: String::new(),
+        }
+    }
+
+    fn accepted() -> ProposalStatus {
+        ProposalStatus::Accepted { job: job(9) }
+    }
+
+    #[test]
+    fn a_full_chain_is_shown() {
+        let (a, b) = (job(1), job(2));
+        let c = improvement_cycle(
+            std::slice::from_ref(&a),
+            &[introspection(&a, Vec::new())],
+            &[proposal(&[&a, &b], accepted(), 1)],
+        );
+        assert!(c.shown(), "{}", c.line());
+        assert_eq!(c.line(), "improvement cycle: shown");
+    }
+
+    #[test]
+    fn a_rejection_with_a_reason_is_a_decision() {
+        let (a, b) = (job(1), job(2));
+        let rejected = ProposalStatus::Rejected {
+            reason: "no gain on the cases".into(),
+        };
+        let c = improvement_cycle(
+            std::slice::from_ref(&a),
+            &[introspection(&a, Vec::new())],
+            &[proposal(&[&a, &b], rejected, 1)],
+        );
+        assert!(c.shown());
+    }
+
+    #[test]
+    fn each_missing_stage_is_named() {
+        let (a, b) = (job(1), job(2));
+        let one = std::slice::from_ref(&a);
+        let good_i = introspection(&a, Vec::new());
+        let good_p = proposal(&[&a, &b], accepted(), 1);
+
+        let gi = std::slice::from_ref(&good_i);
+        let gp = std::slice::from_ref(&good_p);
+
+        let c = improvement_cycle(&[], gi, gp);
+        assert!(c.missing().contains(&"repair"), "{}", c.line());
+
+        let flagged = introspection(&a, vec!["restates the event".into()]);
+        let c = improvement_cycle(one, &[flagged], gp);
+        assert_eq!(c.missing(), vec!["supported finding"]);
+
+        let single = proposal(&[&a], accepted(), 1);
+        let c = improvement_cycle(one, gi, &[single]);
+        assert!(c.missing().contains(&"evaluated candidate"));
+
+        let pending = proposal(&[&a, &b], ProposalStatus::Pending, 1);
+        let c = improvement_cycle(one, gi, &[pending]);
+        assert_eq!(c.missing(), vec!["adoption decision"]);
+
+        // A later withdrawal replaces the accepted record.
+        let withdrawn = proposal(&[&a, &b], ProposalStatus::Withdrawn, 2);
+        let c = improvement_cycle(one, gi, &[good_p.clone(), withdrawn]);
+        assert_eq!(c.missing(), vec!["adoption decision"]);
+        assert!(c.line().contains("not shown"));
+    }
+
+    #[test]
+    fn an_empty_record_set_is_not_shown() {
+        let c = improvement_cycle(&[], &[], &[]);
+        assert!(!c.shown());
+        assert_eq!(c.missing().len(), 4);
+        assert!(c.line().starts_with("improvement cycle: not shown"));
+    }
+}
