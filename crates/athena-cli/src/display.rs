@@ -1331,8 +1331,13 @@ pub fn status(v: &StatusView) -> String {
     if let Some(trend) = &v.class_trend {
         out.push_str(&trend_section(trend));
     }
-    if let Some(line) = v.role_need.as_ref().and_then(|r| r.line()) {
+    if let Some(need) = v.role_need.as_ref()
+        && let Some(line) = need.line()
+    {
         let _ = writeln!(out, "role need   {line}");
+        for replay in need.replay() {
+            let _ = writeln!(out, "            {replay}");
+        }
     }
     for (i, j) in v.open.iter().enumerate() {
         let label = if i == 0 { "open" } else { "" };

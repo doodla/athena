@@ -42,6 +42,25 @@ pub struct RoleNeed {
     pub retire_candidates: Vec<String>,
     /// On-demand roles, with their runs (from every source) since the window's oldest invocation.
     pub not_measured: Vec<(String, usize)>,
+    /// Every role, measured or not, with its count and the data source the count came from.
+    pub roles: Vec<RoleCount>,
+}
+
+/// Source label for runs counted from the window's job records.
+pub const SOURCE_JOB_RUNS: &str = "runs in the window's jobs";
+/// Source label for built-in roles counted from runs kept outside any job's records.
+pub const SOURCE_OUTSIDE_JOBS: &str = "runs outside job records, since the window began";
+/// Source label for roles added by name, counted from the work they queued.
+pub const SOURCE_QUEUED_WORK: &str = "work items queued since the window began";
+
+/// One role's count in the replay, with where the count came from.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RoleCount {
+    pub role: String,
+    pub count: usize,
+    pub source: String,
+    /// True when the role is a retire candidate.
+    pub flagged: bool,
 }
 
 /// Whether a job counts as work for the window: it closed after a model ran. `ran` holds the ids of jobs with
@@ -114,8 +133,18 @@ impl RoleNeed {
         ];
         let mut used = Vec::new();
         let mut retire_candidates = Vec::new();
+        let mut counts = Vec::new();
+        let mut push_count = |role: &str, count: usize, source: &str, flagged: bool| {
+            counts.push(RoleCount {
+                role: role.to_string(),
+                count,
+                source: source.to_string(),
+                flagged,
+            });
+        };
         for role in all_roles {
             let n = runs.get(&role).copied().unwrap_or(0);
+            push_count(role.as_str(), n, SOURCE_JOB_RUNS, n == 0);
             if n > 0 {
                 used.push((role.as_str().to_string(), n));
             } else {
@@ -135,11 +164,17 @@ impl RoleNeed {
                 .iter()
                 .filter(|w| w.role == name && w.at >= window_start)
                 .count();
+            push_count(name, n, SOURCE_QUEUED_WORK, n == 0);
             if n > 0 {
                 used.push((name.to_string(), n));
             } else {
                 retire_candidates.push(name.to_string());
             }
+        }
+        for r in ON_DEMAND_ROLES {
+            let n = on_demand_runs.get(r).copied().unwrap_or(0);
+            // On-demand roles are never flagged, whatever their count.
+            push_count(r.as_str(), n, SOURCE_OUTSIDE_JOBS, false);
         }
         let not_measured = ON_DEMAND_ROLES
             .iter()
@@ -156,7 +191,24 @@ impl RoleNeed {
             used,
             retire_candidates,
             not_measured,
+            roles: counts,
         })
+    }
+
+    /// One line per role: its count, the data source of the count, and whether it is flagged.
+    pub fn replay(&self) -> Vec<String> {
+        self.roles
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}: {} ({}){}",
+                    r.role,
+                    r.count,
+                    r.source,
+                    if r.flagged { " [retire candidate]" } else { "" }
+                )
+            })
+            .collect()
     }
 
     /// The text `athena status` prints after the `role need` label; None when no role is a retire candidate,
@@ -375,6 +427,98 @@ mod tests {
         assert_eq!(flagged.retire_candidates, vec!["planner", "critic"]);
         assert!(flagged.used.iter().any(|(role, _)| role == "producer"));
         assert!(flagged.line().is_some());
+    }
+
+    #[test]
+    fn runs_kept_outside_job_records_are_counted_with_their_source_and_not_flagged() {
+        // The steward, audience and auditor runs appear in no job's invocations (built by from_parts).
+        use athena_data::records::AnyRecord;
+        use athena_gate::records::{RecordFile, RecordSet};
+        let base = known_active();
+        let mut any: Vec<AnyRecord> = Vec::new();
+        for j in base.jobs.values() {
+            any.extend(
+                j.invocations
+                    .iter()
+                    .map(|i| AnyRecord::Invocation(Box::new(i.clone()))),
+            );
+            any.push(AnyRecord::Outcome(Box::new(j.outcome.clone().unwrap())));
+        }
+        for i in base
+            .steward_runs
+            .iter()
+            .chain(&base.audience_runs)
+            .chain(&base.auditor_runs)
+        {
+            any.push(AnyRecord::Invocation(Box::new(i.clone())));
+        }
+        let files = any
+            .into_iter()
+            .map(|record| RecordFile {
+                path: record.canonical_path(),
+                record: Some(record),
+                error: None,
+                bytes: Vec::new(),
+            })
+            .collect();
+        let r = Records::from_parts(&RecordSet { files }, &[]);
+        assert!(r.jobs.values().all(|j| {
+            j.invocations
+                .iter()
+                .all(|i| !ON_DEMAND_ROLES.contains(&i.role))
+        }));
+        let need = RoleNeed::compute(&r).unwrap();
+        for known in ["steward", "audience", "auditor"] {
+            let rc = need.roles.iter().find(|c| c.role == known).unwrap();
+            assert!(rc.count > 0, "{known}: {rc:?}");
+            assert_eq!(rc.source, SOURCE_OUTSIDE_JOBS);
+            assert!(rc.source.contains("outside job records"));
+            assert!(!rc.flagged);
+            assert!(!need.retire_candidates.iter().any(|c| c == known));
+        }
+    }
+
+    #[test]
+    fn the_replay_lists_every_known_active_role_with_count_and_source() {
+        let known = [
+            "reader", "producer", "verifier", "steward", "audience", "auditor",
+        ];
+        let flagged = RoleNeed::compute(&known_active()).unwrap();
+        let lines = flagged.replay();
+        assert_eq!(lines.len(), flagged.roles.len());
+        for role in known {
+            let rc = flagged.roles.iter().find(|c| c.role == role).unwrap();
+            assert!(
+                rc.count > 0 && !rc.source.is_empty() && !rc.flagged,
+                "{rc:?}"
+            );
+            let line = lines
+                .iter()
+                .find(|l| l.starts_with(&format!("{role}:")))
+                .unwrap();
+            assert!(
+                line.contains(&rc.source) && !line.contains("retire candidate"),
+                "{line}"
+            );
+        }
+        // Mixed: planner and critic are flagged here, and unflagged when they run.
+        assert!(flagged.roles.iter().any(|c| c.flagged));
+        assert!(flagged.roles.iter().any(|c| !c.flagged));
+        assert!(
+            flagged
+                .replay()
+                .iter()
+                .any(|l| l.ends_with("[retire candidate]"))
+        );
+        let all = RoleNeed::compute(&known_active_with(&[
+            Role::Reader,
+            Role::Planner,
+            Role::Critic,
+            Role::Producer,
+            Role::Verifier,
+        ]))
+        .unwrap();
+        assert!(all.roles.iter().all(|c| !c.flagged && !c.source.is_empty()));
     }
 
     #[test]
