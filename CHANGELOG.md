@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- New design note `docs/design/direct-main-merge-tree-landing.md` for throughput review `20261111-055051-tjym`
+  (landing and rebuild 2984.3 of 2990.6 median minutes per landed job): build each verified job's single landing
+  commit on fetched host main with `Git::merge_tree`, not on the long-lived local landing branch. Covers the
+  mechanism, existing code, alternatives, conflict handling, migration and rollback. Predicts 5.0 minutes saved per
+  landed job and says how the next review measures it. Design only; no code changes.
 - The plan check (`open_questions_findings` in `crates/athena-core/src/admission.rs`) now sends a plan back to
   the planner, with no critic call and no round used, when an open question asks whether existing tests break
   or what a backticked named function does on its failure or retry path, even with a `User:` or `Host:` prefix.
