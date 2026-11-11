@@ -1,0 +1,180 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261111-164002-rgay",
+  "n": 1,
+  "at": "2026-11-11T19:08:48.693571246Z",
+  "invocation_seq": 1,
+  "base_commit": "aa342a7b53dac1abed9a8d0c85bd9fbb33c574c8",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make an empty producer diff carry a recorded reason",
+  "summary": "Root cause: the producer is never asked to say why it changed nothing, and Athena ends an empty diff with the bare reason \"the producer made no change\" (candidate.rs), dropping the report it has. Fix by telling the producer in its brief to give a structured no-change outcome (already done with evidence, blocked, or gave up), carrying it in the report, and putting it in the failure reason and records. Retries of 20261027-011733-vrsk and 20261111-145400-dx3z are both of this class.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the failure reason a user reads, run through a test."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus fmt, clippy and test pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fixed in the producer's brief and output schema, not in the two jobs."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The first criterion runs a no-change job and checks its reason."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Prior jobs: 20261027-011733-vrsk (gh/transport.rs move; candidate changed no files, outcome 'the producer made no change') and 20261111-145400-dx3z (role-need retire rule; candidate changed no files). Neither candidate changed any file, so there is no work to keep. Neither job's deliverables (gh/transport.rs, gh/mod.rs, role_need.rs, store.rs, status.rs, display.rs, docs/system-facts.md, docs/spec.toml, xtask/shard-timings.txt) are redone here; they are out_of_scope. Each job's finding, 'the producer made no change', is addressed by making that outcome carry a reason: for dx3z the reason would be 'already done', with the evidence the producer reported.",
+    "Goal and audience: the user and later introspections who read a failed job's reason and need to know whether work was already done, blocked or abandoned. They can see this in the failure reason and the kept report.",
+    "Code survey: crates/athena-core/src/run/candidate.rs (candidate_stage: an empty change list ends in self.failure with the bare text; report_gaps only covers report problems); crates/athena-core/src/run/producer.rs (report check and send-back loop, ends with Flow::Go(Reported)); crates/athena-core/src/run/mod.rs (Reported to candidate_stage; ProducerReport built near line 2529); crates/athena-context/src/outputs.rs (ProducerOutput schema, serde(default) for optional fields); crates/athena-context/src/briefs.rs (producer_brief); crates/athena-data/src/records.rs (ProducerReport and Candidate, deny_unknown_fields, so any new field needs serde(default) and the AnyRecord round-trip tests must still pass; an existing record without the field must still parse). The property is measured directly: the failure reason string of a job whose fake producer changes nothing and reports a no-change outcome.",
+    "Design: add an optional no-change outcome to the producer's structured output and report (kind: already done / blocked / gave up, plus detail or evidence). The producer brief asks for it whenever the diff is empty. candidate_stage includes it in the failure reason. This adds no refusal rule, so there is no refused-readings share.",
+    "Existing code: extend crates/athena-context/src/outputs.rs ProducerOutput, crates/athena-data/src/records.rs ProducerReport, crates/athena-core/src/run/candidate.rs and crates/athena-core/src/run/producer.rs, and the existing retry test in crates/athena-cli/tests/retry.rs (which asserts 'the producer made no change').",
+    "The pre-dispatch check of the named source symbols proposed by introspection 7whw is a refusal-style rule, so it is not built. The brief change is the information fix; the no-change outcome tells the next reader whether the source was already moved.",
+    "Prompt headroom: the producer prompt has 157 tokens left, so the brief addition must be short; prompts stay unchanged beyond the Rust-built brief text."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "cargo test passes with a new test in crates/athena-core/src/run/tests.rs or crates/athena-cli/tests/retry.rs: a fake producer makes no change and reports 'already done' with evidence; the job's failure reason contains the kind and the evidence, not only 'the producer made no change'. The test fails on the base commit.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Three more test cases for blocked, gave up, and no outcome given with an empty diff (the reason says no reason was reported, naming the missing field) pass, so the fix covers the class and not only the two jobs.",
+      "kind": "behavior"
+    },
+    {
+      "text": "git diff shows crates/athena-context/src/briefs.rs (producer brief) telling the producer to give the no-change outcome (already done with evidence, blocked, or gave up) when it leaves the tree unchanged; a briefs.rs unit test asserts this text is in producer_brief.",
+      "kind": "content"
+    },
+    {
+      "text": "git diff shows the new field in ProducerOutput (outputs.rs) and ProducerReport (records.rs) with serde(default), and cargo test shows existing records without the field still parse (the AnyRecord round-trip tests pass).",
+      "kind": "content"
+    },
+    {
+      "text": "The change adds no new rule that refuses or holds work: git diff shows no new admission, gate or check that fails a job, so no refused-readings share applies; an empty diff still fails the job but with the reason recorded.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry naming the root cause: the producer is not asked for a no-change outcome and Athena discards it, so an empty diff was a bare failure.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy and cargo test all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/candidate.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Moving Transport items into gh/transport.rs (job 20261027-011733-vrsk work); no files kept because its candidate changed none",
+    "The role-need retire rule fix (job 20261111-145400-dx3z work); no files kept because its candidate changed none",
+    "A pre-dispatch check that refuses a job when the named source symbols are absent",
+    "Changes to athena.toml, defaults.toml or prompt files",
+    "Automatically retrying or reclassifying jobs whose producer reported 'already done'"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.678373382624769,
+      "p_user_intervenes": 0.06845637583892616,
+      "cost_usd": {
+        "p10": 0.5482794895253837,
+        "p50": 1.4785786040398394,
+        "p90": 5.213149813605901
+      },
+      "wall_time_s": {
+        "p10": 585.1941723927137,
+        "p50": 2117.3686947409997,
+        "p90": 4381.043141447276
+      }
+    }
+  },
+  "departures": "Cost, time and pass probability are worse than the reference: the change spans the output schema, a record type, the brief and the run pipeline, and two earlier jobs of this class ended with no change.",
+  "urgent_reason": "Both earlier jobs ended with an empty diff and no reason, so each wasted a full producer run; recording why cuts those failed attempts and redo retries.",
+  "hard_reason": "It changes the run pipeline: how a producer's result is closed, and the failure Athena records for an empty diff.",
+  "producer_effort": "high"
+}

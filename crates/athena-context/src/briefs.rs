@@ -738,11 +738,23 @@ pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&s
     let _ = writeln!(out, "{}", checkable_evidence_section());
     criteria_check_section(&mut out, &inputs.reading);
     let _ = writeln!(out, "{}", unchanged_files_section());
+    let _ = writeln!(out, "{}", no_change_section());
     let _ = writeln!(
         out,
         "## Report\n\nEnd with the producer report as your structured output."
     );
     out
+}
+
+/// The producer brief's note on leaving the tree unchanged. The run still fails as an empty candidate; the
+/// report's `no_change` outcome becomes the recorded reason, so a later reader can tell work already in place
+/// from a blocker or an abandoned attempt.
+fn no_change_section() -> String {
+    "## If you leave the tree unchanged\n\n\
+     A run that leaves the tree unchanged still fails. Set `no_change` in your report, and Athena records it as \
+     the job's failure reason: `already_done` with the evidence (the file and symbol you found in place), \
+     `blocked` with the blocker, or `gave_up` with the reason. Set it to null when you changed files.\n"
+        .to_string()
 }
 
 /// The producer brief's note on the replay of accepted readings. Athena runs it while the producer works, not
@@ -1545,6 +1557,38 @@ mod tests {
         ] {
             assert!(section.contains(needle), "missing instruction: {needle}");
         }
+    }
+
+    #[test]
+    fn producer_brief_asks_for_a_no_change_outcome_when_the_tree_is_unchanged() {
+        let accepted = AcceptedReading::new(&reading(), &defaults(), |_| false);
+        let brief = producer_brief(&ProducerInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog".into(),
+            reading: accepted,
+            checks: vec![],
+            commands: vec![],
+            pin: None,
+            retry_from: None,
+            retry_findings: None,
+            failure_classes: Vec::new(),
+        });
+        let (_, section) = brief
+            .split_once("## If you leave the tree unchanged\n")
+            .expect("the producer brief has a no-change section");
+        let section = section.split("\n## ").next().unwrap();
+        for needle in [
+            "no_change",
+            "already_done",
+            "blocked",
+            "gave_up",
+            "evidence",
+            "still fails",
+            "failure reason",
+        ] {
+            assert!(section.contains(needle), "missing {needle}: {section}");
+        }
+        assert!(brief.find("## If you leave").unwrap() < brief.find("## Report").unwrap());
     }
 
     #[test]

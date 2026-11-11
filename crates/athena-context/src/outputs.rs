@@ -137,6 +137,41 @@ pub struct ProducerOutput {
     /// flagged to the verifier. Use an empty list when every listed file changed.
     #[serde(default)]
     pub unchanged_planned_files: Vec<UnchangedFileOutput>,
+    /// Set only when you leave the tree unchanged: already_done with the evidence you found, blocked
+    /// with the blocker, or gave_up with the reason. Null when you changed files.
+    #[serde(default)]
+    pub no_change: Option<NoChangeOutput>,
+}
+
+/// Why the producer left the tree unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NoChangeKindOutput {
+    /// The work is already in the tree.
+    AlreadyDone,
+    /// Something outside the producer's reach stopped the work.
+    Blocked,
+    /// The producer abandoned the work.
+    GaveUp,
+}
+
+impl NoChangeKindOutput {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NoChangeKindOutput::AlreadyDone => "already_done",
+            NoChangeKindOutput::Blocked => "blocked",
+            NoChangeKindOutput::GaveUp => "gave_up",
+        }
+    }
+}
+
+/// The producer's account of an empty change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NoChangeOutput {
+    pub kind: NoChangeKindOutput,
+    /// The evidence (file and symbol found in place), the blocker, or the reason for giving up.
+    pub detail: String,
 }
 
 /// A planned or expected file the producer left unchanged, with the reason, so a reader can tell a
@@ -980,5 +1015,75 @@ mod tests {
         .unwrap();
         assert_eq!(output.items[0].kind, StewardKindOutput::RepeatedFailure);
         assert_eq!(output.items[0].rung, RungOutput::DefaultsConventions);
+    }
+
+    fn producer_json(extra: Value) -> Value {
+        let mut base = json!({
+            "summary": "s", "files": [], "checks_run": [], "criteria_check": [],
+            "open_issues": [], "mistakes": [], "learnings": [], "desires": []
+        });
+        if let (Some(base), Value::Object(extra)) = (base.as_object_mut(), extra) {
+            base.extend(extra);
+        }
+        base
+    }
+
+    #[test]
+    fn the_producer_schema_asks_every_run_for_a_nullable_no_change_outcome() {
+        let schema = producer_schema();
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == "no_change")
+        );
+        let object = &schema["properties"]["no_change"];
+        assert!(object.get("properties").is_some(), "{object}");
+        assert!(
+            object["type"]
+                .as_array()
+                .is_some_and(|t| t.contains(&json!("null"))),
+            "nullable: {object}"
+        );
+        assert_eq!(object["additionalProperties"], json!(false));
+        let required = object["required"].as_array().unwrap();
+        assert!(required.contains(&json!("kind")) && required.contains(&json!("detail")));
+        let kind = object["properties"]["kind"].to_string();
+        for word in ["already_done", "blocked", "gave_up"] {
+            assert!(kind.contains(word), "{word} in {kind}");
+        }
+    }
+
+    #[test]
+    fn a_producer_output_parses_with_and_without_a_no_change_outcome() {
+        let without: ProducerOutput = serde_json::from_value(producer_json(json!({}))).unwrap();
+        assert_eq!(without.no_change, None);
+        let null: ProducerOutput =
+            serde_json::from_value(producer_json(json!({ "no_change": null }))).unwrap();
+        assert_eq!(null.no_change, None);
+        for kind in [
+            NoChangeKindOutput::AlreadyDone,
+            NoChangeKindOutput::Blocked,
+            NoChangeKindOutput::GaveUp,
+        ] {
+            let with: ProducerOutput = serde_json::from_value(producer_json(
+                json!({ "no_change": { "kind": kind.as_str(), "detail": "d" } }),
+            ))
+            .unwrap();
+            assert_eq!(
+                with.no_change,
+                Some(NoChangeOutput {
+                    kind,
+                    detail: "d".into()
+                })
+            );
+        }
+        assert!(
+            serde_json::from_value::<ProducerOutput>(producer_json(
+                json!({ "no_change": { "kind": "lost", "detail": "d" } })
+            ))
+            .is_err()
+        );
     }
 }

@@ -4940,3 +4940,27 @@ should replace those estimates with its figures.
   `crates/athena-cli/tests/budgets.rs`, the two introspections' proposed preventions. Measured: `cargo test -p
   athena-context` and `cargo test -p athena-cli --test budgets` on the final text (reader set 1998 of 2000). Not
   measured: whether readings improve; the share of newly refused readings (no reading rule changed).
+
+## D171 · An empty producer diff fails with the producer's reported no-change outcome as its reason; D08 stands
+
+- **Case:** Jobs 20261027-011733-vrsk and 20261111-145400-dx3z each ended with the bare reason "the producer made
+  no change". Root cause: the producer was never asked to say whether the work was already done, blocked or
+  abandoned, and `candidate_stage` in `crates/athena-core/src/run/candidate.rs` dropped the report it held when
+  the change list was empty. A later reader of the failure could not tell the three apart.
+- **Decision:** Amends D08 in prose only: D08 was checked for the `crates/athena-core/src/run/candidate.rs` change
+  and stands. Only the text of the empty-diff reason changed; the candidate build and the job's state are
+  untouched. The producer's output and kept report gain an optional `no_change` outcome (`already_done`,
+  `blocked`, `gave_up`, with a detail), the producer brief asks for it when the tree is left unchanged, and the
+  failure reason carries it, or says that no reason was reported.
+- **Alternatives:** A pre-dispatch check of the named source symbols and files was declined as out of scope for
+  this reading; an informational form, stating in the producer brief that the item already sits at its target,
+  is a possible follow-up. Sending the producer back when the diff is empty and no outcome is given would add a
+  new hold on work. Parsing the outcome out of the summary text cannot tell it from an ordinary report.
+- **Tradeoff:** A producer may report `already_done` wrongly, so the reason words it as what the producer
+  reported. The model's answer to the new schema field is not measured; a wrong or missing answer only changes
+  the recorded reason.
+- **Reversal cost:** Low; remove the field, the brief section and the reason function. Old records still parse.
+- **Provenance:** Read: D08, D160, `crates/athena-core/src/run/candidate.rs`, `crates/athena-core/src/run/producer.rs`,
+  the two jobs' introspections. Measured: the retry tests for each kind and for no outcome, and the unit tests for
+  `no_change_reason`. Not measured: how often producers report each kind; no reading rule changed, so no share
+  of newly refused readings applies.

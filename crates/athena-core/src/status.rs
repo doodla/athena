@@ -379,6 +379,18 @@ pub fn improvement_cycle_line(cycle: &athena_data::records::ImprovementCycle) ->
     )
 }
 
+/// The line `athena status` prints for a later similar task (OLY-10-03): `later similar task: shown (prevented)`,
+/// `later similar task: shown (detected earlier)`, or `later similar task: not shown (<why>)`. Nothing recorded
+/// is not shown, never success.
+pub fn later_similar_task_line(task: &athena_data::records::LaterTask) -> String {
+    use athena_data::records::LaterTask;
+    match task {
+        LaterTask::Prevented => "later similar task: shown (prevented)".into(),
+        LaterTask::DetectedEarlier => "later similar task: shown (detected earlier)".into(),
+        LaterTask::NotShown(why) => format!("later similar task: not shown ({why})"),
+    }
+}
+
 /// The jobs whose latest outcome is landed.
 fn landed_job_ids(records: &Records) -> Vec<athena_data::JobId> {
     records
@@ -454,6 +466,9 @@ pub struct StatusView {
     pub build_measurement: String,
     /// Whether the records show the final acceptance chain, as one printed line ([`improvement_cycle_line`]).
     pub improvement_cycle: String,
+    /// Whether the records show an improved process preventing or earlier detecting a defect, as one printed line
+    /// ([`later_similar_task_line`]).
+    pub later_similar_task: String,
     /// Classes of work whose minutes per landed job fell or rose between their older and newer landed jobs,
     /// with the job after which a rising class got worse; absent until a class has enough landed jobs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1312,6 +1327,11 @@ impl Athena {
                 &records.introspections,
                 &crate::proposals::current(&records.proposals),
             )),
+            later_similar_task: later_similar_task_line(&athena_data::records::later_similar_task(
+                &landed_job_ids(&records),
+                &records.introspections,
+                &crate::proposals::current(&records.proposals),
+            )),
             class_trend: crate::class_trend::ClassTrend::compute(&records),
             role_need: crate::role_need::RoleNeed::compute(&records),
             interventions_by_category: by_category,
@@ -1673,6 +1693,30 @@ mod improvement_cycle_line_tests {
             improvement_cycle_line(&unevaluated),
             "improvement cycle: not shown (missing: evaluated candidate, adoption decision)"
         );
+    }
+
+    #[test]
+    fn the_later_task_line_names_each_outcome_and_empty_records_are_not_shown() {
+        use athena_data::records::LaterTask;
+        assert_eq!(
+            later_similar_task_line(&LaterTask::Prevented),
+            "later similar task: shown (prevented)"
+        );
+        assert_eq!(
+            later_similar_task_line(&LaterTask::DetectedEarlier),
+            "later similar task: shown (detected earlier)"
+        );
+        assert_eq!(
+            later_similar_task_line(&LaterTask::NotShown("why")),
+            "later similar task: not shown (why)"
+        );
+        let records = Records::default();
+        let line = later_similar_task_line(&athena_data::records::later_similar_task(
+            &landed_job_ids(&records),
+            &records.introspections,
+            &crate::proposals::current(&records.proposals),
+        ));
+        assert!(line.starts_with("later similar task: not shown"), "{line}");
     }
 
     #[test]

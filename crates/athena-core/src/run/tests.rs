@@ -7662,3 +7662,74 @@ mod produce_and_verify_order_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod no_change_reason_tests {
+    use super::super::candidate::no_change_reason;
+    use super::super::*;
+
+    fn report(no_change: Option<(&str, &str)>) -> ProducerReport {
+        ProducerReport {
+            summary: "s".into(),
+            files: vec![],
+            checks_run: vec![],
+            criteria_check: vec![],
+            open_issues: vec![],
+            mistakes: vec![],
+            learnings: vec![],
+            desires: vec![],
+            no_change: no_change.map(|(kind, detail)| NoChange {
+                kind: kind.into(),
+                detail: detail.into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn each_kind_names_itself_and_its_detail() {
+        for (kind, words) in [
+            ("already_done", "already done"),
+            ("blocked", "blocked"),
+            ("gave_up", "gave up"),
+        ] {
+            let r = report(Some((kind, "DETAIL-CANARY")));
+            assert_eq!(
+                no_change_reason(Some(&r), &[], "x"),
+                format!("the producer made no change; it reported {words}: DETAIL-CANARY")
+            );
+        }
+    }
+
+    #[test]
+    fn a_blank_detail_reads_no_detail_given() {
+        let r = report(Some(("blocked", "  ")));
+        assert_eq!(
+            no_change_reason(Some(&r), &[], "x"),
+            "the producer made no change; it reported blocked: no detail given"
+        );
+    }
+
+    #[test]
+    fn a_missing_outcome_or_report_says_no_reason_was_recorded() {
+        let r = report(None);
+        let reason = no_change_reason(Some(&r), &[], "x");
+        assert!(
+            reason.starts_with("the producer made no change"),
+            "{reason}"
+        );
+        assert!(reason.contains("reported no reason"), "{reason}");
+        assert!(reason.contains("no_change"), "{reason}");
+        let reason = no_change_reason(None, &[], "x");
+        assert!(reason.contains("gave no report"), "{reason}");
+    }
+
+    #[test]
+    fn the_report_problems_follow_the_outcome() {
+        let r = report(Some(("already_done", "found it")));
+        let gaps = vec!["gap one".to_string(), "gap two".to_string()];
+        assert_eq!(
+            no_change_reason(Some(&r), &gaps, "brief-2.md"),
+            "the producer made no change; it reported already done: found it, and its report still had problems when sent back: gap one; gap two; the report is kept in brief-2.md"
+        );
+    }
+}

@@ -19,6 +19,40 @@ pub(super) struct BuiltCandidate {
     pub(super) paths: BTreeSet<String>,
 }
 
+/// The reason an empty change list ends a job. The job fails either way; the reason says what the producer
+/// reported about leaving the tree unchanged (already done, blocked or gave up), or that it reported none.
+pub(super) fn no_change_reason(
+    report: Option<&ProducerReport>,
+    report_gaps: &[String],
+    report_kept_in: &str,
+) -> String {
+    let mut reason = match report {
+        Some(ProducerReport {
+            no_change: Some(n), ..
+        }) => {
+            let detail = n.detail.trim();
+            let detail = if detail.is_empty() {
+                "no detail given"
+            } else {
+                detail
+            };
+            format!(
+                "the producer made no change; it reported {}: {detail}",
+                n.kind.replace('_', " ")
+            )
+        }
+        Some(_) => "the producer made no change and reported no reason: the report's no_change field was empty".to_string(),
+        None => "the producer made no change and gave no report, so no reason is recorded".to_string(),
+    };
+    if !report_gaps.is_empty() {
+        reason.push_str(&format!(
+            ", and its report still had problems when sent back: {}; the report is kept in {report_kept_in}",
+            report_gaps.join("; ")
+        ));
+    }
+    reason
+}
+
 impl Athena {
     /// Stage S4: the candidate commit for the snapshot's change list, applied to the base's full tree in the
     /// user's repository and not on any branch. The producer stage uses it for a finished producer, and the
@@ -136,15 +170,12 @@ impl Athena {
         // candidate and goes on to admission, checks and the verifier. Only a run with no change against the
         // base fails as an idle producer.
         let Some(c) = candidate.candidate_commit.clone() else {
+            let reason = no_change_reason(
+                candidate.producer_report.as_ref(),
+                report_gaps,
+                report_kept_in,
+            );
             closing.candidate = Some(candidate);
-            let reason = if report_gaps.is_empty() {
-                "the producer made no change".to_string()
-            } else {
-                format!(
-                    "the producer made no change, and its report still had problems when sent back: {}; the report is kept in {report_kept_in}",
-                    report_gaps.join("; ")
-                )
-            };
             closing.happened = self.failure(ctx, &reason);
             return Ok(Flow::Stop);
         };
