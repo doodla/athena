@@ -105,6 +105,7 @@ pub mod invocation;
 pub mod jev;
 pub mod labeled;
 pub mod land;
+pub mod learning;
 pub mod manage;
 pub mod method_experiment;
 pub mod mirrors;

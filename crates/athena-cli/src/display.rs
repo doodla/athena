@@ -1140,6 +1140,17 @@ fn repeated_causes_section(causes: &[athena_core::hestia::RepeatedCause]) -> Str
     out
 }
 
+/// The failure-class lines of `athena status` (requirement OLY-9-09): each repeated class with its request and
+/// the outcome of that request's class of work. The `repeated` label heads them when no open cause printed one.
+fn learning_section(lines: &[String], label_here: bool) -> String {
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        let label = if i == 0 && label_here { "repeated" } else { "" };
+        let _ = writeln!(out, "{label:<11} {line}");
+    }
+    out
+}
+
 /// The repeated causes whose stage `athena.toml` has switched off: apart from the others, because the error
 /// review backfill does not queue a request for them.
 fn dormant_causes_section(causes: &[athena_core::hestia::DormantCause]) -> String {
@@ -1332,6 +1343,7 @@ pub fn status(v: &StatusView) -> String {
     }
     out.push_str(&lines_section(&v.lines));
     out.push_str(&repeated_causes_section(&v.repeated_causes));
+    out.push_str(&learning_section(&v.learning, v.repeated_causes.is_empty()));
     out.push_str(&dormant_causes_section(&v.dormant_causes));
     for (i, n) in v.open_interventions.iter().enumerate() {
         let label = if i == 0 { "follow-up" } else { "" };
@@ -2284,6 +2296,13 @@ mod tests {
             "{text}"
         );
         assert_eq!(repeated_causes_section(&[]), "");
+        assert_eq!(learning_section(&[], true), "");
+        let lines = ["learning: c (FC-1) · request j (landed) · o".to_string()];
+        assert_eq!(
+            learning_section(&lines, true),
+            "repeated    learning: c (FC-1) · request j (landed) · o\n"
+        );
+        assert!(learning_section(&lines, false).starts_with("            learning:"));
     }
 
     #[test]

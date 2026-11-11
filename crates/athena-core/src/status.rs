@@ -465,6 +465,9 @@ pub struct StatusView {
     /// and the request that addresses it. Empty when there are none. Causes in a stage that `athena.toml` has
     /// switched off are not here; see `dormant_causes`.
     pub repeated_causes: Vec<crate::hestia::RepeatedCause>,
+    /// One line per repeated failure class joining it to its addressing request and the outcome of that
+    /// request's class of work (`crate::learning::join`). Empty when no cause repeated.
+    pub learning: Vec<String>,
     /// The open repeated causes whose stage (planner or critic) `athena.toml` has switched off: listed apart,
     /// never queued by the error review backfill that Athena runs at drain start and in each sweep.
     pub dormant_causes: Vec<crate::hestia::DormantCause>,
@@ -1162,11 +1165,25 @@ impl Athena {
                 l.lift
             ));
         }
-        let open_causes: Vec<crate::hestia::RepeatedCause> =
-            crate::hestia::repeated_causes(&records)
-                .into_iter()
-                .filter(crate::hestia::RepeatedCause::is_open)
-                .collect();
+        let all_causes = crate::hestia::repeated_causes(&records);
+        let specialization_view = specialization(&records);
+        let trend_view = crate::class_trend::ClassTrend::compute(&records);
+        let learning = crate::learning::join(
+            &all_causes,
+            &|job| {
+                records
+                    .jobs
+                    .get(job)
+                    .and_then(|j| j.class())
+                    .map(str::to_string)
+            },
+            &specialization_view,
+            trend_view.as_ref(),
+        );
+        let open_causes: Vec<crate::hestia::RepeatedCause> = all_causes
+            .into_iter()
+            .filter(crate::hestia::RepeatedCause::is_open)
+            .collect();
         // The stages athena.toml switches off are read from the configuration at HEAD; an unreadable
         // configuration leaves every cause live.
         let job_config = crate::capability::JobConfig::at(&self.git, &head).ok();
@@ -1274,6 +1291,7 @@ impl Athena {
             code_health,
             lines,
             repeated_causes,
+            learning,
             dormant_causes,
             spec_gaps,
             invalid_records: records.invalid.clone(),
