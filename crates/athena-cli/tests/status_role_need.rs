@@ -166,6 +166,19 @@ fn status_prints_the_role_need_line_only_when_a_role_is_a_retire_candidate() {
         "{line}"
     );
     assert!(line.contains("auditor (1 runs"), "{line}");
+    // The replay lists each role with its count and data source.
+    assert!(
+        text.contains("steward: 1 (runs outside job records"),
+        "{text}"
+    );
+    assert!(
+        text.contains("producer: 8 (runs in the window's jobs)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("planner: 0 (runs in the window's jobs) [retire candidate]"),
+        "{text}"
+    );
     // The newest eight (jobs 2 to 9) hold the rejected, failed and timed-out jobs.
     assert!(line.contains("3 of them failed"), "{line}");
 

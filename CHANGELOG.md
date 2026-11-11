@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The `role need` replay lists every role with its run count and the data source of that count. Root cause of the
+  earlier wrong retire flags: the usage measure read a partial run source (the jobs' own invocation lists), which
+  holds none of the steward, audience or auditor runs. Usage is now read only through `Records::all_invocations`;
+  `athena status` prints one line per role, for example `steward: 1 (runs outside job records, since the window
+  began)`, and marks flagged roles. Tests cover known-active roles and a mixed record set.
 - `role_need` in `athena-core` (requirement OLY-9-11) and a `role need` line in `athena status`: roles with no runs
   in the newest eight jobs that ran a model are retire candidates, printed only when one exists. Jobs that never
   ran a model (dropped, stale, abandoned, declined, closed) are left out; failed, rejected and timed-out jobs are
