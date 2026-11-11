@@ -1,0 +1,165 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261111-122637-aawj",
+  "base_commit": "1d5d683ed17be738fdc4e7a767697fcdc3a2d3a3",
+  "base_fingerprint": "sha256:118a4f0772deac99614f3ede6cb4888f7cbb75d32d0b8b3f7d6118b26f9d316e",
+  "previous_job": "20261111-122652-1k8z",
+  "candidate_commit": "f6cf7b3c318192947961690a044dc3afc8c67735",
+  "candidate_tree": "5c45632b69edfce83f0d28af8a72033928b87989",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 428041
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 99528
+    },
+    {
+      "path": "crates/athena-cli/tests/status_role_need.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 1807
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 15533
+    },
+    {
+      "path": "crates/athena-core/src/role_need.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 12745
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 171431
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 34811
+    },
+    {
+      "path": "docs/spec.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 199896
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 2561
+    }
+  ],
+  "fingerprint": "sha256:546d1c06666f4b2e1adcf99395bd0a0614c069eff83ed083884ee9411a848638",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: a usage measure was written against only the per-job invocation list. The steward, audience and auditor runs are kept in separate Records lists, so those roles looked unused and would have been advised for retirement while running.\n\nWhat changed:\n- `Records::all_invocations` in store.rs yields every run source.\n- A new `role_need` module (OLY-9-11) counts each role's runs through that accessor, over the newest 8 closed jobs.\n- A role with no run in that window is a retire candidate, but only once 8 jobs are closed.\n- Class history is windowed to each class's newest 8 closed jobs. Failed, Rejected and TimedOut count as failed. Declined and Closed are excluded.\n- `athena status` gets a `role need` line, printed only when a candidate exists.\n\nTests: five unit tests in role_need.rs and one CLI test through the status renderer. The key fixture has 10 closed jobs holding only reader, producer and verifier runs, plus recent steward, audience and auditor runs outside them. The test asserts only planner and critic, which never ran, are candidates.\n\nI also updated the OLY-9-11 mechanism and measure in docs/spec.toml, added a CHANGELOG entry, and added the new test file to xtask/shard-timings.txt, which the mirrors test requires.\n\nNo refusal rule was added. The line is advice only, so the share of newly refused readings is 0%.",
+    "files": [
+      "crates/athena-core/src/role_need.rs",
+      "crates/athena-core/src/store.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-cli/tests/status_role_need.rs",
+      "docs/spec.toml",
+      "CHANGELOG.md",
+      "xtask/shard-timings.txt"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core role_need",
+        "result": "pass",
+        "note": "5 role_need tests pass"
+      },
+      {
+        "command": "cargo test -p athena-cli --test status_role_need --test mirrors",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting; fmt --check not separately run"
+      },
+      {
+        "command": "cargo test --locked --quiet --no-fail-fast",
+        "result": "pass",
+        "note": "every test result ok. An earlier plain `cargo test --locked` exited 101, but its output was truncated and I could not see which test failed. The re-run with --no-fail-fast passed everything."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "crates/athena-core/src/store.rs has one Records method that yields invocations from jobs plus steward_runs, audience_runs and auditor_runs; crates/athena-core/src/role_need.rs uses it and not `invocations` alone (Grep).",
+        "status": "met",
+        "evidence": "Records::all_invocations in store.rs chains jobs' invocations with steward_runs, audience_runs and auditor_runs. role_need.rs compute calls records.all_invocations() to count role runs. It reads job.invocations only to find where the window opens (the oldest start among the newest 8 closed jobs), never to count roles."
+      },
+      {
+        "criterion": "crates/athena-core/src/role_need.rs is declared in lib.rs, windows class history to the newest N closed jobs, and OLY-9-11 in docs/spec.toml names it as mechanism with a measure ending `status: role need`.",
+        "status": "met",
+        "evidence": "`pub mod role_need;` is in lib.rs. The WINDOW=8 constant is applied to the overall window and to each class's states. OLY-9-11 mechanism names role_need.rs and the measure ends `status: role need`. The label is registered in STATUS_MEASURE_LABELS, and the test every_measure_label_names_a_status_view_field_and_a_printed_line passes."
+      },
+      {
+        "criterion": "A test in role_need.rs builds Records with more than eight closed jobs holding only reader/producer/verifier runs plus recent steward, audience and auditor runs, and asserts none of those three is a retire candidate; it fails when compute reads only job invocations. Run `cargo test -p athena-core role_need`.",
+        "status": "met",
+        "evidence": "runs_kept_outside_the_jobs_are_not_retire_candidates uses 10 closed jobs and asserts the candidates are exactly planner and critic. It first asserts that job invocations alone hold none of the three roles, so a job-only compute would flag all three. The test passes under `cargo test -p athena-core role_need`. I did not run it against a job-only version of compute."
+      },
+      {
+        "criterion": "A test renders a StatusView through status() and asserts the `role need` line prints only when a candidate exists, and that mixed outcomes (Failed/Rejected/TimedOut counted failed; Declined/Closed excluded) are mapped correctly. Run `cargo test`.",
+        "status": "met",
+        "evidence": "crates/athena-cli/tests/status_role_need.rs renders the view through athena_cli::display::status. It asserts no line with no records, no line when the measure has no candidate, and the line with the candidates and class outcomes otherwise. role_need::tests::outcomes_are_mapped_and_the_class_history_is_windowed asserts that Failed, Rejected and TimedOut count as failed, that Declined and Closed are excluded, and that class history is windowed to 8. Both pass."
+      },
+      {
+        "criterion": "A test over Records asserts the measure yields both outcomes (some roles retired-or-not, some not) rather than all-true or all-false on a mixed fixture. Run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "the_measure_gives_both_outcomes_on_a_mixed_fixture asserts both true and false retire flags. It also asserts that a stale audience run does not keep that role active, so the candidates are planner, critic and audience. It passes. a_thin_history_names_no_candidate covers the fewer-than-8-closed-jobs case."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy and cargo test all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. Locally I ran cargo fmt --all, clippy with -D warnings (clean), and the full test suite, which passed on the --no-fail-fast run."
+      },
+      {
+        "criterion": "CHANGELOG.md names the root cause (usage measure blind to roles whose runs are outside job records) and the fix.",
+        "status": "met",
+        "evidence": "The new Unreleased/Added entry for role_need states the root cause (a usage measure written against only the per-job invocation list, blind to the steward, audience and auditor) and the fix (Records::all_invocations, the 8-job window, the per-class window, and the tests)."
+      }
+    ],
+    "open_issues": [
+      "I did not run the key test against a job-only version of compute, so \"fails without the change\" rests on the test's own assertion that job invocations hold none of the three roles. Athena can check it by stashing the change.",
+      "The earlier failed full-suite run (exit 101, output truncated) was not reproduced. It may have been a flaky or load-sensitive test."
+    ],
+    "mistakes": [
+      "My first test id helper made invalid JobIds (seconds field of 99). I fixed it before reporting.",
+      "The first plain `cargo test --locked` exited 101 with truncated output, so I never saw which test failed. The re-run with --no-fail-fast passed everything, so I could not reproduce a failure."
+    ],
+    "learnings": [
+      "JobRecords::invocations holds only job invocations; steward, audience and auditor runs are routed to separate Records vectors at load time (store.rs).",
+      "STATUS_MEASURE_LABELS needs a pub StatusView field and the literal `\"<label> ` in status.rs, display.rs or hestia.rs, and a test enforces both.",
+      "A new athena-cli test file needs a line in xtask/shard-timings.txt, or the mirrors test fails.",
+      "JobId parsing validates the time part, so test ids need seconds below 60."
+    ],
+    "desires": []
+  }
+}
