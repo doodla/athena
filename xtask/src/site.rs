@@ -127,6 +127,29 @@ pub fn escape(text: &str) -> String {
     out
 }
 
+/// Escapes `text` and turns each `[[term]]` into a link to that term's Glossary entry, so a term is
+/// defined once and every other mention points at the definition.
+fn linked(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        let Some(len) = rest[start + 2..].find("]]") else {
+            break;
+        };
+        let term = &rest[start + 2..start + 2 + len];
+        out.push_str(&escape(&rest[..start]));
+        let _ = write!(
+            out,
+            "<a href=\"#term-{}\">{}</a>",
+            escape(&term.replace(' ', "-")),
+            escape(term)
+        );
+        rest = &rest[start + 2 + len + 2..];
+    }
+    out.push_str(&escape(rest));
+    out
+}
+
 fn str_of<'a>(value: &'a Value, key: &str, what: &str) -> Result<&'a str> {
     value
         .get(key)
@@ -313,7 +336,7 @@ fn start_here(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Res
             body,
             "<dt>{}</dt><dd>{} {}</dd>",
             escape(term),
-            escape(str_of(t, "text", &what)?),
+            linked(str_of(t, "text", &what)?),
             cites(t, &what, known)?
         );
     }
@@ -394,7 +417,7 @@ fn transitions(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Re
             body,
             "<dt>{}</dt><dd>{} {}</dd>",
             escape(term),
-            escape(str_of(d, "text", &what)?),
+            linked(str_of(d, "text", &what)?),
             cites(d, &what, known)?
         );
     }
@@ -415,13 +438,13 @@ fn transitions(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Re
             escape(id),
             escape(str_of(t, "from", &what)?),
             escape(str_of(t, "to", &what)?),
-            escape(str_of(summary, "text", &summary_what)?),
+            linked(str_of(summary, "text", &summary_what)?),
             cites(summary, &summary_what, known)?
         );
         let _ = write!(
             body,
             "<dt>Trigger</dt><dd>{} (decided by {})</dd>",
-            escape(str_of(t, "trigger", &what)?),
+            linked(str_of(t, "trigger", &what)?),
             escape(str_of(t, "trigger_evaluated_by", &what)?)
         );
         // A guard of "none" is a placeholder: nothing checks it, so no checker is named.
@@ -432,12 +455,12 @@ fn transitions(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Re
             let _ = write!(
                 body,
                 "<dt>Guard</dt><dd>{} (checked by {})</dd>",
-                escape(guard),
+                linked(guard),
                 escape(str_of(t, "guard_evaluated_by", &what)?)
             );
         }
         if let Some(failure) = t.get("failure").and_then(Value::as_str) {
-            let _ = write!(body, "<dt>Failure</dt><dd>{}</dd>", escape(failure));
+            let _ = write!(body, "<dt>Failure</dt><dd>{}</dd>", linked(failure));
         }
         let _ = write!(body, "</dl><p>{}</p></article>", cites(t, &what, known)?);
     }
@@ -496,7 +519,7 @@ fn glossary(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Resul
     for entry in entries {
         let term = str_of(entry, "term", "a glossary entry")?;
         let what = format!("glossary entry {term}");
-        let definition = escape(str_of(entry, "definition", &what)?);
+        let definition = linked(str_of(entry, "definition", &what)?);
         // Terms about the page's own structure make no claim about firstmate and need no citation.
         let cite = if entry.get("about").and_then(Value::as_str) == Some("page") {
             String::from("<span class=\"tag\">about this page</span>")
@@ -666,7 +689,7 @@ fn leadin(body: &mut String, intro: &Value, key: &str, known: &BTreeSet<String>)
         .get("leadins")
         .and_then(|l| l.get(key))
         .ok_or_else(|| anyhow!("intro.json has no lead-in `{key}`"))?;
-    let text = escape(str_of(item, "text", &what)?);
+    let text = linked(str_of(item, "text", &what)?);
     let _ = write!(
         body,
         "<p class=\"leadin\">{} {}</p>",
@@ -678,7 +701,7 @@ fn leadin(body: &mut String, intro: &Value, key: &str, known: &BTreeSet<String>)
 
 /// One sentence of the intro as a list item. It must cite at least one claim.
 fn intro_item(body: &mut String, item: &Value, what: &str, known: &BTreeSet<String>) -> Result<()> {
-    let text = escape(str_of(item, "text", what)?);
+    let text = linked(str_of(item, "text", what)?);
     let _ = write!(body, "<li>{} {}</li>", text, cites(item, what, known)?);
     Ok(())
 }
@@ -1252,6 +1275,122 @@ mod tests {
     fn real_study() -> Study {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         load(&root.join(STUDY_DIR)).unwrap()
+    }
+
+    /// The terms defined once, as (start term, glossary id slug).
+    const ONCE_DEFINED: [(&str, &str); 6] = [
+        ("yolo", "yolo"),
+        ("green", "green"),
+        ("red", "red"),
+        ("in scope", "in-scope"),
+        ("place", "place"),
+        ("home", "home"),
+    ];
+
+    /// Lowercase words of `text` with HTML tags removed and entities decoded.
+    fn page_words(text: &str) -> Vec<String> {
+        let mut plain = String::new();
+        let mut in_tag = false;
+        for c in text.chars() {
+            match c {
+                '<' => {
+                    in_tag = true;
+                    plain.push(' ');
+                }
+                '>' => in_tag = false,
+                c if !in_tag => plain.push(c),
+                _ => {}
+            }
+        }
+        let plain = plain
+            .replace("&quot;", " ")
+            .replace("&#39;", "'")
+            .replace("&lt;", " ")
+            .replace("&gt;", " ")
+            .replace("&amp;", "&");
+        plain
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(String::from)
+            .collect()
+    }
+
+    /// `html` without the `<dd>` that follows `dt`, which is a definition.
+    fn without_definition(html: &str, dt: &str) -> String {
+        let at = html.find(dt).unwrap_or_else(|| panic!("no {dt}"));
+        let end = at + html[at..].find("</dd>").unwrap() + "</dd>".len();
+        format!("{}{}", &html[..at], &html[end..])
+    }
+
+    #[test]
+    fn each_term_has_one_definition_and_every_term_link_resolves() {
+        let html = render(&real_study()).unwrap();
+        for (_, slug) in ONCE_DEFINED {
+            let id = format!("<dt id=\"term-{slug}\">");
+            assert_eq!(html.matches(&id).count(), 1, "{slug}");
+        }
+        let mut links = 0;
+        for part in html.split("href=\"#term-").skip(1) {
+            let slug = &part[..part.find('"').unwrap()];
+            assert!(html.contains(&format!("id=\"term-{slug}\"")), "{slug}");
+            links += 1;
+        }
+        assert!(links > 0, "no term links");
+        for (_, slug) in ONCE_DEFINED {
+            assert!(html.contains(&format!("href=\"#term-{slug}\"")), "{slug}");
+        }
+    }
+
+    #[test]
+    fn no_run_of_six_words_from_a_definition_is_repeated_elsewhere_on_the_page() {
+        const RUN: usize = 6;
+        let study = real_study();
+        let mut html = render(&study).unwrap();
+        let mut definitions: Vec<(String, Vec<String>)> = Vec::new();
+        for (term, slug) in ONCE_DEFINED {
+            let glossary = study.intro["glossary"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["term"] == term)
+                .unwrap_or_else(|| panic!("no glossary entry {term}"));
+            definitions.push((
+                term.to_string(),
+                page_words(glossary["definition"].as_str().unwrap()),
+            ));
+            html = without_definition(&html, &format!("<dt id=\"term-{slug}\">"));
+            if let Some(start) = study.intro["start_terms"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["term"] == term)
+            {
+                definitions.push((
+                    term.to_string(),
+                    page_words(start["text"].as_str().unwrap()),
+                ));
+                html = without_definition(&html, &format!("<dt>{term}</dt>"));
+            }
+        }
+        // The claims listing quotes the project's own files and is not page prose.
+        let prose = &html[html.find("<h2>Start here</h2>").unwrap()
+            ..html.find("<h2>Claims and sources</h2>").unwrap()];
+        let words = page_words(prose);
+        let seen: BTreeSet<&[String]> = words.windows(RUN).collect();
+        let mut repeated = Vec::new();
+        for (term, def) in &definitions {
+            for run in def.windows(RUN) {
+                if seen.contains(run) {
+                    repeated.push(format!("{term}: {}", run.join(" ")));
+                }
+            }
+        }
+        assert!(
+            repeated.is_empty(),
+            "definition wording repeated outside the definitions:\n{}",
+            repeated.join("\n")
+        );
     }
 
     #[test]

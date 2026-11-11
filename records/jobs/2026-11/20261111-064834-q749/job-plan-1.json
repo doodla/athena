@@ -1,0 +1,335 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261111-064834-q749",
+  "round": 1,
+  "at": "2026-11-11T06:58:06.299394204Z",
+  "invocation_seq": 2,
+  "approach": "Add one reading check, `check_part_coverage(reading, request)`, as one new `step!(check_part_coverage(reading, request));` line placed last in `refusing_check` (checks.rs:546, after check_reading_references). Appending it last means no existing refusing case changes its first refuser. The existing parser (`is_bullet`, `request_text_acceptance`, topics.rs:266-282) is untouched. A new parser `request_parts` in topics.rs reads: (a) numbered parts, as runs 1,2,3.. (at least two) in one of three forms: `(N)` at line start or inline in a paragraph, `N.` at line start, `N)` at line start; and (b) dash or star Acceptance bullets (only those after an `Acceptance` heading when one exists, otherwise all). It skips fenced blocks, `>` quoted lines, quoted or backticked spans (via `without_quoted_spans`, terms.rs:86), generator-written lines (`is_generated_line`, terms.rs:62) and everything after `## Source` in an approval request (the same anchors `plain_request_prose` uses, terms.rs:189-208).\n\nIn checks.rs, an item is `covered` when some acceptance criterion shares at least `required = min(2, ceil(n/2))` distinctive stems with it (n is the item's count of distinctive stems). A *distinctive stem* is a token of 4+ letters or digits, with a trailing `s` dropped when longer than 4 chars and cut to 5 chars, that is not in a const stop list. The stop list holds generic gate words such as test, pass, change, described, existing, job, part. Both rules are defined in a code comment and pinned by a unit test. An item with no distinctive stem (`Yes`, `No`) is not checked. The cap at 2 is why the long-title Steward bullet `The change is made as described: <title>` is accepted when the reading restates the title in a few words. Dropping `fmt, clippy and test pass` leaves only the stem `clipp` (test, pass and fmt are stop or too short), so that twin is refused. An item is *deferred* when a sentence of the reading's summary, assumptions, departures or out_of_scope has a deferral phrase (follow-up, deferred, later job, separate job, not in this job and the like), no negation guard ('never', 'without', 'refus', 'unless', 'do not'), and names the item. Naming means a marker reference in the phrase's clause (`(3)`, `part 3`), or the required stem overlap. An out_of_scope item that names the marker `(3)` or `part 3` counts without a phrase. Criteria are never searched for deferral, because a criterion may describe the gate itself. A part or bullet is refused when it is deferred or uncovered, unless the request permits a split.\n\nThe split exemption reads only the request's plain sentences (not quoted, fenced or generated). A sentence permits a split only when it has a modal (may, can, could, might, is allowed to), no negation, none of the complaint words (earlier, previous, last, rejected, wrong, said, reading, attempt), and one of two shapes. (1) `<adjective> <noun>`, where the adjective is separate, follow-up (or `follow up`), later, next, smaller, several or multiple and the noun is job, change, PR, request or part. (2) `split` then `into` then (optional determiner) a noun, so `may be split into jobs` passes but `may split checks.rs into modules` does not. Ordinary uses ('split checks.rs into modules', 'test each form separately') and complaints ('the earlier reading said (3) is a follow-up; that was wrong') never match. A permission sentence that names a marker exempts only those parts; one that names none exempts every item.\n\nFixing the test fixtures this change breaks is part of the change. The fake reader (fake.rs:311) emits one fixed criterion, and the CLI `Scenario` reader (athena-cli/tests/common/mod.rs:572) returns `default_reading()` whatever the request says. Requests with bullets, such as drain.rs:3988 and job_plan.rs:166, would now be refused. fake.rs therefore adds one content criterion per request line that is a bullet or numbered part, and `Scenario::script` appends the request's bullet lines the same way. The producer then runs the full `cargo test` and fixes any other fixed-reading fixture at its seam, not by weakening the check.\n\nCorpus input forms mapped to cases (read in refusal_corpus.rs). Existing cases: `numbered-dot-parts` (:1707, number-dot-parts, stays Accept because base_reading copies the bullets); `numbered-paren-parts-not-read-today` (:1721, number-paren-parts, renamed `numbered-paren-parts-uncovered`, now Refuse by check_part_coverage with `bullets_expected` still 0, plus a `-covered` Accept twin); `lettered-paren-parts-not-read-today` (:1734, letter-paren-parts, stays Accept, comment says letters are still not read); `steward-three-dash-bullets` (:1680, dash-bullet) and `star-bullets` (:1695, star-bullet) stay Accept; `root-cause-cites-two-jobs-without-relying` (:1753) and `retry-complaint-reading-names-the-job` / `-omits-the-job` (:1783, :1801) stay as they are. New cases, with source and outcome. All use a request-shape source and say 'rebuilt' unless verbatim.\n- `parts-paren-line-start-third-moved` (job 20261029-084645-sza7 shape, rebuilt): Refuse.\n- `parts-paren-inline-third-moved`: Refuse.\n- `parts-dot-third-deferred-in-out-of-scope` (criteria cover all three, only out_of_scope defers): Refuse.\n- `parts-close-paren-third-deferred`: Refuse.\n- `parts-paren-split-permitted` ('Part (3) may be split into a separate job.' in its own paragraph): Accept.\n- `bullet-deferred-in-summary`: Refuse.\n- `split-word-ordinary-sense` ('Split checks.rs into modules.'): Refuse.\n- `separately-ordinary-sense` ('Test each form separately.'): Refuse.\n- `split-complaint-not-permission`: Refuse.\n- `stray-single-number` ('3. Mention the flag' alone): Accept.\n- `yes-no-list` ('1. Yes' / '2. No'): Accept.\n- `quoted-run` (the 1./2./3. run under `>` and inside backticks): Accept.\n- `generated-numbered-list` (an approval request from the existing `generated_approval_request` helper, :1190, with a numbered list after `## Source`): Accept.\n- `sza7-defers-part-3-and-status-bullet`: Refuse.\n- `sza7-covers-all-parts-and-bullets`: Accept.\n- `steward-standard-bullets-long-title-covered` (request from `StewardRequest::from_change(..).render()`): Accept.\n- `steward-standard-bullets-fmt-clippy-dropped`: Refuse.\n- `this-job-request-and-accepted-reading`: Accept.\nThe 15 new form tags go into INPUT_FORMS, whose array length (52) is raised to match.\n\nThe reader brief (briefs/reader.rs READING_RULES) gets no new rule line and briefs.rs is left unchanged; the refusal message carries the repair text. CHANGELOG.md gets an Unreleased `Changed` entry.",
+  "decisions": [
+    {
+      "choice": "New check is the last `step!` line; the parser is a new `request_parts`, and `is_bullet`/`request_text_acceptance` are not touched.",
+      "reason": "A last step cannot change which check refuses first in any existing corpus or unit case. `every_acceptance_check_has_a_refusing_corpus_case` (corpus :2733) then needs only new refusing cases. `request_text_acceptance` also serves plan_entry, steward and hestia (topics.rs:276), and every corpus case pins its count in `bullets_expected` (corpus :2616).",
+      "rejected": [
+        {
+          "option": "Extend `is_bullet` to read `N)` and `(N)`.",
+          "why": "It would change `athena plan` acceptance for every caller and break the pinned bullet counts of the existing cases."
+        },
+        {
+          "option": "Put the new step before check_prior_result_and_scope.",
+          "why": "It would change the first refuser of existing refusing cases."
+        }
+      ]
+    },
+    {
+      "choice": "Coverage is stem overlap with a cap: required shared distinctive stems = min(2, ceil(n/2)). Distinctive means 4+ chars, trailing s dropped, cut to 5 chars, not in a stop list that includes test, pass, change, described, existing, job, part.",
+      "reason": "This is the fix for the earlier major finding 1. The real Steward bullets (steward.rs:621-623) are accepted when the criteria restate them, even with a long title, because the cap stops a long title demanding many words. Generic words cannot cover the 'fmt, clippy and test pass' bullet, so the drop twin is refused. The definition is written in a code comment and pinned by a unit test (the earlier minor finding).",
+      "rejected": [
+        {
+          "option": "Require every stem of the item to appear.",
+          "why": "It refuses the real Steward bullet whenever the reading shortens the title."
+        },
+        {
+          "option": "Sentence-embedding or model similarity.",
+          "why": "Checks cost no model call and must be deterministic (checks.rs docs; the replay passes no model)."
+        },
+        {
+          "option": "One-to-one assignment of criteria to items.",
+          "why": "A reading that merges two bullets into one criterion would be refused."
+        }
+      ]
+    },
+    {
+      "choice": "The split exemption counts only permission phrasing: modal, no negation, no complaint word, and an `<adjective> <noun>` or `split into <noun>` shape. It is tied to the named part when the sentence names one.",
+      "reason": "This is the fix for the earlier major finding 2. 'split' and 'separately' in an ordinary sense, and a complaint that quotes the old deferral, must not exempt. Table tests pin both directions.",
+      "rejected": [
+        {
+          "option": "Exempt when the request contains the word split or separately.",
+          "why": "It fires on 'split checks.rs into modules' and 'test each form separately'."
+        },
+        {
+          "option": "A global exemption for any permission sentence.",
+          "why": "'Part (3) may be split' would also exempt unrelated bullets."
+        }
+      ]
+    },
+    {
+      "choice": "Deferral is searched in summary, assumptions, departures and out_of_scope, never in criteria. A deferral needs a phrase plus a marker or stem match; out_of_scope with a marker reference counts without a phrase.",
+      "reason": "A criterion may describe the gate ('refuses a reading that defers part (3)'). An out_of_scope item such as 'athena.toml' must not defer a bullet that says athena.toml is unchanged.",
+      "rejected": [
+        {
+          "option": "Search every reading field, including criteria.",
+          "why": "It would refuse readings whose criteria test deferral, including this job's own."
+        }
+      ]
+    },
+    {
+      "choice": "Fix fixed-reading test fixtures at their seams: fake.rs reader_turn and athena-cli/tests/common/mod.rs Scenario::script add request bullet lines as criteria.",
+      "reason": "fake.rs:311 and common/mod.rs:489-573 return a reading that ignores the request, while drain.rs:3988/4067/4492 and job_plan.rs:166 queue bullet requests. They would be refused by the production path (reading.rs:722). The fake only copies request lines; the logic under test stays in core.",
+      "rejected": [
+        {
+          "option": "Skip the new check for nested or fake runs.",
+          "why": "A bypass would leave the gate untested end to end."
+        },
+        {
+          "option": "Edit each CLI test's request.",
+          "why": "There are many, and the seam fix is one place."
+        }
+      ]
+    },
+    {
+      "choice": "No reader-brief rule line is added: briefs.rs is not modified, and briefs/reader.rs is not touched.",
+      "reason": "The rule section test caps the section at 3150 bytes and was measured at 3045 with 11 rules (briefs.rs:3555-3558). A twelfth line would force a cap change and edit a file outside the deliverables. The refusal message already gives the repair, and the reader is re-asked once with it.",
+      "rejected": [
+        {
+          "option": "Add a READING_RULES line and raise the cap.",
+          "why": "It edits briefs/reader.rs (not a deliverable) and the byte cap, for a rule the refusal text already teaches."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "purpose": "Add `check_part_coverage` with the doc comment (root cause, 'higher refusal rate is intended', 'expected 5% of newly refused readings' labeled an estimate with its basis) and the code comment defining 'distinctive stem'. Add the stop-list and constants, the deferral phrases, the coverage and deferral logic, exactly one `step!(check_part_coverage(reading, request));` line last in `refusing_check`, and a link in the `check_reading_acceptance` doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/topics.rs",
+      "action": "modify",
+      "purpose": "Add `request_parts` (numbered `(N)`, `N.`, `N)` runs and Acceptance bullets, skipping quoted, fenced and generated text), `request_sentences`, marker-reference helper and the split-permission function. `is_bullet` and `request_text_acceptance` stay unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add unit tests: distinctive-stem definition, `request_parts` per form and negative, split-permission table, one-step-line and doc-text test, deferral clause handling.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add the new cases and form tags (raising the INPUT_FORMS length), change the `N)` case to Refuse plus a covered twin, add the sza7 constant and the Steward cases built by `StewardRequest::from_change`, and add the CHANGELOG test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "The fake reader adds one content criterion per request line that is a bullet or numbered part, so nested fake runs are not refused (needed: fake.rs:311 emits one fixed criterion). Add a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "purpose": "Test support, not governance: `Scenario::script`'s Reader branch (:572-573) appends the request's bullet and numbered lines as content criteria, so CLI tests that queue bullet requests (drain.rs, job_plan.rs) still get accepted readings.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased `Changed` entry for the part-coverage gate: the new check, the exemption wording, the newly refused share as an estimate, the fake-reader and Scenario criteria change, and that no reader rule or prompt changed.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read checks.rs:330-350 (`sentences`), terms.rs:62-208 (`is_generated_line`, `without_quoted_spans`, `plain_request_prose`) and outcome.rs:141 (`request_words`), and reuse the quoting and generator skips rather than rewriting them.",
+    "topics.rs: add `RequestItem { kind: Part(u32) | Bullet, text }` and `pub(super) fn request_parts(text) -> Vec<RequestItem>`. Drop fenced, `>`-quoted, `#` heading and generated lines, and stop at `## Source` when the approval anchor is present. Find `(N)` runs per paragraph (line-start and inline, on text with quoted spans removed), and `N.` / `N)` runs at line start across the document; a run starts at 1, goes up by 1, and needs at least 2 members. Collect `-`/`*` bullets, only after an `Acceptance` heading when one exists (the section ends at the next heading or label line), otherwise all. Part text is the rest of the marker line up to the next marker or blank line.",
+    "topics.rs: add `request_sentences(text)` over the same plain lines, using `sentences`, and `marker_refs(sentence)` returning the numbers named by `(N)`, `part N`, `item N`. Add `pub(super) fn split_permitted(request, item) -> bool` with the modal / negation / complaint-word guards and the two phrase shapes; a sentence that names markers exempts only those parts, and one that names none exempts all items.",
+    "checks.rs: add the const stop list (sorted, lowercase), `MIN_STEM_LEN = 4`, `STEM_CUT = 5`, and `distinctive_stems(text) -> BTreeSet<String>` with the code comment that defines 'distinctive stem' (at least one non-stop stem of the minimum length; a token is a run of letters or digits; a trailing s is dropped when longer than 4; the stem is cut to 5 chars). Add `required_overlap(n) = min(2, ceil(n/2))`.",
+    "checks.rs: add `pub fn check_part_coverage(reading: &Reading, request: &str) -> Result<()>`. Skip when capability is None, question is Some, or the request has no items. For each item with at least one distinctive stem and not split-permitted, test coverage against the acceptance criteria and test deferral against summary, assumptions, departures and out_of_scope (deferral phrase list; negation guard; clause rule; an out_of_scope marker reference needs no phrase). Bail with one message listing up to 5 items, each as uncovered or deferred with the sentence, and the repair: add a criterion for it, or ask the request to allow a split. The doc comment gives the root cause (multi-part requests silently split in jobs 20261029-084645-sza7 and 20261029-111202-2bpc and the failed 20261029-212839-tcjb plan), 'This check refuses more readings; the higher refusal rate is intended', the 'expected 5% of newly refused readings' estimate and its basis, and its limits.",
+    "checks.rs: add `step!(check_part_coverage(reading, request));` as the last line of `refusing_check`, after check_reading_references. Add \"[`check_part_coverage`]\" to the `check_reading_acceptance` doc chain.",
+    "fake.rs: in `reader_turn`, after the base criterion, push one `content` criterion (trimmed line, capped at 300 chars) for each request line that starts with `- `, `* `, `N. `, `N) ` or `(N) `, or that holds an inline `(1) `. Add a unit test for the criteria of a request with two bullets and (1)(2)(3).",
+    "athena-cli/tests/common/mod.rs: add a helper `covering_request(reading, brief)` that appends the same request lines as content criteria, read from the `# Request (verbatim)` section of the reader prompt (quote marks stripped as in fake.rs `section`), and call it in `Scenario::script`'s Reader branch next to `naming_earlier_jobs`.",
+    "refusal_corpus.rs: add the 15 form tags to INPUT_FORMS and set its length. Rename `numbered-paren-parts-not-read-today` to `numbered-paren-parts-uncovered` (Refuse(\"check_part_coverage\"), `bullets_expected` 0) and add `numbered-paren-parts-covered` (criteria copy the parts, Accept). Update the comments at :1719 and :1735 (letters are still not read). Add a `part_coverage_cases()` function with the cases listed in the approach and add it to `cases()`. Build refusing readings from `base_reading`, changing criteria, summary or out_of_scope one field at a time. Add SZA7_REQUEST (parts (1)-(3) with part (3) the status display, plus four bullets, one 'athena status lists a timed-out check as timed out') with a comment: 'rebuilt from the brief of job 20261029-084645-sza7; its records are not in a snapshot, so the wording is reconstructed'. Build the Steward request with `StewardRequest::from_change` and a title of 12+ words. Add the own-request case (request 'try again on 20261029-212839-tcjb', reading criteria as content kind, `repo_files` None). Add the CHANGELOG-and-doc test next to the other `*_refusal_is_declared_intended` tests.",
+    "reading.rs tests: add `part_coverage_has_one_step_line` (one `step!(check_part_coverage(reading, request));` line in the `refusing_check` body, via `reading_source()`), a doc/comment test (estimate sentence, 'distinctive stem', link in the `check_reading_acceptance` doc), the stem-definition pin, `request_parts_*` form tests, the split-permission table, and the clause-level deferral tests.",
+    "CHANGELOG.md: add an Unreleased `Changed` bullet naming `check_part_coverage`, the item forms read, the exemption wording, 'higher refusal rate is intended', 'expected 5% of newly refused readings' (an estimate), the fake reader and Scenario criteria change, and that briefs.rs, the reader rules and prompts are unchanged.",
+    "Run `cargo test --locked` for the whole workspace. For each failing test, find the request that carries bullets or numbered parts and the reader that returns a fixed reading, and fix the reader fixture at its seam. Then run `cargo fmt --all` and `cargo clippy --all-targets --locked -- -D warnings`. After the corpus passes, count the corpus Accept cases whose request has parts or bullets and write that count as the basis of the 5% estimate in the doc comment."
+  ],
+  "risks": [
+    {
+      "risk": "The new check refuses more existing tests than the ones I read (the criterion 8 blast radius is wider than the files listed).",
+      "mitigation": "Fixed-reading fixtures beyond the ones I found (the CLI Scenario reader, the fake reader) may exist, for example in run/tests.rs, cap-change tests or test_support. The producer runs the full `cargo test` and fixes each at its seam (reader output covers the request lines), never by loosening the check. The criterion 8 demonstration runs the whole suite, and the changelog lists the fixture changes."
+    },
+    {
+      "risk": "Stem overlap is a heuristic: a real reading may paraphrase a bullet without sharing a 4-letter stem and be refused.",
+      "mitigation": "The cap of 2 shared stems and the stop list make restating the title or a few key words enough. Items with no distinctive stem are not checked. Table tests pin the Steward bullets in both directions. The 5% share is labeled an estimate, and the replay measures the real figure at verification."
+    },
+    {
+      "risk": "A deferral sentence that mentions several parts could mark parts that are not deferred.",
+      "mitigation": "A deferral needs a phrase plus a marker or stem match, a negation guard, and the clause rule. Criteria are never searched. Unit tests pin 'Parts (1) and (2) now; part (3) is a follow-up job' (only (3) deferred) and a criterion that merely describes deferral."
+    },
+    {
+      "risk": "The original sza7 request text is not in the snapshot (records/ is absent), so the fixture is a reconstruction.",
+      "mitigation": "SZA7_REQUEST is labeled in a test comment as rebuilt from the brief with shape (parts (1)-(3), four bullets, a status-display part and bullet), not verbatim. The criterion-3 outcome depends on that shape, not on exact wording."
+    },
+    {
+      "risk": "Truncation stemming can collide ('defer' and 'deferred' match, but so might unrelated words that share five letters).",
+      "mitigation": "A corpus case holds the Steward long-title Accept, and a unit test pins the 5-char cut and the plural rule. The stop list is a sorted const with a test that every entry is lowercase."
+    },
+    {
+      "risk": "The own-request Accept case may be refused by an earlier check (check_scope_limit on the 'athena.toml unchanged' criterion, or check_criteria_evidence on behavior criteria).",
+      "mitigation": "If the producer cannot make the own-request case pass without editing a criterion, it rewords only that criterion's file-limiting phrase and says so in the case `source`. The case's purpose is that a request without parts or bullets is not refused by the new check."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusing_check chain (new last step)",
+      "dependent": "crates/athena-core/src/reading.rs:722 (`read_for`, the production caller of `refusing_check`, with `Some(&repo_files)`)",
+      "kind": "code",
+      "test": "corpus_cases_get_the_expected_outcome and the reading.rs read_for tests; the CLI tests in drain.rs and job_plan.rs run it through the Scenario reader after the common/mod.rs fix.",
+      "reason": null
+    },
+    {
+      "name": "check_reading_acceptance behaviour",
+      "dependent": "crates/athena-core/src/reading/replay.rs:55 (`check_reading_text`, used by `athena check-reading` and by replay in run/mod.rs:2225 and :2295)",
+      "kind": "code",
+      "test": null,
+      "reason": "The replay passes no repo and no attempt; the new check reads neither. It only reads the stored request and the stored reading's criteria, summary, assumptions, departures and out_of_scope. Newly refused past readings are intended and declared in criterion 6 (replay_declaration, replay.rs:263). Replay tests in reading.rs (:6374-6411) use requests without parts or bullets (e.g. 'Add a greeting'), so they are unaffected."
+    },
+    {
+      "name": "check_reading_text acceptance of stored readings",
+      "dependent": "crates/athena-core/src/steward.rs:424 (`queued_work` re-checks a Proposed job's stored reading)",
+      "kind": "code",
+      "test": "steward.rs tests unread_steward_and_cli_requests_are_queued_work_oldest_first and the queued_work tests at :2569-2771. REREAD_REQUEST (:2584) has the bullet 'the greeting prints' and the stored reading's criterion is the same text (:2620), so it stays queued; the refuse test at :2755 is refused earlier by check_criteria_evidence.",
+      "reason": null
+    },
+    {
+      "name": "fixed fake reading criterion",
+      "dependent": "crates/athena-agent/src/fake.rs:311 (`reader_turn`) and every nested run that uses the fake reader",
+      "kind": "code",
+      "test": "New fake.rs unit test: a request with two bullets and (1)(2)(3) yields criteria covering them. Existing fake.rs tests at :491-600 do not assert the reader's criteria, and no test asserts the text 'contains the request' (searched the repo).",
+      "reason": null
+    },
+    {
+      "name": "a reader that returns default_reading regardless of the request",
+      "dependent": "crates/athena-cli/tests/common/mod.rs:489-573 (`Scenario::default`, `Scenario::script` Reader branch) and the tests that queue bullet requests: drain.rs:3988, 4067, 4069, 4492, 4681, 6320; job_plan.rs:166, 169",
+      "kind": "code",
+      "test": "The same tests, after `Scenario::script` appends the request's bullet lines as content criteria. drain.rs:6069 already covers its bullet. The producer runs the full `cargo test` and fixes any other fixed-reading fixture the same way; assertions that compare the full criteria list (the lifecycle.rs:1507-1675 and drain.rs:4925 uses of `criteria_texts(&default_reading())`) use requests without bullets, so they are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "corpus expectations",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs existing cases `numbered-paren-parts-not-read-today` (:1721) and `lettered-paren-parts-not-read-today` (:1734); tests `every_acceptance_check_has_a_refusing_corpus_case` (:2733), `an_extra_check_with_no_case_is_reported` (:2754, anchor `step!(check_reading_references(` at :2755), `no_check_bypasses_refusing_check` (:2966), `corpus_covers_the_listed_input_forms` (:2654)",
+      "kind": "code",
+      "test": "The `N)` case is changed on purpose (its own comment at :1719 says the parts follow-up changes it): it becomes Refuse plus a covered Accept twin. The `(a)` case stays Accept. The anchor line stays valid because the new step is added after it. INPUT_FORMS length and tags are updated, and the step has refusing cases.",
+      "reason": null
+    },
+    {
+      "name": "order and count of step! lines",
+      "dependent": "crates/athena-core/src/reading.rs tests that read the step list: `scope_limit_has_one_step_line` (:8481) and the history-fixture test (:8110-8124, `steps[survey + 1] == check_history_fixture`)",
+      "kind": "code",
+      "test": null,
+      "reason": "The new step is appended after the last one, so the relative order of earlier steps is unchanged; those tests count or position only their own lines."
+    },
+    {
+      "name": "request parser",
+      "dependent": "crates/athena-core/src/reading/topics.rs:266-282 (`is_bullet`, `request_text_acceptance`), used by plan_entry (:367), the steward and hestia acceptance, athena plan",
+      "kind": "code",
+      "test": null,
+      "reason": "Untouched: the new parser is a separate `request_parts`, so the `Request format` fact in docs/system-facts.md (bullets starting -, * or 1.) and every `bullets_expected` pin in the corpus are unaffected."
+    },
+    {
+      "name": "request text shapes the new check reads",
+      "dependent": "crates/athena-core/src/steward.rs:620-624 (`StewardRequest::from_change` standard bullets) and the generated shapes in hestia.rs and work_decisions.rs (root-cause and approval requests, `is_generated_line` terms.rs:62)",
+      "kind": "code",
+      "test": "Corpus cases `steward-standard-bullets-*` and `generated-numbered-list`; the existing tests generated_request_has_the_generators_shapes (:1223) and approve_request_has_the_generators_shapes (:1251).",
+      "reason": "Read only: the corpus fixture builds the Steward request with the real generator, so a changed bullet text changes the fixture with it. Generated lines and everything after `## Source` are skipped by the same anchors as check_defined_terms."
+    },
+    {
+      "name": "reader brief rule list",
+      "dependent": "crates/athena-context/src/briefs/reader.rs:287 (READING_RULES) and the section test at crates/athena-context/src/briefs.rs:3493",
+      "kind": "rule",
+      "test": null,
+      "reason": "No rule line is added and neither file is edited, so the 11-line count (:3517) and the 3150-byte cap (:3558) are unchanged. That test names its checks explicitly, so a new check without a rule line does not fail it."
+    },
+    {
+      "name": "newly refused share of past readings",
+      "dependent": "replay hold rule (`REPLAY_HOLD_PERCENT`, replay.rs:13; `replay_declaration`, replay.rs:263)",
+      "kind": "rule",
+      "test": "Criterion 6 test parses 'expected 5% of newly refused readings' with `replay_declaration`, as the corpus test at :2776 does. The 5% is an estimate; the doc states its basis (the count of corpus Accept cases whose request has parts or bullets, measured when the producer runs the corpus).",
+      "reason": null
+    },
+    {
+      "name": "prompt-set budgets and governance files",
+      "dependent": "docs/system-facts.md budgets and `system_facts_budgets_match_computed`; athena.toml, defaults.toml, workflows, records/",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No prompt file, athena.toml, defaults.toml, workflow or record is edited, so the computed budgets and the governance checks are unchanged."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "The corpus builds a request with parts (1),(2),(3) on separate lines. The reading is `base_reading` with criteria for (1) and (2) only and a summary saying part (3) moves to a follow-up job. The case calls `refusing_check` and expects Refuse(\"check_part_coverage\"). The twin appends the paragraph 'Part (3) may be split into a separate job.' to the request and expects Accept.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "corpus_cases_get_the_expected_outcome passes: the deferring reading is refused by check_part_coverage, named by refusing_check, and the permitted-split twin is accepted.",
+      "fails_without": "Without check_part_coverage, `parts-paren-line-start-third-moved` is accepted (gate returns None, expected Refuse), and `every_acceptance_check_has_a_refusing_corpus_case` reports no refusing case for the check. Without the permission exemption, `parts-paren-split-permitted` is refused.",
+      "seam": "Production entry point `athena_core::reading::refusing_check` (checks.rs:518), called by `run(c)` in tests/refusal_corpus.rs:2598. Fixture: `case()` + `base_reading()` with the reading's criteria, summary and out_of_scope replaced. The seam exists today; the plan step adds the cases and the new `step!` line. Guards: capability is Some, question is None, deliverable docs/guide.md exists in repo_files(), and no earlier check refuses (the step is last)."
+    },
+    {
+      "criterion": 2,
+      "method": "Corpus cases for the form `1.`/`2.`/`3.` and the form `1)`/`2)`/`3)` (no Acceptance heading, reading defers item 3) expect Refuse(check_part_coverage). The negative cases expect Accept: a lone '3. Mention the flag', '1. Yes' / '2. No', a run under `>` lines and in backticks, and an approval request built by the existing `generated_approval_request` helper with a numbered list after `## Source`. Unit tests in reading.rs call `request_parts` on each form and assert the parts found (and none for the negatives).",
+      "command": "cargo test -p athena-core",
+      "observes": "All corpus tests pass, including `corpus_covers_the_listed_input_forms` with the new tags. The reading.rs unit tests `request_parts_*` pass. Existing `numbered-dot-parts` stays Accept.",
+      "fails_without": "Without the `N.` and `N)` parser, the `parts-dot-*` and `parts-close-paren-*` deferrals are accepted. If stray numbers, 'Yes/No' lists, quoted runs or generated lists were read as parts, `stray-single-number`, `yes-no-list`, `quoted-run` and `generated-numbered-list` would be refused.",
+      "seam": "`refusing_check` plus the new `request_parts` (topics.rs, added in the plan). Fixtures: corpus `case()`, `generated_approval_request` (exists, corpus :1190), and the reading.rs test helpers `scoped_reading` and `governed_reading` (exist, reading.rs:3674 and :4530). Guard: the skip rules for `>` lines, fenced blocks, quoted spans and generated lines run before any marker is read."
+    },
+    {
+      "criterion": 3,
+      "method": "A const SZA7_REQUEST, with a comment saying it is rebuilt from the brief of job 20261029-084645-sza7 (its records are not in a snapshot, so wording is reconstructed, not verbatim), holds parts (1)-(3) and four `- ` bullets, one about `athena status` showing a timed-out check. Two corpus cases: the reading with criteria for (1),(2) and bullets 1,2,4, and a summary deferring part (3) and the status bullet to a follow-up, expects Refuse(check_part_coverage) with the error naming both items. The reading with a criterion for every part and bullet expects Accept.",
+      "command": "cargo test -p athena-core",
+      "observes": "The refuse case's error names part (3) and the status bullet; the accept case passes `refusing_check` as None.",
+      "fails_without": "Without the check, the deferring sza7 reading is accepted. With a coverage rule that ignored bullets, only part (3) would be reported, not the status bullet. With a rule that ignored deferral, a covering reading could be wrongly refused.",
+      "seam": "`refusing_check` via the corpus `case()`; criteria set explicitly on `c.reading.acceptance_criteria` (the base_reading helper copies only bullets). The seam exists; the plan step adds the cases. `bullets_expected` is 4."
+    },
+    {
+      "criterion": 4,
+      "method": "The corpus builds the request with `StewardRequest::from_change` (steward.rs:600-636, public via `pub mod steward`), given a `ProposedChange` with a long title and a one-line request, so the three standard bullets (steward.rs:621-623) are the real ones. The accept reading has three criteria restating them: the title in a few words, 'no unrelated behavior changes, existing tests pass', and 'cargo fmt, clippy and test pass'. The twin drops the clippy criterion and expects Refuse(check_part_coverage). A third case holds this job's own request ('try again on 20261029-212839-tcjb') with its accepted reading (content-kind criteria) and expects Accept; `source` says criteria are copied from the accepted reading.",
+      "command": "cargo test -p athena-core",
+      "observes": "Both Steward cases get the expected outcome. The accept case passes with a title of 12+ words. The own-request case is accepted, since it has no parts or bullets.",
+      "fails_without": "If the stem rule needed all stems, the long-title bullet would be refused (accept case fails). If generic words like test and pass counted, the dropped 'fmt, clippy and test pass' bullet would be covered by the other bullet (twin is accepted, and the test fails).",
+      "seam": "`refusing_check` plus the real generator `StewardRequest::from_change` (exists); the corpus already imports Reference, WorkItemKind and Ladder. The cases are added by the plan. If `check_scope_limit` refuses this job's own criterion on unchanged config files, the producer words that criterion so it limits no files and notes it in `source`."
+    },
+    {
+      "criterion": 5,
+      "method": "Corpus cases each hold the parts (1),(2),(3) request plus one extra sentence, with the reading deferring (3): 'Split checks.rs into modules.' ; 'You may split checks.rs into modules.' ; 'Test each form separately.' ; 'The earlier reading said (3) is a follow-up; that was wrong.' ; 'The earlier reading said (3) can be a follow-up job; that was wrong.'. All expect Refuse(check_part_coverage). A reading.rs unit test runs a table of sentences through the permission function: positives 'Part (3) may be split into a separate job.', '(3) can be a follow-up job.', 'The work may be split into separate jobs.'; negatives as above plus 'Part (3) may not be split.'",
+      "command": "cargo test -p athena-core",
+      "observes": "Every negative row refuses and every positive row exempts. The `split-permission-*` unit test passes.",
+      "fails_without": "If the exemption fired on the words split or separately, the three ordinary-sense cases would be accepted and fail. If a modal sentence in a complaint exempted, the complaint case would be accepted.",
+      "seam": "`refusing_check` through the corpus `case()`. The unit test calls the permission function directly, a `pub(super)` helper in topics.rs added by the plan, plus `check_part_coverage` on `scoped_reading`. Both seams are added by the plan."
+    },
+    {
+      "criterion": 6,
+      "method": "A reading.rs unit test in the style of `scope_limit_has_one_step_line` (reading.rs:8481). It takes `reading_source()`, extracts the `refusing_check` body and asserts exactly one line equal to `step!(check_part_coverage(reading, request));` and that the diff adds only that one new `step!(check_` line. It also asserts the checks.rs text contains the comment defining 'distinctive stem', that the doc of `check_part_coverage` contains 'expected 5% of newly refused readings', 'estimate' and 'basis', and that the doc of `check_reading_acceptance` links [`check_part_coverage`]. A unit test pins the stem definition: 'Parts'->'part', 'defaults'/'default' equal, 'tests' and 'pass' not distinctive, 'clippy' distinctive.",
+      "command": "cargo test -p athena-core part_coverage",
+      "observes": "The tests pass. `git diff -- crates/athena-core/src/reading/checks.rs` shows one added `step!(check_` line.",
+      "fails_without": "If the step is missing, duplicated or named otherwise, the step-line test fails. If the stem comment or the estimate sentence is missing, the doc test fails.",
+      "seam": "Source text via the existing `reading_source()` helper in reading.rs tests (exists, used at reading.rs:8482). `replay_declaration` (replay.rs:263, exists) parses the 'expected 5% ...' sentence, as in corpus :2776. The new test is added by the plan."
+    },
+    {
+      "criterion": 7,
+      "method": "A corpus test (in the style of corpus :2960) reads CHANGELOG.md via include_str! and asserts it names `check_part_coverage`, 'higher refusal rate is intended' and 'expected 5% of newly refused readings'. Then run `cargo test -p athena-context the_reader_brief_names_each_reading_rule_in_one_short_line` (briefs.rs:3493, unchanged rules, so it passes), and `git diff --stat -- athena.toml defaults.toml .github records crates/athena-context/prompts`.",
+      "command": "cargo test -p athena-core part_coverage_changelog",
+      "observes": "The changelog test and the reader-rule section test pass; the git diff over the governance paths is empty.",
+      "fails_without": "Without the CHANGELOG entry the changelog test fails. If a reader rule were added without updating the section test, the briefs test would fail. If a governance file changed, git diff would list it.",
+      "seam": "include_str! of CHANGELOG.md from tests/refusal_corpus.rs (same pattern exists at corpus :2950-2962). The git diff is a verifier command. The test is added by the plan."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three Athena checks in full, including every crate that reaches the gate (athena-core, athena-cli, athena-agent, athena-context).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three pass. athena-cli drain.rs and job_plan.rs tests that queue bullet requests still plan and run, because the Scenario reader and the fake reader now cover the request's bullets. athena-agent's fake reader unit test asserts that a request with two bullets and (1)(2)(3) gets covering criteria.",
+      "fails_without": "Any fixture the new check now refuses fails `cargo test`: the CLI Scenario readers, the fake reader and the corpus cases are the known ones.",
+      "seam": "Existing: `Scenario::script` (athena-cli/tests/common/mod.rs:562-573) and `reader_turn` (fake.rs:223). The plan edits both so their readings cover the request's bullets, and adds a unit test in fake.rs. Guard: the fake only copies request lines into criteria; coverage logic stays in core."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "9e3f0fe4b09e3e0656d3ead0acbca13cc05b3a7a0c8981b558d3a916c6616207"
+}
