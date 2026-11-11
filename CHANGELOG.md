@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The firstmate study page defines each of yolo, green, red, in scope, places and home once (in "Words used first"
+  or the Glossary) and links to that definition from the overview, walkthrough, t4/t10 cards and failure list.
+  Intro text marks a term as `[[term]]`; `xtask/src/site.rs` renders it as a link. A test on the rendered page checks
+  that no definition sentence repeats and that every term link has a matching id.
 - New design note `docs/design/direct-main-merge-tree-landing.md` for throughput review `20261111-055051-tjym`
   (landing and rebuild 2984.3 of 2990.6 median minutes per landed job): build each verified job's single landing
   commit on fetched host main with `Git::merge_tree`, not on the long-lived local landing branch. Covers the
