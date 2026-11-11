@@ -364,6 +364,30 @@ pub fn build_measurement_line(latest: Option<&BuildMeasurement>) -> String {
     )
 }
 
+/// The line `athena status` prints for the final acceptance chain (OLY-10-02): `improvement cycle: shown`, or
+/// `improvement cycle: not shown (missing: ...)` naming each stage no record supports. Nothing recorded is
+/// every stage missing, never success.
+pub fn improvement_cycle_line(cycle: &athena_data::records::ImprovementCycle) -> String {
+    if cycle.shown() {
+        return "improvement cycle: shown".into();
+    }
+    let missing: Vec<&str> = cycle.missing.iter().map(|s| s.label()).collect();
+    format!(
+        "improvement cycle: not shown (missing: {})",
+        missing.join(", ")
+    )
+}
+
+/// The jobs whose latest outcome is landed.
+fn landed_job_ids(records: &Records) -> Vec<athena_data::JobId> {
+    records
+        .jobs
+        .values()
+        .filter(|j| j.state() == JobState::Closed(OutcomeState::Landed))
+        .filter_map(|j| j.id.clone())
+        .collect()
+}
+
 /// The state of the work.
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusView {
@@ -427,6 +451,8 @@ pub struct StatusView {
     /// The latest build measurement as one printed line ([`build_measurement_line`]), or the line that says
     /// there is none yet.
     pub build_measurement: String,
+    /// Whether the records show the final acceptance chain, as one printed line ([`improvement_cycle_line`]).
+    pub improvement_cycle: String,
     /// Classes of work whose minutes per landed job fell or rose between their older and newer landed jobs,
     /// with the job after which a rising class got worse; absent until a class has enough landed jobs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1275,6 +1301,11 @@ impl Athena {
             build_measurement: build_measurement_line(BuildMeasurement::latest(
                 &records.build_measurements,
             )),
+            improvement_cycle: improvement_cycle_line(&athena_data::records::improvement_cycle(
+                &landed_job_ids(&records),
+                &records.introspections,
+                &crate::proposals::current(&records.proposals),
+            )),
             class_trend: crate::class_trend::ClassTrend::compute(&records),
             interventions_by_category: by_category,
             interventions_by_class: by_class,
@@ -1608,6 +1639,44 @@ mod mistake_tests {
                 "`athena status` prints no line starting {label:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod improvement_cycle_line_tests {
+    use super::*;
+    use athena_data::records::{CycleStage, ImprovementCycle};
+
+    #[test]
+    fn the_line_says_shown_only_for_a_complete_chain_and_names_each_missing_stage() {
+        let shown = ImprovementCycle {
+            missing: Vec::new(),
+        };
+        assert_eq!(improvement_cycle_line(&shown), "improvement cycle: shown");
+        let none = ImprovementCycle {
+            missing: CycleStage::ALL.to_vec(),
+        };
+        let line = improvement_cycle_line(&none);
+        assert!(line.starts_with("improvement cycle: not shown (missing: repair"));
+        assert!(line.contains("evaluated candidate"), "{line}");
+        let unevaluated = ImprovementCycle {
+            missing: vec![CycleStage::Evaluated, CycleStage::Adoption],
+        };
+        assert_eq!(
+            improvement_cycle_line(&unevaluated),
+            "improvement cycle: not shown (missing: evaluated candidate, adoption decision)"
+        );
+    }
+
+    #[test]
+    fn a_status_over_no_records_does_not_claim_the_cycle() {
+        let records = Records::default();
+        let line = improvement_cycle_line(&athena_data::records::improvement_cycle(
+            &landed_job_ids(&records),
+            &records.introspections,
+            &crate::proposals::current(&records.proposals),
+        ));
+        assert!(line.contains("not shown"), "{line}");
     }
 }
 

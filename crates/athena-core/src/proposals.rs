@@ -372,6 +372,7 @@ pub fn generate(
             status: ProposalStatus::Pending,
             candidate_sha256: String::new(),
             notes: NOTES.into(),
+            evaluation: None,
         };
         if taken.contains(&id) {
             out.refusals.push(Refusal {

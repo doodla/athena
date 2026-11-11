@@ -71,3 +71,46 @@ fn status_prints_the_latest_build_measurement_line() {
     }
     assert!(!text.contains("measurement: none yet"), "{text}");
 }
+
+#[test]
+fn status_prints_the_improvement_cycle_line_for_both_outcomes() {
+    use athena_core::status::improvement_cycle_line;
+    use athena_data::records::{CycleStage, ImprovementCycle};
+
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let mut view = athena.status().unwrap();
+    let find = |text: &str| {
+        text.lines()
+            .find(|l| l.starts_with("improvement cycle:"))
+            .unwrap_or_else(|| panic!("no improvement cycle line in:\n{text}"))
+            .to_string()
+    };
+
+    // No records: the real status never claims the chain.
+    let line = find(&athena_cli::display::status(&view));
+    assert_eq!(line, view.improvement_cycle);
+    assert!(
+        line.starts_with("improvement cycle: not shown (missing: repair"),
+        "{line}"
+    );
+    assert!(line.contains("evaluated candidate"), "{line}");
+
+    // A chain with no evaluation names the evaluation stage.
+    view.improvement_cycle = improvement_cycle_line(&ImprovementCycle {
+        missing: vec![CycleStage::Evaluated, CycleStage::Adoption],
+    });
+    assert_eq!(
+        find(&athena_cli::display::status(&view)),
+        "improvement cycle: not shown (missing: evaluated candidate, adoption decision)"
+    );
+
+    // A complete chain.
+    view.improvement_cycle = improvement_cycle_line(&ImprovementCycle {
+        missing: Vec::new(),
+    });
+    assert_eq!(
+        find(&athena_cli::display::status(&view)),
+        "improvement cycle: shown"
+    );
+}
