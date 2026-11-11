@@ -543,11 +543,48 @@ pub struct ProposalRecord {
     pub candidate_sha256: String,
     /// What this build leaves out (no Jev: no assumptions, signals or evidence probabilities).
     pub notes: String,
+    /// The recorded result of testing the candidate against the baseline. Absent until someone records one
+    /// (and on every record written before the field existed); only its presence makes the candidate
+    /// "evaluated" for [`improvement_cycle`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluation: Option<ProposalEvaluation>,
+}
+
+/// A baseline-versus-candidate result for one proposal, in the shape of `method_experiment`: the same
+/// representative cases run once with the current defaults (the baseline arm) and once with the candidate
+/// (the candidate arm), counting the cases each arm got wrong. Fewer failures is better.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalEvaluation {
+    /// The representative cases both arms ran, such as job ids. Never the cases that triggered the proposal
+    /// alone; a case list that is empty is no evaluation.
+    pub cases: Vec<String>,
+    /// How many of `cases` the baseline arm got wrong.
+    pub baseline_failures: u32,
+    /// How many of `cases` the candidate arm got wrong.
+    pub candidate_failures: u32,
+}
+
+impl ProposalEvaluation {
+    /// Why this evaluation is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.cases.is_empty() || self.cases.iter().any(|c| c.trim().is_empty()) {
+            return Err("an evaluation lists the cases both arms ran".into());
+        }
+        let most = self.cases.len() as u64;
+        if u64::from(self.baseline_failures) > most || u64::from(self.candidate_failures) > most {
+            return Err("an arm cannot fail more cases than were run".into());
+        }
+        Ok(())
+    }
 }
 
 impl ProposalRecord {
     /// Why this record is not acceptable, if it is not.
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(evaluation) = &self.evaluation {
+            evaluation.validate()?;
+        }
         if self.id.trim().is_empty() || self.statement.trim().is_empty() {
             return Err("a proposal has an id and a statement".into());
         }
@@ -571,5 +608,363 @@ impl ProposalRecord {
             }
             _ => Ok(()),
         }
+    }
+}
+
+/// One link of the final acceptance chain (`docs/spec.toml` OLY-10-02), in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CycleStage {
+    /// A job landed that an introspection or a proposal names.
+    Repair,
+    /// A recorded introspection that assigned a failure class.
+    Finding,
+    /// A defaults proposal linked to such a finding.
+    Candidate,
+    /// A linked proposal that has a recorded evaluation result.
+    Evaluated,
+    /// A linked, evaluated proposal that was accepted or rejected.
+    Adoption,
+}
+
+impl CycleStage {
+    pub const ALL: [CycleStage; 5] = [
+        CycleStage::Repair,
+        CycleStage::Finding,
+        CycleStage::Candidate,
+        CycleStage::Evaluated,
+        CycleStage::Adoption,
+    ];
+
+    /// The words `athena status` prints for the stage.
+    pub fn label(self) -> &'static str {
+        match self {
+            CycleStage::Repair => "repair",
+            CycleStage::Finding => "process finding",
+            CycleStage::Candidate => "candidate improvement",
+            CycleStage::Evaluated => "evaluated candidate",
+            CycleStage::Adoption => "adoption decision",
+        }
+    }
+}
+
+/// Which stages of the chain the records show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImprovementCycle {
+    /// The stages no record supports, in chain order. Empty only when the whole chain is shown.
+    pub missing: Vec<CycleStage>,
+}
+
+impl ImprovementCycle {
+    pub fn shown(&self) -> bool {
+        self.missing.is_empty()
+    }
+}
+
+/// Whether the records show the chain of OLY-10-02: a landed repair, a process finding, a candidate improvement
+/// linked to that finding, an evaluation result for that candidate, and an adoption decision on it.
+///
+/// `landed` is the jobs that landed; `introspections` and `proposals` are all introspections and the current
+/// record of each proposal. A proposal is linked to a finding when it cites the finding's introspection id or
+/// is about the finding's failure class; a finding about another class and another introspection does not
+/// count for it. The evaluated stage is not inferred from how many jobs the proposal cites (those are the
+/// cases that triggered it, not cases it was tested on): it needs the proposal's `evaluation` field, which
+/// holds a recorded baseline-versus-candidate result. Nothing at all gives every stage missing, never success.
+pub fn improvement_cycle(
+    landed: &[JobId],
+    introspections: &[IntrospectionRecord],
+    proposals: &[&ProposalRecord],
+) -> ImprovementCycle {
+    let findings: Vec<&IntrospectionRecord> = introspections
+        .iter()
+        .filter(|i| i.status == IntrospectionStatus::Recorded && i.failure_class.is_some())
+        .collect();
+    let repair = landed.iter().any(|job| {
+        introspections.iter().any(|i| i.job.as_ref() == Some(job))
+            || proposals
+                .iter()
+                .any(|p| p.sources.iter().any(|s| &s.job == job))
+    });
+    let linked: Vec<&ProposalRecord> = proposals
+        .iter()
+        .copied()
+        .filter(|p| {
+            findings.iter().any(|f| {
+                p.sources.iter().any(|s| s.introspection == f.id)
+                    || f.failure_class.as_ref() == Some(&p.failure_class)
+            })
+        })
+        .collect();
+    // The evaluation signal is `ProposalRecord::evaluation`, and only a valid one counts.
+    let evaluated: Vec<&ProposalRecord> = linked
+        .iter()
+        .copied()
+        .filter(|p| p.evaluation.as_ref().is_some_and(|e| e.validate().is_ok()))
+        .collect();
+    let decided = evaluated.iter().any(|p| {
+        matches!(
+            p.status,
+            ProposalStatus::Accepted { .. } | ProposalStatus::Rejected { .. }
+        )
+    });
+    let reached = [
+        repair,
+        !findings.is_empty(),
+        !linked.is_empty(),
+        !evaluated.is_empty(),
+        decided,
+    ];
+    ImprovementCycle {
+        missing: CycleStage::ALL
+            .into_iter()
+            .zip(reached)
+            .filter(|(_, reached)| !reached)
+            .map(|(stage, _)| stage)
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod improvement_cycle_tests {
+    use super::*;
+
+    fn rid(n: u32) -> RecordId {
+        RecordId::parse(&format!("20261101-1000{:02}-{:04x}", n % 60, n)).unwrap()
+    }
+
+    fn job(n: u32) -> JobId {
+        JobId::parse(&format!("20261101-2000{:02}-{:04x}", n % 60, n)).unwrap()
+    }
+
+    fn ts() -> Timestamp {
+        "2026-11-01T10:00:00Z".parse().unwrap()
+    }
+
+    /// A recorded introspection of `class` about `job`, shaped like the ones the introspection step writes.
+    fn introspection(n: u32, class: u32, about: u32) -> IntrospectionRecord {
+        IntrospectionRecord {
+            id: rid(n),
+            at: ts(),
+            trigger: IntrospectionTrigger::Rejection,
+            job: Some(job(about)),
+            intervention: None,
+            class_of_work: "code".into(),
+            category: "rejected".into(),
+            what_happened: Some("The check failed.".into()),
+            failure_class: Some(rid(class)),
+            new_class: false,
+            earlier_cases: Vec::new(),
+            decisions_matched: Vec::new(),
+            cause: Some("A cause.".into()),
+            other_causes: Vec::new(),
+            open_hypotheses: Vec::new(),
+            contradictions: Vec::new(),
+            prevention_kind: Some(PreventionKind::CodeCheck),
+            prevention: Some("A check.".into()),
+            proposed_request: Some("Add it.".into()),
+            evidence: None,
+            status: IntrospectionStatus::Recorded,
+            failure: None,
+            flags: Vec::new(),
+            dropped_ids: Vec::new(),
+            planning_stopped: false,
+            from_jev: false,
+            jev: None,
+        }
+    }
+
+    /// A proposal like a real one: three sources in three distinct jobs, all introspections of `class`.
+    fn proposal(id: &str, class: u32, intros: [u32; 3]) -> ProposalRecord {
+        ProposalRecord {
+            record: rid(500 + class),
+            at: ts(),
+            id: id.into(),
+            kind: ProposalKind::Add,
+            statement: "A new default.".into(),
+            applies_to: vec!["code".into()],
+            version: ProposalVersion { from: 1, to: 2 },
+            sources: intros
+                .iter()
+                .map(|n| ProposalSource {
+                    introspection: rid(*n),
+                    intervention: None,
+                    job: job(*n),
+                    at: ts(),
+                })
+                .collect(),
+            failure_class: rid(class),
+            status: ProposalStatus::Pending,
+            candidate_sha256: "a".repeat(64),
+            notes: String::new(),
+            evaluation: None,
+        }
+    }
+
+    fn evaluation() -> ProposalEvaluation {
+        ProposalEvaluation {
+            cases: vec!["20261020-100000-aaaa".into(), "20261020-110000-bbbb".into()],
+            baseline_failures: 2,
+            candidate_failures: 0,
+        }
+    }
+
+    fn findings(class: u32) -> Vec<IntrospectionRecord> {
+        (1..=3).map(|n| introspection(n, class, n)).collect()
+    }
+
+    fn missing(
+        landed: &[JobId],
+        intros: &[IntrospectionRecord],
+        proposals: &[&ProposalRecord],
+    ) -> Vec<CycleStage> {
+        improvement_cycle(landed, intros, proposals).missing
+    }
+
+    #[test]
+    fn introspection_cycle_of_an_empty_record_set_is_not_shown() {
+        let cycle = improvement_cycle(&[], &[], &[]);
+        assert!(!cycle.shown());
+        assert_eq!(cycle.missing, CycleStage::ALL.to_vec());
+    }
+
+    #[test]
+    fn introspection_cycle_counts_a_proposal_without_an_evaluation_as_not_evaluated() {
+        // Three distinct source jobs, as every real proposal has: that alone is no evaluation.
+        let mut p = proposal("d", 9, [1, 2, 3]);
+        assert_eq!(p.sources.len(), 3);
+        p.status = ProposalStatus::Accepted { job: job(40) };
+        assert_eq!(
+            missing(&[job(1)], &findings(9), &[&p]),
+            vec![CycleStage::Evaluated, CycleStage::Adoption]
+        );
+    }
+
+    #[test]
+    fn introspection_cycle_is_shown_when_the_linked_proposal_is_evaluated_and_decided() {
+        let mut p = proposal("d", 9, [1, 2, 3]);
+        p.evaluation = Some(evaluation());
+        p.status = ProposalStatus::Rejected {
+            reason: "No gain.".into(),
+        };
+        let cycle = improvement_cycle(&[job(1)], &findings(9), &[&p]);
+        assert!(cycle.shown(), "{:?}", cycle.missing);
+        // Evaluated but still pending: the decision is the missing stage.
+        p.status = ProposalStatus::Pending;
+        assert_eq!(
+            missing(&[job(1)], &findings(9), &[&p]),
+            vec![CycleStage::Adoption]
+        );
+    }
+
+    #[test]
+    fn introspection_cycle_ignores_a_finding_about_another_class_and_introspection() {
+        let mut p = proposal("d", 9, [1, 2, 3]);
+        p.evaluation = Some(evaluation());
+        p.status = ProposalStatus::Accepted { job: job(40) };
+        // Findings 11..13 are about class 8; the proposal cites introspections 1..3 and class 9.
+        let other: Vec<_> = (11..=13).map(|n| introspection(n, 8, n)).collect();
+        assert_eq!(
+            missing(&[job(11)], &other, &[&p]),
+            vec![
+                CycleStage::Candidate,
+                CycleStage::Evaluated,
+                CycleStage::Adoption
+            ]
+        );
+    }
+
+    #[test]
+    fn introspection_cycle_links_by_the_cited_introspection_when_the_class_differs() {
+        let mut p = proposal("d", 9, [1, 2, 3]);
+        p.evaluation = Some(evaluation());
+        p.status = ProposalStatus::Accepted { job: job(40) };
+        let mut intros = findings(9);
+        intros[0].failure_class = Some(rid(8));
+        let cycle = improvement_cycle(&[job(2)], &intros[..1], &[&p]);
+        assert!(cycle.shown(), "{:?}", cycle.missing);
+    }
+
+    #[test]
+    fn introspection_cycle_reports_each_single_missing_stage() {
+        let mut p = proposal("d", 9, [1, 2, 3]);
+        p.evaluation = Some(evaluation());
+        p.status = ProposalStatus::Accepted { job: job(40) };
+        let intros = findings(9);
+        let landed = [job(1)];
+        assert!(improvement_cycle(&landed, &intros, &[&p]).shown());
+        // No landed job.
+        assert_eq!(missing(&[], &intros, &[&p]), vec![CycleStage::Repair]);
+        // A landed job that nothing names.
+        assert_eq!(
+            missing(&[job(30)], &intros, &[&p]),
+            vec![CycleStage::Repair]
+        );
+        // A failed introspection is no finding; with it the proposal is linked to nothing either.
+        let mut failed = intros.clone();
+        for f in &mut failed {
+            f.status = IntrospectionStatus::Failed;
+        }
+        assert_eq!(
+            missing(&landed, &failed, &[&p]),
+            vec![
+                CycleStage::Finding,
+                CycleStage::Candidate,
+                CycleStage::Evaluated,
+                CycleStage::Adoption
+            ]
+        );
+        // No proposal.
+        assert_eq!(
+            missing(&landed, &intros, &[]),
+            vec![
+                CycleStage::Candidate,
+                CycleStage::Evaluated,
+                CycleStage::Adoption
+            ]
+        );
+        // An evaluation with no cases is no evaluation.
+        let mut empty = p.clone();
+        empty.evaluation.as_mut().unwrap().cases.clear();
+        assert_eq!(
+            missing(&landed, &intros, &[&empty]),
+            vec![CycleStage::Evaluated, CycleStage::Adoption]
+        );
+    }
+
+    #[test]
+    fn introspection_cycle_replay_over_mixed_proposals_finds_both_outcomes() {
+        let intros = findings(9);
+        let mut evaluated = proposal("with-eval", 9, [1, 2, 3]);
+        evaluated.evaluation = Some(evaluation());
+        let plain = proposal("no-eval", 9, [1, 2, 3]);
+        let other = proposal("other-class", 7, [21, 22, 23]);
+        let all = [&evaluated, &plain, &other];
+        let results: Vec<bool> = all
+            .iter()
+            .map(|p| !missing(&[job(1)], &intros, &[*p]).contains(&CycleStage::Evaluated))
+            .collect();
+        assert_eq!(results, vec![true, false, false]);
+        assert!(results.iter().any(|r| *r) && results.iter().any(|r| !*r));
+        for p in all {
+            let jobs: std::collections::BTreeSet<_> =
+                p.sources.iter().map(|s| s.job.as_str()).collect();
+            assert_eq!(jobs.len(), 3);
+        }
+    }
+
+    #[test]
+    fn introspection_proposal_evaluation_round_trips_and_is_validated() {
+        let mut p = proposal("d", 9, [1, 2, 3]);
+        p.evaluation = Some(evaluation());
+        let record = AnyRecord::DefaultsProposal(Box::new(p.clone()));
+        assert!(record.to_json().contains("\"candidate_failures\": 0"));
+        assert_eq!(
+            AnyRecord::parse("x", record.to_json().as_bytes()).unwrap(),
+            record
+        );
+        p.evaluation.as_mut().unwrap().baseline_failures = 9;
+        assert!(p.validate().is_err());
+        p.evaluation = None;
+        let json = AnyRecord::DefaultsProposal(Box::new(p)).to_json();
+        assert!(!json.contains("evaluation"));
     }
 }

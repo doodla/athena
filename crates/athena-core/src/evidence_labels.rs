@@ -599,6 +599,7 @@ mod tests {
             status: ProposalStatus::Accepted { job: job_id(job) },
             candidate_sha256: "a".repeat(64),
             notes: String::new(),
+            evaluation: None,
         }
     }
 
