@@ -1232,6 +1232,15 @@ pub fn snapshot_status(v: &athena_core::snapshot::SnapshotView) -> String {
     out
 }
 
+/// The `role need` lines: one per role, then one per class of work that failed repeatedly.
+fn role_need_section(need: &athena_core::role_need::RoleNeed) -> String {
+    let mut out = String::new();
+    for line in need.lines() {
+        let _ = writeln!(out, "role need   {line}");
+    }
+    out
+}
+
 /// `athena status`.
 pub fn status(v: &StatusView) -> String {
     let mut out = String::new();
@@ -1330,6 +1339,7 @@ pub fn status(v: &StatusView) -> String {
     if let Some(trend) = &v.class_trend {
         out.push_str(&trend_section(trend));
     }
+    out.push_str(&role_need_section(&v.role_need));
     for (i, j) in v.open.iter().enumerate() {
         let label = if i == 0 { "open" } else { "" };
         let _ = writeln!(
@@ -2238,6 +2248,117 @@ mod tests {
         ));
         assert!(waiting.contains("no new drain was started"), "{waiting}");
         assert!(waiting.contains("athena drain-restart"), "{waiting}");
+    }
+
+    fn status_view(role_need: athena_core::role_need::RoleNeed) -> StatusView {
+        StatusView {
+            repository: "/repo".into(),
+            branch: Some("main".into()),
+            head: "0123456789abcdef".into(),
+            athena: athena_data::records::Build {
+                version: "0.1.0".into(),
+                source_commit: "0123456789abcdef".into(),
+                dirty: false,
+            },
+            stale_build: None,
+            driver: "claude-code 2.1.299".into(),
+            kill_switch_on: false,
+            nested: None,
+            focus: None,
+            bootstrap: athena_core::status::Bootstrap {
+                range_open: false,
+                through_commit: None,
+                note: "closed".into(),
+            },
+            jobs_by_state: Default::default(),
+            recent: vec![],
+            open: vec![],
+            planning: None,
+            planning_cost: None,
+            keep_rule: None,
+            producer_settings: vec![],
+            specialization: vec![],
+            check_durations: None,
+            gate_counts: vec![],
+            reading_rules: None,
+            duties: vec![],
+            throughput: None,
+            build_measurement: "build      none yet".into(),
+            class_trend: None,
+            role_need,
+            interventions_by_category: Default::default(),
+            interventions_by_class: Default::default(),
+            mistakes: Default::default(),
+            open_interventions: vec![],
+            restarts: 0,
+            forecasts: vec![],
+            pending: vec![],
+            unreviewed_introspections: 0,
+            proposals: vec![],
+            work_proposals: vec![],
+            audience: None,
+            audit: None,
+            code_health: None,
+            lines: vec![],
+            repeated_causes: vec![],
+            learning: vec![],
+            dormant_causes: vec![],
+            spec_gaps: vec![],
+            invalid_records: vec![],
+            next: vec![],
+            reconcile: None,
+        }
+    }
+
+    #[test]
+    fn status_prints_a_role_need_line_for_every_role_and_no_advice_without_a_candidate() {
+        use athena_core::role_need::{ALL_ROLES, analyze};
+        let now: jiff::Timestamp = "2026-11-11T12:00:00Z".parse().unwrap();
+        let text = status(&status_view(analyze(&[], &[], now)));
+        for role in ALL_ROLES {
+            let line = text
+                .lines()
+                .find(|l| l.starts_with("role need") && l.contains(role.as_str()))
+                .unwrap_or_else(|| panic!("no role need line for {role:?}:\n{text}"));
+            assert!(line.contains("not measured"), "{line}");
+        }
+        assert!(!text.contains("retire candidate"), "{text}");
+    }
+
+    #[test]
+    fn status_prints_retire_advice_and_needed_classes() {
+        use athena_core::role_need::{ClassFailures, RoleStanding, RoleStatus};
+        use athena_data::records::Role;
+        let need = athena_core::role_need::RoleNeed {
+            roles: vec![
+                RoleStanding {
+                    role: Role::Planner,
+                    status: RoleStatus::RetireCandidate,
+                },
+                RoleStanding {
+                    role: Role::Reader,
+                    status: RoleStatus::InUse { runs: 4 },
+                },
+            ],
+            needed: vec![ClassFailures {
+                class: "code".into(),
+                failed: 3,
+                jobs: 5,
+            }],
+        };
+        let text = status(&status_view(need));
+        assert!(
+            text.contains("role need   planner   retire candidate"),
+            "{text}"
+        );
+        assert!(
+            text.contains("role need   reader    in use, 4 run(s)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("role need   needed: class code failed in 3 of its last 5"),
+            "{text}"
+        );
     }
 
     #[test]
