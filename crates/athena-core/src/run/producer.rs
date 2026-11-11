@@ -436,7 +436,8 @@ impl Athena {
             }
             let unmet = unmet_criteria(&raw, accepted);
             // Planned files and expected deliverables the work tree does not change, with no reason in the
-            // report. A run with no change at all fails below as an idle producer, so it is not listed here.
+            // report. A run with no change at all fails below as an idle producer (its reason is the report's
+            // `no_change` outcome, see `no_change_reason`), so it is not listed here.
             let changes = snapshot.change_list()?;
             let changed: Vec<String> = changes.iter().map(|c| c.path.clone()).collect();
             // The change reading asks for CHANGELOG.md (the changelog default) and the work tree does not change

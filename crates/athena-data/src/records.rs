@@ -788,6 +788,19 @@ pub struct ProducerReport {
     pub mistakes: Vec<String>,
     pub learnings: Vec<String>,
     pub desires: Vec<String>,
+    /// Why the producer left the tree unchanged. Absent in records made before the outcome was asked for,
+    /// and when the producer changed files; it is not written when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_change: Option<NoChange>,
+}
+
+/// The producer's own account of an empty change: `kind` is `already_done`, `blocked` or `gave_up`, and
+/// `detail` is the evidence, the blocker or the reason, redacted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoChange {
+    pub kind: String,
+    pub detail: String,
 }
 
 /// `athena.candidate/1` and `athena.candidate/2`: the producer's change, as the core captured and admitted
@@ -1881,6 +1894,55 @@ mod tests {
         let text = some.to_json();
         assert!(text.contains("\"previous_job\": \"20261009-101010-abcd\""));
         assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), some);
+    }
+
+    fn sample_report(no_change: Option<NoChange>) -> ProducerReport {
+        ProducerReport {
+            summary: "nothing to do".into(),
+            files: vec![],
+            checks_run: vec![],
+            criteria_check: vec![],
+            open_issues: vec![],
+            mistakes: vec![],
+            learnings: vec![],
+            desires: vec![],
+            no_change,
+        }
+    }
+
+    #[test]
+    fn a_report_made_before_the_no_change_outcome_still_parses_and_is_written_back_unchanged() {
+        let old = r#"{"summary":"s","files":[],"checks_run":[],"open_issues":[],"mistakes":[],"learnings":[],"desires":[]}"#;
+        let report: ProducerReport = serde_json::from_str(old).unwrap();
+        assert_eq!(report.no_change, None);
+        let written = serde_json::to_string(&report).unwrap();
+        assert!(
+            !written.contains("no_change"),
+            "unset is not written: {written}"
+        );
+    }
+
+    #[test]
+    fn candidate_2_round_trips_with_and_without_a_no_change_outcome() {
+        for no_change in [
+            None,
+            Some(NoChange {
+                kind: "already_done".into(),
+                detail: "Transport sits in gh/transport.rs".into(),
+            }),
+        ] {
+            let mut c = sample_candidate();
+            c.base_fingerprint = Some("f".repeat(64));
+            c.producer_report = Some(sample_report(no_change.clone()));
+            let record = AnyRecord::Candidate2(Box::new(c));
+            let text = record.to_json();
+            assert_eq!(
+                text.contains("\"no_change\""),
+                no_change.is_some(),
+                "{text}"
+            );
+            assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), record);
+        }
     }
 
     #[test]
