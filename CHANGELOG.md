@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `athena status` prints one `learning:` line per repeated failure class under the `repeated` label, joining it to
+  its addressing request (landed or open) and the specialization and trend outcome of that request's class of work
+  (`learning::join`, requirement OLY-9-09). Nothing is printed when no cause repeated.
 - A new reading check, `reading::check_records_measure`, refuses a code or tests reading that changes a measure
   computed from Athena's records (throughput, the keep rule, planning cost, refusal rates, check durations, landing
   time) unless one behavior criterion runs it against real records and names an expected range from an independent
