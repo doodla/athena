@@ -49,7 +49,10 @@ Continuity and tidiness work (stale queue entries, leftover branches and caches,
      check run per commit SHA reused by the verifier, and wall time per verified result measured before and
      after. Designed in `docs/design/ci-routing.md` (the brief's 2026-10-16 addendum); review 1 is requested,
      not done, and nothing is built.
-  4. *Timings fed back.* Report invocation and job wall time per class of work, and use them to change
+  4. *Landing on host main.* Build each job's single landing commit on fetched host main with `Git::merge_tree`
+     instead of staging it on the local landing branch. Designed in
+     `docs/design/direct-main-merge-tree-landing.md` (throughput review `20261111-055051-tjym`); nothing is built.
+  5. *Timings fed back.* Report invocation and job wall time per class of work, and use them to change
      routing, ordering or the cache, so a recorded timing leads to a recorded change (AD-11).
   Mechanism rows are added to `docs/enforcement.md` when the tests exist.
 - **Done when:**
