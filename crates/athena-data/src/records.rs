@@ -2253,7 +2253,33 @@ mod tests {
             status: ProposalStatus::Pending,
             candidate_sha256: "a".repeat(64),
             notes: "No Jev.".into(),
+            evaluation: None,
         }
+    }
+
+    #[test]
+    fn a_proposal_with_an_evaluation_is_an_accepted_record_and_round_trips() {
+        let mut proposal = sample_proposal();
+        proposal.evaluation = Some(ProposalEvaluation {
+            cases: vec!["20261014-120000-ffff".into()],
+            baseline_failures: 1,
+            candidate_failures: 0,
+        });
+        let record = AnyRecord::DefaultsProposal(Box::new(proposal.clone()));
+        let path = record.canonical_path();
+        let checked = check_record_file(&path, record.to_json().as_bytes()).unwrap();
+        assert_eq!(checked, Some(record.clone()));
+        assert_eq!(
+            AnyRecord::parse("x", record.to_json().as_bytes()).unwrap(),
+            record
+        );
+        proposal.evaluation = Some(ProposalEvaluation {
+            cases: Vec::new(),
+            baseline_failures: 0,
+            candidate_failures: 0,
+        });
+        let bad = AnyRecord::DefaultsProposal(Box::new(proposal));
+        assert!(AnyRecord::parse("x", bad.to_json().as_bytes()).is_err());
     }
 
     #[test]

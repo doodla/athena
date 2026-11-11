@@ -12,6 +12,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `role_value` in `athena-core` (requirement OLY-9-12): judges a new role against a simpler alternative by reusing
   `method_experiment::compare`, and allows retiring a role only when all its knowledge items are recorded elsewhere.
 
+- `improvement_cycle` in `athena-data` (requirement OLY-10-02) and an `improvement cycle:` line in `athena status`:
+  shows whether the records hold the final acceptance chain (a landed repair, a process finding, a candidate
+  improvement linked to that finding by introspection id or failure class, an evaluation result, and an adoption
+  decision). The evaluated stage needs the new optional `evaluation` field of a defaults proposal (cases and the
+  failures of the baseline and candidate arms), never the number of jobs the proposal cites, so on records with no
+  evaluation the line reads `not shown (missing: evaluated candidate, ...)`; no records at all is never success.
+
 ### Changed
 
 - `athena status` prints one `learning:` line per repeated failure class under the `repeated` label, joining it to
