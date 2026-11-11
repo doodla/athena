@@ -209,6 +209,20 @@ pub fn positive_zero(value: f64) -> f64 {
     if value == 0.0 { 0.0 } else { value }
 }
 
+impl Records {
+    /// Every model invocation there is: the jobs' own, then the steward's, the audience's and the auditor's,
+    /// which are kept apart from `jobs`. A measure of which roles run must read this and never
+    /// `JobRecords::invocations` alone, or it cannot see those three roles.
+    pub fn all_invocations(&self) -> impl Iterator<Item = &Invocation> {
+        self.jobs
+            .values()
+            .flat_map(|j| j.invocations.iter())
+            .chain(self.steward_runs.iter())
+            .chain(self.audience_runs.iter())
+            .chain(self.auditor_runs.iter())
+    }
+}
+
 /// Every record at one commit.
 #[derive(Debug, Clone, Default)]
 pub struct Records {

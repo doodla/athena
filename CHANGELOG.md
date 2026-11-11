@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `role_need` in `athena-core` (requirement OLY-9-11) and a `role need` line in `athena status`, printed only when a
+  role is a retire candidate. Root cause fixed: a usage measure was written against one data source, the per-job
+  invocation list, so roles whose runs are outside job records (the steward, audience and auditor) looked unused and
+  would have been advised for retirement while running. `Records::all_invocations` now yields every run source, the
+  measure reads only it, it waits for a full window of 8 closed jobs, and class history is windowed to each class's
+  newest 8 closed jobs (failed, rejected and timed-out count as failed; declined and closed are left out). Tests build
+  Records with steward, audience and auditor runs outside the jobs and assert none is a candidate, and that the
+  measure gives both outcomes on a mixed fixture.
+
 - `role_value` in `athena-core` (requirement OLY-9-12): judges a new role against a simpler alternative by reusing
   `method_experiment::compare`, and allows retiring a role only when all its knowledge items are recorded elsewhere.
 
