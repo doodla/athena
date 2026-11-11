@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `athena status` prints `role need` lines (`role_need::RoleNeed`, requirement OLY-9-11): one per role saying in
+  use, retire candidate or not measured, and one per class of work whose newest closed jobs failed repeatedly.
+  Runs are counted from every place they are recorded, the job invocations and the separate steward, audience and
+  auditor run lists, so those three are never flagged for retirement because their runs are no job. A role with no
+  recorded run, or judged in a window of fewer than five runs, is shown as not measured. Advice only.
 - `athena status` prints one `learning:` line per repeated failure class under the `repeated` label, joining it to
   its addressing request (landed or open) and the specialization and trend outcome of that request's class of work
   (`learning::join`, requirement OLY-9-09). Nothing is printed when no cause repeated.
