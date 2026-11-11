@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261111-064834-q749",
+  "round": 3,
+  "at": "2026-11-11T07:13:17.465674485Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/common/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/common/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The Scenario reader change adds criteria that the Scenario verifier never judges, which breaks the CLI tests it is meant to protect",
+      "evidence": "I read verify.rs:533-544. For each reading criterion i it takes `inputs.output.criteria.get(i)`, and when there is none it records `met: false` with \"the verifier did not assess this criterion\". In common/mod.rs, `Scenario::default` sets `verdict: passing_verdict(2)`, which builds exactly two verdict criteria. drain.rs:6062-6071 shows that `rated_scenario`, used by the drain.rs:3988 and UNREAD_FIRST/UNREAD_SECOND tests, already has the criterion 'the demo study has a pin, claims and an intro'. Those requests would therefore pass the new check without any change. Under the plan's `covering_request`, though, they would get a third criterion with no verdict entry, and assertions such as `report.landed == 1` (drain.rs:4031, :4055) would fail. job_plan.rs:149-169 uses `Scenario::default()`, whose reading really does not cover 'the demo study has a pin', so it gets the same third criterion and the same unjudged failure. Fix: Change the Scenario seam so it adds only items that the reading does not already cover. Do this by calling the core coverage function, which CLI tests can reach because the cli crate depends on core, or by appending only when no existing criterion has the same text. Also size the Scenario verdict to the reading's criteria count, for example by building `passing_verdict(n)` from the reading actually returned, or by having the Reader branch record n for the Verifier branch. Better still, run the CLI suite first and fix only the scenarios that are actually refused: job_plan.rs:149 could set its own covering reading. Add verify.rs's index-matched verdict to the dependents list, with these tests as its coverage.",
+      "location": "Plan step 8 / Decision 7 / Files: crates/athena-cli/tests/common/mod.rs; crates/athena-core/src/verify.rs:532-544; crates/athena-cli/tests/common/mod.rs:401-414, 500",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out the verifier's index match against the reading's criteria count, and it misstates why the drain.rs tests need a fix",
+      "evidence": "The entry says the drain.rs tests at :3988, 4067, 4069, 4492, 4681 and 6320 are refused through the Scenario reader. They use `rated_scenario()` (drain.rs:3982, 4410, 6056-6071), whose criteria already restate their only bullet. The real reader of a changed criteria count is verify.rs:533 together with `passing_verdict(2)`, and the list does not mention it. That gap is exactly what lets the plan's own fix break those tests. Fix: Rewrite the entry. List `rated_scenario` tests as unaffected and job_plan.rs:142 as the one that is actually refused. Add an entry for verify.rs verdict-by-index and the Scenario `verdict` field, naming the tests that show bullet-request drains still land once the fixture changes.",
+      "location": "Dependents: 'reader that returns default_reading regardless of the request' entry",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The replay hold risk has no path to measurement before verification fails it",
+      "evidence": "System facts state that the producer snapshot has no records/, so no replay figure will appear in the producer's loop. verify.rs:500-529 records a Blocker when the replay share is held. Steward-generated requests all carry the bullet 'No unrelated behavior changes; the existing tests pass'. Under the plan's stop list its own stems are only {unrel, behav}, so readings whose criteria say only 'cargo test passes' would now be refused. Fix: State plainly that the share is first measured at verification. Add corpus Accept cases built from typical real Steward-reading criteria phrasings so the cost is visible. Consider letting a criterion that cites `cargo test` cover the 'existing tests pass' bullet, rather than relying on the stems 'unrelated' and 'behavior'.",
+      "location": "Risks: 'refused share may exceed the hold limit'; Step 13",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The capability guard is not stated",
+      "evidence": "The existing checks guard in different ways. For example, surveys.rs:92 skips only when `capability.is_none()`. The plan does not say whether study readings, or capabilities other than change, are checked. Fix: Name the exact guard, for example `reading.capability.is_none() || reading.question.is_some()`, and add one corpus case that pins it.",
+      "location": "Step 5: 'Skip when capability is not Some(\"change\")-style (follow the other checks' guard)'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The past-tense guard words are common and can hide a real deferral",
+      "evidence": "A current-tense deferral such as 'Part (3), which was the slowest, is left for a follow-up job' would be skipped because it contains 'was'. Only the coverage route would then catch it, and that route accepts when a sibling criterion's stems or a cited marker happen to cover the part. Fix: Skip a clause only when its past word governs the deferral phrase (for example 'was deferred', 'earlier reading deferred') or it names a job id. Add a corpus Refuse case with an incidental 'was' alongside a criterion citing (3).",
+      "location": "Coverage/DEFERRAL: past guard list (was, were, had, already, last)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Most of the plan checks out against the snapshot. refusing_check is at checks.rs:518 and check_reading_references is its last step (:546). fake.rs:311 emits one fixed criterion. The corpus `base_reading` copies `request_text_acceptance` bullets into the criteria, so existing bullet cases stay covered. Placing the new step last also keeps the `an_extra_check_with_no_case_is_reported` anchor valid. The plan has one concrete flaw, in the fixture fix for the CLI Scenario reader. The verifier matches verdict criteria to reading criteria by index (verify.rs:533-544), and a criterion with no verdict entry counts as unmet. Every Scenario verdict is built with `passing_verdict(2)`, which judges only two criteria. Appending request bullets to every Scenario reading therefore adds criteria nobody assesses, and runs that pass today would fail verification. That includes the drain.rs tests that use `rated_scenario`, whose reading already covers its bullet, so those tests need no fix at all. The plan's dependents list leaves out this verdict-by-index reader, and its reason for the change in drain.rs is wrong. The remaining points are minor: the replay hold risk has no route to measurement before verification, the capability guard is described only loosely, and the past-tense guard words are common."
+}

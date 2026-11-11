@@ -127,6 +127,28 @@ pub fn escape(text: &str) -> String {
     out
 }
 
+/// Escapes intro text and turns each `[[term]]` into a link to that term's one definition on the page
+/// (`#term-<term with - for spaces>`).
+fn linked(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some((before, after)) = rest.split_once("[[") {
+        let Some((term, tail)) = after.split_once("]]") else {
+            break;
+        };
+        out.push_str(&escape(before));
+        let _ = write!(
+            out,
+            "<a href=\"#term-{}\">{}</a>",
+            escape(&term.replace(' ', "-")),
+            escape(term)
+        );
+        rest = tail;
+    }
+    out.push_str(&escape(rest));
+    out
+}
+
 fn str_of<'a>(value: &'a Value, key: &str, what: &str) -> Result<&'a str> {
     value
         .get(key)
@@ -311,9 +333,10 @@ fn start_here(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Res
         let what = format!("start term {term}");
         let _ = write!(
             body,
-            "<dt>{}</dt><dd>{} {}</dd>",
+            "<dt id=\"term-{}\">{}</dt><dd>{} {}</dd>",
+            escape(&term.replace(' ', "-")),
             escape(term),
-            escape(str_of(t, "text", &what)?),
+            linked(str_of(t, "text", &what)?),
             cites(t, &what, known)?
         );
     }
@@ -394,7 +417,7 @@ fn transitions(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Re
             body,
             "<dt>{}</dt><dd>{} {}</dd>",
             escape(term),
-            escape(str_of(d, "text", &what)?),
+            linked(str_of(d, "text", &what)?),
             cites(d, &what, known)?
         );
     }
@@ -415,7 +438,7 @@ fn transitions(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Re
             escape(id),
             escape(str_of(t, "from", &what)?),
             escape(str_of(t, "to", &what)?),
-            escape(str_of(summary, "text", &summary_what)?),
+            linked(str_of(summary, "text", &summary_what)?),
             cites(summary, &summary_what, known)?
         );
         let _ = write!(
@@ -496,7 +519,7 @@ fn glossary(body: &mut String, study: &Study, known: &BTreeSet<String>) -> Resul
     for entry in entries {
         let term = str_of(entry, "term", "a glossary entry")?;
         let what = format!("glossary entry {term}");
-        let definition = escape(str_of(entry, "definition", &what)?);
+        let definition = linked(str_of(entry, "definition", &what)?);
         // Terms about the page's own structure make no claim about firstmate and need no citation.
         let cite = if entry.get("about").and_then(Value::as_str) == Some("page") {
             String::from("<span class=\"tag\">about this page</span>")
@@ -666,7 +689,7 @@ fn leadin(body: &mut String, intro: &Value, key: &str, known: &BTreeSet<String>)
         .get("leadins")
         .and_then(|l| l.get(key))
         .ok_or_else(|| anyhow!("intro.json has no lead-in `{key}`"))?;
-    let text = escape(str_of(item, "text", &what)?);
+    let text = linked(str_of(item, "text", &what)?);
     let _ = write!(
         body,
         "<p class=\"leadin\">{} {}</p>",
@@ -678,7 +701,7 @@ fn leadin(body: &mut String, intro: &Value, key: &str, known: &BTreeSet<String>)
 
 /// One sentence of the intro as a list item. It must cite at least one claim.
 fn intro_item(body: &mut String, item: &Value, what: &str, known: &BTreeSet<String>) -> Result<()> {
-    let text = escape(str_of(item, "text", what)?);
+    let text = linked(str_of(item, "text", what)?);
     let _ = write!(body, "<li>{} {}</li>", text, cites(item, what, known)?);
     Ok(())
 }
@@ -1310,17 +1333,98 @@ mod tests {
     }
 
     #[test]
-    fn in_scope_is_defined_in_the_start_terms_and_the_glossary_with_a_citation() {
+    fn in_scope_is_defined_once_in_the_start_terms_with_a_citation() {
         let html = render(&real_study()).unwrap();
         let start = html.find("<h2>Start here</h2>").unwrap();
         let first_use = html.find("<h3>What firstmate is</h3>").unwrap();
-        let at = html.find("<dt>in scope</dt>").unwrap();
+        let entry = "<dt id=\"term-in-scope\">in scope</dt>";
+        assert_eq!(html.matches(entry).count(), 1);
+        let at = html.find(entry).unwrap();
         assert!(start < at && at < first_use);
-        let entry = html.find("<dt id=\"term-in-scope\">in scope</dt>").unwrap();
-        let entry = &html[entry..];
-        let entry = entry.split("</dd>").next().unwrap();
+        let entry = html[at..].split("</dd>").next().unwrap();
         assert!(entry.contains("<span class=\"cites\">"));
         assert!(!entry.contains("about this page"));
+    }
+
+    /// The page text with tags and citation lists removed, so only the prose remains.
+    fn prose(html: &str) -> String {
+        let mut html = html.to_string();
+        while let Some(at) = html.find("<span class=\"cites\">") {
+            let end = at + html[at..].find("</span>").unwrap() + "</span>".len();
+            html.replace_range(at..end, "");
+        }
+        let mut out = String::new();
+        let mut in_tag = false;
+        for c in html.chars() {
+            match c {
+                '<' => in_tag = true,
+                '>' => {
+                    in_tag = false;
+                    out.push(' ');
+                }
+                c if !in_tag => out.push(c),
+                _ => {}
+            }
+        }
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn each_term_is_defined_once_and_every_term_link_resolves() {
+        let html = render(&real_study()).unwrap();
+        let page = prose(&html);
+        for (id, term) in [
+            ("yolo", "yolo"),
+            ("green", "green"),
+            ("red", "red"),
+            ("in-scope", "in scope"),
+            ("place", "place"),
+            ("places-held", "places-held"),
+            ("home", "home"),
+        ] {
+            let open = format!("<dt id=\"term-{id}\">{term}</dt><dd>");
+            assert_eq!(html.matches(&open).count(), 1, "definitions of {term}");
+            let at = html.find(&open).unwrap() + open.len();
+            let definition = prose(html[at..].split("</dd>").next().unwrap());
+            for sentence in definition.split_inclusive(". ") {
+                let sentence = sentence.trim();
+                assert!(sentence.len() > 20, "{term}: {sentence}");
+                assert_eq!(
+                    page.matches(sentence).count(),
+                    1,
+                    "{term}: definition sentence repeated: {sentence}"
+                );
+            }
+        }
+        let ids: Vec<String> = html
+            .split(" id=\"")
+            .skip(1)
+            .map(|s| s.split('"').next().unwrap().to_string())
+            .collect();
+        for id in &ids {
+            assert_eq!(ids.iter().filter(|i| *i == id).count(), 1, "id {id}");
+        }
+        let links: Vec<&str> = html
+            .split("href=\"#term-")
+            .skip(1)
+            .map(|s| s.split('"').next().unwrap())
+            .collect();
+        assert!(links.len() > 10);
+        for link in links {
+            assert!(
+                ids.contains(&format!("term-{link}")),
+                "link to missing term {link}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_term_marked_in_double_brackets_becomes_a_link() {
+        assert_eq!(
+            linked("a [[in scope]] <b>"),
+            "a <a href=\"#term-in-scope\">in scope</a> &lt;b&gt;"
+        );
+        assert_eq!(linked("open [[ only"), "open [[ only");
     }
 
     #[test]
@@ -1361,7 +1465,9 @@ mod tests {
 
     /// The glossary terms on the page, in page order.
     fn glossary_terms(html: &str) -> Vec<String> {
-        html.split("<dt id=\"term-")
+        let glossary = &html[html.find("<h2>Glossary</h2>").unwrap_or(0)..];
+        glossary
+            .split("<dt id=\"term-")
             .skip(1)
             .map(|s| {
                 let s = s.split_once('>').unwrap().1;
@@ -1463,8 +1569,10 @@ mod tests {
         let mut sorted = terms.clone();
         sorted.sort_by_key(|t| t.to_lowercase());
         assert_eq!(terms, sorted);
-        for term in ["green", "red", "home"] {
-            assert!(terms.iter().any(|t| t == term), "{term}");
+        assert!(terms.iter().any(|t| t == "home"));
+        // These are defined once, under "Words used first", and not again here.
+        for term in ["yolo", "in scope", "green", "red", "captain"] {
+            assert!(!terms.iter().any(|t| t == term), "{term}");
         }
     }
 
@@ -1517,7 +1625,10 @@ mod tests {
         let first_use = html.find("<h3>What firstmate is</h3>").unwrap();
         for term in ["captain", "yolo", "green", "red", "local-only landing"] {
             let at = html[start..first_use]
-                .find(&format!("<dt>{term}</dt>"))
+                .find(&format!(
+                    "<dt id=\"term-{}\">{term}</dt>",
+                    term.replace(' ', "-")
+                ))
                 .unwrap_or_else(|| panic!("{term}"));
             assert!(at > 0);
         }
