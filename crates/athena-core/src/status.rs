@@ -322,6 +322,23 @@ pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
 /// The line `athena status` prints for the latest build measurement (`athena measure-build`): T (one cold
 /// target directory), S (one worktree's sources), the wall time of each cold build and the compile-cache
 /// counts, with the commit and time it was taken. With no measurement it says so and how to make one.
+/// The line `athena status` prints for the final acceptance chain (spec OLY-10-02): shown only when a job
+/// whose outcome landed has a supported finding, an evaluated candidate and an adoption decision on record.
+pub fn improvement_cycle_line(records: &Records) -> String {
+    let landed: Vec<athena_data::JobId> = records
+        .jobs
+        .iter()
+        .filter(|(_, j)| {
+            j.outcome
+                .as_ref()
+                .is_some_and(|o| o.state == OutcomeState::Landed)
+        })
+        .filter_map(|(id, _)| athena_data::JobId::parse(id).ok())
+        .collect();
+    athena_data::records::improvement_cycle(&landed, &records.introspections, &records.proposals)
+        .line()
+}
+
 pub fn build_measurement_line(latest: Option<&BuildMeasurement>) -> String {
     let Some(m) = latest else {
         return "build      measurement: none yet (run `athena measure-build`, or the Hestia sweep makes one)"
@@ -427,6 +444,8 @@ pub struct StatusView {
     /// The latest build measurement as one printed line ([`build_measurement_line`]), or the line that says
     /// there is none yet.
     pub build_measurement: String,
+    /// The final acceptance chain as one printed line ([`improvement_cycle_line`]).
+    pub improvement_cycle: String,
     /// Classes of work whose minutes per landed job fell or rose between their older and newer landed jobs,
     /// with the job after which a rising class got worse; absent until a class has enough landed jobs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1275,6 +1294,7 @@ impl Athena {
             build_measurement: build_measurement_line(BuildMeasurement::latest(
                 &records.build_measurements,
             )),
+            improvement_cycle: improvement_cycle_line(&records),
             class_trend: crate::class_trend::ClassTrend::compute(&records),
             interventions_by_category: by_category,
             interventions_by_class: by_class,
