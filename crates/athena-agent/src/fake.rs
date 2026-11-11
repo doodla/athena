@@ -366,7 +366,8 @@ fn producer_turn(spec: &AgentInvocation) -> FakeTurn {
         "mistakes": [],
         "learnings": [],
         "desires": [],
-        "unchanged_planned_files": unchanged
+        "unchanged_planned_files": unchanged,
+        "no_change": null
     }));
     turn.edits.push((
         FAKE_DELIVERABLE.to_string(),

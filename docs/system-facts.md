@@ -9,6 +9,9 @@ whole. Each fact names its source. Where the source is a request and not code, t
 - **Producer snapshot.** A producer works in a one-commit snapshot of the base commit, in a git repository of
   its own with no remote and no other branches. `records/` and history are absent. Source: the
   "Working directory" text of the producer brief in `crates/athena-context/src/briefs.rs`.
+- **Empty producer diff.** A producer run that leaves the tree unchanged fails the job. The failure reason carries
+  the report's `no_change` outcome (`already_done`, `blocked` or `gave_up`, with its detail), or says that no
+  reason was reported. Source: `no_change_reason` in `crates/athena-core/src/run/candidate.rs`.
 - **Plain copy for readers.** The reader, planner and critic get a plain copy of the files, without git or
   `records/`. Source: the user's request of 2026-10-25 (BRIEF.md addendum); the code that makes the copy was
   not checked when this file was written.

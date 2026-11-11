@@ -1,0 +1,368 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261111-164002-rgay",
+  "round": 1,
+  "at": "2026-11-11T19:13:20.164646375Z",
+  "invocation_seq": 2,
+  "approach": "Give the producer the information it lacked and keep what it says. (1) Add an optional `no_change` outcome to the producer's structured output (`ProducerOutput`, serde(default)): kind `already_done` | `blocked` | `gave_up`, plus a detail (evidence, blocker or reason). (2) Add a matching `NoChange` to the kept `ProducerReport` (serde(default), skipped when absent, so old records parse and serialize byte-identically); `redact_report` redacts the detail and carries it over. (3) The Rust-built producer brief gets a short section telling the producer to set `no_change` whenever it leaves the tree unchanged. (4) `candidate_stage` builds its empty-diff reason with a pure `no_change_reason(report, gaps, kept_in)`: with an outcome the reason is \"the producer made no change; it reported <kind>: <detail>\"; with none it says \"the producer made no change and reported no reason: the report's no_change field was empty\". The existing gaps suffix stays. The job still fails exactly as before; only its recorded reason changes. No admission, gate or check is added, so no refusal rule is added and no refused-readings share applies. Root cause for the CHANGELOG and the D171 entry: the producer was never asked for a no-change outcome and Athena dropped the report it had when the diff was empty, so an empty diff was a bare failure. candidate.rs is governed by D08 (docs/decision-links.toml:212-217), so the decision gate needs a new decisions.md entry and a [[link]]; both are in the plan.",
+  "decisions": [
+    {
+      "choice": "Make the outcome a required-by-schema but nullable field `no_change: Option<NoChangeOutput>` on ProducerOutput, with #[serde(default)] for parsing.",
+      "reason": "`harden` in outputs.rs:546-562 lists every property as required, so the model must always answer the question (null when it changed something). #[serde(default)] keeps every existing fake report and test fixture (run_pin_tests.rs:1062-1072, tests/common/mod.rs:370-381) parsing. `harden` recurses into `anyOf` (outputs.rs:555-560), so the nested object also gets additionalProperties false.",
+      "rejected": [
+        {
+          "option": "Reuse `open_issues` or `summary` and parse text out of them",
+          "why": "Free text cannot be told apart from an ordinary report, which is the bare-reason problem again."
+        },
+        {
+          "option": "A non-nullable struct that is always present",
+          "why": "A producer that changed files would have to invent a no-change outcome."
+        }
+      ]
+    },
+    {
+      "choice": "The kept record uses `kind: String` holding the snake_case kind, not a new enum in athena-data.",
+      "reason": "athena-data cannot depend on athena-context, and the neighbouring records already use strings (`ReportedCheck.result`, `ReportedCriterion.status`, records.rs:760-775). The reason text maps the kind by replacing `_` with a space (`already_done` reads \"already done\"), so core needs no enum.",
+      "rejected": [
+        {
+          "option": "Move the kind enum into athena-data and re-export it from context",
+          "why": "A wider change across crates for no extra behavior; a string matches the existing record style."
+        }
+      ]
+    },
+    {
+      "choice": "Fix it by information, not refusal: the brief asks for the outcome, the report keeps it, the failure reason shows it. A missing outcome still fails the job, with the same state as today.",
+      "reason": "The request prefers giving the stage the information. A refusal rule is allowed only when information cannot prevent the failure, and the information here reaches the reader of the reason. Nothing is refused that was not already failing, so there is no refused-readings share.",
+      "rejected": [
+        {
+          "option": "Pre-dispatch check that refuses a job when the named source symbol or file is absent (introspection 7whw)",
+          "why": "It is a refusal rule, and the reading puts it out of scope. The recorded `already_done` evidence tells the next reader the same fact."
+        },
+        {
+          "option": "Send the producer back when the diff is empty and no outcome is given",
+          "why": "It adds a new hold on work. The brief change comes first, and a producer that gives no reason is recorded as such."
+        }
+      ]
+    },
+    {
+      "choice": "Put the reason wording in a pure function `no_change_reason` in candidate.rs, called from candidate_stage, and unit-test it in run/tests.rs. The behavior tests go in crates/athena-cli/tests/retry.rs.",
+      "reason": "candidate_stage already holds the report (`candidate.producer_report` after build_candidate, candidate.rs:129-133) and builds the bare text at lines 138-150, so the fix sits where the reason is made. retry.rs already has the `Scenario` fake and `Fixture` seam, and the existing idle-producer test at retry.rs:840-866 shows the pattern.",
+      "rejected": [
+        {
+          "option": "Set the reason in producer_loop",
+          "why": "The loop does not decide the job is empty; candidate_stage does (candidate.rs:138). A second place would drift from the first."
+        }
+      ]
+    },
+    {
+      "choice": "Add docs/decisions.md D171 and a docs/decision-links.toml [[link]] older D08, newer D171, status amended, saying D08 was checked and stands. List them in files.",
+      "reason": "candidate.rs is governed by D08 (docs/decision-links.toml:212-217). `producer_loop` sends a change that touches it without reconciling back (producer.rs:469-473), and the gate at the candidate closes the job (checks.rs:21-52). Without both files the job ends at the decision gate. Allowed paths are none for this reading (no limiting criterion), so the two files are not outside scope.",
+      "rejected": [
+        {
+          "option": "Avoid touching candidate.rs",
+          "why": "The bare reason is built there, and it is the first deliverable."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "purpose": "Add `NoChangeKindOutput` (already_done, blocked, gave_up; snake_case) and `NoChangeOutput { kind, detail }`, and `no_change: Option<NoChangeOutput>` on ProducerOutput with #[serde(default)] and a doc comment (it becomes the schema description), plus unit tests on the schema and parsing.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `NoChange { kind: String, detail: String }` and `no_change: Option<NoChange>` on ProducerReport with #[serde(default, skip_serializing_if = \"Option::is_none\")]; tests for old-shape parse, skipped-when-absent output and an AnyRecord round trip.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `no_change_section()` (short) and call it in `producer_brief_with_evidence` before the Report section, telling the producer to set `no_change` whenever it leaves the tree unchanged: `already_done` with the evidence it found, `blocked` with the blocker, or `gave_up` with the reason, and null otherwise; unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "In `redact_report`, add the no_change detail to the redacted text list (last, after criteria_check) and carry the kind and redacted detail into ProducerReport.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/candidate.rs",
+      "action": "modify",
+      "purpose": "Add the pure `pub(super) fn no_change_reason(report, report_gaps, report_kept_in) -> String`; candidate_stage uses it for the empty-diff reason, read from `candidate.producer_report` after build_candidate. State and Flow::Stop are unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Only the doc comment on `producer_loop` and the comment at line 439 (an empty diff fails in candidate_stage and its reason carries the report's no_change). No control flow change. Drop this file from the diff if the comment edit is not needed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Unit tests for `no_change_reason`: each kind, a blank detail, a missing report, and the gaps suffix.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "purpose": "Four new behavior tests (already done with evidence, blocked, gave up, nothing reported) through Athena::go with a no-edit Scenario; the existing assertion at line 857 stays.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "Add `\"no_change\": null` to the deterministic producer's report so it matches the schema.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `no_change: None` to the ProducerReport literal in the test helper at line 3862, so the crate compiles. Not in the brief's list; compile-forced.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry naming the root cause (the producer was not asked for a no-change outcome and Athena discarded it, so an empty diff was a bare failure) and the fix.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Add one fact: a producer run with an empty diff fails the job, and the reason carries the report's `no_change` kind and detail or says none was reported; source `crates/athena-core/src/run/candidate.rs` (`no_change_reason`). Leave the budget lines alone.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D171 in the shape of D160 (docs/decisions.md:4435): the case (both jobs), the root cause, the decision, the callers touched with tests, alternatives (the pre-dispatch check was turned down as a refusal rule), and 'D08 was checked and stands'. Needed for the decision gate on candidate.rs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Add a [[link]] with `line` = the heading line of D171, older = \"D08\", newer = \"D171\", status = \"amended\", with a comment saying D08 was checked and stands (copy the D157 and D160 links at lines 180-192).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "outputs.rs: add `NoChangeKindOutput` (Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema; rename_all snake_case; AlreadyDone, Blocked, GaveUp) with `as_str()`, and `NoChangeOutput { kind, detail }` (deny_unknown_fields). Add `#[serde(default)] pub no_change: Option<NoChangeOutput>` to ProducerOutput (outputs.rs:117-140) with a doc comment: 'Set only when you leave the tree unchanged: already_done with the evidence you found, blocked with the blocker, or gave_up with the reason. Null when you changed files.' Add tests: the schema requires `no_change`, the nested object forbids extra properties, JSON without the key parses to None, and a full value parses.",
+    "records.rs: add `NoChange { kind: String, detail: String }` (Debug, Clone, PartialEq, Serialize, Deserialize, deny_unknown_fields) and `#[serde(default, skip_serializing_if = \"Option::is_none\")] pub no_change: Option<NoChange>` on ProducerReport (records.rs:780-791), with a doc comment 'Absent in records made before the no-change outcome, and when the producer changed files.' Add tests: an old-shape report parses to None, an unset field is not written, and a Candidate2 AnyRecord with a no_change round-trips through to_json and parse.",
+    "run/mod.rs `redact_report` (2482-2539): push `report.no_change.detail` (or an empty string) onto the text vector after the criteria_check texts, take it back after criteria_check, and build `no_change: report.no_change.map(|n| NoChange { kind: n.kind.as_str().into(), detail })`. Fix the ProducerReport literal in reading.rs:3862 with `no_change: None`.",
+    "candidate.rs: add `pub(super) fn no_change_reason(report: Option<&ProducerReport>, report_gaps: &[String], report_kept_in: &str) -> String`. Base text: with an outcome, `the producer made no change; it reported {kind with _ replaced by a space}: {detail}` (a blank detail reads `no detail given`); with a report but no outcome, `the producer made no change and reported no reason: the report's no_change field was empty`; with no report, `the producer made no change and gave no report, so no reason is recorded`. When report_gaps is non-empty, append `, and its report still had problems when sent back: {gaps}; the report is kept in {kept_in}`, exactly as the old text. In candidate_stage replace the `let reason = if ...` block (lines 140-147) with a call that reads `candidate.producer_report.as_ref()` before `closing.candidate = Some(candidate)`. The state stays Failed and Flow::Stop stays. Update the comment at producer.rs:439 if wanted.",
+    "briefs.rs: add `fn no_change_section() -> String` with a heading and 3 to 4 short sentences: if you leave the tree unchanged, set `no_change` in your report to `already_done` with the evidence (the file and symbol you found in place), `blocked` with the blocker, or `gave_up` with the reason; set it to null when you changed files; Athena records it as the job's failure reason. Call it in `producer_brief_with_evidence` just before the `## Report` heading (briefs.rs:741). Add the unit test `producer_brief_asks_for_a_no_change_outcome_when_the_tree_is_unchanged`.",
+    "fake.rs: add `\"no_change\": null` to the deterministic producer report (fake.rs:360-370).",
+    "run/tests.rs: add a test module for `no_change_reason` (three kinds, blank detail, missing outcome, missing report, and the gaps suffix after an outcome).",
+    "retry.rs: add a helper `idle_job_with(no_change: Option<Value>) -> Finished` that builds `Scenario { edits: vec![], report: <producer_report(...) with the optional \"no_change\" key>, ..Scenario::default() }`, runs it with `fx.athena(scenario.script())`, `athena.ask` and `run_retry`, and returns the Finished. Add the four tests named in the demonstrations. The already_done test also loads Records and checks the candidate's producer_report.no_change. Keep the assertion at retry.rs:857.",
+    "docs/decisions.md: append D171, written in the shape of D160 (docs/decisions.md:4435): the case (jobs 20261027-011733-vrsk and 20261111-145400-dx3z), the root cause, the decision, the touched code and covering tests, alternatives (the pre-dispatch check was declined as a refusal rule), and 'D08 checked and stands'. Check the mirror registry's decision-entry structure rules while writing it.",
+    "docs/decision-links.toml: add a [[link]] older = \"D08\", newer = \"D171\", status = \"amended\", with `line` set to the line of the D171 heading, and a comment in the style of lines 180-192.",
+    "CHANGELOG.md: add the Unreleased entry naming the root cause and the fix. docs/system-facts.md: add the one fact bullet and do not touch the `- budget` lines.",
+    "Run cargo fmt --all, then cargo clippy --all-targets --locked -- -D warnings and cargo test --locked, fixing any ProducerReport literal clippy finds."
+  ],
+  "risks": [
+    {
+      "risk": "The brief addition could break an existing briefs.rs test that counts sections or checks the brief's order or length.",
+      "mitigation": "The fixed section is short, and the brief is built in Rust, outside the prompt-set budgets (docs/system-facts.md). The producer must run `cargo test -p athena-context` and the budgets test to confirm no brief-size assert exists or breaks."
+    },
+    {
+      "risk": "The failed job's candidate record may not be stored (the retry tests read records only for finished jobs), so the record assertion could fail for a reason unrelated to this change.",
+      "mitigation": "The new retry test loads Records and asserts the failed job's candidate holds the report's no_change. The reason string, which is what the user reads, is asserted separately from the record. If the record turns out not to be kept for a failed job, the producer reports that and keeps the reason-only assertion."
+    },
+    {
+      "risk": "Making `no_change` a required schema property could be rejected by the real model's structured-output validator, or the model could answer with an object where null is expected.",
+      "mitigation": "Treat the schema change as additive and nullable. Step 1's test checks the schema shape (`required` contains `no_change`, additionalProperties false on the nested object), so a shape the validators would reject shows up there. Nothing in this job's checks calls a real model, so the first live run is the real test."
+    },
+    {
+      "risk": "A producer may report `already_done` wrongly, so the reason could mislead a later reader.",
+      "mitigation": "The reason says plainly that the outcome is the producer's claim and names the detail. It is recorded for the next reader and does not change the job's state. The out-of-scope list keeps automatic retry or reclassification off."
+    },
+    {
+      "risk": "The decision gate (D08 governs candidate.rs) or the mirror registry's decision-log structure check could send the job back or fail the test check.",
+      "mitigation": "D171 and the link are in the plan. The producer follows the D157/D160 pattern and runs the mirror test. The `line` value must be the actual heading line of D171 in the file."
+    },
+    {
+      "risk": "A ProducerReport struct literal in a place the search missed fails to compile.",
+      "mitigation": "Adding `no_change: None` to the one literal found by search (reading.rs:3862), then `cargo clippy --all-targets` finds any other literal."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "ProducerOutput gains `no_change` (serde(default))",
+      "dependent": "crates/athena-core/src/run/producer.rs:420-430 (parses the structured output with serde_json::from_value::<ProducerOutput>)",
+      "kind": "code",
+      "test": "Existing lifecycle and retry tests whose fake reports lack `no_change` still parse (tests/common/mod.rs:370-381); the new retry.rs tests send reports with it.",
+      "reason": null
+    },
+    {
+      "name": "ProducerOutput field set",
+      "dependent": "crates/athena-core/src/run/send_back.rs:18-37 (`unmet_criteria`, `left_to_athena`) and run/mod.rs:1600 (`unchanged_planned_files`)",
+      "kind": "code",
+      "test": null,
+      "reason": "They read only criteria_check, unchanged_planned_files and named fields, never the full field set. No change in their behavior; the added field is not read by them."
+    },
+    {
+      "name": "ProducerOutput JSON without `no_change`",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:1062-1072 and 1179 (`report` and `report_explaining` build ProducerOutput from JSON) and send_back.rs:382",
+      "kind": "code",
+      "test": "`cargo test --locked -p athena-core --lib run_pin_tests` and the send_back unit tests; serde(default) keeps them parsing.",
+      "reason": null
+    },
+    {
+      "name": "ProducerReport gains `no_change`",
+      "dependent": "crates/athena-core/src/run/mod.rs:2482-2539 (`redact_report`, the only production builder of ProducerReport) and crates/athena-core/src/reading.rs:3862 (a test helper with a ProducerReport struct literal)",
+      "kind": "code",
+      "test": "New retry.rs test that checks the stored record has the redacted detail; reading.rs:3862 gets `no_change: None`. That test helper is the one compile-time dependent outside the listed deliverables, so reading.rs is added to files. Its test module's own tests (`cargo test --locked -p athena-core --lib reading`) cover it.",
+      "reason": null
+    },
+    {
+      "name": "Stored ProducerReport shape (deny_unknown_fields)",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:1707 (parses a kept ProducerReport from an invocation detail) and every stored record under records/ with a `producer_report` (Candidate, records.rs:815)",
+      "kind": "code",
+      "test": "New records.rs test parses an old-shape report and checks that an unset `no_change` is skipped on write, so existing records stay byte-identical. The existing `candidate_2_round_trips_*` and `candidate_1_still_parses_*` tests (records.rs:1867-1893) pass unchanged.",
+      "reason": null
+    },
+    {
+      "name": "Candidate.producer_report",
+      "dependent": "crates/athena-core/src/land.rs:388, state.rs:817, gate_counts.rs:253, crates/athena-gate/src/landing_tests.rs:184, crates/athena-cli/tests/reconcile.rs:43, introspection.rs:1163, reading.rs:3212 (Candidate literals with `producer_report: None`)",
+      "kind": "code",
+      "test": null,
+      "reason": "They set `producer_report: None`; the Candidate struct itself does not change, only the type inside the Option. No change to them."
+    },
+    {
+      "name": "Failure reason text \"the producer made no change\" (and the gaps suffix)",
+      "dependent": "The empty-diff failure reason in crates/athena-core/src/run/candidate.rs:140-148, read by crates/athena-cli/tests/lifecycle.rs:1461 and :1667, retry.rs:857, run_pin_tests.rs:1717 and lifecycle.rs:1635 (the last two check that \"still had problems when sent back\" is absent or present)",
+      "kind": "code",
+      "test": "The new text keeps the prefix \"the producer made no change\" and the suffix \"and its report still had problems when sent back: ...; the report is kept in ...\", so these asserts hold. Run `cargo test --locked -p athena-cli --test lifecycle --test retry` and `cargo test --locked -p athena-core --lib run_pin_tests`.",
+      "reason": null
+    },
+    {
+      "name": "Failure reason of an empty-diff job",
+      "dependent": "Anything that matches failure-reason text: introspection and failure-class code, `GATE_REASON_PREFIX` in crates/athena-data/src/decision_links.rs, and the retry reader",
+      "kind": "code",
+      "test": null,
+      "reason": "Searched crates/**/*.rs for \"made no change\", \"idle producer\", \"empty candidate\" and \"no_change\": only candidate.rs, tests and briefs.rs:731 and :1769 (the 'fails as an empty candidate' brief text, untouched) match. No code branches on the reason's text, and `Happened.reason` is stored as a string (mod.rs:2542)."
+    },
+    {
+      "name": "Fake producer report shape",
+      "dependent": "crates/athena-agent/src/fake.rs:360-370 (deterministic producer report) and crates/athena-cli/tests/common/mod.rs:370 (`producer_report` helper)",
+      "kind": "code",
+      "test": "fake.rs gets `\"no_change\": null` in the deterministic report, to match the schema. The fake-producer unit tests at fake.rs:574-594 pass. The common/ helper is left as it is, because `no_change` is serde(default); the new retry tests add the key to a copy of the report.",
+      "reason": null
+    },
+    {
+      "name": "Change to a path D08 governs",
+      "dependent": "docs/decision-links.toml:212-217 ([[governs]] D08 over candidate.rs) and the decision gate (run/checks.rs:21-52; `unreconciled_in_snapshot` called at producer.rs:469)",
+      "kind": "rule",
+      "test": "Plan steps 9-10 add the D171 entry and the [[link]] older D08 newer D171. The decision-gate and mirror tests (`cargo test --locked -p athena-core --lib` and the repo `mirrors` test) cover both files, and the producer loop sends back the diff if the gate is not satisfied.",
+      "reason": null
+    },
+    {
+      "name": "docs/system-facts.md edit",
+      "dependent": "crates/athena-cli/tests/budgets.rs (`system_facts_budgets_match_computed`), xtask/tests/policy.rs:1104 (docs/system-facts.md is a compiled-in CI cache input), and the boundary scan",
+      "kind": "rule",
+      "test": "cargo test --locked -p athena-cli --test budgets; cargo test --locked -p xtask",
+      "reason": "The edit adds one fact bullet and leaves the six `- budget <set>:` lines unchanged; the prompt files are untouched, so no budget value moves. The bullet contains no banned word and no email-like text."
+    },
+    {
+      "name": "Producer prompt budget",
+      "dependent": "crates/athena-context/prompts/producer.md (and crates/athena-cap-change/prompts/producer.md), within the producer budget of 1043 of 1200",
+      "kind": "rule",
+      "test": null,
+      "reason": "The prompt files are not edited. The instruction goes in the Rust-built brief, which sits outside the budget sets (docs/system-facts.md, 'Prompt sets and budgets'), so the 157-token headroom is not used."
+    },
+    {
+      "name": "Admission, gate and reading rules",
+      "dependent": "crates/athena-core/src/admission.rs, run/checks.rs, crates/athena-gate, crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "None is changed: the plan adds no rule that refuses or holds work, only the text of a reason that already fails the job. No refusal_corpus case is needed, so `cargo test -p athena-core --test refusal_corpus` is neither changed nor a demonstration here."
+    },
+    {
+      "name": "Description of the producer report fields",
+      "dependent": "docs/agent-reference.md (the optional plan-field and report reference named in producer.md:12)",
+      "kind": "code",
+      "test": null,
+      "reason": "The schema description (the doc comment on `no_change`) and the brief now state the field, and the prompt says every rule is stated in the brief. The reference is optional reading and no test parses it."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test `an_idle_producer_reporting_already_done_fails_with_the_kind_and_evidence` in retry.rs. A Scenario with `edits: vec![]` and a report whose `no_change` is `{\"kind\":\"already_done\",\"detail\":\"Transport is already in gh/transport.rs (grep found it at line 12)\"}`. The job is asked and run with the existing `run_retry` helper. The test asserts the state is Failed and the reason contains \"the producer made no change\", \"already done\" and the evidence text. It then loads Records and asserts the failed job's candidate record has producer_report.no_change with the same kind and detail.",
+      "command": "cargo test --locked -p athena-cli --test retry an_idle_producer_reporting_already_done",
+      "observes": "The finished job's `reason` string and the stored candidate record hold the kind and the evidence, not only the bare sentence.",
+      "fails_without": "On the base commit ProducerOutput has deny_unknown_fields and no `no_change` field, so the report is rejected and the reason is \"the producer returned no valid report\". Even if it parsed, the reason would be the bare \"the producer made no change\", which does not contain \"already done\" or the evidence string, so the test's contains assertions fail.",
+      "seam": "Production entry point: `Athena::go`, which runs produce_and_verify, producer_loop and candidate_stage. The fixture is `Fixture::new()` and `Scenario` from crates/athena-cli/tests/common/mod.rs, injected with `fx.athena(scenario.script())` as a FakeAgentDriver script. The report is plain JSON with the `no_change` key set in the test, and the fake does no reasoning. Both exist today (retry.rs:840-853 uses the same pattern). The only addition is the `no_change` field in the production types (steps 1-2), which the test's JSON needs to parse. Guard: edits empty, so snapshot.change_list() is empty and candidate_stage takes the no-candidate branch (candidate.rs:138). The producer loop does not send an empty-diff report back unless a criterion is unmet, and the Scenario default fills every criterion as met (common/mod.rs:591-604)."
+    },
+    {
+      "criterion": 2,
+      "method": "Three more retry.rs tests with the same helper: `an_idle_producer_reporting_blocked_fails_with_the_blocker` (reason contains \"blocked\" and the blocker text), `an_idle_producer_reporting_gave_up_fails_with_the_reason` (contains \"gave up\" and the reason text), and `an_idle_producer_reporting_nothing_fails_naming_the_missing_no_change_field` (the default report with no `no_change` key; the reason contains \"reported no reason\" and \"no_change\"). In run/tests.rs, a unit test module on `no_change_reason` covers all three kinds, a blank detail (\"gave no detail\"), a missing report, and the gaps suffix still ending with \"the report is kept in ...\".",
+      "command": "cargo test --locked -p athena-cli --test retry an_idle_producer_reporting && cargo test --locked -p athena-core --lib no_change_reason",
+      "observes": "Every kind, and the absent case, produces a distinct reason that names what was or was not reported.",
+      "fails_without": "On the base commit, blocked and gave_up reports are rejected (unknown field) or fall back to the bare reason, so the kind and detail asserts fail. For the missing case, the bare reason does not name `no_change`, so the assert on that word fails.",
+      "seam": "The same retry.rs seam as criterion 1, which exists today. `no_change_reason` is a new `pub(super)` function in candidate.rs (step 4), reached from run/tests.rs via `super::super::candidate::no_change_reason` (candidate is a private child of `run`, mod.rs:61, so the tests module may use it). Its input is a plain `ProducerReport` value; the function does the formatting and nothing is stubbed."
+    },
+    {
+      "criterion": 3,
+      "method": "New briefs.rs unit test `producer_brief_asks_for_a_no_change_outcome_when_the_tree_is_unchanged`, built like `producer_briefs_list_every_criterion_to_copy_and_ask_for_one_entry_each` (briefs.rs:1515-1548). It builds a ProducerInputs, calls `producer_brief`, and asserts the text has the section heading and the words `no_change`, `already_done`, `blocked`, `gave_up`, \"evidence\" and \"leave the tree unchanged\". `git diff crates/athena-context/src/briefs.rs` shows the new `no_change_section()` and its call in `producer_brief_with_evidence` before \"## Report\" (briefs.rs:741).",
+      "command": "cargo test --locked -p athena-context producer_brief_asks_for_a_no_change_outcome",
+      "observes": "The brief text carries the instruction.",
+      "fails_without": "Without the new section, producer_brief output lacks \"no_change\", \"already_done\", \"blocked\" and \"gave_up\", so the test's contains asserts fail.",
+      "seam": "Production entry point `producer_brief` (briefs.rs:672). The `reading()`, `defaults()` and `ProducerInputs` fixtures are the existing test helpers at briefs.rs:1515. No double. The seam exists today."
+    },
+    {
+      "criterion": 4,
+      "method": "outputs.rs: a test that producer_schema()['required'] contains `no_change`, that its object form has additionalProperties false, and that a ProducerOutput JSON without the key parses with `no_change == None` while one with it parses to the kind and detail. records.rs: a test that ProducerReport JSON from before the change parses with `no_change == None` and serializes without the key. Another test round-trips an `AnyRecord::Candidate2` holding a producer_report with and without a no_change, through `to_json` and `AnyRecord::parse`. The existing `candidate_2_round_trips_*` and `candidate_1_still_parses_*` tests run unchanged. `run_pin_tests.rs:1707` still parses an old kept report. `git diff` shows `#[serde(default)]` on both new fields.",
+      "command": "cargo test --locked -p athena-context outputs && cargo test --locked -p athena-data records && cargo test --locked -p athena-core --lib run_pin_tests",
+      "observes": "The new field is optional on read, absent on write when unset, and required in the model's schema as nullable.",
+      "fails_without": "If the field lacked serde(default), the old-shape JSON in the new tests (no `no_change` key) would fail to parse. If the schema left `no_change` out, the producer_schema assertions would fail. Without skip_serializing_if, the round-trip text assert for an absent key would fail.",
+      "seam": "Production entry points: `producer_schema`, serde for ProducerOutput and ProducerReport, and `AnyRecord::parse` / `to_json`. They use in-memory JSON and the existing `sample_candidate()` fixture (records.rs:1852), which exist today. No double."
+    },
+    {
+      "criterion": 5,
+      "method": "Read `git diff --stat` and `git diff crates/athena-core/src/run/candidate.rs`: the only change to the empty-diff branch is the reason text. The state is still `OutcomeState::Failed` through `self.failure`, the early `return Ok(Flow::Stop)` stays, and nothing in crates/athena-core/src/admission.rs, run/checks.rs, run/producer.rs's send-back conditions (producer.rs:488-495) or crates/athena-gate is touched. The existing `a_producer_that_makes_no_change_fails_whatever_its_test_result` (lifecycle.rs:1447) and `an_unseeded_run_whose_producer_changes_nothing_still_fails` (retry.rs:840) still pass, so an empty diff still fails.",
+      "command": "git diff --stat",
+      "observes": "An empty diff still ends the job as Failed, and no new admission, gate or check appears in the diff.",
+      "fails_without": "Not a behavior check. A rule added elsewhere would show as a diff in admission.rs, checks.rs, reading/checks.rs or a gate crate, and the stat would list it.",
+      "seam": "Inspection of git diff, plus the two existing tests above, run through `cargo test --locked -p athena-cli --test lifecycle --test retry`. Both exist today."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the new entry under the Unreleased heading. It names the root cause: the producer was not asked for a no-change outcome and Athena discarded the report it had, so an empty diff was a bare failure. It also says the fix: the brief asks for `no_change`, the report and record keep it, and the failure reason shows it. It mentions jobs 20261027-011733-vrsk and 20261111-145400-dx3z.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The CHANGELOG diff shows the root-cause sentence.",
+      "fails_without": "Without the entry the diff of CHANGELOG.md is empty. Admission also refuses a change reading that leaves it untouched (producer.rs:445-451).",
+      "seam": "Inspection of the diff; no code path. Admission's `changelog_required` already applies to this change reading, so the entry is also needed to land."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three commands whole. Also the decision-gate and mirror tests cover the docs/decisions.md and decision-links.toml edits, and the budgets test covers docs/system-facts.md (`system_facts_budgets_match_computed`; no budget line changes, and the prompts are untouched).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three pass.",
+      "fails_without": "Not applicable: this is the check suite itself. A struct literal of ProducerReport left without `no_change` would fail to compile in cargo clippy and cargo test; reading.rs:3862 is one.",
+      "seam": "The commands themselves. They exist today."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "58db9f0cfc59386de978a70aeca1bdecc783eda4a6ef341352a2218b6e88e616"
+}

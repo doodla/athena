@@ -1,0 +1,104 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261111-222407-mz22",
+  "base_commit": "f7002de243407376ca2ee40402607e1fdfa7aa44",
+  "base_fingerprint": "sha256:77813f95888e424f44f5bb4b38246c822235ec35dd489dde9136aecb881ec291",
+  "previous_job": "20261111-164002-rgay",
+  "candidate_commit": "78141d3a4b736da491bec084ff47938f92e0aeaa",
+  "candidate_tree": "81d9768bd94b1c44fbc93f5ac8ff11e613602e72",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 431845
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 189238
+    }
+  ],
+  "fingerprint": "sha256:9b0cf3c82a0b422347aa627db788f22beb2226b4c364eb57ee6871e61ca4ce56",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: the producer brief never told the producer to find the existing tests that read the output it changes (status, plan, display text) and run them before reporting, so a broken test surfaced only at the final verdict (jobs 20261111-105048-n7bm and 20261111-213010-8jgz). Fix: a new `existing_tests_section()` in crates/athena-context/src/briefs.rs, emitted by `producer_brief_with_evidence` after the replay section and before \"## Commands Bash may run\". It tells the producer to name each changed output, Grep `tests/` and the test modules for it, run each test with `cargo test -p <crate> --test <name>`, then the whole crate, and cite the commands and any failing test name in the evidence. It is information only; no gate or refusal rule, so 0% newly refused. The new unit test `producer_brief_tells_the_producer_to_run_existing_tests_that_read_its_output` covers a plain brief, a retry brief and a brief with an evidence path. CHANGELOG.md has an entry. One catch: the policy scan cuts a source file's production text at the first literal test-module marker, so the section spells that marker in two pieces with `concat!`. A literal marker before the `include_str!` of docs/system-facts.md made `athena_bin_keys_cover_every_compiled_in_file` fail.",
+    "files": [
+      "crates/athena-context/src/briefs.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p athena-context briefs::tests::producer_brief_tells",
+        "result": "pass",
+        "note": "3 passed, including the new test"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "22 passed; the first run failed on athena_bin_keys_cover_every_compiled_in_file until the test-module marker was split"
+      },
+      {
+        "command": "cargo test -p athena-cli --test mirrors",
+        "result": "pass",
+        "note": "4 passed"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran twice (the first output was too large to read, so a quiet --no-fail-fast rerun was used). The rerun gave no error and no failure."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "crates/athena-context/src/briefs.rs adds a producer-brief section, emitted by producer_brief_with_evidence, that tells the producer: before reporting, Grep tests/ and #[cfg(test)] modules for text of any output it changes (status, plan, display), run those tests with cargo test -p <crate> --test <name>, then the full crate's tests, and cite the commands and any failing test name in its evidence.",
+        "status": "met",
+        "evidence": "Read the diff. existing_tests_section() holds the text and producer_brief_with_evidence calls it after the replay section. The new unit test checks the section for Grep, tests/, the test-module attribute, `cargo test -p <crate> --test <name>`, \"whole crate\" and \"failing test\", and passes."
+      },
+      {
+        "criterion": "A new unit test in briefs.rs asserts the producer brief contains this section for any reading; it fails on the base (run `cargo test -p athena-context briefs`) and passes with the change.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-context briefs`: 106 passed before I split the marker, and the new test passes in the later targeted run. The test calls .expect on the section heading, so it panics on the base, where the heading does not exist. It covers producer_brief with plain inputs, with retry_from set, and producer_brief_with_evidence with an evidence path. I did not run it against the base."
+      },
+      {
+        "criterion": "The section is given to the producer as information in the brief; no new refusal or gate rule is added, so the expected share of newly refused past readings is 0%.",
+        "status": "met",
+        "evidence": "The diff touches only briefs.rs (a string function, its call and a test) and CHANGELOG.md. No reading, replay, admission or gate code changed."
+      },
+      {
+        "criterion": "Jobs 20261111-105048-n7bm and 20261111-213010-8jgz: their candidates (role_need.rs, status.rs, display.rs, introspection.rs, docs/spec.toml, status_build_measurement.rs) are dropped, not kept; their findings are about those features, not this cause. The drain flake in job 8jgz is out of scope.",
+        "status": "met",
+        "evidence": "`git status --short` lists only CHANGELOG.md and crates/athena-context/src/briefs.rs. None of the named files changed. The CHANGELOG entry says the candidates are dropped and the drain flake is out of scope."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy and cargo test --locked pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked: no failures."
+      }
+    ],
+    "open_issues": [
+      "The new test's fails-on-base property is by construction (the heading lookup panics when the section is absent). I did not run the test against the base source."
+    ],
+    "mistakes": [
+      "The first draft put the literal test-module attribute in the section text before the include_str! of docs/system-facts.md. That broke athena_bin_keys_cover_every_compiled_in_file. Fixed with concat!, and the policy test now passes."
+    ],
+    "learnings": [
+      "xtask/tests/policy.rs compiled_in_files cuts each production source file at the first literal test-module attribute, so that literal must not appear in non-test code before an include_str!. Spell it with concat!.",
+      "The producer role's Bash hook rejects pipes to head, tail and grep and also double-quoted shell expansions."
+    ],
+    "desires": [
+      "Bash blocks head, tail, grep and rg, so I could not filter large test output. A --quiet summary mode or a readable path for saved tool output would help."
+    ]
+  }
+}

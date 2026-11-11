@@ -43,8 +43,8 @@ use athena_context::{
 use athena_data::records::{
     AcceptedBy, AnyRecord, Baseline, Build, Candidate, Caps, ChangeEntry, ChangeStatus, CheckRun,
     CriterionKind, Critique, CritiqueVerdict, DeliverableAction, Demonstration, DependentKind,
-    Finding, FindingSource, Invocation, InvocationOutcome, Job, JobKind, JobPlan, Outcome,
-    OutcomeState, Owner, PinnedRepo, PlanDecision, PlanDependent, PlanFile, PlanRisk,
+    Finding, FindingSource, Invocation, InvocationOutcome, Job, JobKind, JobPlan, NoChange,
+    Outcome, OutcomeState, Owner, PinnedRepo, PlanDecision, PlanDependent, PlanFile, PlanRisk,
     PolicyViolation, ProducerReport, Reading, RejectedOption, Replay, ReportedCheck,
     ReportedCriterion, Role, Score, Severity, Totals, Verdict, Verification,
 };
@@ -2498,6 +2498,9 @@ impl Athena {
             text.push(check.criterion.clone());
             text.push(check.evidence.clone());
         }
+        if let Some(no_change) = &report.no_change {
+            text.push(no_change.detail.clone());
+        }
         redactor.redact_all(&mut text)?;
         let mut it = text.into_iter();
         let summary = it.next().unwrap_or_default();
@@ -2526,6 +2529,10 @@ impl Athena {
                 evidence,
             });
         }
+        let no_change = report.no_change.as_ref().map(|n| NoChange {
+            kind: n.kind.as_str().into(),
+            detail: take(1).pop().unwrap_or_default(),
+        });
         Ok(ProducerReport {
             summary,
             files: report.files,
@@ -2535,6 +2542,7 @@ impl Athena {
             mistakes,
             learnings,
             desires,
+            no_change,
         })
     }
 }
