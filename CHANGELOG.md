@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `role_value` in `athena-core` (requirement OLY-9-12): judges a new role against a simpler alternative by reusing
+  `method_experiment::compare`, and allows retiring a role only when all its knowledge items are recorded elsewhere.
+
 ### Changed
 
 - `athena status` prints one `learning:` line per repeated failure class under the `repeated` label, joining it to
