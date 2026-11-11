@@ -73,6 +73,32 @@ fn status_prints_the_latest_build_measurement_line() {
 }
 
 #[test]
+fn status_prints_the_later_similar_task_line_for_both_outcomes() {
+    use athena_core::status::later_similar_task_line;
+    use athena_data::records::LaterTask;
+
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let mut view = athena.status().unwrap();
+    let find = |text: &str| {
+        text.lines()
+            .find(|l| l.starts_with("later similar task:"))
+            .unwrap_or_else(|| panic!("no later similar task line in:\n{text}"))
+            .to_string()
+    };
+
+    // No records: never shown.
+    let line = find(&athena_cli::display::status(&view));
+    assert_eq!(line, view.later_similar_task);
+    assert!(line.starts_with("later similar task: not shown"), "{line}");
+
+    view.later_similar_task = later_similar_task_line(&LaterTask::Prevented);
+    let line = find(&athena_cli::display::status(&view));
+    assert_eq!(line, view.later_similar_task);
+    assert_eq!(line, "later similar task: shown (prevented)");
+}
+
+#[test]
 fn status_prints_the_improvement_cycle_line_for_both_outcomes() {
     use athena_core::status::improvement_cycle_line;
     use athena_data::records::{CycleStage, ImprovementCycle};

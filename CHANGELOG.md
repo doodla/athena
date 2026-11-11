@@ -54,6 +54,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   failures of the baseline and candidate arms), never the number of jobs the proposal cites, so on records with no
   evaluation the line reads `not shown (missing: evaluated candidate, ...)`; no records at all is never success.
 
+- `later_similar_task` in `athena-data` (requirement OLY-10-03) and a `later similar task:` line in `athena status`:
+  for an accepted defaults proposal, shows `prevented` when a job landed after its accepting job with no recorded
+  introspection of the same failure class, or `detected earlier` when the class recurred at an earlier stage than
+  before. Recurrences before acceptance, pending, rejected or withdrawn proposals, and empty records read
+  `not shown`. No record schema changed.
+
 ### Changed
 
 - `athena status` prints one `learning:` line per repeated failure class under the `repeated` label, joining it to

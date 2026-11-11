@@ -723,6 +723,232 @@ pub fn improvement_cycle(
     }
 }
 
+/// What the records show about a later similar task (`docs/spec.toml` OLY-10-03).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaterTask {
+    /// Jobs landed after an accepted proposal and none of them recorded the defect's failure class again.
+    Prevented,
+    /// The defect's class came back after the proposal was accepted, but caught at an earlier stage than before.
+    DetectedEarlier,
+    /// The records do not show either, and why.
+    NotShown(&'static str),
+}
+
+impl LaterTask {
+    pub fn shown(&self) -> bool {
+        !matches!(self, LaterTask::NotShown(_))
+    }
+}
+
+/// How early a category of introspection catches a defect: lower is earlier. A job that failed on its own run
+/// is caught before one that reached the final verdict and was rejected; anything else (an intervention by the
+/// owner after the work was done) is later still.
+fn detection_rank(category: &str) -> u8 {
+    match category {
+        "failed" => 0,
+        "rejected" => 1,
+        _ => 2,
+    }
+}
+
+/// Whether the records show that an improved process prevented a defect or caught it earlier (OLY-10-03).
+///
+/// Only a proposal whose current status is accepted counts as the improved process, and only what happened in
+/// jobs after the accepting job (a job id sorts by time): a recurrence before acceptance, and a pending, rejected
+/// or withdrawn proposal, count for nothing. For an accepted proposal, `landed` jobs after the accepting job with
+/// no recorded introspection of the proposal's failure class give [`LaterTask::Prevented`]. If the class did
+/// recur in later jobs, the result is [`LaterTask::DetectedEarlier`] only when the earliest-stage recurrence is
+/// caught at an earlier stage than every case before acceptance; a recurrence at the same or a later stage, no
+/// earlier case to compare with, no later landed job, no accepted proposal or no records at all is
+/// [`LaterTask::NotShown`], never success. Records carry no class for a landed job, so any later landed job
+/// stands for a later task.
+pub fn later_similar_task(
+    landed: &[JobId],
+    introspections: &[IntrospectionRecord],
+    proposals: &[&ProposalRecord],
+) -> LaterTask {
+    let mut why = "no accepted defaults proposal";
+    let mut detected = false;
+    for p in proposals {
+        let ProposalStatus::Accepted { job: accepted } = &p.status else {
+            continue;
+        };
+        let same_class = |i: &&IntrospectionRecord| {
+            i.status == IntrospectionStatus::Recorded
+                && i.failure_class.as_ref() == Some(&p.failure_class)
+        };
+        let later: Vec<&IntrospectionRecord> = introspections
+            .iter()
+            .filter(same_class)
+            .filter(|i| i.job.as_ref().is_some_and(|j| j > accepted))
+            .collect();
+        let earlier_rank = introspections
+            .iter()
+            .filter(same_class)
+            .filter(|i| i.job.as_ref().is_some_and(|j| j <= accepted))
+            .map(|i| detection_rank(&i.category))
+            .min();
+        if later.is_empty() {
+            if landed.iter().any(|j| j > accepted) {
+                return LaterTask::Prevented;
+            }
+            why = "no job landed after the proposal was accepted";
+            continue;
+        }
+        let first = later.iter().map(|i| detection_rank(&i.category)).min();
+        match (first, earlier_rank) {
+            (Some(now), Some(before)) if now < before => detected = true,
+            (_, None) => why = "no case before acceptance to compare the stage with",
+            _ => why = "the defect recurred at the same or a later stage",
+        }
+    }
+    if detected {
+        LaterTask::DetectedEarlier
+    } else {
+        LaterTask::NotShown(why)
+    }
+}
+
+#[cfg(test)]
+mod later_similar_task_tests {
+    use super::*;
+
+    fn rid(n: u32) -> RecordId {
+        RecordId::parse(&format!("20261101-1000{:02}-{:04x}", n % 60, n)).unwrap()
+    }
+
+    /// Job `n` sorts by `n`, so a larger number is a later job.
+    fn job(n: u32) -> JobId {
+        JobId::parse(&format!("20261101-20{:04}-{:04x}", n, n)).unwrap()
+    }
+
+    fn intro(n: u32, class: u32, about: u32, category: &str) -> IntrospectionRecord {
+        IntrospectionRecord {
+            id: rid(n),
+            at: "2026-11-01T10:00:00Z".parse().unwrap(),
+            trigger: IntrospectionTrigger::Rejection,
+            job: Some(job(about)),
+            intervention: None,
+            class_of_work: "code".into(),
+            category: category.into(),
+            what_happened: Some("The check failed.".into()),
+            failure_class: Some(rid(class)),
+            new_class: false,
+            earlier_cases: Vec::new(),
+            decisions_matched: Vec::new(),
+            cause: Some("A cause.".into()),
+            other_causes: Vec::new(),
+            open_hypotheses: Vec::new(),
+            contradictions: Vec::new(),
+            prevention_kind: Some(PreventionKind::CodeCheck),
+            prevention: Some("A check.".into()),
+            proposed_request: Some("Add it.".into()),
+            evidence: None,
+            status: IntrospectionStatus::Recorded,
+            failure: None,
+            flags: Vec::new(),
+            dropped_ids: Vec::new(),
+            planning_stopped: false,
+            from_jev: false,
+            jev: None,
+        }
+    }
+
+    /// A proposal of `class`, accepted by job 10 unless the test changes the status.
+    fn proposal(class: u32, status: ProposalStatus) -> ProposalRecord {
+        ProposalRecord {
+            record: rid(500 + class),
+            at: "2026-11-01T10:00:00Z".parse().unwrap(),
+            id: "d".into(),
+            kind: ProposalKind::Add,
+            statement: "A new default.".into(),
+            applies_to: vec!["code".into()],
+            version: ProposalVersion { from: 1, to: 2 },
+            sources: vec![ProposalSource {
+                introspection: rid(1),
+                intervention: None,
+                job: job(1),
+                at: "2026-11-01T10:00:00Z".parse().unwrap(),
+            }],
+            failure_class: rid(class),
+            status,
+            candidate_sha256: "a".repeat(64),
+            notes: String::new(),
+            evaluation: None,
+        }
+    }
+
+    fn accepted(class: u32) -> ProposalRecord {
+        proposal(class, ProposalStatus::Accepted { job: job(10) })
+    }
+
+    #[test]
+    fn a_later_landed_job_without_a_recurrence_shows_prevention() {
+        let before = [intro(1, 9, 1, "rejected")];
+        let p = accepted(9);
+        assert_eq!(
+            later_similar_task(&[job(1), job(11)], &before, &[&p]),
+            LaterTask::Prevented
+        );
+        // A recurrence of another class does not undo it.
+        let other = [intro(1, 9, 1, "rejected"), intro(2, 8, 12, "rejected")];
+        assert_eq!(
+            later_similar_task(&[job(12)], &other, &[&p]),
+            LaterTask::Prevented
+        );
+    }
+
+    #[test]
+    fn a_recurrence_at_an_earlier_stage_shows_earlier_detection() {
+        let p = accepted(9);
+        let intros = [intro(1, 9, 1, "rejected"), intro(2, 9, 12, "failed")];
+        assert_eq!(
+            later_similar_task(&[job(12)], &intros, &[&p]),
+            LaterTask::DetectedEarlier
+        );
+    }
+
+    #[test]
+    fn a_recurrence_at_the_same_or_a_later_stage_is_not_shown() {
+        let p = accepted(9);
+        for category in ["rejected", "tests"] {
+            let intros = [intro(1, 9, 1, "rejected"), intro(2, 9, 12, category)];
+            let got = later_similar_task(&[job(12)], &intros, &[&p]);
+            assert!(!got.shown(), "{category}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn no_records_or_no_later_job_is_not_shown() {
+        assert!(!later_similar_task(&[], &[], &[]).shown());
+        let p = accepted(9);
+        let before = [intro(1, 9, 1, "rejected")];
+        // Nothing landed after job 10.
+        assert!(!later_similar_task(&[job(1), job(10)], &before, &[&p]).shown());
+        assert!(!later_similar_task(&[], &[], &[&p]).shown());
+    }
+
+    #[test]
+    fn a_recurrence_before_acceptance_or_an_unaccepted_proposal_does_not_count() {
+        // Only a recurrence before job 10: the class has not recurred after, and nothing landed after either.
+        let early = [intro(1, 9, 1, "rejected"), intro(2, 9, 5, "failed")];
+        let p = accepted(9);
+        assert!(!later_similar_task(&[job(5)], &early, &[&p]).shown());
+        // A later landed job with no recurrence counts only for an accepted proposal.
+        let before = [intro(1, 9, 1, "rejected")];
+        for status in [
+            ProposalStatus::Pending,
+            ProposalStatus::Rejected {
+                reason: "No gain.".into(),
+            },
+            ProposalStatus::Withdrawn,
+        ] {
+            let q = proposal(9, status);
+            assert!(!later_similar_task(&[job(11)], &before, &[&q]).shown());
+        }
+    }
+}
+
 #[cfg(test)]
 mod improvement_cycle_tests {
     use super::*;
