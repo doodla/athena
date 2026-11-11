@@ -61,7 +61,7 @@ pub const PLANNER_FRAME: PromptAsset = PromptAsset {
 /// The plan critic's role frame.
 pub const CRITIC_FRAME: PromptAsset = PromptAsset {
     id: "frame.critic",
-    version: 1,
+    version: 2,
     text: include_str!("../prompts/critic.md"),
 };
 
