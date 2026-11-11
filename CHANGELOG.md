@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `athena status` prints a `role need` line (`role_need::RoleNeed::compute`, requirement OLY-9-11): a class of work
+  with at least four closed jobs, at least two failed and at least half failed is a role-needed candidate, and a
+  role with no invocation in the newest eight closed jobs is a retire candidate. It is advisory and nothing is
+  printed when there is no candidate.
 - `athena status` prints one `learning:` line per repeated failure class under the `repeated` label, joining it to
   its addressing request (landed or open) and the specialization and trend outcome of that request's class of work
   (`learning::join`, requirement OLY-9-09). Nothing is printed when no cause repeated.

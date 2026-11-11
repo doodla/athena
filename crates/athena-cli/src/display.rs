@@ -1097,6 +1097,16 @@ fn lines_section(lines: &[athena_core::scope_guard::LineMark]) -> String {
     out
 }
 
+/// The `role need` line of `athena status`: classes of work that may need a role and roles that may be retired.
+fn role_need_section(need: &athena_core::role_need::RoleNeed) -> String {
+    let mut out = String::new();
+    for (i, line) in need.lines().iter().enumerate() {
+        let label = if i == 0 { "role need" } else { "" };
+        let _ = writeln!(out, "{label:<11} {line}");
+    }
+    out
+}
+
 /// The open repeated causes of Hestia's error review: each with how many times and in how many jobs it
 /// occurred, and the request that addresses it.
 /// The `trend` line of `athena status`: the classes of work that improved and the ones that got worse.
@@ -1329,6 +1339,9 @@ pub fn status(v: &StatusView) -> String {
     let _ = writeln!(out, "{}", v.build_measurement);
     if let Some(trend) = &v.class_trend {
         out.push_str(&trend_section(trend));
+    }
+    if let Some(need) = &v.role_need {
+        out.push_str(&role_need_section(need));
     }
     for (i, j) in v.open.iter().enumerate() {
         let label = if i == 0 { "open" } else { "" };
@@ -2238,6 +2251,30 @@ mod tests {
         ));
         assert!(waiting.contains("no new drain was started"), "{waiting}");
         assert!(waiting.contains("athena drain-restart"), "{waiting}");
+    }
+
+    #[test]
+    fn the_role_need_line_is_printed_only_with_a_candidate() {
+        use athena_core::role_need::{RoleNeed, RoleNeeded};
+        let need = RoleNeed {
+            needed: vec![RoleNeeded {
+                class: "code".into(),
+                jobs: 5,
+                failed: 3,
+            }],
+            retire: vec!["auditor".into()],
+        };
+        let text = role_need_section(&need);
+        assert!(
+            text.starts_with("role need   role needed: class code failed 3 of 5 jobs"),
+            "{text}"
+        );
+        assert!(text.contains("retire candidate: auditor"), "{text}");
+        let none = RoleNeed {
+            needed: Vec::new(),
+            retire: Vec::new(),
+        };
+        assert_eq!(role_need_section(&none), "");
     }
 
     #[test]

@@ -305,6 +305,7 @@ fn empty_row(rule: &str) -> RuleRefusals {
 pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
     ("throughput", "throughput"),
     ("trend", "class_trend"),
+    ("role need", "role_need"),
     ("checks", "check_durations"),
     ("planning", "planning_cost"),
     ("keep rule", "keep_rule"),
@@ -431,6 +432,10 @@ pub struct StatusView {
     /// with the job after which a rising class got worse; absent until a class has enough landed jobs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub class_trend: Option<crate::class_trend::ClassTrend>,
+    /// Classes of work whose repeated failures suggest a new role, and roles with no recent invocation
+    /// (advisory); absent when there is no candidate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_need: Option<crate::role_need::RoleNeed>,
     pub interventions_by_category: BTreeMap<String, usize>,
     pub interventions_by_class: BTreeMap<String, usize>,
     /// Mistakes per class and per cause, with the prevention proposed. Apart from `interventions_by_category`,
@@ -1276,6 +1281,7 @@ impl Athena {
                 &records.build_measurements,
             )),
             class_trend: crate::class_trend::ClassTrend::compute(&records),
+            role_need: crate::role_need::RoleNeed::compute(&records),
             interventions_by_category: by_category,
             interventions_by_class: by_class,
             mistakes: mistake_report(&records),
