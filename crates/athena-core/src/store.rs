@@ -26,6 +26,10 @@ pub struct JobRecords {
     /// The user's priority records, by `n` (`athena.priority/1`); the latest wins.
     pub priorities: Vec<PriorityRecord>,
     pub job: Option<Job>,
+    /// The model invocations recorded under this job. This is a PARTIAL source for measuring usage: the
+    /// steward's, the audience's and the auditor's runs are never in it (they are kept apart in
+    /// [`Records::steward_runs`], [`Records::audience_runs`] and [`Records::auditor_runs`]). A measure of
+    /// which roles ran must read [`Records::all_invocations`], not this list.
     pub invocations: Vec<Invocation>,
     pub candidate: Option<Candidate>,
     pub verification: Option<Verification>,
@@ -210,6 +214,11 @@ pub fn positive_zero(value: f64) -> f64 {
 }
 
 /// Every record at one commit.
+///
+/// Model invocations are split over four places: `jobs[..].invocations` (reader, producer, verifier, planner,
+/// critic) and the three lists `steward_runs`, `audience_runs` and `auditor_runs`. The steward, audience and
+/// auditor runs are NOT in any job's list. Anything that asks which roles ran, or how much, reads
+/// [`Records::all_invocations`].
 #[derive(Debug, Clone, Default)]
 pub struct Records {
     pub jobs: BTreeMap<String, JobRecords>,
@@ -507,6 +516,20 @@ impl Records {
         jobs
     }
 
+    /// Every model invocation in the records, from every place they are kept: each job's `invocations`, then
+    /// `steward_runs`, `audience_runs` and `auditor_runs`. The steward, audience and auditor runs are in no
+    /// job's list, so a usage measure that reads only `jobs[..].invocations` never sees those roles. Use this
+    /// for any question of which roles ran or how often. A test (`all_invocations_covers_every_loaded_invocation`)
+    /// fails if a record kind of invocation is loaded but missing here.
+    pub fn all_invocations(&self) -> impl Iterator<Item = &Invocation> {
+        self.jobs
+            .values()
+            .flat_map(|j| j.invocations.iter())
+            .chain(self.steward_runs.iter())
+            .chain(self.audience_runs.iter())
+            .chain(self.auditor_runs.iter())
+    }
+
     /// Resolves a job reference: a full id, a unique suffix, or `latest`.
     pub fn resolve(&self, reference: &str) -> Result<JobId> {
         if reference == "latest" {
@@ -683,6 +706,61 @@ mod tests {
             pin: None,
             dispatch_branch: None,
             allowed_paths: None,
+        }
+    }
+
+    #[test]
+    fn all_invocations_covers_every_loaded_invocation() {
+        use crate::status::planning_cost_tests::invocation;
+        use athena_gate::records::RecordFile;
+        // One invocation record per role. Whichever list `from_parts` routes it to, it must come back out of
+        // `all_invocations`; a fourth list added to `Records` without a place in `all_invocations` fails here.
+        let roles = [
+            Role::Reader,
+            Role::Producer,
+            Role::Verifier,
+            Role::Steward,
+            Role::Audience,
+            Role::Auditor,
+            Role::Planner,
+            Role::Critic,
+        ];
+        let files: Vec<RecordFile> = roles
+            .iter()
+            .enumerate()
+            .map(|(n, role)| {
+                let record = AnyRecord::Invocation(Box::new(invocation(
+                    &job_id(),
+                    n as u32 + 1,
+                    *role,
+                    1.0,
+                )));
+                RecordFile {
+                    path: record.canonical_path(),
+                    record: Some(record),
+                    error: None,
+                    bytes: Vec::new(),
+                }
+            })
+            .collect();
+        let loaded = Records::from_parts(&RecordSet { files }, &[]);
+        let mut seen: Vec<(u32, Role)> =
+            loaded.all_invocations().map(|i| (i.seq, i.role)).collect();
+        seen.sort_by_key(|(seq, _)| *seq);
+        let want: Vec<(u32, Role)> = roles
+            .iter()
+            .enumerate()
+            .map(|(n, r)| (n as u32 + 1, *r))
+            .collect();
+        assert_eq!(seen, want);
+        // The three out-of-job roles are not in the job's own list: that is the trap the docs warn of.
+        let in_jobs: Vec<Role> = loaded
+            .jobs
+            .values()
+            .flat_map(|j| j.invocations.iter().map(|i| i.role))
+            .collect();
+        for role in [Role::Steward, Role::Audience, Role::Auditor] {
+            assert!(!in_jobs.contains(&role), "{role:?} is kept outside jobs");
         }
     }
 

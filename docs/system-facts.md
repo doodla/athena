@@ -41,6 +41,11 @@ whole. Each fact names its source. Where the source is a request and not code, t
   `https://github.com/example/project.git`. Source: the user's request of 2026-10-25; the code that refuses it
   was not found when this file was written. Related: `parse_remote` in `crates/athena-core/src/gh.rs`
   supports only github.com remotes for pull requests.
+- **Where invocations are recorded.** Reader, producer, verifier, planner and critic runs are under their job
+  (`JobRecords::invocations`). Steward, audience and auditor runs are kept outside job records
+  (`Records::steward_runs`, `audience_runs`, `auditor_runs`) and are in no job's list. A usage measure reads
+  `Records::all_invocations`, and is replayed over records holding those three roles before it is done. Source:
+  `crates/athena-core/src/store.rs` (`Records::from_parts`, `Records::all_invocations`).
 - **CI caches.** GitHub scopes a cache to the branch that saved it, so a pull request's entries serve only
   that branch; the shared toolchain, registry and target entries are saved only from the default branch.
   Source: `.github/workflows/ci.yml` (header and cache comments); `docs/design/ci-routing.md`.

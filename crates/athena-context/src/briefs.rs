@@ -2741,7 +2741,7 @@ mod tests {
             assert!(fact.contains("Source"), "no source in: {fact}");
         }
         assert!(
-            SYSTEM_FACTS.len() < 5_000,
+            SYSTEM_FACTS.len() < 6_000,
             "the facts file is {} bytes; keep it short",
             SYSTEM_FACTS.len()
         );
