@@ -1755,6 +1755,70 @@ mod tests {
         }
     }
 
+    /// The sample with the three lists written after `cause`, where the record serialises them.
+    fn sample_introspection_with_lists(others: &str, open: &str, against: &str) -> String {
+        sample_introspection("code-check").replace(
+            "  \"cause\": \"a cause\",\n",
+            &format!(
+                "  \"cause\": \"a cause\",\n  \"other_causes\": {others},\n  \"open_hypotheses\": {open},\n  \"contradictions\": {against},\n"
+            ),
+        )
+    }
+
+    #[test]
+    fn an_introspection_with_the_three_lists_round_trips_and_an_old_one_has_them_empty() {
+        let path = "records/introspections/2026-10/20261010-153012-k7q2.json";
+        let old = check_record_file(path, sample_introspection("default").as_bytes())
+            .unwrap()
+            .expect("a record");
+        let AnyRecord::Introspection(o) = &old else {
+            panic!("not an introspection");
+        };
+        assert!(
+            o.other_causes.is_empty()
+                && o.open_hypotheses.is_empty()
+                && o.contradictions.is_empty()
+        );
+
+        let bytes = sample_introspection_with_lists(r#"["b", "c"]"#, r#"["h"]"#, r#"["x"]"#);
+        assert!(bytes.contains("other_causes"));
+        let checked = check_record_file(path, bytes.as_bytes())
+            .unwrap()
+            .expect("a record");
+        let AnyRecord::Introspection(i) = &checked else {
+            panic!("not an introspection");
+        };
+        assert_eq!(i.other_causes, ["b", "c"]);
+        assert_eq!(i.open_hypotheses, ["h"]);
+        assert_eq!(i.contradictions, ["x"]);
+        let back = AnyRecord::parse(path, checked.to_json().as_bytes()).unwrap();
+        assert_eq!(back, checked);
+    }
+
+    #[test]
+    fn an_introspection_list_with_a_blank_entry_or_too_many_entries_is_invalid() {
+        let path = "records/introspections/2026-10/20261010-153012-k7q2.json";
+        let six = r#"["1", "2", "3", "4", "5", "6"]"#;
+        let five = r#"["1", "2", "3", "4", "5"]"#;
+        assert!(
+            check_record_file(
+                path,
+                sample_introspection_with_lists(five, "[]", "[]").as_bytes()
+            )
+            .is_ok()
+        );
+        for bytes in [
+            sample_introspection_with_lists("[\" \"]", "[]", "[]"),
+            sample_introspection_with_lists("[]", six, "[]"),
+            sample_introspection_with_lists("[]", "[]", six),
+        ] {
+            assert!(matches!(
+                check_record_file(path, bytes.as_bytes()),
+                Err(RecordError::Invalid { .. })
+            ));
+        }
+    }
+
     #[test]
     fn relax_and_remove_introspections_round_trip_and_only_they_loosen() {
         for (text, kind) in [
