@@ -699,6 +699,7 @@ pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&s
         "\nYou may run them first. Athena runs them again on your result, with the base commit's tool configuration.\n"
     );
     let _ = writeln!(out, "{}", replay_while_working_section());
+    let _ = writeln!(out, "{}", existing_tests_section());
     let _ = writeln!(out, "## Commands Bash may run\n");
     list(&mut out, &inputs.commands, "(none)");
     match &inputs.retry_from {
@@ -770,6 +771,25 @@ fn replay_while_working_section() -> String {
      up there. Narrow the rule so it refuses what it is meant to refuse; do not hide the cases. A replay \
      that cannot run says `no replay` and never counts as a pass.\n"
         .to_string()
+}
+
+/// The producer brief's note on the existing tests that read the output the change touches. The brief cannot
+/// know the changed files at dispatch, so it tells the producer how to find those tests itself; without it the
+/// first notice of a broken test that compares whole output is the final verdict.
+fn existing_tests_section() -> String {
+    // The attribute is spelled in two pieces: the policy scan reads a source file's production text only up to
+    // the first literal test-module marker, so the marker must not appear before the file's other items.
+    let test_modules = concat!("`#[cfg(", "test)]`");
+    format!(
+        "## Run the existing tests that read what you change\n\n\
+         Before you report, name each output your change alters: status, plan, display or any other printed text. \
+         Grep `tests/` and the {test_modules} modules for a distinctive line of that output and for the function \
+         that prints it. Run each test file found with `cargo test -p <crate> --test <name>` (for example \
+         `cargo test -p athena-cli --test mirrors`), or `cargo test -p <crate> <module>` for a unit test. Then run \
+         the whole crate with `cargo test -p <crate>`. A section printed unconditionally breaks a test that \
+         compares whole output, so look for those first. Cite each command, and the name and assertion of any \
+         failing test, in your `criteria_check` evidence.\n"
+    )
 }
 
 /// The part of the producer's send-back that reports the replay of accepted readings: the measured share,
@@ -3415,6 +3435,37 @@ mod tests {
         // It comes after the checks and before the commands.
         assert!(brief.find("## Checks Athena will run").unwrap() < at);
         assert!(at < brief.find("## Commands Bash may run").unwrap());
+    }
+
+    #[test]
+    fn producer_brief_tells_the_producer_to_run_existing_tests_that_read_its_output() {
+        let plain = producer_brief(&producer_inputs(None));
+        let mut retry = producer_inputs(None);
+        retry.retry_from = Some(seed());
+        let retried = producer_brief(&retry);
+        let with_evidence = producer_brief_with_evidence(&producer_inputs(None), Some("/tmp/ev"));
+        for brief in [plain, retried, with_evidence] {
+            let at = brief
+                .find("## Run the existing tests that read what you change")
+                .expect("the producer brief has the existing-tests section");
+            let section = &brief[at..];
+            let section = &section[..section[3..].find("\n## ").map_or(section.len(), |e| e + 3)];
+            for text in [
+                "Grep",
+                "tests/",
+                "#[cfg(test)]",
+                "cargo test -p <crate> --test <name>",
+                "whole crate",
+                "failing test",
+            ] {
+                assert!(
+                    section.contains(text),
+                    "the section omits {text}: {section}"
+                );
+            }
+            assert!(brief.find("## Checks Athena will run").unwrap() < at);
+            assert!(at < brief.find("## Commands Bash may run").unwrap());
+        }
     }
 
     #[test]
