@@ -9,6 +9,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- A new reading check, `reading::check_records_measure`, refuses a code or tests reading that changes a measure
+  computed from Athena's records (throughput, the keep rule, planning cost, refusal rates, check durations, landing
+  time) unless one behavior criterion runs it against real records and names an expected range from an independent
+  source (`history.json` commit times, landing record timestamps, recorded check durations, or `git log` with an
+  `Environment:` assumption). Root cause: measures computed from the records were verified on fixture records alone
+  and then showed wrong figures on the real records; on 2026-10-29 the landing time shown by `status` was 0.1
+  minutes, then, after the first fix, 273.8 minutes, both against real landings of a few minutes. The check fires on
+  the measure names in the summary or a criterion, and on a change to `status/throughput.rs` or `status/planning.rs`
+  in `athena-core`, so a split or move of those two modules needs the criterion too, because a moved figure can
+  change; a reading that names a measure only to say it is unchanged is also refused. The refusal text gives an
+  example criterion that takes its range from `history.json` commit times and compares the `status --snapshot`
+  output with it. The reader brief gains one rule line (other lines are shortened, so the section does not grow)
+  and the planner brief one line. The check is lexical and proves only that the criterion exists; the verifier runs
+  it. This check refuses more readings; the higher refusal rate is intended, expected 3% of newly refused readings
+  (an estimate, not measured: about 7 of the last 200 commit subjects name these measures). Stored readings of
+  queued requests that lack the criterion leave the drain queue until `athena go` or a new read.
 - New design note `docs/design/direct-main-merge-tree-landing.md` for throughput review `20261111-055051-tjym`
   (landing and rebuild 2984.3 of 2990.6 median minutes per landed job): build each verified job's single landing
   commit on fetched host main with `Git::merge_tree`, not on the long-lived local landing branch. Covers the

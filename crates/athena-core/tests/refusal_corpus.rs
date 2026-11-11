@@ -87,7 +87,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 52] = [
+const INPUT_FORMS: [&str; 63] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -140,6 +140,17 @@ const INPUT_FORMS: [&str; 52] = [
     "scope-limit-consumer-not-a-deliverable",
     "scope-limit-proposal-apply",
     "scope-limit-bare-form",
+    "records-measure-word-fixture-only",
+    "refusal-counts-wording",
+    "measure-module-path-trigger",
+    "measure-module-split-refactor",
+    "measure-named-as-unchanged",
+    "real-records-range-satisfied",
+    "declaration-wrapped",
+    "docs-class-measure-word",
+    "ci-drain-throughput",
+    "ci-wait-time-spent",
+    "record-types-module-no-measure",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -296,6 +307,7 @@ fn cases() -> Vec<Case> {
     out.extend(delivery_cases());
     out.extend(defined_terms_cases());
     out.extend(scope_limit_cases());
+    out.extend(records_measure_cases());
     out
 }
 
@@ -326,6 +338,166 @@ fn scope_case(
     files.insert("CHANGELOG.md".into());
     c.repo_files = Some(files);
     c
+}
+
+/// Readings that change a measure computed from Athena's records (`check_records_measure`). The refusing cases
+/// verify the measure on fixture records alone, as the landing-time fixes of 2026-10-29 did (0.1 minutes, then
+/// 273.8 minutes, against real landings of a few minutes). The accepting cases add a criterion that runs the
+/// measure on the real records with an expected range from `history.json`, and cases that name no measure.
+fn records_measure_cases() -> Vec<Case> {
+    const SOURCE_LANDING: &str = "the landing-time jobs of 2026-10-29, a measure verified on fixtures only; rebuilt from the job brief";
+    const SOURCE_COUNTS: &str = "commit 5724053, per-rule reading refusal counts in status; rebuilt from the commit subject";
+    const SOURCE_MODULE: &str = "the figure modules status/throughput.rs and status/planning.rs; rebuilt from their module docs";
+    let survey =
+        "Code survey: read crates/athena-core/src/reading.rs, the gate every reading passes";
+    let fixture_bullet = "- Run `cargo test -p athena-core status::`: over a fixture of three landings the landing time is 4 minutes";
+    let real_bullet = "- Run `cargo run -p athena-cli -- status --snapshot evidence`: on the real records the landing time it prints is within the expected range taken from the commit times in history.json";
+    // A code reading whose first request bullet is the behavior criterion, with this summary and deliverables.
+    // The files are not in the small file set of the corpus, so the deliverables are not compared with it.
+    let measure_case = |id: &'static str,
+                        source: &'static str,
+                        forms: &'static [&'static str],
+                        summary: &str,
+                        bullets: &[&str],
+                        paths: &[&str],
+                        expected: Expected| {
+        let mut text = vec![summary];
+        text.extend_from_slice(bullets);
+        let mut c = case(id, source, forms, &lines(&text), bullets.len(), expected);
+        c.reading.summary = summary.into();
+        c.reading.class_of_work = "code".into();
+        c.reading.acceptance_criteria[0].kind = CriterionKind::Behavior;
+        c.reading.assumptions = vec![survey.into()];
+        c.reading.deliverables = paths
+            .iter()
+            .map(|p| deliverable(p, DeliverableAction::Modify))
+            .collect();
+        c.repo_files = None;
+        c
+    };
+    let status = "crates/athena-core/src/status.rs";
+    let throughput = "crates/athena-core/src/status/throughput.rs";
+    let first = measure_case(
+        "records-measure-change-on-fixtures-only-job-landing-time",
+        SOURCE_LANDING,
+        &["dash-bullet", "records-measure-word-fixture-only"],
+        "Fix the landing time shown by status",
+        &[fixture_bullet],
+        &[status],
+        Expected::Refuse("check_records_measure"),
+    );
+    let mut out = vec![first];
+    out.push(measure_case(
+        "refusal-counts-status-from-5724053",
+        SOURCE_COUNTS,
+        &["dash-bullet", "refusal-counts-wording"],
+        "Report per-rule reading refusal counts in status",
+        &["- Run `cargo test -p athena-core status::`: status lists each rule with its refusal count"],
+        &[status, "crates/athena-core/src/hestia.rs"],
+        Expected::Refuse("check_records_measure"),
+    ));
+    out.push(measure_case(
+        "measure-module-path-no-measure-word",
+        SOURCE_MODULE,
+        &["dash-bullet", "measure-module-path-trigger"],
+        "Tidy the module",
+        &["- Run `cargo test -p athena-core status::`: the module builds"],
+        &[throughput],
+        Expected::Refuse("check_records_measure"),
+    ));
+    out.push(measure_case(
+        "measure-module-split-refactor",
+        SOURCE_MODULE,
+        &["dash-bullet", "measure-module-split-refactor"],
+        "Split the module into submodules; this moves code with no behavior change",
+        &["- Run `cargo test -p athena-core status::`: the existing tests pass"],
+        &[throughput],
+        Expected::Refuse("check_records_measure"),
+    ));
+    out.push(measure_case(
+        "records-measure-named-as-unchanged",
+        SOURCE_LANDING,
+        &["dash-bullet", "measure-named-as-unchanged"],
+        "Change the status header; the landing time is unchanged",
+        &["- Run `cargo test -p athena-core status::`: the header is bold"],
+        &[status],
+        Expected::Refuse("check_records_measure"),
+    ));
+    out.push(measure_case(
+        "records-measure-change-with-real-records-range-history-json",
+        SOURCE_LANDING,
+        &["dash-bullet", "real-records-range-satisfied"],
+        "Fix the landing time shown by status",
+        &[real_bullet],
+        &[status],
+        Expected::Accept,
+    ));
+    let mut c = measure_case(
+        "records-measure-change-with-real-records-range-git-log",
+        SOURCE_LANDING,
+        &["dash-bullet", "real-records-range-satisfied"],
+        "Fix the landing time shown by status",
+        &[
+            "- Run `cargo run -p athena-cli -- status --snapshot evidence`: on the real records the landing time it prints is within the expected range taken from git log commit times",
+        ],
+        &[status],
+        Expected::Accept,
+    );
+    c.reading.assumptions.push(
+        "Environment: the verifier reads the git log and the records in the snapshot, with read permission only; history is reached through the snapshot files"
+            .into(),
+    );
+    out.push(c);
+    out.push(measure_case(
+        "refusal-rate-declaration-wrapped-line",
+        "the declaration every refusal rule carries; rebuilt from the reader brief",
+        &["dash-bullet", "declaration-wrapped"],
+        "Refuse more readings",
+        &["- Run `cargo test -p athena-core`: the check refuses more readings and the higher\n  refusal rate is\n  intended"],
+        &[status],
+        Expected::Accept,
+    ));
+    let mut c = case(
+        "docs-reading-naming-landing-time",
+        "a docs reading that describes the landing time; rebuilt from the job brief",
+        &["dash-bullet", "docs-class-measure-word"],
+        &lines(&[
+            "Describe the landing time.",
+            "- The guide says how the landing time is computed from the landing records",
+        ]),
+        1,
+        Expected::Accept,
+    );
+    c.reading.summary = "Describe the landing time shown by status".into();
+    out.push(c);
+    out.push(measure_case(
+        "ci-drain-throughput-reading",
+        "a drain throughput job; rebuilt from the job brief",
+        &["dash-bullet", "ci-drain-throughput"],
+        "Raise the throughput of the drain queue",
+        &["- Run `cargo test -p athena-cli --test drain`: two jobs drain in one pass"],
+        &["crates/athena-cli/src/drain.rs"],
+        Expected::Accept,
+    ));
+    out.push(measure_case(
+        "ci-wait-time-spent-reading",
+        "a CI wait job; rebuilt from the job brief",
+        &["dash-bullet", "ci-wait-time-spent"],
+        "Reduce time spent waiting for CI",
+        &["- Run `cargo test -p athena-core land::`: a job does not wait for a green run twice"],
+        &["crates/athena-core/src/land.rs"],
+        Expected::Accept,
+    ));
+    out.push(measure_case(
+        "records-throughput-record-types-no-measure-word",
+        SOURCE_MODULE,
+        &["dash-bullet", "record-types-module-no-measure"],
+        "Add a field to the record type",
+        &["- Run `cargo test -p athena-data`: the new field round-trips"],
+        &["crates/athena-data/src/records/throughput.rs"],
+        Expected::Accept,
+    ));
+    out
 }
 
 /// Readings whose criterion limits which files may change. The refusing cases leave out a file the job must
@@ -2960,6 +3132,78 @@ fn history_fixture_refusal_is_declared_intended() {
     assert!(changelog.contains("check_history_fixture"));
     assert!(changelog.contains("higher refusal rate is intended"));
     assert!(changelog.contains("expected 4% of newly refused readings"));
+}
+
+#[test]
+fn records_measure_refusal_is_declared_intended() {
+    // The declared share is read from the criterion text by the replay.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: "The change refuses more readings: expected 3% of newly refused readings".into(),
+            kind: CriterionKind::Behavior,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(3));
+    // The step line is in refusing_check, and the doc comment names the cause, the limits and the estimate.
+    assert!(
+        acceptance_check_names(reading_source()).contains(&"check_records_measure".to_string())
+    );
+    let doc = reading_source()
+        .split("pub fn check_records_measure(")
+        .next()
+        .unwrap()
+        .lines()
+        .rev()
+        .take_while(|l| l.starts_with("///"))
+        .map(|l| l.trim_start_matches('/').trim())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "This check refuses more readings; the higher refusal rate is intended.",
+        "expected 3% of newly refused readings",
+        "estimate",
+        "0.1 minutes",
+        "273.8 minutes",
+        "Limits:",
+        "a split or move",
+        "caught by their words only",
+        "fixture records alone",
+    ] {
+        assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+    }
+    // The doc's own declaration parses to the same share.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: doc.clone(),
+            kind: CriterionKind::Content,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(3));
+    let changelog = include_str!("../../../CHANGELOG.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "reading::check_records_measure",
+        "higher refusal rate is intended",
+        "expected 3% of newly refused readings",
+        "0.1 minutes",
+        "273.8 minutes",
+        "2026-10-29",
+        "real records",
+        "expected range",
+        "independent source",
+        "history.json",
+        "status --snapshot",
+        "split",
+    ] {
+        assert!(changelog.contains(needle), "the changelog lacks {needle:?}");
+    }
 }
 
 #[test]
