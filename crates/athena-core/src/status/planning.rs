@@ -91,6 +91,9 @@ pub struct KeepRule {
     /// Landings later cited as the cause of a failure, a revert or a fix job, for planned and unplanned jobs,
     /// reported beside the landed share. Reported only; the verdict above still rests on share and cost.
     pub later_harm: LaterHarm,
+    /// Defects found by verification and defects cited later, per verified job, older window against newer
+    /// (OLY-7-06). Reported only, like `later_harm`.
+    pub discovery: Discovery,
 }
 
 /// How one later record cites a landed job as a cause of trouble (job-planning.md section 9, D143).
@@ -218,6 +221,105 @@ pub fn later_harm(records: &Records) -> LaterHarm {
     harm
 }
 
+/// The fewest verified jobs each window must hold before the discovery figure says anything. With fewer, one
+/// job moves a per-job rate too far, so the figure reports "not enough data" and never an improvement.
+pub const MIN_DISCOVERY_JOBS: usize = 5;
+
+/// What the defect-discovery figure says (OLY-7-06).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryState {
+    /// A window holds fewer than [`MIN_DISCOVERY_JOBS`] verified jobs: no reading, in particular no improvement.
+    #[default]
+    NotEnoughData,
+    /// Later-cited defects fell while the defects verification found per verified job fell too: fewer
+    /// reported defects are not evidence of improvement.
+    Weakened,
+    /// Verification found defects at the older rate or higher: a drop in later-cited defects stands.
+    Held,
+}
+
+/// Defects counted over one window of verified jobs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct DiscoveryWindow {
+    /// Verified jobs in the window.
+    pub verified_jobs: usize,
+    /// Blocker and major findings by the verifier in those jobs' verifications.
+    pub verifier_found: usize,
+    /// Landed jobs of the window later cited as the cause of a failure, a revert or a fix job.
+    pub later_cited: usize,
+    /// `verifier_found / verified_jobs`; none for an empty window.
+    pub found_per_job: Option<f64>,
+    /// `later_cited / verified_jobs`; none for an empty window.
+    pub cited_per_job: Option<f64>,
+}
+
+/// Defect discovery, older window against newer, beside the landed share. Reported only: it changes no verdict
+/// and blocks nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct Discovery {
+    pub older: DiscoveryWindow,
+    pub newer: DiscoveryWindow,
+    pub state: DiscoveryState,
+}
+
+fn discovery_window(records: &Records, jobs: &[&JobRecords]) -> DiscoveryWindow {
+    use athena_data::records::{FindingSource, Severity};
+    let verifier_found = jobs
+        .iter()
+        .filter_map(|j| j.verification.as_ref())
+        .flat_map(|v| &v.findings)
+        .filter(|f| {
+            f.source == FindingSource::Verifier
+                && matches!(f.severity, Severity::Blocker | Severity::Major)
+        })
+        .count();
+    let later_cited = jobs
+        .iter()
+        .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
+        .filter(|j| !later_causes(records, j).is_empty())
+        .count();
+    let per_job = |n: usize| (!jobs.is_empty()).then(|| n as f64 / jobs.len() as f64);
+    DiscoveryWindow {
+        verified_jobs: jobs.len(),
+        verifier_found,
+        later_cited,
+        found_per_job: per_job(verifier_found),
+        cited_per_job: per_job(later_cited),
+    }
+}
+
+/// Defects found by verification and later-cited defects per verified job, the older half of the verified jobs
+/// (by job id) against the newer half. Fewer later-cited defects with fewer verifier-found defects per job is
+/// flagged as weakened discovery, not read as improvement; with fewer than [`MIN_DISCOVERY_JOBS`] verified jobs
+/// in a window it says there is not enough data.
+pub fn discovery(records: &Records) -> Discovery {
+    let mut verified: Vec<&JobRecords> = records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| j.verification.is_some())
+        .collect();
+    verified.sort_by(|a, b| a.id().as_str().cmp(b.id().as_str()));
+    let (old, new) = verified.split_at(verified.len() / 2);
+    let older = discovery_window(records, old);
+    let newer = discovery_window(records, new);
+    let state = if older.verified_jobs < MIN_DISCOVERY_JOBS
+        || newer.verified_jobs < MIN_DISCOVERY_JOBS
+    {
+        DiscoveryState::NotEnoughData
+    } else if newer.cited_per_job < older.cited_per_job && newer.found_per_job < older.found_per_job
+    {
+        DiscoveryState::Weakened
+    } else {
+        DiscoveryState::Held
+    };
+    Discovery {
+        older,
+        newer,
+        state,
+    }
+}
+
 /// The verdict of the keep rule for `planned` jobs with the given share and cost per landed job.
 fn keep_verdict(planned: usize, share: f64, cost_per_landed: Option<f64>) -> KeepVerdict {
     if planned < KEEP_RULE_DECISION_JOBS {
@@ -273,6 +375,7 @@ pub fn keep_rule(records: &Records) -> Option<KeepRule> {
             .then(|| first_round_accepted as f64 / rounds.len() as f64),
         verdict: keep_verdict(planned.len(), share, cost_per_landed_usd),
         later_harm: later_harm(records),
+        discovery: discovery(records),
     })
 }
 
