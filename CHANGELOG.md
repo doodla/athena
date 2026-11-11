@@ -14,6 +14,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The critic brief has a `## Challenge` section telling the critic to search for counterexamples, fragile
+  assumptions and failure modes. OLY-8-05 in `docs/spec.toml` now names this mechanism and measures it by `status: planning`.
+
 - `athena status` prints a `specialization` section: per class of work, each producer model and effort with its
   first-pass rate and landed share against the class's most-used setting, flagged "specialization helps" only
   when a non-default setting with at least 3 jobs does better, otherwise "not enough jobs" or "no better

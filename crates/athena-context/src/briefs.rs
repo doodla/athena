@@ -2581,6 +2581,21 @@ mod tests {
     }
 
     #[test]
+    fn the_critic_brief_tells_the_critic_to_search_for_ways_the_plan_is_wrong() {
+        let brief = critic_brief(&critic_inputs());
+        assert!(brief.contains("## Challenge"));
+        let lower = brief.to_lowercase();
+        for phrase in [
+            "might be wrong",
+            "counterexamples",
+            "fragile assumptions",
+            "failure modes",
+        ] {
+            assert!(lower.contains(phrase), "the critic brief lacks {phrase}");
+        }
+    }
+
+    #[test]
     fn the_critic_brief_and_producer_section_show_dependents_only_when_the_plan_has_them() {
         use athena_data::records::{DependentKind, PlanDependent};
         let bare = plan(1);
