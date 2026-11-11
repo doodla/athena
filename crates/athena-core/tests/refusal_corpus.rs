@@ -3204,6 +3204,9 @@ mod plan_side {
     // estimate, not a measurement); the higher refusal rate is intended, because those plans spent critic
     // rounds on questions code could answer. The records of the failed jobs are not in the snapshot, so the
     // reworded cases are synthetic: a paraphrase of the failure class's wording, not the jobs' own text.
+    // A third rule refuses a prefixed question that asks whether existing tests break or what a named
+    // function does on its failure or retry path; about 3% of newly refused plans (an estimate, not a
+    // measurement), for the same reason. The decision and host-environment forms stay accepted.
 
     struct OpenQuestionCase {
         id: &'static str,
@@ -3269,6 +3272,96 @@ mod plan_side {
                 id: "host-fact-marked-in-bold",
                 source: made_up,
                 question: "**Host:** Is the production host disk large enough?",
+                expected: PlanExpected::Accept,
+            },
+            OpenQuestionCase {
+                id: "unprefixed-test-breakage-question",
+                source: made_up,
+                question: "Do existing tests break when the prompt grows?",
+                expected: PlanExpected::Refuse("has no addressee"),
+            },
+            OpenQuestionCase {
+                id: "user-question-whether-existing-tests-break",
+                source: made_up,
+                question: "User: do any existing tests break when the prompt grows?",
+                expected: PlanExpected::Refuse("settled by searching the code"),
+            },
+            OpenQuestionCase {
+                id: "host-question-which-other-tests-fail",
+                source: made_up,
+                question: "**Host:** which other tests fail if the budget line changes?",
+                expected: PlanExpected::Refuse("settled by searching the code"),
+            },
+            OpenQuestionCase {
+                id: "user-question-whether-tests-outside-the-deliverables-break",
+                source: made_up,
+                question: "  user: do tests outside the deliverables fail?",
+                expected: PlanExpected::Refuse("settled by searching the code"),
+            },
+            OpenQuestionCase {
+                id: "user-question-existing-tests-that-expect-old-wording-break",
+                source: made_up,
+                question: "User: do existing tests that expect the old wording break?",
+                expected: PlanExpected::Refuse("settled by searching the code"),
+            },
+            OpenQuestionCase {
+                id: "user-question-may-existing-tests-fail",
+                source: made_up,
+                question: "User: may existing tests fail after this?",
+                expected: PlanExpected::Refuse("settled by searching the code"),
+            },
+            OpenQuestionCase {
+                id: "user-question-what-a-function-does-on-the-retry-path",
+                source: made_up,
+                question: "User: what does `land` do on the retry path?",
+                expected: PlanExpected::Refuse("settled by searching the code"),
+            },
+            OpenQuestionCase {
+                id: "host-question-what-happens-on-failure-in-a-named-function",
+                source: made_up,
+                question: "Host: what happens on failure in `run_job`?",
+                expected: PlanExpected::Refuse("settled by searching the code"),
+            },
+            OpenQuestionCase {
+                id: "user-decision-about-which-failing-test-blocks-landing",
+                source: made_up,
+                question: "User: which failing test should block landing?",
+                expected: PlanExpected::Accept,
+            },
+            OpenQuestionCase {
+                id: "user-decision-to-ignore-failing-tests-on-a-platform",
+                source: made_up,
+                question: "User: should any test that fails on Windows be marked ignored?",
+                expected: PlanExpected::Accept,
+            },
+            OpenQuestionCase {
+                id: "host-question-whether-existing-tests-fail-on-the-production-toolchain",
+                source: made_up,
+                question: "Host: do existing tests fail on the production host's older toolchain?",
+                expected: PlanExpected::Accept,
+            },
+            OpenQuestionCase {
+                id: "user-question-whether-failing-existing-tests-are-acceptable",
+                source: made_up,
+                question: "User: is it acceptable if existing tests break?",
+                expected: PlanExpected::Accept,
+            },
+            OpenQuestionCase {
+                id: "user-question-that-names-no-function-on-error",
+                source: made_up,
+                question: "User: does it matter whether the CLI exits 1 or 2 on error?",
+                expected: PlanExpected::Accept,
+            },
+            OpenQuestionCase {
+                id: "user-question-about-what-the-user-expects-on-failure",
+                source: made_up,
+                question: "User: what does the user expect `athena land` to print on failure?",
+                expected: PlanExpected::Accept,
+            },
+            OpenQuestionCase {
+                id: "user-scope-question-naming-a-tests-path",
+                source: made_up,
+                question: "User: may the change edit tests in `crates/athena-cli/tests/job_plan.rs`?",
                 expected: PlanExpected::Accept,
             },
         ]

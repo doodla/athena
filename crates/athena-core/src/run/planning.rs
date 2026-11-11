@@ -212,8 +212,9 @@ impl Athena {
         // critic call and without using the round, up to MAX_MECHANICAL_PASSES times in a round. The checks
         // include the open-questions rule: only a `User:` or `Host:` question stays open, so a question that
         // reading the code settles never costs a critic round. They also refuse a risk or a dependent that
-        // defers the search for callers and tests to the producer, so impact the planner can find by
-        // searching is never left open.
+        // defers the search for callers and tests to the producer, and an open question about whether
+        // existing tests break or what a named function does on its failure or retry path, so impact the
+        // planner can find by searching is never left open.
         let athena_findings = plan_findings(
             &plan,
             ctx.reading,
