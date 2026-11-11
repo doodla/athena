@@ -1,0 +1,169 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261111-222407-mz22",
+  "round": 1,
+  "at": "2026-11-11T22:27:27.254206735Z",
+  "invocation_seq": 3,
+  "approach": "Root cause: the producer brief (producer_brief_with_evidence, crates/athena-context/src/briefs.rs:678-747) lists the checks (693-700), the replay (701), the banned-word scan and the mirror check, but never tells the producer to find the existing tests that read the output it changes (status, plan, display text) and run them before reporting. The first notice is the final verdict. Fix it where the information is missing: add a private fn existing_tests_section() -> String beside replay_while_working_section (briefs.rs:763) and emit it from producer_brief_with_evidence right after the replay line (701), before \"## Commands Bash may run\" (702). The section tells the producer, before it reports, to name each output it changes, Grep tests/ and the #[cfg(test)] modules for a distinctive line of it, run each test found with cargo test -p <crate> --test <name> (or cargo test -p <crate> <module> for a unit test), then run the whole crate with cargo test -p <crate>, and cite the commands and any failing test name and assertion in the criteria_check evidence. It is information only: no check, gate or refusal rule changes, so 0% of past accepted readings are newly refused. Add a unit test and a CHANGELOG.md entry. Revision: criterion 5 is a behavior criterion, so its demonstration now names its seam and what fails without the change.",
+  "decisions": [
+    {
+      "choice": "Add the guidance as a new producer-brief section emitted unconditionally with fixed text, placed after the replay section and before \"## Commands Bash may run\".",
+      "reason": "The failing stage (producer) lacked the instruction. The brief cannot know the changed files at dispatch, so the section tells the producer how to find the tests itself. It matches the neighbouring sections (mirror check, banned words, replay), reaches every reading and retry, and so covers the class and not one job.",
+      "rejected": [
+        {
+          "option": "A gate that runs the full athena-cli suite after the producer and refuses on failure",
+          "why": "A refusal rule. The request allows one only when information cannot prevent the failure. The checks already run cargo test --locked at the end; the failure was late detection."
+        },
+        {
+          "option": "Compute affected tests from the diff and add them to the brief or a send-back",
+          "why": "No diff exists at dispatch. A mid-run send-back is a new mechanism, too large for one run."
+        },
+        {
+          "option": "Edit the producer prompt file, athena.toml or defaults.toml",
+          "why": "Out of scope. The producer prompt budget has only 157 tokens of room (1043 of 1200)."
+        },
+        {
+          "option": "Put the text inside checkable_evidence_section",
+          "why": "That section is about what the verifier can see. The existing test producer_brief_requires_checkable_evidence_in_the_snapshot would then cover two topics."
+        }
+      ]
+    },
+    {
+      "choice": "Demonstrate criterion 5 with the three Athena checks, and name the new unit test as the part that changes outcome.",
+      "reason": "fmt, clippy and test are the checks Athena runs on the result (cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked). The workspace test run includes the new test from step 3, which fails on the base, so the run is a real check of the change and not only a green build.",
+      "rejected": [
+        {
+          "option": "Run only the athena-context filter for criterion 5",
+          "why": "Criterion 5 asks for the workspace checks; the filtered run is criterion 2's demonstration."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add existing_tests_section() beside replay_while_working_section, emit it from producer_brief_with_evidence after the replay section, and add the unit test in the tests module.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Under [Unreleased] > Added, record the change: name the root cause, the two jobs, the 0% newly refused statement, the dropped candidates and the out-of-scope drain flake.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-context/src/briefs.rs add `fn existing_tests_section() -> String` after replay_while_working_section (ends line 773), with a one-line doc comment saying why it exists. Heading `## Run the existing tests that read what you change`. Text: before you report, name each output you change (status, plan, display or any printed text); Grep tests/ and the #[cfg(test)] modules for a distinctive line of that output and for the function that prints it; run each test found with `cargo test -p <crate> --test <name>` (example: `cargo test -p athena-cli --test mirrors`), or `cargo test -p <crate> <module>` for a unit test; then run the whole crate with `cargo test -p <crate>`; cite each command, and the name and assertion of any failing test, in your criteria_check evidence. Note that a section printed unconditionally breaks tests that compare whole output.",
+    "In producer_brief_with_evidence add `let _ = writeln!(out, \"{}\", existing_tests_section());` directly after the replay_while_working_section line (701).",
+    "In the tests module, near line 3395, add producer_brief_tells_the_producer_to_run_existing_tests_that_read_its_output. Build briefs with producer_brief(&producer_inputs(None)), with inputs.retry_from = Some(seed()), and with producer_brief_with_evidence(.., Some(\"/tmp/ev\")). For each, find the heading with expect, slice the section as the replay test does, assert it contains \"Grep\", \"tests/\", \"#[cfg(test)]\", \"cargo test -p <crate> --test <name>\", \"whole crate\" and \"failing test\", and assert the heading falls after \"## Checks Athena will run\" and before \"## Commands Bash may run\".",
+    "Add the CHANGELOG.md entry under [Unreleased] > Added, in the style of the nearby entries (CHANGELOG.md:12-21): the root cause, jobs 20261111-105048-n7bm and 20261111-213010-8jgz, no refusal rule (0% newly refused), candidates dropped, drain flake out of scope.",
+    "Run cargo fmt --all, then cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings, cargo test -p athena-context briefs, cargo test -p athena-core, cargo test -p xtask --test policy, and finally cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "The producer ignores the section, since it is advice and not a rule.",
+      "mitigation": "The user chose information over refusal. The section asks for the commands to be cited in the criteria_check evidence, so the verifier can see whether they were run."
+    },
+    {
+      "risk": "The new test is brittle against reworded text.",
+      "mitigation": "Assert on stable key phrases and section order only, as the replay test at briefs.rs:3395 does."
+    },
+    {
+      "risk": "The text trips the boundary scan or adds an email-like string.",
+      "mitigation": "Use only generic words (producer, crate, tests). Run cargo test -p xtask --test policy."
+    },
+    {
+      "risk": "The <crate> and <name> placeholders are taken literally.",
+      "mitigation": "Add a worked example, such as `cargo test -p athena-cli --test mirrors` (crates/athena-cli/tests/mirrors.rs, referenced at briefs.rs:2291)."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Producer brief text and section order",
+      "dependent": "crates/athena-context/src/briefs.rs tests producer_briefs_* (about lines 1497-2294) and the replay-order test at 3395",
+      "kind": "code",
+      "test": "cargo test -p athena-context briefs",
+      "reason": "They assert contains or ordering of other sections; none compares the whole brief. The replay test checks replay < \"## Commands Bash may run\", still true with the new section between."
+    },
+    {
+      "name": "Producer brief rendered at dispatch and stored as brief-producer.md",
+      "dependent": "crates/athena-core/src/run/mod.rs:1162 (caller of producer_brief_with_evidence), run/tests.rs:846, run_pin_tests.rs:1536, reading.rs:3449-3513",
+      "kind": "code",
+      "test": "cargo test -p athena-core",
+      "reason": "They check the evidence placeholder, unchanged-files section and findings blocks by substring, not length or exact text."
+    },
+    {
+      "name": "Number of briefs captured",
+      "dependent": "crates/athena-cli/tests/lifecycle.rs (briefs.len() at about 1546, 2508) and job_plan.rs (about 739-1031)",
+      "kind": "code",
+      "test": null,
+      "reason": "They count briefs sent, not their content, so a longer producer brief changes nothing. Covered by cargo test --locked."
+    },
+    {
+      "name": "Producer prompt-set budget (budget producer: 1043 of 1200)",
+      "dependent": "docs/system-facts.md budget lines and system_facts_budgets_match_computed in crates/athena-cli/tests/budgets.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "The budget covers always-loaded prompt files; briefs sit outside these sets, and no prompt file changes, so the computed values stay the same."
+    },
+    {
+      "name": "Banned words and email-like text",
+      "dependent": "xtask/tests/policy.rs boundary scan (boundary_words) and the [personal_data] allow-list in athena.toml, over briefs.rs and CHANGELOG.md",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test policy",
+      "reason": null
+    },
+    {
+      "name": "Reading and replay rules, record formats",
+      "dependent": "replay_send_back_section (briefs.rs:778), reading rules in crates/athena-core/src/reading.rs, and crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No record file, parser, stem list or matching rule changes, so no past reading changes outcome and no refusal_corpus case is needed. check_record_file and AnyRecord are not touched."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test reads the rendered producer brief and slices the new section from its heading to the next \"## \" heading.",
+      "command": "cargo test -p athena-context briefs::tests::producer_brief_tells_the_producer_to_run_existing_tests_that_read_its_output",
+      "observes": "The brief has the heading \"## Run the existing tests that read what you change\" and, inside that section, the words Grep, tests/, #[cfg(test)], `cargo test -p <crate> --test <name>`, the whole-crate run, and the instruction to cite the commands and any failing test name. The heading falls after \"## Checks Athena will run\" and before \"## Commands Bash may run\".",
+      "fails_without": "The brief has no such heading, so the find(...).expect on the heading panics.",
+      "seam": "Production entry point producer_brief(&ProducerInputs) (briefs.rs:672), which calls producer_brief_with_evidence (678). Fixture: the existing helper producer_inputs(None) (briefs.rs:1758), passed as an argument. No double; the section builder is production code. The test is added by step 3; the helper exists."
+    },
+    {
+      "criterion": 2,
+      "method": "The same test runs over several readings: producer_inputs(None); the same with inputs.retry_from = Some(seed()) (helper at briefs.rs:1772); and producer_brief_with_evidence with an evidence path. Run the filter on the base to see it fail, then with the change to see it pass.",
+      "command": "cargo test -p athena-context briefs",
+      "observes": "All briefs tests pass with the change, including the new one. On the base the new test fails at the heading lookup. The older tests (producer_brief_tells_the_producer_the_replay_is_checked_while_it_works at briefs.rs:3395, and the producer_briefs_* tests) still pass because none compares the whole brief.",
+      "fails_without": "The section function and its call are absent on the base, so the new test panics with \"the producer brief has the existing-tests section\".",
+      "seam": "producer_brief and producer_brief_with_evidence (briefs.rs:672, 678). Fixtures producer_inputs and seed() exist today and are passed in; the retry variant sets retry_from on a mutable copy of the inputs. Step 3 adds the test."
+    },
+    {
+      "criterion": 3,
+      "method": "Review the diff: only briefs.rs and CHANGELOG.md change, and the new section is a plain string function whose output no check reads.",
+      "command": "git diff --stat",
+      "observes": "No gate, refusal or matching rule is in the diff. The reading and replay code (crates/athena-core/src/reading.rs and run) is untouched, so no accepted reading is newly refused: 0%.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Check the diff paths and the CHANGELOG entry text.",
+      "command": "git diff --stat",
+      "observes": "None of role_need.rs, status.rs, display.rs, introspection.rs, docs/spec.toml or status_build_measurement.rs appears among changed files. The CHANGELOG entry says the candidates of jobs 20261111-105048-n7bm and 20261111-213010-8jgz are dropped and the drain flake is out of scope.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three checks Athena runs on the result. The test run includes the new unit test, so a missing or broken section fails it, and a formatting or lint slip in the new function fails fmt or clippy.",
+      "command": "cargo test --locked",
+      "observes": "cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked all pass. The tests that read producer brief text elsewhere (crates/athena-core/src/reading.rs:3449-3513, run_pin_tests.rs:1536, run/tests.rs:846) still pass because they assert on other sections by substring. xtask/tests/policy.rs passes because the new text uses no banned word or email-like string.",
+      "fails_without": "On the base, cargo test --locked fails once the step 3 test is present without the step 1-2 code (the new test panics at the heading lookup); with the code but a rustfmt or clippy slip in existing_tests_section, the fmt or clippy command fails. Without the new test and section both, the run would pass but would not show the cause fixed, which is why criterion 2's filtered run is the discriminating one.",
+      "seam": "Entry points are the workspace commands cargo fmt, cargo clippy and cargo test, run from the repository root. Fixtures are the existing test suites of every crate plus the new test in briefs.rs (producer_brief with producer_inputs(None) and seed(), which exist today); nothing is faked. Step 3 adds the new test; step 5 runs the three commands."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "b63cb4dd7c2ebc7ed169a7c2ea7d7519cb0c9646c6c80bacbda2293cb041fada"
+}

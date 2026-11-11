@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The producer brief now tells the producer to find and run the existing tests that read the output it changes.
+  Root cause of the repeated failure (jobs 20261111-105048-n7bm and 20261111-213010-8jgz, a new status line that
+  broke an existing test, caught only at the final verdict): nothing in the brief asked the producer to find the
+  tests that read the status, plan or display text it was changing before it reported. A new section, emitted for
+  every reading and retry, says to Grep `tests/` and the `#[cfg(test)]` modules for the output, run each test with
+  `cargo test -p <crate> --test <name>`, then the whole crate, and cite the commands and any failing test name in
+  the evidence. It is information only; no check, gate or refusal rule was added, so 0% of past accepted readings
+  are newly refused. The candidates of those two jobs are dropped, and the drain test flake is out of scope.
 - An empty producer diff now fails with a recorded reason. Root cause of the repeated failure (jobs
   20261027-011733-vrsk and 20261111-145400-dx3z, both ended "the producer made no change"): the producer was not
   asked for a no-change outcome, and Athena discarded the report it had when the diff was empty, so an empty diff
