@@ -147,6 +147,11 @@ pub struct CriticInputs {
     pub athena_findings: Vec<Finding>,
 }
 
+/// The adversarial instruction in the critic's brief (OLY-8-05): look for ways the plan's conclusions are wrong.
+pub const CHALLENGE_INSTRUCTION: &str = "Search for ways this plan's conclusions might be wrong. Look for \
+counterexamples to its claims, fragile assumptions it relies on, and failure modes it does not cover. \
+Name each one as a finding with the evidence you read.";
+
 /// The critic's brief: the request, the reading, the plan with every demonstration, and Athena's own findings.
 pub fn critic_brief(inputs: &CriticInputs) -> String {
     let mut out = String::new();
@@ -168,6 +173,7 @@ pub fn critic_brief(inputs: &CriticInputs) -> String {
         &mut out,
         "A blocker or major soundness finding makes your verdict revise. Minor and nit findings do not.",
     );
+    let _ = writeln!(out, "## Challenge\n\n{CHALLENGE_INSTRUCTION}\n");
     let _ = writeln!(
         out,
         "## Critique\n\nEnd with the critique as your structured output."
