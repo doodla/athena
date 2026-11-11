@@ -1601,6 +1601,19 @@ mod tests {
     }
 
     #[test]
+    fn composed_critic_prompt_carries_the_challenge_rule() {
+        let composed = crate::compose(&[crate::CONTRACT.into(), crate::CRITIC_FRAME.into()]);
+        let text = composed.text;
+        for needle in [
+            "Search for ways the plan's conclusions might be wrong",
+            "counterexamples, fragile assumptions, failure modes",
+        ] {
+            assert!(text.contains(needle), "missing wording: {needle}");
+        }
+        assert_eq!(crate::CRITIC_FRAME.version, 2);
+    }
+
+    #[test]
     fn planner_prompt_and_brief_carry_the_refusal_corpus_rule() {
         let brief = planner_brief(&planner_inputs(None));
         let report = brief.split("## Report").nth(1).expect("report section");

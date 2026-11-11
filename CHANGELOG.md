@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The critic role prompt (`frame.critic`, now version 2) tells the critic to search for ways the plan's
+  conclusions might be wrong; a test pins the rule and OLY-8-05 records it as its mechanism (`status: planning`).
 - `planning_round` in `crates/athena-core/src/run/planning.rs` is split into smaller private methods
   (`critic_round`, `stop_on_mechanical_limit`) so no function exceeds the 200-line limit. Behavior is unchanged.
 
