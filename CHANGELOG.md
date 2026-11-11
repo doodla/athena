@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- An empty producer diff now fails with a recorded reason. Root cause of the repeated failure (jobs
+  20261027-011733-vrsk and 20261111-145400-dx3z, both ended "the producer made no change"): the producer was not
+  asked for a no-change outcome, and Athena discarded the report it had when the diff was empty, so an empty diff
+  was a bare failure that did not say whether the work was already done, blocked or abandoned. The producer's
+  structured output has a nullable `no_change` field (`already_done` with the evidence, `blocked` with the
+  blocker, or `gave_up` with the reason); the producer brief asks for it whenever the tree is left unchanged; the
+  kept report and the failure reason carry it, and a run that reports none says no reason was reported and names
+  the `no_change` field. The job still fails exactly as before; no check, gate or admission rule was added.
+  Records made earlier still parse. Left out of scope: a pre-dispatch check that refuses a job whose named source
+  symbol is absent; stating in the brief that the item already sits at its target is a possible follow-up.
 - Guards so a usage measure cannot go blind to a role again. Root cause of the repeated failure (usage measures
   that would have retired the steward, audience and auditor): invocations are kept in four places (each job's list
   and the steward, audience and auditor lists), and nothing guarded the list of sources or the list of roles, so a
@@ -43,6 +53,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   decision). The evaluated stage needs the new optional `evaluation` field of a defaults proposal (cases and the
   failures of the baseline and candidate arms), never the number of jobs the proposal cites, so on records with no
   evaluation the line reads `not shown (missing: evaluated candidate, ...)`; no records at all is never success.
+
+- `later_similar_task` in `athena-data` (requirement OLY-10-03) and a `later similar task:` line in `athena status`
+  (`later_similar_task_line`). Only an accepted defaults proposal counts. A later task is similar only by class of
+  work: a landed job counts when the class stored in its job record is one of the proposal's `applies_to`; a job
+  of another class or with no class never counts, so an unrelated job landing shows nothing. `shown (prevented)`
+  needs at least three such later landed jobs (the repeat threshold that makes a proposal) and no recurrence of the
+  proposal's failure class on a later job, for every accepted proposal. `shown (detected earlier)` needs a
+  recurrence in the proposal's classes whose stage (`rejected`, caught before landing, against an owner fix after
+  the result) is earlier than the earliest stage among the introspections the proposal cites; `failed` (which may
+  be an infrastructure failure) and every other category state no stage and give `not shown`. Output over the real
+  records (the evidence snapshot of job 20261111-213010-8jgz: 464 landed jobs, no defaults-proposal record, so no
+  accepted proposal): `later similar task: not shown`. One example of each outcome, from the status fixture
+  tests (`cargo test -p athena-core status`, `cargo test -p athena-data introspection`): three later landed
+  `code` jobs after an accepted proposal for `code` give `later similar task: shown (prevented)`; the same records
+  with the three later jobs of class `docs` give `later similar task: not shown` (not prevented by a different
+  class); an accepted proposal with no later job gives `later similar task: not shown`. This replaces the earlier
+  attempt that counted any later landed job.
 
 ### Changed
 

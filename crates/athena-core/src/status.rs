@@ -379,6 +379,36 @@ pub fn improvement_cycle_line(cycle: &athena_data::records::ImprovementCycle) ->
     )
 }
 
+/// The line `athena status` prints for the final test of the process (OLY-10-03): `later similar task: ` and
+/// then `shown (prevented)`, `shown (detected earlier)` or `not shown`. It is computed from the job records'
+/// stored class of work, so a later job of another class never shows it.
+pub fn later_similar_task_line(records: &Records) -> String {
+    format!(
+        "later similar task: {}",
+        athena_data::records::later_similar_task(
+            &landed_with_class(records),
+            &records.introspections,
+            &crate::proposals::current(&records.proposals),
+        )
+        .label()
+    )
+}
+
+/// The jobs whose latest outcome is landed, each with its stored class of work.
+fn landed_with_class(records: &Records) -> Vec<athena_data::records::LandedJob> {
+    records
+        .jobs
+        .values()
+        .filter(|j| j.state() == JobState::Closed(OutcomeState::Landed))
+        .filter_map(|j| {
+            Some(athena_data::records::LandedJob {
+                id: j.id.clone()?,
+                class_of_work: j.job.as_ref().and_then(|job| job.class_of_work.clone()),
+            })
+        })
+        .collect()
+}
+
 /// The jobs whose latest outcome is landed.
 fn landed_job_ids(records: &Records) -> Vec<athena_data::JobId> {
     records
@@ -454,6 +484,9 @@ pub struct StatusView {
     pub build_measurement: String,
     /// Whether the records show the final acceptance chain, as one printed line ([`improvement_cycle_line`]).
     pub improvement_cycle: String,
+    /// Whether the records show a later similar task the improved process prevented or caught earlier, as one
+    /// printed line ([`later_similar_task_line`]).
+    pub later_similar_task: String,
     /// Classes of work whose minutes per landed job fell or rose between their older and newer landed jobs,
     /// with the job after which a rising class got worse; absent until a class has enough landed jobs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1312,6 +1345,7 @@ impl Athena {
                 &records.introspections,
                 &crate::proposals::current(&records.proposals),
             )),
+            later_similar_task: later_similar_task_line(&records),
             class_trend: crate::class_trend::ClassTrend::compute(&records),
             role_need: crate::role_need::RoleNeed::compute(&records),
             interventions_by_category: by_category,
@@ -1672,6 +1706,89 @@ mod improvement_cycle_line_tests {
         assert_eq!(
             improvement_cycle_line(&unevaluated),
             "improvement cycle: not shown (missing: evaluated candidate, adoption decision)"
+        );
+    }
+
+    /// Fixture records: a defaults proposal for the class `code` accepted by an early job, then `count` later
+    /// landed jobs, each of class `class`.
+    fn records_with_later_jobs(class: Option<&str>, count: u32) -> Records {
+        use crate::status::records_worktree_tests::job_record;
+        use athena_data::records::{
+            AnyRecord, Outcome, OutcomeState, ProposalKind, ProposalRecord, ProposalSource,
+            ProposalStatus, ProposalVersion,
+        };
+        let at: jiff::Timestamp = "2026-11-02T10:00:00Z".parse().unwrap();
+        let rid = |s: &str| athena_data::RecordId::parse(s).unwrap();
+        let accepting = athena_data::JobId::parse("20261102-100000-aaaa").unwrap();
+        let proposals = vec![ProposalRecord {
+            record: rid("20261102-100001-bbbb"),
+            at,
+            id: "d".into(),
+            kind: ProposalKind::Add,
+            statement: "A new default.".into(),
+            applies_to: vec!["code".into()],
+            version: ProposalVersion { from: 1, to: 2 },
+            sources: vec![ProposalSource {
+                introspection: rid("20261101-100000-cccc"),
+                intervention: None,
+                job: athena_data::JobId::parse("20261101-100000-dddd").unwrap(),
+                at,
+            }],
+            failure_class: rid("20261101-100002-eeee"),
+            status: ProposalStatus::Accepted { job: accepting },
+            candidate_sha256: "a".repeat(64),
+            notes: String::new(),
+            evaluation: None,
+        }];
+        let mut records = Records {
+            proposals,
+            ..Records::default()
+        };
+        for n in 0..count {
+            let id = format!("20261103-10000{n}-ffff");
+            let AnyRecord::Job(mut job) = job_record(&id, "code") else {
+                unreachable!()
+            };
+            job.class_of_work = class.map(String::from);
+            let jr = JobRecords {
+                id: Some(job.id.clone()),
+                outcome: Some(Outcome {
+                    job: job.id.clone(),
+                    state: OutcomeState::Landed,
+                    reason: "Landed.".into(),
+                    at,
+                    totals: None,
+                    branch: None,
+                    base_commit: None,
+                    candidate_commit: None,
+                    after_blocked: false,
+                    through_commit: None,
+                }),
+                job: Some(*job),
+                ..JobRecords::default()
+            };
+            records.jobs.insert(id, jr);
+        }
+        records
+    }
+
+    #[test]
+    fn the_later_similar_task_line_follows_the_class_of_the_later_landed_jobs() {
+        let same = later_similar_task_line(&records_with_later_jobs(Some("code"), 3));
+        assert_eq!(same, "later similar task: shown (prevented)");
+        // The same records, but the later jobs are of another class, or have none.
+        let other = later_similar_task_line(&records_with_later_jobs(Some("docs"), 3));
+        assert_eq!(other, "later similar task: not shown");
+        let none = later_similar_task_line(&records_with_later_jobs(None, 3));
+        assert_eq!(none, "later similar task: not shown");
+        // Too few later jobs, and none at all.
+        assert_eq!(
+            later_similar_task_line(&records_with_later_jobs(Some("code"), 2)),
+            "later similar task: not shown"
+        );
+        assert_eq!(
+            later_similar_task_line(&Records::default()),
+            "later similar task: not shown"
         );
     }
 

@@ -723,6 +723,377 @@ pub fn improvement_cycle(
     }
 }
 
+/// How many later landed jobs of a proposal's classes must pass without a recurrence before "prevented" is
+/// claimed. It equals the number of distinct jobs that make a proposal (the repeat threshold), so one quiet
+/// job is never taken for prevention.
+pub const MIN_LATER_SAME_CLASS_JOBS: usize = 3;
+
+/// What the records show about the final test of the process (OLY-10-03).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaterSimilarTask {
+    /// Enough later jobs of the same class of work landed and the failure did not recur.
+    Prevented,
+    /// The failure recurred, but at a stage the records show to be earlier than where it was found before.
+    DetectedEarlier,
+    NotShown,
+}
+
+impl LaterSimilarTask {
+    /// The words `athena status` prints after `later similar task:`.
+    pub fn label(self) -> &'static str {
+        match self {
+            LaterSimilarTask::Prevented => "shown (prevented)",
+            LaterSimilarTask::DetectedEarlier => "shown (detected earlier)",
+            LaterSimilarTask::NotShown => "not shown",
+        }
+    }
+}
+
+/// A landed job and its class of work, as `Job::class_of_work` records it (absent for a job with no class).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LandedJob {
+    pub id: JobId,
+    pub class_of_work: Option<String>,
+}
+
+/// Where in the job a defect was caught, from the `category` an introspection states. Only categories whose
+/// stage the records state are ranked: `rejected` is caught by the verifier before landing (rank 1); an owner
+/// fix after the result (`did-work-themselves`, `corrected-output`, `overrode-decision`, `mistake`) is caught
+/// later (rank 2). `failed` can be an infrastructure failure that says nothing about the process, and any
+/// other category names no stage, so those have no rank and never support "detected earlier".
+fn stage_rank(category: &str) -> Option<u8> {
+    match category {
+        "rejected" => Some(1),
+        "did-work-themselves" | "corrected-output" | "overrode-decision" | "mistake" => Some(2),
+        _ => None,
+    }
+}
+
+/// Whether the records show a later similar task: one the improved process prevented or caught earlier.
+///
+/// Only an accepted proposal counts (pending, rejected and withdrawn ones are not "improved process"), and a
+/// task is "later" only when its job id sorts after the job that accepted the proposal. A task is "similar"
+/// only by class of work: a later landed job counts only when its `class_of_work` is one of the proposal's
+/// `applies_to`. A job with no class, or of another class, never counts, so an unrelated job landing cannot
+/// show anything.
+///
+/// For each accepted proposal, a recurrence is a recorded introspection of the proposal's failure class on a
+/// later job. If any accepted proposal has a recurrence, the result is never `Prevented`. Otherwise
+/// `Prevented` needs at least [`MIN_LATER_SAME_CLASS_JOBS`] later landed jobs of the proposal's classes.
+/// `DetectedEarlier` needs a recurrence on a later job of the proposal's classes whose stage, by
+/// [`stage_rank`], is earlier than the earliest ranked stage among the introspections the proposal cites, and
+/// no accepted proposal may have another recurrence that is not shown earlier. The same stage, a later stage,
+/// or a stage the records do not state (a `failed` category such as an infrastructure failure, or any other
+/// category) is not shown. No records, no class, or no later job gives `NotShown`, never success.
+pub fn later_similar_task(
+    landed: &[LandedJob],
+    introspections: &[IntrospectionRecord],
+    proposals: &[&ProposalRecord],
+) -> LaterSimilarTask {
+    let mut prevented = false;
+    let mut earlier = false;
+    for p in proposals {
+        let ProposalStatus::Accepted { job: accepted } = &p.status else {
+            continue;
+        };
+        let in_class = |class: &str| p.applies_to.iter().any(|a| a == class);
+        let recurrences: Vec<&IntrospectionRecord> = introspections
+            .iter()
+            .filter(|i| i.status == IntrospectionStatus::Recorded)
+            .filter(|i| i.failure_class.as_ref() == Some(&p.failure_class))
+            .filter(|i| i.job.as_ref().is_some_and(|j| j > accepted))
+            .collect();
+        if recurrences.is_empty() {
+            let later = landed
+                .iter()
+                .filter(|j| &j.id > accepted)
+                .filter(|j| j.class_of_work.as_deref().is_some_and(in_class))
+                .count();
+            prevented |= later >= MIN_LATER_SAME_CLASS_JOBS;
+            continue;
+        }
+        let before = p
+            .sources
+            .iter()
+            .filter_map(|s| introspections.iter().find(|i| i.id == s.introspection))
+            .filter_map(|i| stage_rank(&i.category))
+            .min();
+        let caught_earlier = recurrences.iter().all(|i| {
+            in_class(&i.class_of_work)
+                && matches!((stage_rank(&i.category), before), (Some(now), Some(then)) if now < then)
+        });
+        if !caught_earlier {
+            return LaterSimilarTask::NotShown;
+        }
+        earlier = true;
+    }
+    if earlier {
+        // A recurrence on any accepted proposal blocks "prevented", even when another proposal was quiet.
+        return LaterSimilarTask::DetectedEarlier;
+    }
+    if prevented {
+        LaterSimilarTask::Prevented
+    } else {
+        LaterSimilarTask::NotShown
+    }
+}
+
+#[cfg(test)]
+mod later_similar_task_tests {
+    use super::*;
+
+    fn rid(n: u32) -> RecordId {
+        RecordId::parse(&format!("20261101-1000{:02}-{:04x}", n % 60, n)).unwrap()
+    }
+
+    /// A job id whose order follows `n`.
+    fn job(n: u32) -> JobId {
+        JobId::parse(&format!("20261101-2000{:02}-{:04x}", n % 60, n)).unwrap()
+    }
+
+    fn ts() -> Timestamp {
+        "2026-11-01T10:00:00Z".parse().unwrap()
+    }
+
+    fn landed(n: u32, class: Option<&str>) -> LandedJob {
+        LandedJob {
+            id: job(n),
+            class_of_work: class.map(String::from),
+        }
+    }
+
+    fn intro(n: u32, class: u32, about: u32, category: &str) -> IntrospectionRecord {
+        IntrospectionRecord {
+            id: rid(n),
+            at: ts(),
+            trigger: IntrospectionTrigger::Rejection,
+            job: Some(job(about)),
+            intervention: None,
+            class_of_work: "code".into(),
+            category: category.into(),
+            what_happened: Some("It happened.".into()),
+            failure_class: Some(rid(class)),
+            new_class: false,
+            earlier_cases: Vec::new(),
+            decisions_matched: Vec::new(),
+            cause: Some("A cause.".into()),
+            other_causes: Vec::new(),
+            open_hypotheses: Vec::new(),
+            contradictions: Vec::new(),
+            prevention_kind: Some(PreventionKind::CodeCheck),
+            prevention: Some("A check.".into()),
+            proposed_request: Some("Add it.".into()),
+            evidence: None,
+            status: IntrospectionStatus::Recorded,
+            failure: None,
+            flags: Vec::new(),
+            dropped_ids: Vec::new(),
+            planning_stopped: false,
+            from_jev: false,
+            jev: None,
+        }
+    }
+
+    /// An accepted proposal for class `class`, cited by introspections 1..=3 (category `rejected`), accepted by
+    /// job 10, applying to the class of work `code`.
+    fn accepted(class: u32) -> ProposalRecord {
+        ProposalRecord {
+            record: rid(500 + class),
+            at: ts(),
+            id: "d".into(),
+            kind: ProposalKind::Add,
+            statement: "A new default.".into(),
+            applies_to: vec!["code".into()],
+            version: ProposalVersion { from: 1, to: 2 },
+            sources: (1..=3)
+                .map(|n| ProposalSource {
+                    introspection: rid(n),
+                    intervention: None,
+                    job: job(n),
+                    at: ts(),
+                })
+                .collect(),
+            failure_class: rid(class),
+            status: ProposalStatus::Accepted { job: job(10) },
+            candidate_sha256: "a".repeat(64),
+            notes: String::new(),
+            evaluation: None,
+        }
+    }
+
+    fn sources(category: &str) -> Vec<IntrospectionRecord> {
+        (1..=3).map(|n| intro(n, 9, n, category)).collect()
+    }
+
+    fn code_jobs(count: u32) -> Vec<LandedJob> {
+        (11..11 + count).map(|n| landed(n, Some("code"))).collect()
+    }
+
+    fn run(
+        jobs: &[LandedJob],
+        intros: &[IntrospectionRecord],
+        ps: &[&ProposalRecord],
+    ) -> LaterSimilarTask {
+        later_similar_task(jobs, intros, ps)
+    }
+
+    #[test]
+    fn introspection_later_jobs_of_the_same_class_without_recurrence_are_prevented() {
+        let p = accepted(9);
+        let got = run(
+            &code_jobs(MIN_LATER_SAME_CLASS_JOBS as u32),
+            &sources("rejected"),
+            &[&p],
+        );
+        assert_eq!(got, LaterSimilarTask::Prevented);
+        assert_eq!(got.label(), "shown (prevented)");
+    }
+
+    #[test]
+    fn introspection_too_few_later_same_class_jobs_are_not_shown() {
+        let p = accepted(9);
+        let jobs = code_jobs(MIN_LATER_SAME_CLASS_JOBS as u32 - 1);
+        assert_eq!(
+            run(&jobs, &sources("rejected"), &[&p]),
+            LaterSimilarTask::NotShown
+        );
+    }
+
+    #[test]
+    fn introspection_later_jobs_of_another_class_or_no_class_are_not_shown() {
+        let p = accepted(9);
+        let src = sources("rejected");
+        let other: Vec<LandedJob> = (11..20).map(|n| landed(n, Some("docs"))).collect();
+        assert_eq!(run(&other, &src, &[&p]), LaterSimilarTask::NotShown);
+        let none: Vec<LandedJob> = (11..20).map(|n| landed(n, None)).collect();
+        assert_eq!(run(&none, &src, &[&p]), LaterSimilarTask::NotShown);
+        // Same-class jobs mixed with many others still need the minimum of the right class.
+        let mut mixed = other;
+        mixed.extend(code_jobs(2));
+        assert_eq!(run(&mixed, &src, &[&p]), LaterSimilarTask::NotShown);
+        // The right class does count: adding one more same-class job tips it.
+        mixed.push(landed(30, Some("code")));
+        assert_eq!(run(&mixed, &src, &[&p]), LaterSimilarTask::Prevented);
+    }
+
+    #[test]
+    fn introspection_jobs_before_the_acceptance_and_no_jobs_are_not_shown() {
+        let p = accepted(9);
+        let src = sources("rejected");
+        // Jobs 1..=10 are not after the accepting job 10.
+        let before: Vec<LandedJob> = (1..=10).map(|n| landed(n, Some("code"))).collect();
+        assert_eq!(run(&before, &src, &[&p]), LaterSimilarTask::NotShown);
+        assert_eq!(run(&[], &src, &[&p]), LaterSimilarTask::NotShown);
+        assert_eq!(run(&[], &[], &[]), LaterSimilarTask::NotShown);
+    }
+
+    #[test]
+    fn introspection_a_pending_rejected_or_withdrawn_proposal_is_not_shown() {
+        let jobs = code_jobs(5);
+        let src = sources("rejected");
+        for status in [
+            ProposalStatus::Pending,
+            ProposalStatus::Rejected {
+                reason: "No gain.".into(),
+            },
+            ProposalStatus::Withdrawn,
+        ] {
+            let mut p = accepted(9);
+            p.status = status;
+            assert_eq!(run(&jobs, &src, &[&p]), LaterSimilarTask::NotShown);
+        }
+    }
+
+    #[test]
+    fn introspection_a_recurrence_at_an_earlier_stage_is_detected_earlier() {
+        let p = accepted(9);
+        // The defect was found by the owner after the result (rank 2); now the verifier rejects it (rank 1).
+        let mut intros = sources("corrected-output");
+        intros.push(intro(20, 9, 12, "rejected"));
+        let got = run(&code_jobs(5), &intros, &[&p]);
+        assert_eq!(got, LaterSimilarTask::DetectedEarlier);
+        assert_eq!(got.label(), "shown (detected earlier)");
+    }
+
+    #[test]
+    fn introspection_a_recurrence_at_the_same_or_a_later_or_an_unstated_stage_is_not_shown() {
+        let p = accepted(9);
+        // Same stage: rejected before, rejected again.
+        let mut same = sources("rejected");
+        same.push(intro(20, 9, 12, "rejected"));
+        assert_eq!(run(&code_jobs(5), &same, &[&p]), LaterSimilarTask::NotShown);
+        // Later stage: rejected before, found by the owner now.
+        let mut later = sources("rejected");
+        later.push(intro(20, 9, 12, "mistake"));
+        assert_eq!(
+            run(&code_jobs(5), &later, &[&p]),
+            LaterSimilarTask::NotShown
+        );
+        // A failed job (possibly infrastructure) names no stage.
+        let mut failed = sources("corrected-output");
+        failed.push(intro(20, 9, 12, "failed"));
+        assert_eq!(
+            run(&code_jobs(5), &failed, &[&p]),
+            LaterSimilarTask::NotShown
+        );
+        // Sources that state no stage give nothing to compare with.
+        let mut unknown = sources("other");
+        unknown.push(intro(20, 9, 12, "rejected"));
+        assert_eq!(
+            run(&code_jobs(5), &unknown, &[&p]),
+            LaterSimilarTask::NotShown
+        );
+    }
+
+    #[test]
+    fn introspection_a_recurrence_on_a_job_of_another_class_is_not_shown_earlier() {
+        let p = accepted(9);
+        let mut intros = sources("corrected-output");
+        let mut r = intro(20, 9, 12, "rejected");
+        r.class_of_work = "docs".into();
+        intros.push(r);
+        assert_eq!(
+            run(&code_jobs(5), &intros, &[&p]),
+            LaterSimilarTask::NotShown
+        );
+    }
+
+    #[test]
+    fn introspection_a_recurrence_on_any_accepted_proposal_blocks_prevented() {
+        let quiet = accepted(9);
+        let mut noisy = accepted(8);
+        noisy.id = "e".into();
+        noisy.record = rid(600);
+        let mut intros = sources("rejected");
+        intros.push(intro(20, 8, 12, "rejected"));
+        // The quiet proposal alone is prevented.
+        assert_eq!(
+            run(&code_jobs(5), &intros, &[&quiet]),
+            LaterSimilarTask::Prevented
+        );
+        // With the recurring one beside it, it is not, whichever comes first.
+        assert_eq!(
+            run(&code_jobs(5), &intros, &[&quiet, &noisy]),
+            LaterSimilarTask::NotShown
+        );
+        assert_eq!(
+            run(&code_jobs(5), &intros, &[&noisy, &quiet]),
+            LaterSimilarTask::NotShown
+        );
+    }
+
+    #[test]
+    fn introspection_a_recurrence_before_the_acceptance_does_not_count() {
+        let p = accepted(9);
+        // Introspection of the same class on job 5, before the accepting job 10.
+        let intros = sources("rejected");
+        assert_eq!(
+            run(&code_jobs(4), &intros, &[&p]),
+            LaterSimilarTask::Prevented
+        );
+    }
+}
+
 #[cfg(test)]
 mod improvement_cycle_tests {
     use super::*;
