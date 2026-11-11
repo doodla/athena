@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-212839-1z5j",
+  "round": 1,
+  "at": "2026-11-11T04:01:36.719250537Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "docs/system-facts.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/system-facts.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The binding limit is the 800-token cap on planner.md alone, not the 95 tokens left in the 1,200-token set. The bullet needs an equal cut that the plan neither plans nor locates.",
+      "evidence": "lib.rs:408 asserts `estimate_tokens(frame.text) < 800` for PLANNER_FRAME. compose() (lib.rs:142-148) joins the trimmed contract and frame with \"\\n\\n\" and adds \"\\n\". The system facts give contract 310 and planner set 1105. That puts planner.md at about 2,381-2,386 bytes, or about 795 tokens. These are estimates derived from the figures and the compose code; I ran nothing. So about 3-5 tokens (about 10-15 bytes) are free under the frame cap. A bullet of about 270 bytes therefore needs about 260 bytes of unpinned wording removed. Many phrases are pinned: lib.rs:483-533 and FRAME_ANCHORS at :563-618, which covers most of line 12, line 14, the start of line 8, and the pointer on line 16. The plan says 'trim ... if the size does not fit', as if trimming were optional, and treats the 95 spare tokens as the headroom. The dependents list also omits other tests that pin frame text and that the trimming could break: briefs.rs:1582-1600 (`planning_prompts_and_brief_require_a_named_test_seam`) and briefs.rs:1617-1630, plus the budget computations in budgets.rs:64 and :381. planning.rs:135 composes the same frame at run time. Fix: State the real constraint: planner.md must stay under 800 estimated tokens, about 795 today. Make the change roughly net-zero in bytes. Either write a much shorter bullet (for example: '- Check each claim about existing code (a function's failure/retry path, tests outside the deliverables it breaks, the verifier's environment, paths and tools) and cite file:line; settle every question the code can settle.'), or name the exact unpinned sentences to cut, such as the redundant clauses in line 3, lines 5-6, line 9's second sentence and line 11. Add briefs.rs:1582-1630 and budgets.rs:64/:381 to dependents, tested by `cargo test -p athena-context` and `cargo test -p athena-cli --test budgets`.",
+      "location": "Risks (third bullet), Decision 4, Step 6, Files: planner.md; crates/athena-context/src/lib.rs:408",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The matching rule uses common words, so it refuses real User: and Host: decisions.",
+      "evidence": "The test-breakage check passes when the question has a test word, a break/fail word and any word from {existing, current, other, outside, which, any}. 'which' and 'any' are ordinary words. 'User: which failing test should block landing?' and 'User: should any test that fails on Windows be marked ignored?' are both policy decisions, and both would be refused. Host-environment questions are also hit, though the request treats the environment as a separate concern: 'Host: does any test fail on the production host's older toolchain?' cannot be settled from the snapshot. The function check pairs 'does it' or 'what happens' with 'on error' and needs no named function at all, so 'User: does it matter whether the CLI exits 1 or 2 on error?' is refused. The request speaks of 'a named function'. The plan's accept cases test only the one decision it chose ('should a failing test be skipped on CI?'). Fix: Narrow the match to the code-settleable shapes. For tests, require 'existing', 'other' or 'outside' to sit next to 'test(s)' (for example 'existing tests', 'other tests', 'tests outside'), together with a break/fail word; drop 'which', 'any' and 'current'. For functions, require a named function (a backticked identifier or `name()`) plus a failure/retry phrase, and drop 'does it'. Add accept cases to the admission unit tests and to refusal_corpus for the counterexamples above ('which failing test should block landing', 'does it matter ... on error', a Host: toolchain question), so the boundary is pinned.",
+      "location": "Decision 2, Step 1 (`asks_about_existing_behavior`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 3 'fails without' text predicts the wrong call counts.",
+      "evidence": "The scenario scripts critiques = [accept]. Without the new branch, the first User:-prefixed plan passes plan_findings (has_addressee is true and says_code_answers is false at admission.rs:528-535). The critic accepts it and the job lands with 1 planner call and 1 critic call, not 'a critic call count of 2'. The test still fails, through the planner==2 assertion and the out-of-range briefs[1] index, but the stated mechanism is wrong. Fix: Restate it: without the rule the job lands after 1 planner call, so `count(Planner) == 2` fails and briefs has only one entry. The critic count stays 1.",
+      "location": "Demonstrations, Criterion 3, 'Fails without the behavior'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Listed deliverables fake.rs and planning.rs are left unchanged or get only a comment; the plan justifies this.",
+      "evidence": "The reading lists crates/athena-agent/src/fake.rs (modify). The plan correctly shows that planner_turn (fake.rs:406-440) is not the seam, and that the scripted Scenario (tests/common/mod.rs:451-455, 562) is. Criterion 6 limits extra files; it does not require every listed file to change. Fix: No change needed. Optionally state in the changelog or report that fake.rs was deliberately left unchanged.",
+      "location": "Decision 3; Files: planning.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan mostly fits the request and the reading. The new rule goes into open_questions_findings (admission.rs:524), which I read. Through plan_findings it already reaches the mechanical send-back in planning.rs:217-246, which returns before critic_round at :249. The job_plan.rs test reuses the scripted-Scenario seam that the tests at job_plan.rs:791 and :851 use, and it correctly uses a User:-prefixed question, since an unprefixed one is already refused today. Two problems need a revision. First, the prompt-budget reasoning has the wrong binding limit. The plan counts the 95 tokens left in the 1,200-token planner set. But planner_and_critic_frames_are_short_and_fit_the_budgets (lib.rs:408) also requires planner.md alone to be under 800 tokens. My estimate from the system-facts figures and compose() is about 795 tokens today, so roughly 3 to 5 tokens are left (an estimate; not run). The roughly 90-token bullet therefore needs an equal cut of unpinned wording, which the plan neither plans nor locates, and the dependents list omits some readers of the frame text. Second, the matching rule uses very common words ('which', 'any', 'does it', 'on error') as its third trigger, so it will refuse real user and host decisions."
+}

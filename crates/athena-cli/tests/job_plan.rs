@@ -883,6 +883,45 @@ fn athena_sends_a_plan_without_dependents_back_to_the_planner_with_no_critic_cal
 }
 
 #[test]
+fn athena_sends_a_plan_whose_open_question_asks_about_existing_tests_back_with_no_critic_call() {
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    let question = "User: do any existing tests break when the prompt grows?";
+    let mut asks = good_plan();
+    asks["open_questions"] = json!([question]);
+    scenario.plans = vec![asks, good_plan()];
+    scenario.critiques = vec![critique_of("accept", &[], None)];
+    let calls = scenario.invocations.clone();
+    let briefs = scenario.seen_by_planner.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    // One mechanical revision, then the second plan reaches the critic, as round 1.
+    assert_eq!(count(&calls, Role::Planner), 2);
+    assert_eq!(count(&calls, Role::Critic), 1);
+    let briefs = briefs.lock().unwrap();
+    assert_eq!(briefs.len(), 2);
+    assert!(
+        briefs[1].contains("settled by searching the code")
+            && briefs[1].contains(question)
+            && briefs[1].contains("Revision"),
+        "{}",
+        briefs[1]
+    );
+    assert!(
+        critique_at(&fx, &proposal.job.dir(), 1)
+            .invocation_seq
+            .is_some(),
+        "critique 1 is the critic's"
+    );
+}
+
+#[test]
 fn athena_checks_that_files_to_modify_exist_and_files_to_create_do_not() {
     let fx = Fixture::with_config(&planned_config());
     let mut scenario = Scenario::default();

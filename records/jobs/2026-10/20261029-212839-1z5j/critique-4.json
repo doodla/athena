@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-212839-1z5j",
+  "round": 4,
+  "at": "2026-11-11T04:15:10.145275956Z",
+  "invocation_seq": 11,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Line 9 plus its newline is 275 bytes, not 276, so the ledger nets +1 byte, not 0.",
+      "evidence": "I counted planner.md line 9 word by word ('- Search the tests ... Athena refuses it.'): 274 characters plus 1 newline = 275. The other ledger entries check out (49->193, 26->145, +34, -21). The net is +1, so planner.md becomes 2384 bytes. If the composed contract+planner size sits at the top of its 3-byte bucket (budget planner 1105 means 3313-3315 bytes), system_facts_budgets_match_computed (budgets.rs:124) fails. The step's 'ls -l, expect 2383, adjust' fallback catches it. Fix: Correct the ledger to -275 and trim one more byte from the new line 5 or the merged line 8, for example drop the comma in 'paths, tools'. Keep the ls -l fallback.",
+      "location": "Decision 5 / Step 7 (planner.md byte ledger)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A planned file left unchanged is flagged and sent back to the producer unless the report gives a reason; no step tells the producer to give one.",
+      "evidence": "run/mod.rs:1594-1615 `unchanged_planned_files` flags every planned path that is not in the change list and has no reasoned entry in the report. producer.rs:455 uses it to send the candidate back (send_back.rs:166-170). fake.rs is in the plan's Files list as 'modify' and in the reading's deliverables, but the plan deliberately leaves it unchanged. Fix: Add a step telling the producer to list crates/athena-agent/src/fake.rs in unchanged_planned_files with the reason (the scripted Scenario is the fake-planner seam; planner_turn at fake.rs:406-440 stays stateless).",
+      "location": "Files: crates/athena-agent/src/fake.rs (modify, no edit planned); Steps",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The decision exemption checks 'should/shall/would' only as the first word, so real user decisions that start with a condition or state a fact first are refused.",
+      "evidence": "'User: if existing tests fail on the old wording, do you want them updated or the wording kept?' has first token 'if', the pair existing+tests and 'fail'. No exemption matches ('you want' is not 'user want'), so it is refused, yet it is a decision only the user can make. 'User: other tests fail on main today; should this job fix them?' is refused the same way. A refused planner gets two mechanical passes, then the job stops (planning.rs:233-246; run/tests.rs:1450). Fix: Also exempt a body with 'should' anywhere, 'you' followed by want/wants/prefer/expect, or an 'X or Y?' choice form. Pin one such question as an accept case in admission.rs and the corpus.",
+      "location": "Decision 3 / Step 2 (decision exemptions)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An existing end-to-end test of the open-questions path, run/tests.rs:1349, is not in the dependents list.",
+      "evidence": "run/tests.rs:1342-1389 `plan_with_open_questions` and `a_plan_with_an_unaddressed_open_question_is_revised_before_the_critic` feed open questions ('Does the [parallel] max_concurrency path reach landing?', 'User: Should the change also cover the design docs?') through plan_findings and assert the planner/critic call order. The dependents list names run/tests.rs:1450 only. Neither question matches the new rule, and cargo test (criterion 5) runs it. Fix: Add run/tests.rs:1349 to the first dependents entry, with the reason that its questions have no existing/other+test pair and that cargo test -p athena-core covers it.",
+      "location": "Dependents: open_questions_findings entries",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The token 'os' also comes from Rust paths such as `std::os`, which exempts a test-breakage question that names one.",
+      "evidence": "The plan splits the body on non-alphanumerics, so a backticked `std::os::unix` yields the token 'os'. 'User: do existing tests break if `std::os` use changes?' would be exempt. Fix: Drop 'os' or match it only outside backticks, or list it among the known misses in the doc comment.",
+      "location": "Decision 3 / Step 2 (host-environment word 'os')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read admission.rs (plan_findings doc :150-174, open_questions_findings :506-547, has_addressee :549-556, DEFERRAL_DETAIL :387), planning.rs:205-250, planner.md, lib.rs frame tests and FRAME_ANCHORS (:397-650), briefs.rs:1581-1648, briefs/planner.rs:45-66, refusal_corpus.rs:3202-3310, job_plan.rs:780-883, run/tests.rs:1341-1464, and the unchanged-planned-files path (run/mod.rs:1593-1615, producer.rs:455). The plan's claims hold. The new branch sits where the fault starts. The mechanical path returns before critic_round (planning.rs:229-249). The job_plan.rs test reuses the existing scripted-Scenario seam and the critique_at(...).invocation_seq pattern from job_plan.rs:821-829. Every accepted question in the existing tests and corpus survives the planned tokenizer and pair rule. No frame test pins the wording the planner.md edit removes. The remaining findings are minor. (1) The byte ledger is off by one: line 9 plus its newline is 275 bytes, not 276, so the net change is +1. The planned ls -l fallback catches it. (2) fake.rs is listed as a planned file but left unedited, and no step tells the producer to give its reason in unchanged_planned_files. That invites a producer send-back. (3) The decision exemption, which applies only when 'should' is the first word, refuses natural decision questions that begin with a condition. (4) run/tests.rs:1349, an existing test of the open-questions path, is not listed in dependents, though cargo test covers it."
+}
