@@ -14,6 +14,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- An introspection can record several causes, open hypotheses and contradictory evidence (OLY-R1-03). The model's
+  answer and `IntrospectionRecord` gain `other_causes`, `open_hypotheses` and `contradictions`, each a list of at most
+  5 entries, omitted when empty so older records read and write unchanged. `apply_answer` redacts and rewords the
+  entries with the other prose fields and drops blank ones; `validate()` refuses a blank entry or a sixth. `cause`
+  stays the one main cause that Hestia counts. `athena status` does not print the lists. The refusal of a text that
+  cannot be reworded is tested through `clean_texts` with a closure for the reword step.
 - `validate_item` in `crates/athena-core/src/steward.rs` now refuses a repeated-failure or proposal item that cites
   fewer than two distinct instances, so one instance is not treated as a general weakness (OLY-5-07). A repeated
   failure counts distinct jobs only; a proposal counts distinct references other than its own source. Commit ids and
