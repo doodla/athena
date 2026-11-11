@@ -14,6 +14,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena status` prints a `specialization` section: per class of work, each producer model and effort with its
+  first-pass rate and landed share against the class's most-used setting, flagged "specialization helps" only
+  when a non-default setting with at least 3 jobs does better, otherwise "not enough jobs" or "no better
+  setting". It is the mechanism for requirement OLY-R8-01 in `docs/spec.toml`.
+
 - An experiment's result is recorded as supported, unsupported or inconclusive (OLY-R6-02). `exploration.rs` gains
   `ExperimentResult`, a `result` field on `Experiment` and `record_result`, which refuses an invalid or unconcluded
   experiment. The spec measure ends `status: not shown`; the exploration tests show it.

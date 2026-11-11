@@ -5,8 +5,8 @@ use athena_core::gate_counts::GateCount;
 use athena_core::reading::Proposal;
 use athena_core::run::Finished;
 use athena_core::status::{
-    JobTrace, KeepRule, KeepVerdict, LaterHarm, PlanningCost, PlanningGroup, ProducerSettingStats,
-    StatusView,
+    ClassSpecialization, JobTrace, KeepRule, KeepVerdict, LaterHarm, PlanningCost, PlanningGroup,
+    ProducerSettingStats, SPECIALIZATION_MIN_JOBS, SpecializationVerdict, StatusView,
 };
 use athena_data::records::{
     CriterionKind, DeliverableAction, Forecast, OutcomeState, Quantiles, Reading, Score,
@@ -176,6 +176,49 @@ fn producer_settings_lines(settings: &[ProducerSettingStats]) -> String {
             s.landed,
             s.jobs
         );
+    }
+    out
+}
+
+/// Per class of work, each producer setting with its jobs, first-pass rate and landed share, and whether a
+/// non-default setting beat the class's most-used one. Empty when there are no classes.
+fn specialization_lines(classes: &[ClassSpecialization]) -> String {
+    let mut out = String::new();
+    if classes.is_empty() {
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "specialization   per class of work, producer settings against the most-used one (flagged from {SPECIALIZATION_MIN_JOBS} jobs)"
+    );
+    for c in classes {
+        let verdict = match &c.verdict {
+            SpecializationVerdict::Helps { model, effort } => {
+                format!("specialization helps: {model} · {effort} beat the default")
+            }
+            SpecializationVerdict::NotEnoughJobs => "not enough jobs".to_string(),
+            SpecializationVerdict::NoBetterSetting => "no better setting".to_string(),
+        };
+        let _ = writeln!(
+            out,
+            "            {}: {verdict} (default {} · {})",
+            c.class, c.baseline_model, c.baseline_effort
+        );
+        for s in &c.settings {
+            let first_pass = s.first_pass_rate.map_or("n/a".to_string(), |r| {
+                format!("{} ({} of {})", pct(r), s.first_pass, s.verified)
+            });
+            let _ = writeln!(
+                out,
+                "              {} · {}: {} jobs · first-pass {first_pass} · landed {} ({} of {})",
+                s.model,
+                s.effort,
+                s.jobs,
+                pct(s.landed_share),
+                s.landed,
+                s.jobs
+            );
+        }
     }
     out
 }
@@ -1258,6 +1301,7 @@ pub fn status(v: &StatusView) -> String {
     if !v.producer_settings.is_empty() {
         out.push_str(&producer_settings_lines(&v.producer_settings));
     }
+    out.push_str(&specialization_lines(&v.specialization));
     if let Some(durations) = &v.check_durations {
         let _ = writeln!(out, "{}", durations.text());
     }
@@ -2361,6 +2405,51 @@ mod tests {
         unverified.first_pass_rate = None;
         let text = producer_settings_lines(&[unverified]);
         assert!(text.contains("first-pass n/a"), "{text}");
+    }
+
+    #[test]
+    fn specialization_lines_start_a_line_and_list_classes_with_flag_or_not_enough_jobs() {
+        let setting = |effort: &str, jobs: usize, landed: usize| ProducerSettingStats {
+            model: "m".into(),
+            effort: effort.into(),
+            jobs,
+            verified: jobs,
+            first_pass: landed,
+            first_pass_rate: Some(landed as f64 / jobs as f64),
+            landed,
+            landed_share: landed as f64 / jobs as f64,
+            total_cost_usd: 1.0,
+            cost_per_landed_usd: None,
+        };
+        let class = |name: &str, verdict| ClassSpecialization {
+            class: name.into(),
+            baseline_model: "m".into(),
+            baseline_effort: "medium".into(),
+            settings: vec![setting("medium", 4, 1), setting("high", 3, 3)],
+            verdict,
+        };
+        let text = specialization_lines(&[
+            class(
+                "code",
+                SpecializationVerdict::Helps {
+                    model: "m".into(),
+                    effort: "high".into(),
+                },
+            ),
+            class("docs", SpecializationVerdict::NotEnoughJobs),
+        ]);
+        assert!(text.starts_with("specialization   per class"), "{text}");
+        assert!(
+            text.contains("code: specialization helps: m · high beat the default"),
+            "{text}"
+        );
+        assert!(text.contains("docs: not enough jobs"), "{text}");
+        assert!(
+            text.contains("m · high: 3 jobs · first-pass 100% (3 of 3) · landed 100% (3 of 3)"),
+            "{text}"
+        );
+        // No classes: nothing is printed, so empty records never read as shown.
+        assert_eq!(specialization_lines(&[]), "");
     }
 
     fn keep_rule(landed: usize, planned: usize, verdict: KeepVerdict) -> KeepRule {
