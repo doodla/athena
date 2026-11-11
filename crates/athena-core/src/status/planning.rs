@@ -392,9 +392,14 @@ pub struct ProducerSettingStats {
 /// from the records of dispatched request jobs. A job counts under the model and effort of its first producer
 /// invocation; a job that never ran a producer is left out. Sorted by model, then effort.
 pub fn producer_settings(records: &Records) -> Vec<ProducerSettingStats> {
+    settings_of(&records.request_jobs())
+}
+
+/// The per-setting figures of [`producer_settings`] for the given jobs only.
+fn settings_of(jobs: &[&JobRecords]) -> Vec<ProducerSettingStats> {
     use athena_data::records::Verdict;
     let mut buckets: BTreeMap<(String, String), ProducerSettingStats> = BTreeMap::new();
-    for job in records.request_jobs() {
+    for job in jobs.iter().copied() {
         if job.job.is_none() {
             continue;
         }
@@ -446,4 +451,87 @@ pub fn producer_settings(records: &Records) -> Vec<ProducerSettingStats> {
             b
         })
         .collect()
+}
+
+/// Fewest jobs a non-baseline producer setting needs in a class before it can be flagged as better.
+pub const SPECIALIZATION_MIN_JOBS: usize = 3;
+
+/// The class shown for a job that has no class of work.
+pub const CLASS_UNCLASSIFIED: &str = "unclassified";
+
+/// What the records show about specializing one class of work.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum SpecializationVerdict {
+    /// A non-baseline setting with enough jobs beat the baseline on landed share or first-pass rate.
+    Helps { model: String, effort: String },
+    /// No non-baseline setting has [`SPECIALIZATION_MIN_JOBS`] jobs in the class.
+    NotEnoughJobs,
+    /// Non-baseline settings have enough jobs and none beat the baseline.
+    NoBetterSetting,
+}
+
+/// Producer settings of one class of work, compared with the class's most-used setting.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ClassSpecialization {
+    pub class: String,
+    /// Model and effort used for the most jobs in the class (the first on a tie, by model then effort).
+    pub baseline_model: String,
+    pub baseline_effort: String,
+    pub settings: Vec<ProducerSettingStats>,
+    pub verdict: SpecializationVerdict,
+}
+
+/// For each class of work, compares producer model and effort settings with the class's most-used setting, and
+/// flags the class when a non-baseline setting with at least [`SPECIALIZATION_MIN_JOBS`] jobs has a strictly
+/// higher landed share or first-pass rate. Measured from the records of dispatched request jobs; a class with
+/// no producer run is left out. Sorted by class.
+pub fn specialization(records: &Records) -> Vec<ClassSpecialization> {
+    let mut by_class: BTreeMap<String, Vec<&JobRecords>> = BTreeMap::new();
+    for job in records.request_jobs() {
+        let class = job
+            .job
+            .as_ref()
+            .and_then(|j| j.class_of_work.clone())
+            .unwrap_or_else(|| CLASS_UNCLASSIFIED.to_string());
+        by_class.entry(class).or_default().push(job);
+    }
+    let mut out = Vec::new();
+    for (class, jobs) in by_class {
+        let settings = settings_of(&jobs);
+        let mut baseline: Option<&ProducerSettingStats> = None;
+        for s in &settings {
+            if baseline.is_none_or(|b| s.jobs > b.jobs) {
+                baseline = Some(s);
+            }
+        }
+        let Some(base) = baseline else { continue };
+        let others = || {
+            settings
+                .iter()
+                .filter(|s| (&s.model, &s.effort) != (&base.model, &base.effort))
+                .filter(|s| s.jobs >= SPECIALIZATION_MIN_JOBS)
+        };
+        let better = |s: &&ProducerSettingStats| {
+            s.landed_share > base.landed_share
+                || matches!((s.first_pass_rate, base.first_pass_rate), (Some(a), Some(b)) if a > b)
+        };
+        let verdict = if let Some(s) = others().find(better) {
+            SpecializationVerdict::Helps {
+                model: s.model.clone(),
+                effort: s.effort.clone(),
+            }
+        } else if others().next().is_some() {
+            SpecializationVerdict::NoBetterSetting
+        } else {
+            SpecializationVerdict::NotEnoughJobs
+        };
+        out.push(ClassSpecialization {
+            class,
+            baseline_model: base.model.clone(),
+            baseline_effort: base.effort.clone(),
+            settings: settings.clone(),
+            verdict,
+        });
+    }
+    out
 }

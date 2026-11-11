@@ -309,6 +309,7 @@ pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
     ("planning", "planning_cost"),
     ("keep rule", "keep_rule"),
     ("producers", "producer_settings"),
+    ("specialization", "specialization"),
     ("mistakes", "mistakes"),
     ("repeated", "repeated_causes"),
     ("code health", "code_health"),
@@ -399,6 +400,10 @@ pub struct StatusView {
     /// when no dispatched job ran a producer.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub producer_settings: Vec<ProducerSettingStats>,
+    /// Per class of work, whether a non-default producer setting beat the class's most-used one; empty when no
+    /// dispatched job ran a producer.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub specialization: Vec<ClassSpecialization>,
     /// Median and slowest `test` check duration over the newest jobs, against the check time limit; absent
     /// when no job ran a measured test check or the configuration cannot be read.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1244,6 +1249,7 @@ impl Athena {
             planning_cost: planning_cost(&records),
             keep_rule: keep_rule(&records),
             producer_settings: producer_settings(&records),
+            specialization: specialization(&records),
             check_durations,
             gate_counts: crate::gate_counts::gate_counts(&records),
             reading_rules: ReadingRuleStats::compute(&records),
@@ -2561,6 +2567,95 @@ pub(crate) mod planning_cost_tests {
             check_durations(&records(vec![only_placeholder]), 1800),
             None
         );
+    }
+
+    fn classed_job(
+        text: &str,
+        class: &str,
+        effort: &str,
+        state: OutcomeState,
+        verdict: athena_data::records::Verdict,
+    ) -> JobRecords {
+        let mut j = producer_job(text, "s", Some(effort), state, verdict, 1.0);
+        j.job.as_mut().unwrap().class_of_work = Some(class.into());
+        j
+    }
+
+    #[test]
+    fn specialization_flags_only_a_class_where_an_enough_used_setting_beats_the_default() {
+        use athena_data::records::Verdict::{Fail, Pass};
+        let (landed, failed) = (OutcomeState::Landed, OutcomeState::Failed);
+        let mut jobs = Vec::new();
+        let mut n = 0;
+        let mut add = |class: &str, effort: &str, state, verdict| {
+            n += 1;
+            jobs.push(classed_job(
+                &format!("20261026-1000{n:02}-aa{n:02}"),
+                class,
+                effort,
+                state,
+                verdict,
+            ));
+        };
+        // "code": medium (default, 4 jobs) lands 1 of 4; high (3 jobs) lands 3 of 3.
+        for _ in 0..3 {
+            add("code", "medium", failed, Fail);
+        }
+        add("code", "medium", landed, Pass);
+        for _ in 0..3 {
+            add("code", "high", landed, Pass);
+        }
+        // "docs": the same, but the better setting has only 2 jobs.
+        for _ in 0..3 {
+            add("docs", "medium", failed, Fail);
+        }
+        for _ in 0..2 {
+            add("docs", "high", landed, Pass);
+        }
+        // "tests": the other setting has enough jobs and does no better.
+        for _ in 0..4 {
+            add("tests", "medium", landed, Pass);
+        }
+        for _ in 0..3 {
+            add("tests", "high", failed, Fail);
+        }
+        let result = specialization(&records(jobs));
+        let verdict = |c: &str| {
+            &result
+                .iter()
+                .find(|r| r.class == c)
+                .unwrap_or_else(|| panic!("no class {c}: {result:?}"))
+                .verdict
+        };
+        assert_eq!(
+            verdict("code"),
+            &SpecializationVerdict::Helps {
+                model: "s".into(),
+                effort: "high".into()
+            }
+        );
+        assert_eq!(verdict("docs"), &SpecializationVerdict::NotEnoughJobs);
+        assert_eq!(verdict("tests"), &SpecializationVerdict::NoBetterSetting);
+        let code = result.iter().find(|r| r.class == "code").unwrap();
+        assert_eq!(code.baseline_effort, "medium");
+        assert_eq!(code.settings.len(), 2);
+    }
+
+    #[test]
+    fn specialization_groups_unclassified_jobs_and_is_empty_without_a_producer() {
+        use athena_data::records::Verdict::Pass;
+        assert!(specialization(&Records::default()).is_empty());
+        let r = specialization(&records(vec![producer_job(
+            "20261026-100000-aaaa",
+            "s",
+            Some("medium"),
+            OutcomeState::Landed,
+            Pass,
+            1.0,
+        )]));
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].class, "unclassified");
+        assert_eq!(r[0].verdict, SpecializationVerdict::NotEnoughJobs);
     }
 
     #[test]
