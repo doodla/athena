@@ -14,6 +14,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- An experiment's result is recorded as supported, unsupported or inconclusive (OLY-R6-02). `exploration.rs` gains
+  `ExperimentResult`, a `result` field on `Experiment` and `record_result`, which refuses an invalid or unconcluded
+  experiment. The spec measure ends `status: not shown`; the exploration tests show it.
 - An introspection can record several causes, open hypotheses and contradictory evidence (OLY-R1-03). The model's
   answer and `IntrospectionRecord` gain `other_causes`, `open_hypotheses` and `contradictions`, each a list of at most
   5 entries, omitted when empty so older records read and write unchanged. `apply_answer` redacts and rewords the

@@ -26,6 +26,19 @@ pub struct Experiment {
     pub bound: u32,
     /// How it ended.
     pub outcome: Outcome,
+    /// What the experiment showed. `None` until a result is recorded.
+    pub result: Option<ExperimentResult>,
+}
+
+/// What an experiment showed about its hypothesis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExperimentResult {
+    /// The hypothesis held.
+    Supported,
+    /// The hypothesis did not hold.
+    Unsupported,
+    /// The experiment could not tell.
+    Inconclusive,
 }
 
 /// Why an experiment is refused.
@@ -37,6 +50,8 @@ pub enum Refusal {
     EmptyApproach,
     /// There is no bound.
     Unbounded,
+    /// The experiment has not concluded, so it has no result to record.
+    NotConcluded,
 }
 
 /// Accept an experiment only if it has a hypothesis, an approach and a bound.
@@ -64,6 +79,18 @@ pub fn conclude(e: &Experiment, spent: u32) -> Result<Outcome, Refusal> {
     })
 }
 
+/// Record the result of a validated experiment that has concluded (its outcome
+/// is not `Pending`). An invalid or unconcluded experiment is refused and keeps
+/// no result.
+pub fn record_result(e: &mut Experiment, result: ExperimentResult) -> Result<(), Refusal> {
+    validate(e)?;
+    if e.outcome == Outcome::Pending {
+        return Err(Refusal::NotConcluded);
+    }
+    e.result = Some(result);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,7 +101,40 @@ mod tests {
             approach: a.into(),
             bound,
             outcome: Outcome::Pending,
+            result: None,
         }
+    }
+
+    #[test]
+    fn exploration_records_each_result_on_concluded_experiment() {
+        for r in [
+            ExperimentResult::Supported,
+            ExperimentResult::Unsupported,
+            ExperimentResult::Inconclusive,
+        ] {
+            let mut e = exp("h", "a", 3);
+            e.outcome = conclude(&e, 2).unwrap();
+            assert_eq!(e.result, None);
+            assert_eq!(record_result(&mut e, r), Ok(()));
+            assert_eq!(e.result, Some(r));
+        }
+    }
+
+    #[test]
+    fn exploration_refuses_result_when_unconcluded_or_invalid() {
+        let mut e = exp("h", "a", 3);
+        assert_eq!(
+            record_result(&mut e, ExperimentResult::Supported),
+            Err(Refusal::NotConcluded)
+        );
+        assert_eq!(e.result, None);
+        let mut u = exp("h", "a", 0);
+        u.outcome = Outcome::Completed;
+        assert_eq!(
+            record_result(&mut u, ExperimentResult::Supported),
+            Err(Refusal::Unbounded)
+        );
+        assert_eq!(u.result, None);
     }
 
     #[test]
