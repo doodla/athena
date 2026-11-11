@@ -1,0 +1,269 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261029-212839-1z5j",
+  "round": 1,
+  "at": "2026-11-11T03:59:46.044541175Z",
+  "invocation_seq": 3,
+  "approach": "Three parts, all inside the existing mechanical-revision flow, so no critic round is used. (1) In `admission.rs`, `open_questions_findings` gets a third branch. After the no-addressee and says-the-code-answers branches, a question that asks whether existing tests break (a test word, a break/fail word and an existing/other/outside/which/any/current word), or what a named function does on its failure or retry path, is a major finding at \"open questions\", even with a `User:` or `Host:` prefix. The doc comments of `open_questions_findings` and `plan_findings` list the rule. (2) `planner.md` gets one compact bullet that requires each claim about existing behavior to be checked in code and cited with file and line, and every code-settleable open question to be settled. The bullet is paid for by trimming wording elsewhere in the file. `docs/system-facts.md`'s planner budget line is then updated to the computed value, because `system_facts_budgets_match_computed` pins it. (3) Tests: unit tests in `admission.rs`, new `refusal_corpus.rs` cases, and a `job_plan.rs` test. The `job_plan.rs` test scripts the planner (`scenario.plans`) with a first plan whose open question is \"User: do any existing tests break ...\", then a good plan, and asserts planner calls = 2, critic calls = 1, critique-1 is the critic's, and the second planner brief quotes the finding. The `planning.rs` change is a comment only. `fake.rs` needs no change.",
+  "decisions": [
+    {
+      "choice": "Put the rule in `open_questions_findings` as a third `else if` branch, after `has_addressee` and `says_code_answers`. A question gets at most one finding. An unprefixed test-breakage question keeps the existing 'no addressee' finding.",
+      "reason": "Existing tests count one finding per question: `an_unaddressed_open_question_is_a_major_finding_naming_it` (admission.rs:1190-1196) and `question_findings` in refusal_corpus.rs:3311. Reusing the function reuses the call chain plan_findings (admission.rs:314) -> planning.rs:217 -> `RoundEnd::Mechanical` (planning.rs:233-244), which returns before `critic_round` (planning.rs:249).",
+      "rejected": [
+        {
+          "option": "A new top-level check in `plan_findings` that scans open questions, risks and steps for test-breakage wording",
+          "why": "It widens the false-refusal surface to prose that is not an open question, and it can double-count a question the addressee rule already refuses."
+        },
+        {
+          "option": "A changed `MAX_MECHANICAL_PASSES` or a new `RoundEnd` variant",
+          "why": "Out of scope. The existing path (planning.rs:233, :486) already does not use the round."
+        }
+      ]
+    },
+    {
+      "choice": "Match by word-level predicates on the lowercased text, split on non-alphanumerics. The test-breakage predicate needs a token in {test, tests}, a token in {break, breaks, broken, breakage, fail, fails, failing, regress, regression}, and a token in {existing, current, other, outside, which, any}. The function predicate needs one of (what does, what happens, how does, does it) together with one of (failure path, retry path, on failure, on retry, on error, when it fails, if it fails).",
+      "reason": "Token matching means a path such as `crates/athena-cli/tests/job_plan.rs` counts as a test word but not a break word, so the scope questions already accepted at admission.rs:1226 and refusal_corpus.rs:3265 still pass. Requiring the third word keeps 'User: should a failing test be skipped on CI?' open, which is a genuine decision.",
+      "rejected": [
+        {
+          "option": "Refuse any prefixed question that contains 'test'",
+          "why": "It would refuse scope questions such as admission.rs:1226."
+        },
+        {
+          "option": "Refuse any question that names a backticked function and 'what does'",
+          "why": "'User: what does the user expect `athena land` to print?' is a decision, not a code fact."
+        }
+      ]
+    },
+    {
+      "choice": "Do not change `fake.rs`. The `job_plan.rs` test drives the scripted `Scenario` (`scenario.plans`, `seen_by_planner`, `invocations`, common/mod.rs:431-455), the same seam as the existing mechanical tests at job_plan.rs:791 and :851.",
+      "reason": "The fake planner in fake.rs (`planner_turn`, :406-440) always emits `open_questions: []` and is not on this path. The brief says the test uses a fake planner, and the scripted planner is that fake. Changing `planner_turn` would alter every job that uses the fake driver.",
+      "rejected": [
+        {
+          "option": "Make `planner_turn` emit a test-breakage question on a first call",
+          "why": "It changes unrelated fake-planner behavior and needs call state in a pure function (`planner_turn(spec)` takes no state)."
+        }
+      ]
+    },
+    {
+      "choice": "Update `docs/system-facts.md`'s `- budget planner:` line (1105 of 1200 now) to the computed value. List the file with this purpose. The producer reads the computed value from the `system_facts_budgets_match_computed` failure message and never touches the budget figure.",
+      "reason": "`system_facts_budgets_match_computed` (budgets.rs:124-129; message at :111, 'update docs/system-facts.md') fails whenever planner.md changes size, so the file must change for `cargo test` to pass. Prior prompt changes did the same: HISTORY.txt:288-295 and :1005-1010 changed planner.md and docs/system-facts.md together. Criterion 6's 'no files other than the listed deliverables' conflicts literally; see the open question.",
+      "rejected": [
+        {
+          "option": "Keep the planner prompt byte-count within the same ⌈bytes/3⌉ so the line stays 1105",
+          "why": "A net-zero edit cannot be guaranteed without running the test. The planner budget has 95 tokens spare, which is why the bullet is compact."
+        }
+      ]
+    },
+    {
+      "choice": "Leave `PLANNER_FRAME.version` at 1 in `crates/athena-context/src/lib.rs`.",
+      "reason": "lib.rs is not a deliverable, and the version is only recorded (lib.rs:86-107). I found no test that pins a version against the text.",
+      "rejected": [
+        {
+          "option": "Bump to version 2, as the critic frame was",
+          "why": "It adds a non-deliverable file for a recorded label only."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/prompts/planner.md",
+      "action": "modify",
+      "purpose": "Add one compact bullet (about 90 tokens or fewer): check every claim about existing code (a named function's failure and retry path, existing tests outside the deliverables that the change breaks, the environment, paths and tools the verifier's checks provide) and cite file and line; settle every open question the code can settle. Trim unpinned wording elsewhere in the file to stay within the budget.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Add the third branch and its predicates (`asks_about_existing_behavior`) to `open_questions_findings`. Update the doc comments of `open_questions_findings` and `plan_findings`, including the expected refusal-rate sentence. Add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "Add the scripted-planner test: a first plan with a test-breakage open question is sent back with no critic call, then a good plan reaches the critic as round 1.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add open-question cases to `open_question_cases` for each input form of the new rule (see dependents for the ids).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Comment only (lines 211-216): say the checks also refuse an open question about existing-test breakage or a function's failure/retry path. No code change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under `## [Unreleased]` / `### Changed` for the new plan check and the planner brief change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Update the single `- budget planner:` line to the computed size, which `system_facts_budgets_match_computed` requires after planner.md changes. Not a listed deliverable; see the open question.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read admission.rs:506-572 (open_questions_findings, has_addressee, says_code_answers) and its tests at :1178-1241. Add `fn asks_about_existing_behavior(question: &str) -> bool`. It lowercases the text and splits it into tokens on non-alphanumerics. It returns true on the test-breakage predicate (a token in {test, tests}, a token in {break, breaks, broken, breakage, fail, fails, failing, regress, regression}, a token in {existing, current, other, outside, which, any}) or on the function predicate (one of 'what does', 'what happens', 'how does', 'does it' together with one of 'failure path', 'retry path', 'on failure', 'on retry', 'on error', 'when it fails', 'if it fails'; phrases are matched on the lowercased text).",
+    "Add an `else if asks_about_existing_behavior(question)` branch to `open_questions_findings`, after `says_code_answers`. It pushes a major finding at 'open questions' with a summary 'Open question {number} asks about existing tests or a function's failure or retry path, which can be settled by searching the code: {question}' and a fix telling the planner to search the tests and the function, put the answer in the plan with file and line (callers in dependents, breakage in files and steps), and keep open only a decision for the user or a host fact. Update the doc comments of `open_questions_findings` (list the third rule, the known misses and the refusal-rate sentence) and of `plan_findings` (the open-questions bullet).",
+    "Add the admission.rs unit tests `a_user_or_host_question_about_existing_tests_or_a_retry_path_is_refused` and `a_user_decision_that_mentions_tests_is_not_refused`, and an unprefixed-question assertion that keeps the 'no addressee' wording (see criterion 4).",
+    "In refusal_corpus.rs `open_question_cases` (:3215), add the cases: unprefixed-test-breakage-question (Refuse 'has no addressee'), user-question-whether-existing-tests-break (Refuse 'settled by searching the code'), host-question-which-tests-fail (Refuse, with a bold prefix), user-question-what-a-function-does-on-the-retry-path (Refuse), user-decision-about-a-failing-test (Accept) and user-scope-question-naming-a-tests-path (Accept). Each has a made_up source. Extend the comment at :3202-3206 with the new rule's refusal-rate sentence.",
+    "Add the job_plan.rs test next to :851. Build `let mut asks = good_plan(); asks[\"open_questions\"] = json!([\"User: do any existing tests break when the prompt grows?\"]);`. Set `scenario.plans = vec![asks, good_plan()]` and `scenario.critiques = vec![critique_of(\"accept\", &[], None)]`. Run `ask` and `go`, then assert Landed, planner count 2, critic count 1, `briefs[1]` containing 'can be settled by searching the code' and 'Revision', and `critique_at(&fx, &proposal.job.dir(), 1).invocation_seq.is_some()`.",
+    "Edit planner.md: add the bullet right after the 'Read the code the request touches first' bullet (line 5), for example: '- Check every claim about existing code and cite file and line: a named function's failure and retry path, existing tests outside the deliverables that the change breaks, the environment, paths and tools the verifier's checks provide. Settle every open question the code can settle.' Trim unpinned wording elsewhere if the size does not fit. Do not remove the phrases pinned in crates/athena-context/src/lib.rs:579-618.",
+    "Run `cargo test -p athena-cli --test budgets` and read the computed planner figure from the `system_facts_budgets_match_computed` failure message; set only the `- budget planner:` line in docs/system-facts.md to that size, keeping 1200 as the budget. Run it again and confirm that it passes. Run `cargo test -p athena-context` for the planner frame tests.",
+    "Update the comment in planning.rs at :211-216 (comment only).",
+    "Add the CHANGELOG.md entry under `## [Unreleased]` / `### Changed` (before the planning_round bullet or after the critic bullet at :12): the plan check now sends back, without a critic call, an open question about whether existing tests break or what a named function does on its failure or retry path, even with a User:/Host: prefix; and the planner brief now requires such claims to be checked in code and cited with file and line.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked`. Also run `cargo test -p athena-core --test refusal_corpus` and `cargo test -p athena-cli --test job_plan`."
+  ],
+  "risks": [
+    {
+      "risk": "The wording match refuses a genuine User: decision that mentions tests and failure.",
+      "mitigation": "The predicate needs three word groups (test word, break/fail word, existing/other/outside/which/any/current word), so decisions and path-scoped questions pass. The known false refusal is a genuine user decision phrased as 'which tests may fail', and the planner can reword it. Unit tests and corpus accept-cases pin the boundary. The critic still reviews what passes."
+    },
+    {
+      "risk": "The check misses rewordings.",
+      "mitigation": "The match is on a finite word list. Known misses: a passive or synonym form ('does the suite still pass?') and a question that avoids the word 'test'. The brief bullet is the prose cover for those. State this in the doc comment, as `risks_findings` does at admission.rs:332-337."
+    },
+    {
+      "risk": "The planner prompt exceeds its 1200-token budget (95 tokens free, 1105 of 1200 today).",
+      "mitigation": "Write the bullet at about 270 bytes or fewer and trim unpinned wording in other bullets. Run `cargo test -p athena-cli --test budgets` and `cargo test -p athena-context` and set the facts line to the computed figure. Never change the budget, which is 1200."
+    },
+    {
+      "risk": "The check settles the form of the question, not whether a claimed function behavior is true; a planner can still state a wrong claim as fact.",
+      "mitigation": "Keep this change to the planner, as the reading says. The critic is unchanged, and criterion 3 pins that only the planner is re-run."
+    },
+    {
+      "risk": "More plans are refused mechanically.",
+      "mitigation": "State the change in the first sentence of the changelog entry and in the doc comment: expected about 3% of newly refused plans, an estimate from the reading, not a measurement. The higher refusal rate is intended, because those plans spent critic rounds on impact the planner can find by searching."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "open_questions_findings now refuses test-breakage and failure/retry-path questions",
+      "dependent": "`plan_findings` in crates/athena-core/src/run/planning.rs:217-247 (the only production caller; sends a major finding back as `RoundEnd::Mechanical`)",
+      "kind": "code",
+      "test": "New job_plan.rs test (criterion 3); existing run/tests.rs:1450 `a_plan_that_still_breaks_a_rule_after_two_mechanical_passes_stops_without_the_critic` and job_plan.rs:791, :851 stay green.",
+      "reason": null
+    },
+    {
+      "name": "Corpus cases of the open-questions rule",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `question_findings` (:3277-3298) and `open_question_cases` (:3215): the rule's corpus. Other `plan_findings` callers: :3136 and :3576 (dependents and risks cases, `open_questions: vec![]`, :3117), and admission.rs:924, :1054, :1175 (unit helpers).",
+      "kind": "code",
+      "test": "`cargo test -p athena-core --test refusal_corpus`. Existing ids kept: question-max-concurrency-into-landing, question-old-job-records-on-the-landing-branch, question-with-a-code-path-and-no-addressee, question-lookalike-prefix, user-question-that-says-the-code-answers-it, host-question-that-says-the-code-answers-it, user-decision, user-scope-question-citing-a-path, host-fact-marked-in-bold. Cases added in this change: unprefixed-test-breakage-question (Refuse 'has no addressee'), user-question-whether-existing-tests-break and host-question-which-tests-fail (Refuse 'settled by searching the code'; the host case uses a bold or whitespace prefix to cover prefix forms), user-question-what-a-function-does-on-the-retry-path (Refuse), user-decision-about-a-failing-test and user-scope-question-naming-a-tests-path (Accept). The form 'tests/' in a path maps to user-scope-question-citing-a-path (:3265) and the new tests-path case. All have source 'synthetic: written for this corpus, no job behind it', as at :3218.",
+      "reason": null
+    },
+    {
+      "name": "Accepted User:/Host: questions",
+      "dependent": "Every existing admission.rs open-question test that the new branch could newly refuse: admission.rs:1181-1241 (the unaddressed, code-reading-phrase and accepted-list tests)",
+      "kind": "code",
+      "test": "`cargo test -p athena-core admission`",
+      "reason": "None of the accepted questions at admission.rs:1225-1229 has both a break/fail word and a test word, so the new predicate does not fire. The path question at :1226 has the token 'tests' (from 'tests/') but no break/fail word."
+    },
+    {
+      "name": "Existing plan fixtures",
+      "dependent": "Plan fixtures with non-empty open questions in other crates: none run `plan_findings`. drain.rs:674 sets a reading's open_questions and briefs.rs:2417 builds a brief fixture; neither calls the plan check. All job_plan.rs fixtures use `\"open_questions\": []` (:436) and fake.rs `planner_turn` emits `[]` (:440).",
+      "kind": "code",
+      "test": null,
+      "reason": "They carry no open questions, so the new branch never fires for them."
+    },
+    {
+      "name": "planner.md text and size",
+      "dependent": "crates/athena-context/src/lib.rs `PLANNER_FRAME` (include_str! of planner.md, :59), its tests at :398 (`planner_and_critic_frames_are_short_and_fit_the_budgets`, frame under 800 tokens and within the producer budget) and :482-531, :579-631 (pinned phrases the planner frame must keep)",
+      "kind": "code",
+      "test": "`cargo test -p athena-context`. The producer must keep every pinned phrase: refusal_corpus, 'seam, fake or fixture', 'commit-shape table', 'must name the state it needs', 'do not repeat a rejected design', 'answer each quoted finding', and the other pairs at lib.rs:579-618. The producer trims only unpinned wording.",
+      "reason": null
+    },
+    {
+      "name": "docs/system-facts.md `- budget planner: 1105 of 1200` line",
+      "dependent": "crates/athena-cli/tests/budgets.rs `system_facts_budgets_match_computed` (:124) and `system_facts_drift_is_rejected` (:131), reading docs/system-facts.md via `athena_context::briefs::SYSTEM_FACTS` (briefs.rs:1376); briefs.rs tests at :2692-2756 (facts file under 5,000 bytes, included in the brief)",
+      "kind": "rule",
+      "test": "`cargo test -p athena-cli --test budgets` after the line is set to the computed value from the failure message. Only that one line changes, so the briefs.rs size and shape tests are unaffected.",
+      "reason": null
+    },
+    {
+      "name": "Finding text carried to the planner on a mechanical revision",
+      "dependent": "Planner brief assembly in crates/athena-context/src/briefs/planner.rs and the revision text built from the previous plan's findings (seen in job_plan.rs:525-535)",
+      "kind": "code",
+      "test": "The new job_plan.rs test asserts `briefs[1]` contains the new finding text.",
+      "reason": "The finding's summary and fix text travel in the existing revision brief unchanged; only new finding wording is added."
+    },
+    {
+      "name": "Mechanical revision budget",
+      "dependent": "`MAX_MECHANICAL_PASSES = 2` (planning.rs:486) and the stop at the limit (planning.rs:245, `stop_on_mechanical_limit`)",
+      "kind": "code",
+      "test": "run/tests.rs:1450",
+      "reason": "Unchanged. A plan that keeps asking such a question stops the job after two passes, as for any major finding. run/tests.rs:1450 pins that path."
+    },
+    {
+      "name": "Round numbering after a mechanical revision",
+      "dependent": "Status and history readers of critique records (crates/athena-core/src/status.rs, tests job_plan.rs:1338-1456) that count rounds",
+      "kind": "code",
+      "test": "job_plan.rs:1338 `status_shows_each_planned_jobs_plan_state_and_round_and_the_first_round_counts` and the new test's `critique_at(..., 1).invocation_seq.is_some()`.",
+      "reason": "A mechanical pass writes no critique and does not advance the round (planning.rs:233-244), so round numbers stay as before."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of planner.md and the one-line budget change in docs/system-facts.md.",
+      "command": "git diff -- crates/athena-context/prompts/planner.md docs/system-facts.md",
+      "observes": "One added bullet requires each claim about existing behavior (a named function's failure and retry path, existing tests outside the deliverables that the change breaks, the environment, paths and tools the verifier's checks provide) to be checked in code and cited with file and line, and every code-settleable open question to be settled. The planner budget line is at most 1200. `cargo test --locked` in criterion 5 runs `system_facts_budgets_match_computed` and `planner_and_critic_frames_are_short_and_fit_the_budgets`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the diff of `open_questions_findings` and the doc comments.",
+      "command": "git diff -- crates/athena-core/src/admission.rs",
+      "observes": "A third branch gives a major finding at location 'open questions' for a test-breakage question or a failure/retry-path question, with or without a User:/Host: prefix. The doc comments of `open_questions_findings` and `plan_findings` list the rule.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "New test `athena_sends_a_plan_whose_open_question_asks_about_existing_tests_back_with_no_critic_call` in job_plan.rs. It builds `Scenario::default()` with `plans = [plan_with_open_question, good_plan()]` and `critiques = [critique_of(\"accept\", &[], None)]`. The first plan is `good_plan()` with `open_questions` set to the test-breakage question. It runs `athena.ask` then `athena.go` as in job_plan.rs:851-872. It asserts the job is Landed, `count(&calls, Role::Planner) == 2`, `count(&calls, Role::Critic) == 1`, `briefs[1]` contains the finding text and 'Revision', and `critique_at(&fx, &dir, 1).invocation_seq.is_some()` (critique 1 is the critic's, so the mechanical pass did not use round 1). The round number is 1 for the plan record the critic saw.",
+      "command": "cargo test -p athena-cli --test job_plan",
+      "observes": "Two planner calls, one critic call, the critic's critique as round 1, and the second planner brief quoting the finding.",
+      "fails_without": "Without the new branch in `open_questions_findings`, the first plan (open question 'User: do any existing tests break when the prompt grows?') passes `plan_findings` and reaches the critic. The test then sees a critic call count of 2 rather than 1, no 'settled by searching the code' text in the second planner brief, and a first-plan critique that is the critic's.",
+      "seam": "Production entry point: `Athena::go`, which reaches `plan_round` (planning.rs:217) and `plan_findings`. Fake: the scripted `Scenario` from tests/common/mod.rs, with `plans`, `critiques`, `invocations` and `seen_by_planner`, injected by `fx.athena(scenario.script())`. It exists; it is used at job_plan.rs:851-883. The logic under test (`plan_findings`) is real. Only the planner's output is scripted."
+    },
+    {
+      "criterion": 4,
+      "method": "Add two admission.rs unit tests next to `a_user_or_host_question_with_a_code_reading_phrase_is_refused` (:1206) and `a_user_or_host_question_and_an_empty_list_are_not_refused` (:1223), using `open_question_findings_for`. `a_user_or_host_question_about_existing_tests_or_a_retry_path_is_refused` runs: 'User: do any existing tests break when the prompt grows?', 'Host: which other tests fail if the budget line changes?', '**User:** Does the existing test suite break?', 'user: what does `land` do on the retry path?', 'User: what happens on failure in `run_job`?'. For each it expects exactly 1 major Athena finding at 'open questions' whose summary contains the question and 'settled by searching the code'. `a_user_decision_that_mentions_tests_is_not_refused` adds 'User: should a failing test be skipped on CI?', 'User: may the change edit tests in `crates/athena-cli/tests/job_plan.rs`?' and the existing 'User: Should the CHANGELOG entry go under Added or Changed?', and expects no findings. A third assertion shows an unprefixed 'Do existing tests break?' still yields only the 'no addressee' finding. The same command's name filter also runs the `refusal_corpus` module cases whose names contain 'admission', if any.",
+      "command": "cargo test -p athena-core admission",
+      "observes": "All new and existing admission unit tests pass.",
+      "fails_without": "Without the new branch, the test-breakage questions yield no finding, so the unit test that asserts one major finding each fails. Without the word-level narrowing, the 'genuine decision' question is refused and the accepted-list test fails.",
+      "seam": "Production entry point: `plan_findings`, through the `open_question_findings_for` helper (admission.rs, unit-test module near :1190). Inputs are plain strings, so no fake is needed. It exists."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the full suite. The same checks are `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`. Also run `cargo test -p athena-core --test refusal_corpus` and `cargo test -p athena-cli --test budgets` on their own: the producer and the verifier can run these. I read the case ids (see dependents) but have not seen a run.",
+      "command": "cargo test --locked",
+      "observes": "Every test passes, including `system_facts_budgets_match_computed` against the updated planner line, `open_question_cases_get_the_expected_outcome` with the new cases, and the existing mechanical-revision tests.",
+      "fails_without": "The mechanical-revision tests at job_plan.rs:791 and :851 and the admission, refusal_corpus and budget tests already pin the unchanged behavior. A regression such as refusing the accepted scope questions, or a stale planner budget line, fails one of them.",
+      "seam": "Production entry points: all test targets; nothing is injected. The existing suite is the seam."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the stat and the CHANGELOG diff.",
+      "command": "git diff --stat",
+      "observes": "CHANGELOG.md `## [Unreleased]` / `### Changed` has an entry for the new plan check (open questions about existing-test breakage or a function's failure/retry path are refused without a critic call) and the planner brief bullet. The changed files are planner.md, admission.rs, job_plan.rs, refusal_corpus.rs, planning.rs (comment only), CHANGELOG.md, plus docs/system-facts.md for the budget line. No records/ file changes. fake.rs is unchanged.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: criterion 6 says no files other than the listed deliverables change, but `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs:124) fails unless the planner budget line in docs/system-facts.md matches the new planner.md size. May docs/system-facts.md's budget line be edited as a necessary consequence of the planner.md change? The plan assumes yes, as in HISTORY.txt:288-295."
+  ],
+  "producer_section_sha256": "caecc7f53b6ab83f1ef960ad096e54fc9b718e6136d60566665cd7bb205f415c"
+}

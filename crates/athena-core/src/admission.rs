@@ -165,8 +165,10 @@ fn athena_finding(
 ///
 /// - every planned path is a plain relative file path: not empty, not absolute, no `..`, no trailing `/`, and
 ///   not a directory in the base (`is_directory` says whether a path is one); a major finding otherwise.
-/// - every open question begins `User:` or `Host:` (only a user decision or a host fact stays open) and does
-///   not say the code answers it; a major finding otherwise (see `open_questions_findings`).
+/// - every open question begins `User:` or `Host:` (only a user decision or a host fact stays open), does
+///   not say the code answers it, and does not ask whether existing tests break or what a named function
+///   does on its failure or retry path, even with the prefix; a major finding otherwise (see
+///   `open_questions_findings`).
 /// - no risk and no dependent's test or reason defers the search for callers and tests to the producer
 ///   ("producer to check existing tests"); a major finding at `risks` or `dependents, dependent N` otherwise
 ///   (see `risks_findings`).
@@ -518,9 +520,24 @@ fn defers_to_producer(text: &str) -> bool {
 /// shape check; a deferral of it to the producer is refused by `risks_findings` and
 /// `dependents_deferral_findings`.
 ///
-/// The rule refuses more plans: expected 5% of newly refused plans (the reading's estimate, not a
-/// measurement). The higher refusal rate is intended, because those plans spent critic rounds on questions
-/// code could answer.
+/// Three rules, at most one finding per question, tried in this order:
+///
+/// 1. no `User:` or `Host:` prefix: no addressee;
+/// 2. a prefixed question that says the code answers it (`says_code_answers`);
+/// 3. a prefixed question that asks whether existing tests break, or what a backticked named function does
+///    on its failure or retry path (`asks_about_existing_behavior`). Both are found by searching the tests
+///    and the function, so the prefix does not make them a decision or a host fact.
+///
+/// The third rule strips the prefix first and checks its exemptions on the question body only: a body whose
+/// first word is should, shall or would; a body with acceptable, allowed, prefer(s) or wish; `user` followed
+/// by want or expect; or a host-environment word (toolchain, platform, machine, os, host). Known misses, left
+/// to the planner brief and the critic: a breakage question phrased "should existing tests ...", one that
+/// names a platform or toolchain, a rewording that avoids "test", a function named without backticks, and
+/// "does the suite still pass?". Whether a claim about a function is true is not checked here.
+///
+/// The rule refuses more plans: expected 5% of newly refused plans for the first two rules (the reading's
+/// estimate, not a measurement) and about 3% for the third (also an estimate). The higher refusal rate is
+/// intended, because those plans spent critic rounds on questions code could answer.
 fn open_questions_findings(questions: &[String]) -> Vec<Finding> {
     let mut findings = Vec::new();
     for (i, question) in questions.iter().enumerate() {
@@ -541,9 +558,114 @@ fn open_questions_findings(questions: &[String]) -> Vec<Finding> {
                 ),
                 "Read the code, settle the question and put the answer in the plan with file and line; keep it open only if the code cannot show the answer.".into(),
             ));
+        } else if asks_about_existing_behavior(question) {
+            findings.push(athena_finding(
+                Severity::Major,
+                "open questions".into(),
+                format!(
+                    "Open question {number} asks whether existing tests break or what a named function does on its failure or retry path, which can be settled by searching the code: {question}"
+                ),
+                "Search the tests and the function, and put the answer in the plan with file and line (callers in dependents, breakage in files and steps). Keep a question open only if it is a decision for the user or a fact about the host.".into(),
+            ));
         }
     }
     findings
+}
+
+/// True when a prefixed open question asks something a search settles: whether existing tests break, or what a
+/// backticked named function does on its failure or retry path. The prefix is stripped before any check, so
+/// the host-environment exemption applies to the body only. See `open_questions_findings` for the
+/// exemptions and the known misses.
+fn asks_about_existing_behavior(question: &str) -> bool {
+    let lowered = question.to_lowercase();
+    let edge = |c: char| c.is_whitespace() || matches!(c, '*' | '_' | '`');
+    let trimmed = lowered.trim_start_matches(edge);
+    let body = trimmed
+        .strip_prefix("user:")
+        .or_else(|| trimmed.strip_prefix("host:"))
+        .unwrap_or(trimmed)
+        .trim_start_matches(edge);
+    let words: Vec<&str> = body
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    // Exemptions: forms that mark a decision for the user, or a fact about the host environment.
+    if matches!(words.first(), Some(&("should" | "shall" | "would"))) {
+        return false;
+    }
+    if words.iter().any(|w| {
+        matches!(
+            *w,
+            "acceptable"
+                | "allowed"
+                | "prefer"
+                | "prefers"
+                | "wish"
+                | "toolchain"
+                | "platform"
+                | "machine"
+                | "os"
+                | "host"
+        )
+    }) {
+        return false;
+    }
+    if words.windows(2).any(|w| {
+        w[0] == "user" && matches!(w[1], "want" | "wants" | "expect" | "expects" | "prefer")
+    }) {
+        return false;
+    }
+
+    let tests_break = words.windows(2).any(|w| {
+        (matches!(w[0], "existing" | "other") && matches!(w[1], "test" | "tests"))
+            || (w[0] == "tests" && w[1] == "outside")
+    }) && words.iter().any(|w| {
+        matches!(
+            *w,
+            "break"
+                | "breaks"
+                | "broken"
+                | "breakage"
+                | "fail"
+                | "fails"
+                | "failing"
+                | "failure"
+                | "failures"
+                | "regress"
+                | "regresses"
+                | "regression"
+        )
+    });
+    if tests_break {
+        return true;
+    }
+
+    let segments: Vec<&str> = body.split('`').collect();
+    let names_function = segments.iter().enumerate().any(|(i, span)| {
+        let name = span.strip_suffix("()").unwrap_or(span);
+        i % 2 == 1
+            && i + 1 < segments.len()
+            && !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | ':'))
+    });
+    names_function
+        && ["what does", "what happens", "how does"]
+            .iter()
+            .any(|p| body.contains(p))
+        && [
+            "failure path",
+            "retry path",
+            "on failure",
+            "on retry",
+            "on error",
+            "when it fails",
+            "if it fails",
+        ]
+        .iter()
+        .any(|p| body.contains(p))
 }
 
 /// True when the question begins with `User:` or `Host:`, ignoring leading whitespace, `*`, `_` and
@@ -1217,6 +1339,58 @@ mod tests {
             assert!(found[0].summary.contains(question), "{found:?}");
             assert!(found[0].summary.contains("says the code answers it"));
         }
+    }
+
+    #[test]
+    fn a_user_or_host_question_about_existing_tests_or_a_retry_path_is_refused() {
+        for question in [
+            "User: do any existing tests break when the prompt grows?",
+            "Host: which other tests fail if the budget line changes?",
+            "**Host:** which other tests fail if the budget line changes?",
+            "**User:** Does the existing test suite break?",
+            "user: what does `land` do on the retry path?",
+            "User: what happens on failure in `run_job`?",
+            "User: do tests outside the deliverables fail?",
+            "User: do existing tests that expect the old wording break?",
+            "User: may existing tests fail after this?",
+        ] {
+            let found = open_question_findings_for(vec![question]);
+            assert_eq!(found.len(), 1, "{question}: {found:?}");
+            assert_eq!(found[0].severity, Severity::Major);
+            assert_eq!(found[0].source, FindingSource::Athena);
+            assert_eq!(found[0].location.as_deref(), Some("open questions"));
+            assert!(found[0].summary.contains(question), "{found:?}");
+            assert!(
+                found[0].summary.contains("settled by searching the code"),
+                "{found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decision_or_host_fact_that_mentions_tests_or_failure_is_not_refused() {
+        for question in [
+            "User: Should the CHANGELOG entry go under Added or Changed?",
+            "User: which failing test should block landing?",
+            "User: should any test that fails on Windows be marked ignored?",
+            "Host: does any test fail on the production host's older toolchain?",
+            "Host: do existing tests fail on the production host's older toolchain?",
+            "User: does it matter whether the CLI exits 1 or 2 on error?",
+            "User: should other tests that fail be skipped?",
+            "User: is it acceptable if existing tests break?",
+            "User: what does the user expect `athena land` to print on failure?",
+            "User: may the change edit tests in `crates/athena-cli/tests/job_plan.rs`?",
+        ] {
+            let found = open_question_findings_for(vec![question]);
+            assert!(found.is_empty(), "{question}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn an_unprefixed_question_about_existing_tests_keeps_only_the_no_addressee_finding() {
+        let found = open_question_findings_for(vec!["Do existing tests break?"]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].summary.contains("no addressee"), "{found:?}");
     }
 
     #[test]

@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The plan check (`open_questions_findings` in `crates/athena-core/src/admission.rs`) now sends a plan back to
+  the planner, with no critic call and no round used, when an open question asks whether existing tests break
+  or what a backticked named function does on its failure or retry path, even with a `User:` or `Host:` prefix.
+  The prefix is stripped before the exemptions (a decision form, or a host-environment word in the body) are
+  checked. About 3% of newly refused plans (an estimate, not a measurement). A new test in
+  `crates/athena-cli/tests/job_plan.rs` shows it. The planner brief (`prompts/planner.md`) now requires each
+  claim about existing code to be cited with file and line and every question the code can settle to be
+  settled, and keeps "name only what you saw"; its size is unchanged. `crates/athena-agent/src/fake.rs` is
+  unchanged on purpose: the scripted planner in the tests is the seam, and the built-in fake planner emits no
+  open questions.
 - The critic role prompt (`frame.critic`, now version 2) tells the critic to search for ways the plan's
   conclusions might be wrong; a test pins the rule and OLY-8-05 records it as its mechanism (`status: planning`).
 - `planning_round` in `crates/athena-core/src/run/planning.rs` is split into smaller private methods
@@ -16,6 +26,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `crates/athena-core/src/method_experiment.rs` defines a bounded baseline-versus-candidate experiment for a
+  change to an engineering method (refused when unbounded or incomplete, stopped over its bound, else Better,
+  Worse or NoDifference); OLY-9-05 records it as its mechanism (`status: not shown`). It is not wired into runs.
 - `athena status` prints a `specialization` section: per class of work, each producer model and effort with its
   first-pass rate and landed share against the class's most-used setting, flagged "specialization helps" only
   when a non-default setting with at least 3 jobs does better, otherwise "not enough jobs" or "no better
