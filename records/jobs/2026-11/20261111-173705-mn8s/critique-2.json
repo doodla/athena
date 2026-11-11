@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261111-173705-mn8s",
+  "round": 2,
+  "at": "2026-11-11T17:44:20.7114651Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-data/src/records.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-data/src/records.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Criterion 7 cannot be shown as written: the diff contains no steward/audience/auditor outcome assertion. On the pre-change code the new tests fail only because they do not compile.",
+      "evidence": "Criterion 7 says the verifier reads the diff for assertions on the auditor, steward and audience outcomes. The plan states that the diff 'does not hold the steward/audience/auditor outcome assertions', because they landed in 41539a7 and b670592 (confirmed at HISTORY.txt l.6 and l.11, and role_need.rs:433-479). The new tests are the scan of a synthetic struct, the Role::ALL index match and the MEASURED_ROLES classification. They assert nothing about the measure's output. On the base code they fail only because `MEASURED_ROLES`, `Role::ALL` and `unchained_invocation_lists` do not exist yet. Acceptance bullet 2 asks for a test that fails without the change 'for the cause', and a test that fails only because the code does not compile does not meet that. Fix: Add one role_need test to the diff that is driven by `Role::ALL`. For every role it loads at least one Invocation through `Records::from_parts`, using the real routing as in role_need.rs:455-464, over a window of 8 or more jobs. It then asserts on `RoleNeed::compute` output: every `Role::ALL` entry appears in `roles` with count > 0; steward, audience and auditor are in `not_measured` with their source `SOURCE_OUTSIDE_JOBS`; and none of them is in `retire_candidates`. Then the outcome assertions are in the diff, the test covers every role and not one fixed list, and a new role left unrouted or unchained fails on what the measure outputs. Update the Criterion 7 demonstration to name this test.",
+      "location": "Demonstrations, Criterion 7; Risks item 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The text scan of `Records` repeats what a behavioral test already covers, and its 'ident appears in fn_src' check can pass when it should fail.",
+      "evidence": "`from_parts` routes Invocation records only by role (store.rs:429-437). A fourth list therefore needs a new Role routed into it, and the plan's `Role::ALL` exhaustive match forces that role into `all_invocations_covers_every_loaded_invocation`. That test already fails when the list is not chained. Separately, testing whether an ident 'is found in fn_src' is a substring test, so a new field such as `runs` or `audit_runs` would count as chained, because `auditor_runs`/`steward_runs` contain the text. The codebase already uses a source-scan guard (role_need.rs:577), so the style is accepted here, but this one is weaker than it looks. Fix: Either drop the scan and rely on the from_parts test over `Role::ALL`, or match the field as the whole token `self.<ident>` in the `all_invocations` body, and add a synthetic case where a field's name is a substring of a chained field's name.",
+      "location": "Decision 2 / Step 3 (`unchained_invocation_lists`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The completeness test for `Role::ALL` checks order against a second, hand-kept index map. A plain exhaustive match whose result is checked with `contains` would be simpler.",
+      "evidence": "`position(r)` mapping to 0..=7, with the requirement that ALL equals 0..8 in order, ties the declaration order of `ALL` to a second list kept by hand. A new variant needs edits in three places, and the ordering adds nothing to the guard. Fix: In the test, give each `Role` an exhaustive match (no wildcard) that returns `()`, and assert `Role::ALL.contains(&r)` for a sample of each variant. Or assert `ALL.len()` and that `ALL` has no duplicates. Either keeps the compile-time push without depending on order.",
+      "location": "Step 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read store.rs, role_need.rs, records.rs, xtask/shard-timings.txt and HISTORY.txt. The plan describes the base code correctly. `JobRecords::invocations` is documented as partial (store.rs:29); `all_invocations` chains the three out-of-job lists (store.rs:524-531); `compute` reads only `all_invocations`; and from_parts-based tests for the known-active roles already exist (role_need.rs:433-479). The root-cause fix landed in 41539a7 and b670592. I searched for other usage measures that flatten `job.invocations` and found none outside store.rs. The remaining per-job role filters in status.rs, planning.rs and throughput.rs are legitimately per job. The guards the plan adds (`Role::ALL`, `MEASURED_ROLES`, an exhaustive classification match, and a from_parts coverage test over `Role::ALL`) target the class sensibly, and their scope fits one run. The main gap: criterion 7 tells the verifier to find steward/audience/auditor outcome assertions in the diff, but the plan admits the diff holds none. On the pre-change code the new tests fail only because they do not compile. One `Role::ALL`-driven test of `RoleNeed::compute` through `from_parts` would fix this. The text scan of `Records` is minor: it repeats what the behavioral test covers, and its substring check can pass when it should fail. Athena's finding on the out-of-scope records.rs stands, and I have not repeated it."
+}
