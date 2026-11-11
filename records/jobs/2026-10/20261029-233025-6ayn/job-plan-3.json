@@ -1,0 +1,367 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261029-233025-6ayn",
+  "round": 3,
+  "at": "2026-11-11T07:43:04.298082009Z",
+  "invocation_seq": 7,
+  "approach": "Add one reading check, `check_records_measure`, in `crates/athena-core/src/reading/surveys.rs` beside `check_history_fixture`. It has the same gate (`changes_code_with_behavior_criterion`, surveys.rs:237). It fires on either of two triggers. (a) WORDS: the summary or a criterion names a records-computed measure by its real names: keep rule, planning cost, refusal rate(s), refusal count(s), refusal share, check duration(s), landing time(s), landed time, time spent, wasted work, and throughput only in records phrases (throughput section, review, figure(s), measure(s), status). Matching is whole words on lowercase, whitespace-normalised text with hyphens and underscores read as spaces. (b) PATHS: a non-deleted deliverable is a measure-only module, located by reading the code: `crates/athena-data/src/records/throughput.rs`, `crates/athena-core/src/status/throughput.rs` and `crates/athena-core/src/status/planning.rs` (its module doc, lines 1-2, says it holds planning cost, the keep rule, later harm and producer settings; `keep_rule` is at planning.rs:242, `planning_cost` at :304). The per-rule refusal counts (`ReadingRuleStats`, status.rs:185) live in the shared status.rs, so `status.rs` is not a path trigger and that measure is caught by words only. A reading that fires is accepted only if one Behavior criterion names `real records`, an independent source (`git log`, `history.json`, `commit times`, `recorded check durations`, `recorded durations`, `landing record timestamps`) and `expected range`. Otherwise the check bails, naming the trigger (word or path) and the missing parts. Criteria that declare the replay share (they contain `newly refused`) are not scanned for words, and the sentence `higher refusal rate is intended` is stripped after whitespace normalisation. The refusal text's example takes the expected range from `history.json` commit times or landing record timestamps and presents `status --snapshot` only as the real output checked against that range. The step is one `step!` line in `refusing_check` after `check_history_fixture`. One reader rule line and one planner rule line state the rule. The reader section does not grow, because existing lines are shortened by the new line's length.",
+  "decisions": [
+    {
+      "choice": "Trigger on measure-only module paths as well as on words, and widen the word list from the measures' real names (finding 5). Paths: crates/athena-data/src/records/throughput.rs, crates/athena-core/src/status/throughput.rs, crates/athena-core/src/status/planning.rs (non-deleted deliverables only). Words add refusal count(s), refusal share, landed time, time spent, wasted work. Bare 'throughput' narrows to throughput section/review/figure(s)/measure(s)/status.",
+      "reason": "HISTORY.txt shows the keyword list alone misses real measure changes: line 109 (5724053, 'refusal counts'), line 441 ('wasted work', 'landed time'), line 1233 ('time spent'), and lines 86-99 (3a25c33 touched records/throughput.rs under a subject naming no measure). The three modules hold only measure code (status/planning.rs:1-2; status/throughput.rs functions landed_jobs, time_spent, Throughput::compute; records/throughput.rs check_durations). A path trigger there flags no unrelated edit. status.rs is shared with unrelated code, so it is NOT a path trigger and refusal counts are caught by words only; the limit is stated in the doc comment. Narrowing bare 'throughput' stops matches on CI or drain throughput readings. The cost is that a trivial edit to a measure-only module also needs one criterion, which is the intent: both 2026-10-29 landing-time errors came from small changes in such a module.",
+      "rejected": [
+        {
+          "option": "Keyword list only (the round 2 plan)",
+          "why": "Misses 5724053, ad7e260-style wording and 3a25c33, shown by HISTORY.txt."
+        },
+        {
+          "option": "Path trigger on status.rs or all of status/",
+          "why": "status.rs and status/ hold unrelated code; it would refuse refactors that move no figure."
+        },
+        {
+          "option": "Keep bare 'throughput' as a word",
+          "why": "Matches readings about CI or drain throughput that compute nothing from records."
+        }
+      ]
+    },
+    {
+      "choice": "Keep four files outside the reading's deliverable list and say why (findings 1-4): crates/athena-core/src/reading/checks.rs, crates/athena-core/tests/refusal_corpus.rs, crates/athena-context/src/briefs/reader.rs, crates/athena-context/src/briefs/planner.rs.",
+      "reason": "Each is the only place the behavior lives. checks.rs holds `refusing_check` (checks.rs:518) and its `step!` macro (checks.rs:525); its doc at checks.rs:513-514 says a new check is added as one `step!` line there, never as a direct call, and the file already has `use super::*` (checks.rs:3) so the new function needs no import edit. refusal_corpus.rs must gain a refusing case for the new step line, or `every_acceptance_check_has_a_refusing_corpus_case` fails and `cargo test` with it. briefs.rs only declares `mod planner; mod reader;` and holds the tests; the rule text is built in briefs/reader.rs (READING_RULES) and briefs/planner.rs (Report string). Nothing else outside the listed deliverables is touched, and no governance file is touched.",
+      "rejected": [
+        {
+          "option": "Call check_records_measure inside check_history_fixture so checks.rs is untouched",
+          "why": "It hides a second rule in a function named for another; the corpus step extractor would not see it as its own check, and the history-fixture step-line test would be confused."
+        },
+        {
+          "option": "Skip the corpus cases",
+          "why": "every_acceptance_check_has_a_refusing_corpus_case would fail."
+        },
+        {
+          "option": "Put the brief lines in briefs.rs",
+          "why": "They would not reach the generated briefs."
+        }
+      ]
+    },
+    {
+      "choice": "Do not raise the reader section limit. Keep `assert!(section.len() < 3150)`. The new reader line is at most 220 characters including `- `; existing READING_RULES entries are shortened by at least its length plus 3 bytes, keeping every phrase the tests pin. The producer prints the baseline `section.len()` first, records baseline and new size in the test comment, and asserts the section is no longer than the baseline.",
+      "reason": "The reading says the reader line must replace or shorten existing wording; the accepted brief has 2 tokens of reader headroom. If the section cannot fit without losing a rule, the producer stops and reports instead of raising the limit.",
+      "rejected": [
+        {
+          "option": "Raise the limit to the new size plus a margin",
+          "why": "The size test would pass without meeting the criterion."
+        },
+        {
+          "option": "Shorten CODE_SURVEY_GUIDE",
+          "why": "Many tests pin its phrases and it carries the guidance the checks rely on."
+        }
+      ]
+    },
+    {
+      "choice": "Fixed planner bound: `REAL_RECORDS_RULE` is one line of at most 200 bytes; a new test finds it exactly once in the Report section and asserts `report.len() <= REPORT_BASE + REAL_RECORDS_RULE.len() + 4`, with REPORT_BASE measured with empty inputs before the change.",
+      "reason": "200 bytes is about 67 tokens, within the planner's 95 tokens of headroom, and later growth fails the test.",
+      "rejected": [
+        {
+          "option": "No numeric bound",
+          "why": "Nothing would fail."
+        }
+      ]
+    },
+    {
+      "choice": "Replay-declaration handling: a criterion whose normalised text contains `newly refused` is skipped for word triggers; elsewhere the sentence `higher refusal rate is intended` is removed after lowercasing and whitespace-normalising, so a wrapped sentence is removed too.",
+      "reason": "The reader brief tells readers to write that declaration for every refusal rule; the declaration must not trip another rule. Existing corpus line 2910 and the declared-intended tests (refusal_corpus.rs:2806, 2852, 2947) carry it.",
+      "rejected": [
+        {
+          "option": "Remove only the literal sentence from raw text",
+          "why": "A wrapped sentence escapes it."
+        },
+        {
+          "option": "Drop 'refusal rate' from the list",
+          "why": "The request names refusal rates."
+        }
+      ]
+    },
+    {
+      "choice": "Independent sources accepted: git log, history.json, commit times, recorded check durations, recorded durations, landing record timestamps. The refusal text and CHANGELOG example take the range from `history.json` commit times or landing record timestamps; `status --snapshot` appears only as the real output that is checked against that range (finding 7).",
+      "reason": "`status --snapshot` prints the throughput section (briefs.rs:665-666), which is the output of the code under change, so it cannot be the independent source. The verifier has the evidence snapshot, not git. `git log` is in ENV_LOCATED_SOURCES (surveys.rs:561-567) and needs an `Environment:` assumption. `history.json` and `commit times` are not in that list, and scan_segments breaks a token with an interior `.`, so the history.json form needs no assumption (finding 9); the test asserts it.",
+      "rejected": [
+        {
+          "option": "Accept only git log and recorded check durations",
+          "why": "Forces an Environment assumption and the verifier has no git."
+        }
+      ]
+    },
+    {
+      "choice": "A code reading that names a measure only to say it is unchanged is refused; a corpus case pins this.",
+      "reason": "The check is lexical, as check_history_fixture says (surveys.rs:320-321). A nearby change can still move the figure, which is how both 2026-10-29 landing-time figures went wrong. The cost is one criterion; the doc comment states the limit. HISTORY.txt subjects naming these measures: lines 109, 441, 709, 1233, 1266, 1285, 1400, plus 3a25c33 by path: roughly 8 of 200, so the declared 3% is an estimate; the replay at verification measures the real share.",
+      "rejected": [
+        {
+          "option": "Accept readings that say 'unchanged'",
+          "why": "Needs negation parsing and reopens the gap."
+        }
+      ]
+    },
+    {
+      "choice": "Satisfy the rule only with one Behavior criterion holding `real records`, an independent source and `expected range`.",
+      "reason": "One criterion ties the real run to the independent range; a Content criterion runs nothing.",
+      "rejected": [
+        {
+          "option": "Accept the parts spread over several criteria",
+          "why": "A real-records criterion could have no range."
+        },
+        {
+          "option": "Require a numeric range",
+          "why": "Needs a number parser; the lexical form matches check_history_fixture."
+        }
+      ]
+    },
+    {
+      "choice": "Stored readings that newly fail leave the drain queue (finding 6): intended, and covered by a check_reading_text test.",
+      "reason": "drain.rs:114-124 and steward.rs:424 route a stored reading by `check_reading_text` (replay.rs:54), which calls `check_reading_acceptance`. A queued measure request (such as one from the throughput review, HISTORY.txt line 709) whose stored reading lacks the criterion stops being run by the batch and waits for `athena go` or a re-read. It is not lost. That is the rule drain already applies to any reading that fails any check, and the existing test drain.rs:4406-4459 pins the mechanism with a stored reading failing a check, so the new check needs no new drain test. A reading.rs test calls `check_reading_text` on a stored measure reading and asserts `ReadingCheck::Refuse` naming the criterion, which is the exact function drain, plan and the steward call.",
+      "rejected": [
+        {
+          "option": "Add a new cli drain test",
+          "why": "It would re-test the generic drain routing already pinned at drain.rs:4406; the new part is the Refuse from check_reading_text."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/surveys.rs",
+      "action": "modify",
+      "purpose": "Add RECORDS_MEASURE_PHRASES, RECORDS_MEASURE_PATHS, REAL_RECORDS_PHRASES, INDEPENDENT_SOURCE_PHRASES, EXPECTED_RANGE_PHRASES and `pub fn check_records_measure(reading) -> Result<()>` with the doc comment (root cause, limits, 'higher refusal rate is intended', 'expected 3% of newly refused readings', 'estimate', 0.1 and 273.8 minutes).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add tests in the existing test module: refusal on fixtures only with its variants (words, path trigger, unchanged), acceptance with the real-records criterion (history.json with no assumption, git log with Environment), unaffected readings, wrapped declaration, check_reading_text Refuse, and the single step line after check_history_fixture.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "purpose": "Add `step!(check_records_measure(reading));` after the check_history_fixture step (line 538) and name the check in the check_reading_acceptance doc. Outside the listed deliverables; refusing_check lives here (finding 1).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add the nine corpus cases, new INPUT_FORMS tags and `records_measure_refusal_is_declared_intended`. Outside the listed deliverables; forced by every_acceptance_check_has_a_refusing_corpus_case (finding 2).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs/reader.rs",
+      "action": "modify",
+      "purpose": "Add one READING_RULES entry (array [&str; 12], at most 220 characters) and shorten existing entries by at least its length plus 3 bytes. Outside the listed deliverables; the rule text is built here (finding 3).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs/planner.rs",
+      "action": "modify",
+      "purpose": "Add the one-line const REAL_RECORDS_RULE (at most 200 bytes) and interpolate it in the Report string after {OPEN_QUESTION_RULE}. Outside the listed deliverables; the Report text is built here (finding 4).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Update the reader rule test (count 12, check name, exactly-one-line assertion, `< 3150` unchanged, baseline and new size in the comment, no-growth assertion) and add the planner test with the fixed bound.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One item under [Unreleased] / Changed naming reading::check_records_measure, the rule, the 2026-10-29 landing-time figures 0.1 and 273.8 minutes, the history.json example range, 'higher refusal rate is intended' and 'expected 3% of newly refused readings'.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Measure first: add a temporary failing assert in the reader rule test to print the current `section.len()` and one for the planner Report length with empty inputs; note both baselines (REPORT_BASE), then remove them. Read check_history_fixture and changes_code_with_behavior_criterion (surveys.rs:237, 335), has_phrase (39), straight_lowercase (286) and normalised (replay.rs:216).",
+    "Write `check_records_measure` after check_history_fixture in surveys.rs with its phrase and path lists. Gate: changes_code_with_behavior_criterion. Word scan: for the summary and each criterion, straight_lowercase with hyphens and underscores as spaces; skip criteria containing `newly refused`; strip 'higher refusal rate is intended'. Path scan: non-deleted deliverables equal to the three measure-only modules. Take the first trigger. Accept if one Behavior criterion has `real records`, an independent-source phrase and `expected range`. Otherwise bail naming the trigger and each missing part, with an example criterion taking its range from history.json commit times or landing record timestamps and comparing the `status --snapshot` output against it, and a note that `git log` needs an `Environment:` assumption. Write the doc comment with root cause, limits and the declaration with 'estimate'.",
+    "In checks.rs add `step!(check_records_measure(reading));` on the line after `step!(check_history_fixture(reading));` and name the check in the check_reading_acceptance doc.",
+    "In the reading.rs test module add the tests listed under criteria 3 and 4, using code_reading, add_behavior, accept, gate_refuser, SURVEY and MODIFY_READING; include the history.json variant asserting gate_refuser None with no assumption, the path-trigger and word variants, the wrapped declaration, the check_reading_text Refuse, and the step-line position test.",
+    "In briefs/reader.rs add the single READING_RULES entry (type [&str; 12], at most 220 characters) and shorten existing entries by at least its length plus 3 bytes without losing pinned phrases. In briefs/planner.rs add the one-line REAL_RECORDS_RULE (at most 200 bytes) and put {REAL_RECORDS_RULE} in the Report string after {OPEN_QUESTION_RULE}.",
+    "In briefs.rs update the reader rule test (count 12, check_records_measure in the list, exactly one line naming real records and an expected range, `section.len() < 3150` unchanged, baseline and new size in the comment, no-growth assertion) and add the planner test (rule once in the Report, at most 200 bytes, `report.len() <= REPORT_BASE + REAL_RECORDS_RULE.len() + 4`).",
+    "In refusal_corpus.rs add INPUT_FORMS tags (records-measure-word-fixture-only, measure-module-path-trigger, refusal-counts-wording, real-records-range-satisfied, declaration-wrapped, docs-class-measure-word, measure-named-as-unchanged, ci-drain-throughput; update the array length) and the nine cases from criterion 7, with repo_files set so the deliverables are found, as the history cases do. Input form to case: word fixture-only -> records-measure-change-on-fixtures-only-job-landing-time; 'refusal counts' wording -> refusal-counts-status-from-5724053; path trigger without a measure word -> measure-module-path-no-measure-word; satisfied with history.json -> ...-history-json; satisfied with git log -> ...-git-log; wrapped declaration -> refusal-rate-declaration-wrapped-line; docs class -> docs-reading-naming-landing-time; unchanged -> records-measure-named-as-unchanged; bare throughput about CI or drain -> ci-drain-throughput-reading. Singular/plural, hyphen/underscore and Content-only forms are unit tests in reading.rs.",
+    "In refusal_corpus.rs add `records_measure_refusal_is_declared_intended`, modelled on `history_fixture_refusal_is_declared_intended` (line 2919): replay_declaration share Some(3), step line present, doc comment holds the declaration, 'estimate', 0.1, 273.8 and the limits, and the whitespace-collapsed changelog holds the check name, 'higher refusal rate is intended', 'expected 3% of newly refused readings' and the 2026-10-29 figures.",
+    "Add the CHANGELOG item under [Unreleased] / Changed, wrapped at 120 columns like its neighbours, with the needles the tests pin; mention that queued measure requests with a stored reading lacking the criterion wait for `athena go`.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-context` and `cargo test -p athena-cli --test drain`, and fix what they report. No step calls an external service."
+  ],
+  "risks": [
+    {
+      "risk": "Criterion 1 says the added lines are in briefs.rs, but the text is built in briefs/reader.rs and briefs/planner.rs; briefs.rs holds the tests.",
+      "mitigation": "Criterion 1 rests on the test assertions (rule count 11 to 12, exactly one line naming real records and an expected range, rule once in the Report), with the diff of the two sub-module files as a supplement. The plan lists all three files."
+    },
+    {
+      "risk": "Shortening existing reader rule lines to hold the section at the baseline could break a test that pins their wording or lose meaning.",
+      "mitigation": "Keep every pinned phrase (Consumers:, CHANGELOG.md, Term ladder:, Environment:, Existing code:, check names, '(prose only).' endings), trim only filler, run cargo test -p athena-context; if it cannot fit, stop and report, do not raise the limit."
+    },
+    {
+      "risk": "False positives: 'time spent' and 'wasted work' are common phrases; a path trigger refuses a trivial edit to a measure-only module; a reading that names a measure only as unchanged is refused.",
+      "mitigation": "The gate needs a capability, no question, class code or tests and a Behavior criterion. Declaration criteria and the intended-rate sentence are exempt. The cost is one criterion and the refusal text gives an example. The corpus pins the accepted and refused forms. The declared 3% is an estimate; the replay at verification measures the share and holds a job above the declared share plus 5 points."
+    },
+    {
+      "risk": "The check is lexical: a criterion can hold the three phrases without running anything on real records, and a measure can be changed in status.rs under unlisted words.",
+      "mitigation": "The doc comment states both limits. The check makes sure the criterion exists; the verifier runs it. Making the verifier fetch records is out of scope."
+    },
+    {
+      "risk": "A reader who satisfies the rule with git log meets check_environment_reach on its one second read.",
+      "mitigation": "The refusal text points first to history.json commit times, which need no Environment assumption, and says git log needs one. Tests cover both through the whole chain."
+    },
+    {
+      "risk": "The planner could not run the tests, so baseline sizes (reader section about 3045 of 3150, REPORT_BASE) are not measured here.",
+      "mitigation": "The producer measures both before editing, records them in test comments, and asserts against the measured values."
+    },
+    {
+      "risk": "Queued measure requests with stored readings drop out of the drain until someone runs `athena go`.",
+      "mitigation": "Intended and the existing drain rule for any failing stored reading (drain.rs:114-124); the request is not lost. The changelog item says so."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "reading gate chain: new step check_records_measure",
+      "dependent": "crates/athena-core/src/reading/checks.rs `refusing_check` (518) and `check_reading_acceptance` doc (475-489); `build_reading` in reading.rs calls it",
+      "kind": "code",
+      "test": "history_fixture_has_one_step_line and the order tests keep passing because the new step sits after check_history_fixture and changes no neighbour pair; `no_check_bypasses_refusing_check` (refusal_corpus.rs); the new step-line and position test in reading.rs.",
+      "reason": null
+    },
+    {
+      "name": "refusal corpus coverage and INPUT_FORMS list",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `every_acceptance_check_has_a_refusing_corpus_case`, `an_extra_check_with_no_case_is_reported`, `corpus_covers_the_listed_input_forms`, `the_wrapper_agrees_with_refusing_check_on_every_case`",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus with the nine new cases and the new tags (the array length grows from 52 by the number of tags added).",
+      "reason": null
+    },
+    {
+      "name": "stored readings checked by check_reading_text",
+      "dependent": "crates/athena-cli/src/drain.rs:114-124 (and `plan`, which runs the same pass, drain.rs:112-113) and crates/athena-core/src/steward.rs:424 `queued_work`",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/drain.rs:4406 pins that routing with a stored reading failing a check; the new reading.rs test asserts `check_reading_text` returns Refuse for the stored measure reading, the exact function drain, plan and the steward call. Run `cargo test -p athena-cli --test drain` and `cargo test -p athena-core`.",
+      "reason": "Effect: a stored reading of a measure change with no real-records criterion (for example one queued by Hestia's throughput review, HISTORY.txt line 709) leaves the drain queue and waits for `athena go` or a re-read; it is not lost. This is intended, and is the rule drain applies to any stored reading that fails any check."
+    },
+    {
+      "name": "readings newly refused when stored readings are replayed",
+      "dependent": "crates/athena-core/src/reading/replay.rs `check_reading_text` (54), `athena check-reading` (athena-cli main.rs:661-687), the verification replay and run/tests.rs:1817-2142",
+      "kind": "code",
+      "test": "records_measure_refusal_is_declared_intended in refusal_corpus.rs pins the declaration the replay compares against.",
+      "reason": "They call check_reading_acceptance unchanged and get the new refusal as a Refuse reason. The replay compares against the share declared in the job's criteria; criterion 5 requires 'expected 3% of newly refused readings' and the declared-intended test pins it. The share is an estimate (about 8 of 200 commits in HISTORY.txt name these measures or touch their modules); the replay at verification measures it."
+    },
+    {
+      "name": "replay-declaration recognition reused by the new check",
+      "dependent": "crates/athena-core/src/reading/replay.rs `normalised` (216), `declared_percent` (227), `replay_declaration` (263)",
+      "kind": "code",
+      "test": null,
+      "reason": "The new check only reads the `newly refused` form; it does not change those functions, so the replay tests are unaffected."
+    },
+    {
+      "name": "rule name check_records_measure in stored refusals",
+      "dependent": "crates/athena-core/src/hestia.rs `reading_rule_findings` (675), status.rs `ReadingRuleStats` (185)",
+      "kind": "code",
+      "test": null,
+      "reason": "They take rule names from stored refusals with no fixed list; a new name is a new row. Their tests use their own constants."
+    },
+    {
+      "name": "a satisfying criterion naming git log",
+      "dependent": "crates/athena-core/src/reading/surveys.rs `check_environment_reach` (899) and `ENV_LOCATED_SOURCES` (561-567)",
+      "kind": "code",
+      "test": "The accepted git-log test adds an `Environment:` assumption so the whole chain passes; the history.json test asserts gate_refuser is None with no assumption, because history.json and commit times are not in ENV_LOCATED_SOURCES and a token with an interior `.` is a break in scan_segments.",
+      "reason": null
+    },
+    {
+      "name": "READING_RULES length 11 to 12, reader section size, planner Report text",
+      "dependent": "crates/athena-context/src/briefs.rs test `the_reader_brief_names_each_reading_rule_in_one_short_line`, READING_RULES consumers in briefs/reader.rs, planner tests in briefs.rs",
+      "kind": "code",
+      "test": "The reader test is updated (count 12, check name, exactly one line naming real records and an expected range, `< 3150`, no growth over baseline); the planner test bounds growth; other tests pin phrases that the shortening keeps. `cargo test -p athena-context`.",
+      "reason": null
+    },
+    {
+      "name": "reader and planner prompt budgets (1998 of 2000, 1105 of 1200)",
+      "dependent": "docs/system-facts.md budget lines and `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs:125); `BudgetSet::budget` (crates/athena-context/src/lib.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The budget sets compose only CONTRACT, frames, defaults and catalog; the brief text sits outside them per the 'Prompt sets and budgets' fact. The reader section does not grow and the planner line is at most 200 bytes (about 67 tokens), within the 95 tokens of headroom, so the computed figures stay equal to the doc."
+    },
+    {
+      "name": "new text in source files and CHANGELOG",
+      "dependent": "xtask/tests/policy.rs boundary-word scan and the [personal_data] allow-list in athena.toml",
+      "kind": "rule",
+      "test": null,
+      "reason": "The new strings and the changelog item name no person, machine or email address."
+    },
+    {
+      "name": "governance and host configuration",
+      "dependent": "athena.toml, defaults.toml, workflows",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The plan changes none; the check reads only the Reading text, with no git, network or records access, so an origin or none behaves the same."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "The test is the evidence: READING_RULES.len() goes from 11 to 12 and exactly one line names a records-computed measure, real records, an expected range and an independent source (the count of matching lines is asserted == 1). A new planner test asserts the Report section holds REAL_RECORDS_RULE exactly once. The diff is a supplement only: reader.rs also shows '+' lines for shortened existing entries (finding 8), so the count rests on the assertions, not the diff.",
+      "command": "cargo test -p athena-context the_reader_brief_names_each_reading_rule_in_one_short_line && git diff -U0 -- crates/athena-context/src/briefs/reader.rs crates/athena-context/src/briefs/planner.rs",
+      "observes": "Both tests pass; the diff shows one new READING_RULES entry (its text naming check_records_measure) and one new REAL_RECORDS_RULE const plus its interpolation in the Report string. The rule text is built in briefs/reader.rs and briefs/planner.rs, not briefs.rs (briefs.rs:17-18 declares the modules and holds tests).",
+      "fails_without": "With either line missing, the exactly-one assertions fail (zero lines match in the reader section, zero occurrences in the Report).",
+      "seam": "Production entry points `reader_brief(&reader_inputs(&reading()))` and `planner_brief(&planner_inputs(None))` in the briefs.rs test module; both builders exist. The reader test exists and is updated; the planner test is added by plan steps 5 and 6. No double."
+    },
+    {
+      "criterion": 2,
+      "method": "Run all athena-context tests, including the updated reader rule test (count 12, each line at most 220 characters, `section.len() < 3150` unchanged, measured baseline and new size in the comment, an assertion that the section is no longer than the baseline) and the new planner test (rule at most 200 bytes, `report.len() <= REPORT_BASE + REAL_RECORDS_RULE.len() + 4`).",
+      "command": "cargo test -p athena-context",
+      "observes": "All pass, so reader and planner briefs stay within their limits with both lines present.",
+      "fails_without": "If the reader line is added without shortening others, `section.len() < 3150` or the no-growth assertion fails. If the planner const is not interpolated, the once-in-Report assertion fails. If it is over 200 bytes, the bound fails.",
+      "seam": "Production entry points `reader_brief` and `planner_brief` through `reader_inputs` and `planner_inputs` in the briefs.rs test module; they exist. Plan steps 5 and 6 add the assertions and the planner test. No double."
+    },
+    {
+      "criterion": 3,
+      "method": "In the reading.rs test module build `code_reading(&[SURVEY], &[MODIFY_READING])` with the summary 'Fix the landing time shown by status' and a fixture-only Behavior criterion (a status test where the landing time is 4.0 minutes on a fixture of landed jobs). Call `gate_refuser` and `accept(..).unwrap_err()`. Variants, each refused: the three parts in a Content criterion only; real records with no range; real records and a range with no independent source; summary written `landing-time`; each new word (refusal counts, wasted work, time spent, throughput review); a reading with a deliverable `crates/athena-data/src/records/throughput.rs` and no measure word; a code reading saying the throughput section is unchanged; and `check_reading_text` on the same reading returns `ReadingCheck::Refuse` (the drain, plan and steward seam).",
+      "command": "cargo test -p athena-core records_measure_without_real_records_criterion_is_refused",
+      "observes": "`gate_refuser` returns Some(\"check_records_measure\"); the error names the trigger (the phrase or the path), `real records`, the independent sources, `expected range` and the word criterion.",
+      "fails_without": "Without the check or its `step!` line, `gate_refuser` is None and `unwrap_err()` panics.",
+      "seam": "Production entry points `refusing_check` (checks.rs:518), `check_reading_acceptance` (checks.rs:490) and `check_reading_text` (replay.rs:54); the new `check_records_measure` is added by plan step 2 and its `step!` line by step 3. Fixture: a `Reading` built by the existing helpers `code_reading`, `add_behavior`, `accept` and `gate_refuser` in the reading.rs test module (they exist; named from the earlier reading of reading.rs). The check is a pure function of the Reading, so there is no double."
+    },
+    {
+      "criterion": 4,
+      "method": "Companion tests in the reading.rs test module. (1) The same landing-time reading plus a Behavior criterion naming real records, `history.json` commit times and an expected range: `check_records_measure` is Ok and `gate_refuser(..) == None` with NO `Environment:` assumption added (finding 9; history.json is not in ENV_LOCATED_SOURCES, surveys.rs:561-567). (2) A `git log` variant with an `Environment:` assumption: `gate_refuser` None. (3) The path-trigger reading with the same satisfying criterion: accepted. (4) Unaffected and accepted: the default reading ('Change the reading rules.'), a docs reading naming landing time, a question, a decline, a content-only reading, a code reading on CI or drain throughput, a code reading with a wrapped 'higher refusal rate is intended' sentence, and a criterion with 'expected 3% of newly refused readings'. (5) A step-line test pins one `step!(check_records_measure(reading));` line directly after `step!(check_history_fixture(reading));`.",
+      "command": "cargo test -p athena-core records_measure",
+      "observes": "Satisfied readings are accepted by the whole chain; the unaffected readings are accepted; the step line and its position are present once.",
+      "fails_without": "If the check ignored the satisfying criterion, the accepted cases would be refused. If it ignored the carve-outs, the docs, question, decline, CI-throughput and declaration cases would be refused.",
+      "seam": "Same as criterion 3. The assumption is a string pushed to `reading.assumptions` in the test. The step-line test mirrors the existing `history_fixture_has_one_step_line`. No double."
+    },
+    {
+      "criterion": 5,
+      "method": "A test modelled on `history_fixture_refusal_is_declared_intended` (refusal_corpus.rs:2919) reads the doc comment above `pub fn check_records_measure(` from the surveys source and checks it; it calls `replay_declaration` on a criterion with the declaration.",
+      "command": "cargo test -p athena-core --test refusal_corpus records_measure_refusal_is_declared_intended",
+      "observes": "The doc comment holds 'This check refuses more readings; the higher refusal rate is intended.', 'expected 3% of newly refused readings', 'estimate', the 2026-10-29 figures 0.1 and 273.8 minutes, and a Limits paragraph (lexical; unchanged-measure readings still refused; status.rs refusal counts caught by words only). `replay_declaration` returns share Some(3).",
+      "fails_without": "Missing declaration or limits make the needle assertions fail.",
+      "seam": "Production entry point `athena_core::reading::replay_declaration` and the source reader in refusal_corpus.rs (`reading_source()`, line 2673, exists); the test is added by plan step 8. No double."
+    },
+    {
+      "criterion": 6,
+      "method": "The same test collapses the whitespace of CHANGELOG.md (include_str!, as in the existing declared-intended tests) and checks the new item; the diff shows it under [Unreleased] / Changed.",
+      "command": "cargo test -p athena-core --test refusal_corpus records_measure_refusal_is_declared_intended && git diff -U0 -- CHANGELOG.md",
+      "observes": "The item names `reading::check_records_measure`, states the rule, cites landing time 0.1 and 273.8 minutes on 2026-10-29, gives the history.json commit-time example range with `status --snapshot` as the output compared against it, and contains 'higher refusal rate is intended' and 'expected 3% of newly refused readings'.",
+      "fails_without": "Without the item the changelog assertions fail.",
+      "seam": "CHANGELOG.md read with include_str! in refusal_corpus.rs; exists. No double."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three Athena checks, then the corpus alone. The corpus gains cases: records-measure-change-on-fixtures-only-job-landing-time (Refuse check_records_measure; the 2026-10-29 request), refusal-counts-status-from-5724053 (Refuse; summary 'Report per-rule reading refusal counts in status', deliverables as in HISTORY.txt lines 109-113), measure-module-path-no-measure-word (Refuse; deliverable records/throughput.rs, rebuilt from 3a25c33, HISTORY.txt lines 86-99), records-measure-named-as-unchanged (Refuse), records-measure-change-with-real-records-range-history-json (Accept, no assumption), records-measure-change-with-real-records-range-git-log (Accept, Environment assumption), refusal-rate-declaration-wrapped-line (Accept), docs-reading-naming-landing-time (Accept), ci-drain-throughput-reading (Accept). The planner did not run any of this and cites no result.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked && cargo test -p athena-core --test refusal_corpus",
+      "observes": "All pass. `every_acceptance_check_has_a_refusing_corpus_case` finds check_records_measure refusing in the first case; `corpus_covers_the_listed_input_forms` passes with the new tags; `the_wrapper_agrees_with_refusing_check_on_every_case` passes. Existing cases keep their outcome: refusal_corpus.rs holds the measure phrases only in the declared-intended sentences (lines 2806-2961, 3204, 3431), which are skipped.",
+      "fails_without": "Without the new corpus case `every_acceptance_check_has_a_refusing_corpus_case` fails; any broken existing reading test fails cargo test.",
+      "seam": "Production entry points `refusing_check` and `check_reading_acceptance` called by the corpus harness `run(c)` with new `Case` values built by the existing `case(...)` helper, `repo_files` set as the history cases do. Plan step 7 adds them. No double."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "7d2b4c928231032a4682e41433002485e7d722cabd5d398125bc01bc9e8ee799"
+}

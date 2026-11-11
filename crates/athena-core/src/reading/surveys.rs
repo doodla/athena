@@ -369,6 +369,238 @@ pub fn check_history_fixture(reading: &Reading) -> Result<()> {
     )
 }
 
+/// Phrases that name a measure Athena computes from its own records. Matched with [`has_phrase`] on lowercase
+/// text in which a hyphen or an underscore reads as a space, so `landing-time` and `check_durations` match.
+/// Bare `time spent` and bare `throughput` are not in the list: they are ordinary words (`time spent waiting
+/// for CI`, drain throughput), so the measure is named by `unlanded time spent`, `time spent per job` or the
+/// records phrases of `throughput` below.
+pub(super) const RECORDS_MEASURE_PHRASES: &[&str] = &[
+    "keep rule",
+    "planning cost",
+    "planning costs",
+    "refusal rate",
+    "refusal rates",
+    "refusal count",
+    "refusal counts",
+    "refusal share",
+    "check duration",
+    "check durations",
+    "landing time",
+    "landing times",
+    "landed time",
+    "wasted work",
+    "unlanded time spent",
+    "time spent per job",
+    "throughput section",
+    "throughput review",
+    "throughput figure",
+    "throughput figures",
+    "throughput measure",
+    "throughput measures",
+    "throughput status",
+];
+
+/// The identifier of a measure in `status/throughput.rs`. Matched on text in which only a hyphen reads as a
+/// space, so the underscore keeps it apart from the English phrase `time spent`.
+pub(super) const RECORDS_MEASURE_IDENTIFIERS: &[&str] = &["time_spent"];
+
+/// Modules that compute the figures `status` prints from the records: throughput and wasted work in the
+/// first, planning cost and the keep rule in the second. `records/throughput.rs` in `athena-data` is not
+/// here: it holds record types and computes nothing.
+pub(super) const RECORDS_MEASURE_PATHS: &[&str] = &[
+    "crates/athena-core/src/status/throughput.rs",
+    "crates/athena-core/src/status/planning.rs",
+];
+
+/// What a criterion must name to run a records measure against the real records.
+pub(super) const REAL_RECORDS_PHRASES: &[&str] = &["real records"];
+
+/// Sources of an expected range that do not depend on the code under change. `status --snapshot` is not one:
+/// it prints the figure the change computes. `git log` is also a located source for [`check_environment_reach`],
+/// which then asks for an `Environment:` assumption; `history.json` and the others are not.
+pub(super) const INDEPENDENT_SOURCE_PHRASES: &[&str] = &[
+    "git log",
+    "history.json",
+    "commit times",
+    "recorded check durations",
+    "recorded durations",
+    "landing record timestamps",
+];
+
+/// What a criterion must name so the real output is compared with something other than itself.
+pub(super) const EXPECTED_RANGE_PHRASES: &[&str] = &["expected range"];
+
+/// The sentence a refusal-rule criterion carries by design (`CODE_SURVEY_GUIDE` asks for it). It is removed
+/// before the measure phrases are searched, so declaring a higher refusal rate triggers nothing.
+const RECORDS_MEASURE_DECLARATION: &str = "higher refusal rate is intended";
+
+/// The two lowercase forms of `text` that [`check_records_measure`] searches: hyphens and underscores read as
+/// spaces (for the phrase list, with the declared-intended sentence removed), and only hyphens read as spaces
+/// (for the identifiers).
+fn records_measure_forms(text: &str) -> (String, String) {
+    fn squash(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    let base = straight_lowercase(text);
+    let words = squash(&base.replace(['-', '_'], " ")).replace(RECORDS_MEASURE_DECLARATION, " ");
+    (words, squash(&base.replace('-', " ")))
+}
+
+/// What names a records-computed measure in the reading, if anything: a phrase or identifier in the summary or
+/// a criterion (a criterion that declares `newly refused` readings is not searched), or a created or modified
+/// deliverable that computes the figures.
+fn records_measure_trigger(reading: &Reading) -> Option<String> {
+    let mut texts: Vec<&str> = vec![reading.summary.as_str()];
+    texts.extend(
+        reading
+            .acceptance_criteria
+            .iter()
+            .filter(|c| !straight_lowercase(&c.text).contains("newly refused"))
+            .map(|c| c.text.as_str()),
+    );
+    for text in texts {
+        let (words, identifiers) = records_measure_forms(text);
+        if let Some(phrase) = RECORDS_MEASURE_PHRASES
+            .iter()
+            .find(|phrase| has_phrase(&words, phrase))
+        {
+            return Some(format!("it names \"{phrase}\""));
+        }
+        if let Some(identifier) = RECORDS_MEASURE_IDENTIFIERS
+            .iter()
+            .find(|identifier| has_phrase(&identifiers, identifier))
+        {
+            return Some(format!("it names \"{identifier}\""));
+        }
+    }
+    reading
+        .deliverables
+        .iter()
+        .find(|d| {
+            d.action != DeliverableAction::Delete
+                && RECORDS_MEASURE_PATHS.contains(&d.path.as_str())
+        })
+        .map(|d| {
+            format!(
+                "it changes {}, which computes the figures status prints",
+                d.path
+            )
+        })
+}
+
+/// Refuses a code or tests reading that changes a measure computed from Athena's records unless a behavior
+/// criterion runs it against the real records and takes the expected range from an independent source.
+///
+/// Root cause this check removes: measures and reports computed from the records (throughput, the keep rule,
+/// planning cost, refusal rates, check durations, landing time) were verified on fixture records alone, and
+/// the fixtures held the shapes the author expected, so a wrong figure showed only on the real records. On
+/// 2026-10-29 the landing time shown by `status` was 0.1 minutes, then, after the first fix, 273.8 minutes,
+/// both against real landings of a few minutes. Nothing required a criterion that runs the measure on the
+/// repository's real records and compares the output with a range from a source the change does not compute,
+/// so both fixes passed their fixtures. The rule sits where readings are accepted, so a later job cannot
+/// skip it.
+///
+/// It reads the [`Reading`] only: no model call, no repository, no records and no network. It applies under
+/// the gate of [`check_code_survey`] (a capability, no question, class `code` or `tests`, a behavior
+/// criterion). It fires on either of two triggers. (a) Words: the summary or a criterion names a measure
+/// (see [`RECORDS_MEASURE_PHRASES`]: `keep rule`, `planning cost`, `refusal rate`, `refusal count`, `check
+/// duration`, `landing time`, `wasted work`, `throughput` in a records phrase such as `throughput section` or
+/// `throughput figures`, and the identifier `time_spent`), as whole words on lowercase text in which a hyphen
+/// or an underscore reads as a space. A criterion that declares `newly refused` readings is not searched, and
+/// the sentence `higher refusal rate is intended` is removed first, so a refusal rule's own declaration
+/// triggers nothing. (b) Paths: a created or modified deliverable is `status/throughput.rs` or
+/// `status/planning.rs` in `athena-core`, the two modules that compute the figures. A code-health split or
+/// move of those modules needs the criterion too, because a moved figure can change.
+///
+/// The reading is accepted when one behavior criterion names `real records`, an independent source (`git log`,
+/// `history.json`, `commit times`, `recorded check durations`, `recorded durations` or `landing record
+/// timestamps`) and an `expected range`. `status --snapshot` prints the code under change, so it is the real
+/// output to compare, never the source of the range. `git log` is a located source for
+/// [`check_environment_reach`] and so needs an `Environment:` assumption; `history.json` and `commit times`
+/// need none.
+///
+/// Limits: the check is lexical, with no reading of negation, so a reading that names a measure only to say
+/// it is unchanged is still refused, and so is a split or move of the two figure modules with no behavior
+/// change. It checks that the criterion exists; the verifier runs it. A criterion can hold the three parts
+/// without running anything on real records. Refusal counts and other figures in shared code such as
+/// `status.rs` are caught by their words only, not by path. `records/throughput.rs` in `athena-data` holds
+/// record types and is not a trigger.
+///
+/// This check refuses more readings; the higher refusal rate is intended. A replay of accepted readings
+/// (`replay`) holds a job that newly refuses more than 10% unless the job's criteria declare a share. Declared
+/// here: expected 3% of newly refused readings. That is an estimate, not measured: about 7 of the last 200
+/// commit subjects name these measures, plus this job's own reading, and the replay at verification measures
+/// the real share. Stored readings of queued requests that lack the criterion leave the drain queue until
+/// `athena go` or a new read, as for any failing check.
+///
+/// The error names the trigger and the missing parts and gives an example criterion that takes its range
+/// from `history.json` commit times.
+pub fn check_records_measure(reading: &Reading) -> Result<()> {
+    if !changes_code_with_behavior_criterion(reading) {
+        return Ok(());
+    }
+    let Some(trigger) = records_measure_trigger(reading) else {
+        return Ok(());
+    };
+    // For each behavior criterion, which of the three parts it holds: real records, an independent source
+    // and an expected range.
+    let parts: Vec<[bool; 3]> = reading
+        .acceptance_criteria
+        .iter()
+        .filter(|c| c.kind == CriterionKind::Behavior)
+        .map(|c| {
+            let (words, _) = records_measure_forms(&c.text);
+            let plain = straight_lowercase(&c.text);
+            let holds = |list: &[&str]| {
+                list.iter()
+                    .any(|p| has_phrase(&words, p) || has_phrase(&plain, p))
+            };
+            [
+                holds(REAL_RECORDS_PHRASES),
+                holds(INDEPENDENT_SOURCE_PHRASES),
+                holds(EXPECTED_RANGE_PHRASES),
+            ]
+        })
+        .collect();
+    if parts.iter().any(|p| p.iter().all(|held| *held)) {
+        return Ok(());
+    }
+    // Judge the best behavior criterion, so the error names what is still missing from the nearest one.
+    let best = parts
+        .iter()
+        .max_by_key(|p| p.iter().filter(|held| **held).count())
+        .copied()
+        .unwrap_or([false; 3]);
+    let mut missing: Vec<&str> = Vec::new();
+    if !best[0] {
+        missing.push("`real records`");
+    }
+    if !best[1] {
+        missing.push(
+            "an independent source of the range (`git log`, `history.json`, `commit times`, `recorded check \
+             durations`, `recorded durations` or `landing record timestamps`)",
+        );
+    }
+    if !best[2] {
+        missing.push("an `expected range`");
+    }
+    bail!(
+        "the reading was refused because it changes a measure computed from Athena's records ({trigger}) but no \
+         behavior criterion runs it against real records with an expected range from an independent source; \
+         missing from the nearest behavior criterion: {}. A measure verified on fixture records alone has \
+         shown wrong figures on the real records (2026-10-29: a landing time of 0.1 minutes, then 273.8 \
+         minutes, against real landings of a few minutes). Add one behavior criterion that names `real \
+         records`, an independent source and the `expected range`, for example: \"Run `cargo run -p \
+         athena-cli -- status --snapshot <evidence directory>`: on the real records the landing time it prints \
+         is within the expected range taken from the commit times in history.json\". The range must come from \
+         a source the change does not compute; the status output is the real output compared with it. `git \
+         log` also needs an `Environment:` assumption naming the site, read permission and the records or \
+         history it reaches. A split or move of the figure modules with no behavior change needs the same \
+         criterion, because a moved figure can change",
+        missing.join(", ")
+    )
+}
+
 /// The `Environment:` assumptions of a reading: those whose trimmed text starts with that label, in any case.
 pub(super) fn environment_assumptions(reading: &Reading) -> Vec<&str> {
     reading

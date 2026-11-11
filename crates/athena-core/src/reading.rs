@@ -8224,6 +8224,386 @@ mod tests {
         );
     }
 
+    /// A criterion that runs a landing-time measure on fixture records only.
+    const FIXTURE_ONLY_CRITERION: &str = "Run `cargo test -p athena-core status::`: over a fixture of three \
+         landings the landing time is 4 minutes";
+
+    /// A criterion that runs the measure on the real records and takes the range from commit times in
+    /// `history.json`, a source the change does not compute.
+    const REAL_RECORDS_CRITERION: &str = "Run `cargo run -p athena-cli -- status --snapshot evidence`: on the \
+         real records the landing time it prints is within the expected range taken from the commit times in \
+         history.json";
+
+    /// A code reading with the survey, these deliverables, this summary and one more behavior criterion.
+    fn measure_reading(summary: &str, paths: &[&str], criterion: &str) -> Reading {
+        let mut reading = history_reading(paths, criterion);
+        reading.summary = summary.into();
+        reading
+    }
+
+    const LANDING_TIME_SUMMARY: &str = "Fix the landing time shown by status";
+
+    #[test]
+    fn records_measure_without_real_records_criterion_is_refused() {
+        // Criterion 3: the landing-time reading of 2026-10-29, verified on fixtures only.
+        let reading = measure_reading(
+            LANDING_TIME_SUMMARY,
+            &["crates/athena-core/src/status.rs"],
+            FIXTURE_ONLY_CRITERION,
+        );
+        assert_eq!(gate_refuser(&reading), Some("check_records_measure"));
+        let error = accept(&reading).unwrap_err().to_string();
+        for needle in [
+            "was refused",
+            "\"landing time\"",
+            "`real records`",
+            "independent source",
+            "`history.json`",
+            "`git log`",
+            "`expected range`",
+            "0.1 minutes",
+            "273.8 minutes",
+            "behavior criterion",
+            "split or move",
+        ] {
+            assert!(error.contains(needle), "{needle}: {error}");
+        }
+        // The check refuses it on its own, with the same text.
+        assert_eq!(
+            check_records_measure(&reading).unwrap_err().to_string(),
+            error
+        );
+        // The stored-reading seam (drain, plan, steward and `athena check-reading`) refuses it too.
+        match check_reading_text(&reading, "change the reading rules") {
+            ReadingCheck::Refuse(reason) => {
+                assert!(reason.contains("real records"), "{reason}");
+                assert!(reason.contains("\"landing time\""), "{reason}");
+            }
+            ReadingCheck::Accept => {
+                panic!("a stored measure reading with no real-records criterion")
+            }
+        }
+    }
+
+    #[test]
+    fn records_measure_refusal_names_what_is_missing() {
+        let landing = "crates/athena-core/src/status.rs";
+        // Real records and a source, no range.
+        let no_range = measure_reading(
+            LANDING_TIME_SUMMARY,
+            &[landing],
+            "Run `cargo run -p athena-cli -- status --snapshot evidence`: on the real records the landing \
+             time matches the commit times in history.json",
+        );
+        let error = check_records_measure(&no_range).unwrap_err().to_string();
+        assert!(
+            error.contains("missing from the nearest behavior criterion: an `expected range`"),
+            "{error}"
+        );
+        // Real records and a range, no independent source.
+        let no_source = measure_reading(
+            LANDING_TIME_SUMMARY,
+            &[landing],
+            "Run `cargo run -p athena-cli -- status --snapshot evidence`: on the real records the landing \
+             time is within the expected range of 2 to 10 minutes",
+        );
+        let error = check_records_measure(&no_source).unwrap_err().to_string();
+        assert!(
+            error.contains("missing from the nearest behavior criterion: an independent source"),
+            "{error}"
+        );
+        // A source and a range, no real records.
+        let no_real = measure_reading(
+            LANDING_TIME_SUMMARY,
+            &[landing],
+            "Run `cargo test`: the landing time is within the expected range taken from the commit times in \
+             history.json",
+        );
+        let error = check_records_measure(&no_real).unwrap_err().to_string();
+        assert!(
+            error.contains("missing from the nearest behavior criterion: `real records`"),
+            "{error}"
+        );
+        // The three parts in a content criterion only: a content criterion runs nothing.
+        let mut content = measure_reading(LANDING_TIME_SUMMARY, &[landing], FIXTURE_ONLY_CRITERION);
+        add_content(&mut content, REAL_RECORDS_CRITERION);
+        assert_eq!(gate_refuser(&content), Some("check_records_measure"));
+        // The parts spread over several behavior criteria are not one criterion.
+        let mut spread = measure_reading(LANDING_TIME_SUMMARY, &[landing], FIXTURE_ONLY_CRITERION);
+        add_behavior(
+            &mut spread,
+            "Run `status` on the real records and show the landing time",
+        );
+        add_behavior(
+            &mut spread,
+            "The landing time is within the expected range from the commit times in history.json",
+        );
+        assert_eq!(gate_refuser(&spread), Some("check_records_measure"));
+    }
+
+    #[test]
+    fn records_measure_words_and_paths_each_trigger_the_rule() {
+        let status = "crates/athena-core/src/status.rs";
+        let throughput = "crates/athena-core/src/status/throughput.rs";
+        let planning = "crates/athena-core/src/status/planning.rs";
+        // Each word in the summary, in the spellings a reader writes.
+        for summary in [
+            "Fix the landing-time shown by status",
+            "Fix the landing_time shown by status",
+            "Fix the Landing Times shown by status",
+            "Report per-rule reading refusal counts in status",
+            "Lower the refusal rates of the reading rules",
+            "Show wasted work in the status output",
+            "Count the time spent per job",
+            "Count the unlanded time spent",
+            "Round time_spent to whole minutes",
+            "Add a line to the throughput review",
+            "Change the throughput figures",
+            "Change the keep rule",
+            "Lower the planning cost",
+            "Fix the check durations",
+            "Fix the check_duration column",
+        ] {
+            let reading = measure_reading(summary, &[status], FIXTURE_ONLY_CRITERION);
+            assert_eq!(
+                gate_refuser(&reading),
+                Some("check_records_measure"),
+                "{summary}"
+            );
+        }
+        // A word in a behavior criterion or a content criterion triggers it too.
+        let in_criterion = measure_reading(
+            "Change the status header",
+            &[status],
+            "Run `cargo test`: the keep rule keeps jobs that landed",
+        );
+        assert_eq!(gate_refuser(&in_criterion), Some("check_records_measure"));
+        let mut in_content =
+            measure_reading("Change the status header", &[status], "Run `cargo test`");
+        add_content(&mut in_content, "The doc names the check durations");
+        assert_eq!(gate_refuser(&in_content), Some("check_records_measure"));
+        // The two modules that compute the figures trigger it with no measure word.
+        for path in [throughput, planning] {
+            let reading =
+                measure_reading("Tidy the module", &[path], "Run `cargo test`: it builds");
+            let error = check_records_measure(&reading).unwrap_err().to_string();
+            assert!(error.contains(path), "{error}");
+            assert_eq!(gate_refuser(&reading), Some("check_records_measure"));
+        }
+        // A split of a figure module with no behavior change still needs the criterion.
+        let split = measure_reading(
+            "Split the module into submodules; this moves code with no behavior change",
+            &[throughput],
+            "Run `cargo test -p athena-core status::`: the existing tests pass",
+        );
+        assert_eq!(gate_refuser(&split), Some("check_records_measure"));
+        // A reading that names a measure only to say it is unchanged is still refused.
+        let unchanged = measure_reading(
+            "Change the status header; the landing time is unchanged",
+            &[status],
+            "Run `cargo test`: the header is bold",
+        );
+        assert_eq!(gate_refuser(&unchanged), Some("check_records_measure"));
+    }
+
+    #[test]
+    fn records_measure_with_a_real_records_criterion_is_accepted() {
+        // Criterion 4: the same reading, once a behavior criterion names real records, an independent source
+        // and an expected range. `history.json` needs no `Environment:` assumption.
+        let landing = "crates/athena-core/src/status.rs";
+        let mut reading = measure_reading(LANDING_TIME_SUMMARY, &[landing], FIXTURE_ONLY_CRITERION);
+        assert_eq!(gate_refuser(&reading), Some("check_records_measure"));
+        add_behavior(&mut reading, REAL_RECORDS_CRITERION);
+        assert_eq!(gate_refuser(&reading), None);
+        accept(&reading).unwrap();
+        assert_eq!(
+            check_reading_text(&reading, "change the reading rules"),
+            ReadingCheck::Accept
+        );
+        // The example in the refusal text satisfies the check it comes from.
+        let refused = measure_reading(LANDING_TIME_SUMMARY, &[landing], FIXTURE_ONLY_CRITERION);
+        let error = check_records_measure(&refused).unwrap_err().to_string();
+        let example = error
+            .split("for example: \"")
+            .nth(1)
+            .and_then(|rest| rest.split("\". ").next())
+            .unwrap();
+        let mut with_example = refused.clone();
+        add_behavior(&mut with_example, example);
+        assert_eq!(gate_refuser(&with_example), None, "{example}");
+        // Each independent source is accepted.
+        for source in [
+            "history.json",
+            "the commit times",
+            "the recorded check durations",
+            "the recorded durations",
+            "the landing record timestamps",
+        ] {
+            let mut sourced = refused.clone();
+            add_behavior(
+                &mut sourced,
+                &format!(
+                    "Run `status --snapshot evidence`: on the real records the landing time is within the \
+                     expected range taken from {source}"
+                ),
+            );
+            assert_eq!(gate_refuser(&sourced), None, "{source}");
+        }
+        // `git log` is accepted with the `Environment:` statement that reading it asks for.
+        let mut git_log = refused.clone();
+        add_behavior(
+            &mut git_log,
+            "Run `status --snapshot evidence`: on the real records the landing time is within the expected \
+             range taken from git log commit times",
+        );
+        git_log.assumptions.push(
+            "Environment: the verifier reads the git log and the records in the snapshot, with read \
+             permission only; history is reached through the snapshot files"
+                .into(),
+        );
+        assert_eq!(gate_refuser(&git_log), None);
+        // The path trigger is met by the same criterion.
+        let mut by_path = measure_reading(
+            "Tidy the module",
+            &["crates/athena-core/src/status/throughput.rs"],
+            "Run `cargo test`: it builds",
+        );
+        assert_eq!(gate_refuser(&by_path), Some("check_records_measure"));
+        add_behavior(&mut by_path, REAL_RECORDS_CRITERION);
+        assert_eq!(gate_refuser(&by_path), None);
+        // Spellings of the parts: hyphens, case and wrapped lines.
+        let mut spelled = refused;
+        add_behavior(
+            &mut spelled,
+            "Run `status --snapshot evidence`: on the Real-Records the landing time is within the\n  Expected \
+             Range taken from the commit times in history.json",
+        );
+        assert_eq!(gate_refuser(&spelled), None);
+    }
+
+    #[test]
+    fn records_measure_leaves_unrelated_readings_alone() {
+        let status = "crates/athena-core/src/status.rs";
+        let neutral = "Run `cargo test`: the new unit test passes";
+        let mut cases: Vec<(&str, Reading)> = Vec::new();
+        cases.push((
+            "default reading",
+            code_reading(&[SURVEY], &[MODIFY_READING]),
+        ));
+        let mut docs = measure_reading(
+            LANDING_TIME_SUMMARY,
+            &["docs/guide.md"],
+            FIXTURE_ONLY_CRITERION,
+        );
+        docs.class_of_work = "docs".into();
+        cases.push(("docs naming landing time", docs));
+        let mut tests_class = measure_reading("Add a test", &[status], neutral);
+        tests_class.class_of_work = "tests".into();
+        cases.push(("tests class without a measure", tests_class));
+        let mut declined = measure_reading(LANDING_TIME_SUMMARY, &[status], FIXTURE_ONLY_CRITERION);
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        cases.push(("decline", declined));
+        let mut asking = measure_reading(LANDING_TIME_SUMMARY, &[status], FIXTURE_ONLY_CRITERION);
+        asking.question = Some("which file?".into());
+        cases.push(("question", asking));
+        let mut content = code_reading(&[SURVEY], &[MODIFY_READING]);
+        content.summary = LANDING_TIME_SUMMARY.into();
+        content.acceptance_criteria = vec![Criterion {
+            text: "The doc names the landing time".into(),
+            kind: CriterionKind::Content,
+        }];
+        cases.push(("content criteria only", content));
+        cases.push((
+            "drain throughput of the CI queue",
+            measure_reading(
+                "Raise the throughput of the drain queue",
+                &["crates/athena-cli/src/drain.rs"],
+                "Run `cargo test -p athena-cli --test drain`: two jobs drain in one pass",
+            ),
+        ));
+        cases.push((
+            "time spent waiting for CI",
+            measure_reading(
+                "Reduce time spent waiting for CI",
+                &["crates/athena-core/src/land.rs"],
+                neutral,
+            ),
+        ));
+        cases.push((
+            "record types module without a measure word",
+            measure_reading(
+                "Add a field to the record type",
+                &["crates/athena-data/src/records/throughput.rs"],
+                neutral,
+            ),
+        ));
+        cases.push(("deleted figure module", {
+            let mut deleted = measure_reading("Remove the unused file", &[], neutral);
+            deleted.deliverables.push(Deliverable {
+                path: "crates/athena-core/src/status/planning.rs".into(),
+                action: DeliverableAction::Delete,
+                p: 0.9,
+            });
+            deleted
+        }));
+        // The declaration a refusal rule carries by design is not a measure change, even when wrapped.
+        cases.push((
+            "wrapped declaration",
+            measure_reading(
+                "Refuse more readings",
+                &[status],
+                "Run `cargo test`: the check refuses more readings and the higher\n   refusal  rate is\n intended",
+            ),
+        ));
+        cases.push((
+            "declared share",
+            measure_reading(
+                "Refuse more readings",
+                &[status],
+                "Run `cargo test`: expected 3% of newly refused readings, a higher refusal rate than before",
+            ),
+        ));
+        for (label, reading) in &cases {
+            check_records_measure(reading).unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_ne!(
+                gate_refuser(reading),
+                Some("check_records_measure"),
+                "{label}"
+            );
+        }
+        // The identifier is kept apart from the English phrase: only a hyphen reads as a space.
+        assert!(!has_phrase("time spent waiting", "time_spent"));
+        assert!(has_phrase("round time_spent now", "time_spent"));
+    }
+
+    #[test]
+    fn records_measure_has_one_step_line() {
+        let source = reading_source();
+        let body = source
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        let steps: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("step!(check_"))
+            .collect();
+        let line = "step!(check_records_measure(reading));";
+        assert_eq!(steps.iter().filter(|l| **l == line).count(), 1, "{steps:?}");
+        let history = steps
+            .iter()
+            .position(|l| *l == "step!(check_history_fixture(reading));")
+            .unwrap();
+        assert_eq!(steps[history + 1], line);
+        let acceptance_doc = source
+            .split("pub fn check_reading_acceptance(")
+            .next()
+            .unwrap();
+        assert!(acceptance_doc.contains("[`check_records_measure`]"));
+    }
+
     /// A change reading as the gate sees it in production: `CHANGELOG.md` is always a deliverable.
     fn limited(deliverables: &[&str], criterion: &str) -> Reading {
         let mut paths = deliverables.to_vec();

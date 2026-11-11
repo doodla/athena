@@ -476,7 +476,9 @@ pub fn check_reading_references(
 /// retried or followed-up job ([`check_prior_result_and_scope`]), then the evidence each criterion rests on
 /// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
 /// rests on ([`check_code_survey`]), then the realistic-branch fixture a commit classification, history or
-/// attribution rule is tested on ([`check_history_fixture`]), then the governance files the outcome needs
+/// attribution rule is tested on ([`check_history_fixture`]), then the real-records criterion a change to a
+/// measure computed from the records rests on ([`check_records_measure`]), then the governance files the
+/// outcome needs
 /// ([`check_governance_coverage`]), then the observable state a delivery request needs
 /// ([`check_outcome_state`]), then the place, permissions and data reach of each action or source the reading
 /// assigns ([`check_environment_reach`]), then the structural terms the request uses and the reading leaves
@@ -536,6 +538,7 @@ pub fn refusing_check(
     step!(check_criteria_evidence(reading));
     step!(check_code_survey(reading));
     step!(check_history_fixture(reading));
+    step!(check_records_measure(reading));
     step!(check_design_existing_code(reading));
     step!(check_governance_coverage(reading, request));
     step!(check_outcome_state(reading, request));

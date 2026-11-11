@@ -284,18 +284,19 @@ pub const READING_RULES_HEADING: &str = "# Reading rules";
 /// Each rule a reading must pass, one short line each. A line gives the check that enforces it; a reading
 /// that breaks a checked rule is refused and read again once, with the refusal as a correction. A line
 /// ending `(prose only)` has no check and causes no refusal.
-pub const READING_RULES: [&str; 11] = [
-    "Previous result: a retry or follow-up names each earlier job, says how its result is addressed, lists deliverables and out_of_scope, and lists or excludes the files it changed (`check_prior_result_and_scope`).",
-    "Criteria evidence: each criterion rests on a command, Grep or file the verifier can check, never the producer's report (`check_criteria_evidence`).",
-    "Governance files: list one as a deliverable and name it in a criterion when the request names it or a deliverable implies it, or name it in out_of_scope (`check_governance_coverage`).",
-    "Code survey: a code or tests reading with a behavior criterion has a `Code survey:` assumption naming a crates/ path (`check_code_survey`).",
-    "Design: an `Existing code:` assumption names crates/ or docs/ paths the job does not create; a criterion needs an existing code section that reuses or extends them (`check_design_existing_code`).",
-    "Environment: a CI workflow, a push, PR or pull request, or a records-branch or history read needs an `Environment:` assumption: site, read/write permissions, data reached (`check_environment_reach`).",
-    "Terms: define each structural term the request uses (ladder, rung, tier, layer) in a `Term ladder: <meaning>` assumption; a quoted or cited mention needs none (`check_defined_terms`).",
-    "Scope limit: a limiting criterion lists CHANGELOG.md or says `the deliverables`; a config deliverable needs `Consumers: <deliverable paths>` or `Consumers: none found` (`check_scope_limit`).",
-    "Valid reading: class, capability and producer model from the closed lists; a decline gives a reason; a capability needs a criterion; forecasts are valid (`build_reading`).",
-    "Test placement: put each test in a crate that can import the code under test; xtask has no library target, so test it in `xtask/tests/` or unit tests in `xtask/src/` (prose only).",
-    "Enabled roles: brief content targets only the roles listed under Enabled roles; a role not listed gets no new content (prose only).",
+pub const READING_RULES: [&str; 12] = [
+    "Previous result: a retry or follow-up names each earlier job, how its result is addressed, deliverables, out_of_scope, and each changed file kept or excluded (`check_prior_result_and_scope`).",
+    "Criteria evidence: each criterion rests on a command, Grep or file the verifier can check, not the producer's report (`check_criteria_evidence`).",
+    "Governance files: when the request names one or a deliverable implies it, list it and name it in a criterion, or in out_of_scope (`check_governance_coverage`).",
+    "Code survey: a code or tests reading with a behavior criterion has a `Code survey:` assumption naming crates/ paths (`check_code_survey`).",
+    "Design: an `Existing code:` assumption names crates/ or docs/ paths the job does not create; a criterion reuses or extends them (`check_design_existing_code`).",
+    "Environment: a CI workflow, push, PR, or records-branch or history read needs an `Environment:` assumption: site, read/write permissions, data reached (`check_environment_reach`).",
+    "Terms: define each structural term in the request (ladder, rung, tier, layer) in a `Term ladder: <meaning>` assumption; a quoted mention needs none (`check_defined_terms`).",
+    "Scope limit: a limiting criterion lists CHANGELOG.md or says `the deliverables`; a config deliverable needs `Consumers: <paths>` or `Consumers: none found` (`check_scope_limit`).",
+    "Records measures: changing throughput, keep rule, planning cost, refusal rate or landing time needs a criterion run on real records with an expected range from an independent source (`check_records_measure`).",
+    "Valid reading: class, capability and producer model from closed lists; a decline gives a reason; a capability needs a criterion; valid forecasts (`build_reading`).",
+    "Test placement: put each test where it can import the code; xtask has no library, so use `xtask/tests/` or unit tests in `xtask/src/` (prose only).",
+    "Enabled roles: brief content targets only roles under Enabled roles (prose only).",
 ];
 
 /// What the reader writes before it gives behavior criteria for a code or tests change, and when a request
