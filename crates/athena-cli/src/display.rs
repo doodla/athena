@@ -5,8 +5,9 @@ use athena_core::gate_counts::GateCount;
 use athena_core::reading::Proposal;
 use athena_core::run::Finished;
 use athena_core::status::{
-    ClassSpecialization, JobTrace, KeepRule, KeepVerdict, LaterHarm, PlanningCost, PlanningGroup,
-    ProducerSettingStats, SPECIALIZATION_MIN_JOBS, SpecializationVerdict, StatusView,
+    ClassSpecialization, Discovery, DiscoveryState, JobTrace, KeepRule, KeepVerdict, LaterHarm,
+    PlanningCost, PlanningGroup, ProducerSettingStats, SPECIALIZATION_MIN_JOBS,
+    SpecializationVerdict, StatusView,
 };
 use athena_data::records::{
     CriterionKind, DeliverableAction, Forecast, OutcomeState, Quantiles, Reading, Score,
@@ -258,6 +259,33 @@ fn later_harm_lines(h: &LaterHarm) -> String {
     out
 }
 
+/// Defect discovery beside the landed share (OLY-7-06): defects found by verification and landings later
+/// cited, per window of verified jobs, and a flag when fewer later-cited defects come with weaker discovery.
+fn discovery_lines(d: &Discovery) -> String {
+    let mut out =
+        String::from("            defect discovery (older half of verified jobs, then newer):\n");
+    for (name, w) in [("older", &d.older), ("newer", &d.newer)] {
+        let _ = writeln!(
+            out,
+            "              {name:<9} {} verified jobs · {} defects found by verification · {} landings later cited",
+            w.verified_jobs, w.verifier_found, w.later_cited
+        );
+    }
+    let line = match d.state {
+        DiscoveryState::NotEnoughData => {
+            "not enough data: too few verified jobs in a window to read discovery".to_string()
+        }
+        DiscoveryState::Weakened => {
+            "discovery weakened: fewer later-cited defects with fewer found by verification per job; \
+             not evidence of improvement"
+                .to_string()
+        }
+        DiscoveryState::Held => "discovery held: verification found defects at the older rate or higher".to_string(),
+    };
+    let _ = writeln!(out, "              {line}");
+    out
+}
+
 /// Hestia's recurring duties (hestia.md section 13): one line each with the cadence, the last run, the next due
 /// point and an OVERDUE mark when the next sweep would run the duty. Empty when there are none.
 fn duties_lines(duties: &[athena_core::hestia::DutyStanding]) -> String {
@@ -307,6 +335,7 @@ fn keep_rule_lines(k: &KeepRule) -> String {
         "            cost per landed job {cost} · first-round accept rate {rate}"
     );
     out.push_str(&later_harm_lines(&k.later_harm));
+    out.push_str(&discovery_lines(&k.discovery));
     let numbers = format!(
         "{} of {} planned jobs landed ({}), baseline {}, cost per landed job {cost}",
         k.landed,
@@ -2465,7 +2494,39 @@ mod tests {
             first_round_accept_rate: Some(0.5),
             verdict,
             later_harm: LaterHarm::default(),
+            discovery: Discovery::default(),
         }
+    }
+
+    #[test]
+    fn keep_rule_lines_show_defect_discovery_counts_and_the_weakened_flag() {
+        use athena_core::status::DiscoveryWindow;
+        let window = |jobs, found, cited| DiscoveryWindow {
+            verified_jobs: jobs,
+            verifier_found: found,
+            later_cited: cited,
+            found_per_job: Some(found as f64 / jobs as f64),
+            cited_per_job: Some(cited as f64 / jobs as f64),
+        };
+        let mut rule = keep_rule(28, 51, KeepVerdict::Keep);
+        let none = keep_rule_lines(&rule);
+        assert!(none.contains("not enough data"), "{none}");
+        assert!(!none.contains("discovery weakened"), "{none}");
+        rule.discovery = Discovery {
+            older: window(6, 12, 3),
+            newer: window(6, 6, 1),
+            state: DiscoveryState::Weakened,
+        };
+        let text = keep_rule_lines(&rule);
+        assert!(
+            text.contains("older     6 verified jobs · 12 defects found by verification · 3 landings later cited"),
+            "{text}"
+        );
+        assert!(
+            text.contains("newer     6 verified jobs · 6 defects found by verification · 1 landings later cited"),
+            "{text}"
+        );
+        assert!(text.contains("discovery weakened"), "{text}");
     }
 
     #[test]

@@ -616,7 +616,7 @@ impl DutyRunner for AthenaDuties<'_> {
 }
 
 /// What the keep-rule threshold check sees: one finding when the rule's verdict is a breach or says to turn
-/// planning off. The thresholds are the rule's own ([`crate::status::KEEP_RULE_TARGET_SHARE`] and its
+/// planning off, and one when the defect-discovery figure reads weakened. The thresholds are the rule's own ([`crate::status::KEEP_RULE_TARGET_SHARE`] and its
 /// neighbours); this check reads the verdict and changes nothing.
 fn keep_rule_output(records: &Records) -> CheckOutput {
     let Some(rule) = crate::status::keep_rule(records) else {
@@ -640,6 +640,26 @@ fn keep_rule_output(records: &Records) -> CheckOutput {
                 rule.cost_per_landed_usd
                     .map(|c| format!(", ${c:.2} per landed job"))
                     .unwrap_or_default()
+            ),
+            age_seconds: 0,
+            state: FindingState::Open,
+        });
+    }
+    // OLY-7-06: fewer later-cited defects with weaker discovery is not an improvement; say so, change nothing.
+    if rule.discovery.state == crate::status::DiscoveryState::Weakened {
+        let d = &rule.discovery;
+        findings.push(Finding {
+            check: KEEP_RULE_CHECK_ID.into(),
+            subject: "defect discovery".into(),
+            evidence: format!(
+                "discovery weakened: {} landing(s) later cited over {} verified job(s), then {} over {}; \
+                 {} defect(s) found by verification, then {}",
+                d.older.later_cited,
+                d.older.verified_jobs,
+                d.newer.later_cited,
+                d.newer.verified_jobs,
+                d.older.verifier_found,
+                d.newer.verifier_found
             ),
             age_seconds: 0,
             state: FindingState::Open,

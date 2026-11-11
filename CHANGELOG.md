@@ -14,6 +14,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The `keep rule` section of `athena status` prints a defect-discovery figure beside the landed share: defects
+  found by verification and landings later cited, per verified job, for the older and the newer half of the
+  verified jobs. Fewer later-cited defects with fewer found by verification per job is flagged "discovery
+  weakened" and is not read as improvement; with fewer than 5 verified jobs in a window it says "not enough
+  data". Hestia's keep-rule check reports the weakened flag as a finding. Reported only: no verdict or landing
+  changes. It is the mechanism for requirement OLY-7-06 in `docs/spec.toml`.
 - `athena status` prints a `specialization` section: per class of work, each producer model and effort with its
   first-pass rate and landed share against the class's most-used setting, flagged "specialization helps" only
   when a non-default setting with at least 3 jobs does better, otherwise "not enough jobs" or "no better

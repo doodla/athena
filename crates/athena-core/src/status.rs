@@ -2829,6 +2829,105 @@ pub(crate) mod planning_cost_tests {
         assert_eq!(json["later_harm"]["unplanned"]["failures"], 1);
     }
 
+    /// `per_window` verified, landed jobs in each of two windows (older ids first). Each job in the older window
+    /// has `old_found` verifier major findings and the first `old_cited` of them are cited by a later failure;
+    /// the newer window likewise with `new_found` and `new_cited`.
+    fn discovery_fixture(
+        per_window: usize,
+        (old_found, old_cited): (usize, usize),
+        (new_found, new_cited): (usize, usize),
+    ) -> Records {
+        use athena_data::records::{Finding, FindingSource, Severity, Verdict};
+        let mut jobs = Vec::new();
+        let mut cites = Vec::new();
+        for i in 0..per_window * 2 {
+            let (found, cited) = if i < per_window {
+                (old_found, old_cited)
+            } else {
+                (new_found, new_cited)
+            };
+            let text = format!("202610{:02}-100000-a{:03}", i + 1, i);
+            let mut j = producer_job(&text, "m", None, OutcomeState::Landed, Verdict::Pass, 0.0);
+            let n = if i < per_window { i } else { i - per_window };
+            j.verification.as_mut().unwrap().findings = (0..found)
+                .map(|_| Finding {
+                    severity: Severity::Major,
+                    summary: "defect".into(),
+                    evidence: "e".into(),
+                    location: None,
+                    source: FindingSource::Verifier,
+                })
+                .collect();
+            if n < cited {
+                cites.push(failure_cause(
+                    &format!("20261101-1000{i:02}-m{i:03}"),
+                    "20261101-100000-zz00",
+                    &format!("{text} broke the drain."),
+                ));
+            }
+            jobs.push(j);
+        }
+        let mut records = records(jobs);
+        records.introspections = cites;
+        records
+    }
+
+    #[test]
+    fn discovery_flags_fewer_later_cited_defects_with_fewer_found_by_verification_as_weakened() {
+        // Later-cited 3 -> 1 of 6 and verifier-found 2 -> 1 per verified job: the drop is not an improvement.
+        let rule_records = discovery_fixture(6, (2, 3), (1, 1));
+        let d = discovery(&rule_records);
+        assert_eq!(
+            (d.older.verified_jobs, d.newer.verified_jobs),
+            (6, 6),
+            "{d:?}"
+        );
+        assert_eq!(
+            (d.older.verifier_found, d.newer.verifier_found),
+            (12, 6),
+            "{d:?}"
+        );
+        assert_eq!((d.older.later_cited, d.newer.later_cited), (3, 1), "{d:?}");
+        assert_eq!(d.state, DiscoveryState::Weakened);
+        let json = serde_json::to_value(d).unwrap();
+        assert_eq!(json["state"], "weakened");
+        assert_eq!(json["older"]["verifier_found"], 12);
+        assert_eq!(json["newer"]["later_cited"], 1);
+    }
+
+    #[test]
+    fn discovery_rides_on_the_keep_rule_with_its_counts_in_the_json() {
+        let mut r = discovery_fixture(6, (2, 3), (1, 1));
+        let planned_job = planned(99, OutcomeState::Landed, 1.0, &[CritiqueVerdict::Accept]);
+        r.jobs
+            .insert(planned_job.id().as_str().to_string(), planned_job);
+        let rule = keep_rule(&r).expect("planned jobs");
+        assert_eq!(rule.discovery, discovery(&r));
+        let json = serde_json::to_value(&rule).unwrap();
+        assert_eq!(json["discovery"]["state"], "weakened");
+        assert_eq!(json["discovery"]["older"]["verified_jobs"], 6);
+        assert_eq!(json["discovery"]["newer"]["verifier_found"], 6);
+    }
+
+    #[test]
+    fn discovery_with_steady_verifier_finds_is_held_not_weakened() {
+        // Later-cited falls 3 -> 1 but verification finds as many per job as before.
+        let d = discovery(&discovery_fixture(6, (2, 3), (2, 1)));
+        assert_eq!(d.state, DiscoveryState::Held, "{d:?}");
+        let d = discovery(&discovery_fixture(6, (2, 2), (2, 2)));
+        assert_eq!(d.state, DiscoveryState::Held, "{d:?}");
+    }
+
+    #[test]
+    fn discovery_with_too_few_verified_jobs_says_not_enough_data() {
+        let d = discovery(&discovery_fixture(MIN_DISCOVERY_JOBS - 1, (2, 3), (1, 0)));
+        assert_eq!(d.state, DiscoveryState::NotEnoughData, "{d:?}");
+        assert_eq!(
+            discovery(&Records::default()).state,
+            DiscoveryState::NotEnoughData
+        );
+    }
+
     /// The records of one request job whose stages took the minutes in `m`, starting at `start`: the reader,
     /// the planner (when `m.planning` is above zero), the producer, the checks (a verification with one
     /// `test` check, when `m.checks` is above zero), the verifier, then `m.landing_and_rebuild` minutes before
