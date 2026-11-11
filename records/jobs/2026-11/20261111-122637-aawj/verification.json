@@ -1,0 +1,201 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261111-122637-aawj",
+  "candidate_commit": "f6cf7b3c318192947961690a044dc3afc8c67735",
+  "verified_fingerprint": "sha256:546d1c06666f4b2e1adcf99395bd0a0614c069eff83ed083884ee9411a848638",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/43040251168 for f6cf7b3c318192947961690a044dc3afc8c67735",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/43040251168 for f6cf7b3c318192947961690a044dc3afc8c67735",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/43040251168 for f6cf7b3c318192947961690a044dc3afc8c67735",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 3,
+  "criteria": [
+    {
+      "criterion": "crates/athena-core/src/store.rs has one Records method that yields invocations from jobs plus steward_runs, audience_runs and auditor_runs; crates/athena-core/src/role_need.rs uses it and not `invocations` alone (Grep).",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read the code. store.rs:216 adds `pub fn all_invocations(&self)`, which chains jobs[..].invocations, steward_runs, audience_runs and auditor_runs. role_need.rs:131 counts each role's runs through `records.all_invocations()`. Job invocations are read only to find the window's opening time (role_need.rs:121-125).",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "crates/athena-core/src/role_need.rs is declared in lib.rs, windows class history to the newest N closed jobs, and OLY-9-11 in docs/spec.toml names it as mechanism with a measure ending `status: role need`.",
+      "kind": "content",
+      "met": true,
+      "evidence": "lib.rs adds `pub mod role_need;`. In compute, `newest = &states[states.len().saturating_sub(WINDOW)..]` keeps each class's newest 8 closed jobs. In spec.toml, OLY-9-11's mechanism names crates/athena-core/src/role_need.rs, and its measure ends \"status: role need\". STATUS_MEASURE_LABELS adds (\"role need\", \"role_need\").",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A test in role_need.rs builds Records with more than eight closed jobs holding only reader/producer/verifier runs plus recent steward, audience and auditor runs, and asserts none of those three is a retire candidate; it fails when compute reads only job invocations. Run `cargo test -p athena-core role_need`.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "5 tests passed, including runs_kept_outside_the_jobs_are_not_retire_candidates. Its fixture has 10 closed jobs that hold only reader, producer and verifier runs, and steward, audience and auditor runs at t=1009 in the separate lists. It first asserts those three roles are absent from job invocations, then that none is a candidate. If compute read only job invocations, all three would be candidates and the test would fail (found by reading the code; I did not change the code to try it).",
+      "commands": [
+        "cargo test -p athena-core role_need"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A test renders a StatusView through status() and asserts the `role need` line prints only when a candidate exists, and that mixed outcomes (Failed/Rejected/TimedOut counted failed; Declined/Closed excluded) are mapped correctly. Run `cargo test`.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "status_prints_the_role_need_line_only_with_a_candidate passed. It renders through athena_cli::display::status(&view) and finds no line for None or for zero candidates, and a line naming planner and critic plus \"code 3/8 failed\" when they are candidates. outcomes_are_mapped_and_the_class_history_is_windowed passed. It shows code at (8,3) with two old failures outside the window and a newer Declined job left out, and docs at (1,0), so the Closed job is left out. The full suite passed in CI (recorded check).",
+      "commands": [
+        "cargo test -p athena-cli --test status_role_need",
+        "cargo test -p athena-core role_need",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A test over Records asserts the measure yields both outcomes (some roles retired-or-not, some not) rather than all-true or all-false on a mixed fixture. Run `cargo test -p athena-core`.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "the_measure_gives_both_outcomes_on_a_mixed_fixture passed. It asserts the flags contain both true and false, and that the candidates are [planner, critic, audience] once the audience run is moved before the window.",
+      "commands": [
+        "cargo test -p athena-core role_need"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "cargo fmt --check, cargo clippy and cargo test all pass.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded checks for f6cf7b3c: fmt, clippy and test passed (CI run 43040251168). My targeted runs also passed.",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "CHANGELOG.md names the root cause (usage measure blind to roles whose runs are outside job records) and the fix.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The CHANGELOG entry says: \"Root cause fixed: a usage measure was written against one data source, the per-job invocation list, so roles whose runs are outside job records (the steward, audience and auditor) looked unused ... `Records::all_invocations` now yields every run source\".",
+      "commands": [],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The measure was not replayed over the real records. On them it would advise retiring the auditor, which the request names as known-active.",
+      "evidence": "Evidence snapshot, read with Glob and Grep; this is a result about the snapshot, not the live repository. The newest 8 closed jobs that count as work are 20261110-191432-ysr1, 20261111-022136-czdw, 055238-5har, 061100-smxs, 064834-q749, 075222-nsk3, 105048-n7bm and 122652-1k8z (landed, rejected and failed outcomes). Steward runs (20261111-055051, 061048), audience runs, and planner and critic runs (191432-ysr1, 064834-q749) fall inside the window. The only auditor invocations are jobs/2026-10/20261017-201222-3a9h and 20261017-200939-4ynn. So status would print \"role need  retire candidates: auditor ...\". The request's cause lists the auditor among roles \"known\" to be active and says the missing step was replay \"on the real records\" and comparison \"with known facts\". The auditor runs on demand (`athena audit`), so a fixed 8-job window may not show whether it is needed. The fix needs either a replay against the known-active list or a \"not measured\" / on-demand case, as introspection 20261111-105017-5k6m proposed. `status --snapshot` does not print role need, so the snapshot cannot show the line.",
+      "location": "crates/athena-core/src/role_need.rs RoleNeed::compute / shown",
+      "source": "verifier"
+    },
+    {
+      "severity": "major",
+      "summary": "The class fix is an opt-in accessor. Nothing points a future measure to it or stops one from using the partial source, so the class is not prevented.",
+      "evidence": "`pub invocations: Vec<Invocation>` on JobRecords still has no doc comment saying the steward, audience and auditor runs are not in it. The only pointer is on the new all_invocations, which a writer reaching for job.invocations will not see. docs/system-facts.md has no mention of steward, audience, auditor or invocation (Grep: no matches). The request prefers giving the stage this information in its brief or system facts. Introspection 5k6m names \"The producer was not told where each role's runs are recorded\". No test or check requires a new measure to be replayed over real records, and no store-level test checks that all_invocations covers every loaded invocation (one would catch a future fourth split list). Simpler and stronger options: document the split on JobRecords::invocations and in the system facts, and add a test over Records::from_parts that every Invocation record appears in all_invocations.",
+      "location": "crates/athena-core/src/store.rs:29 (JobRecords::invocations), docs/system-facts.md",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "Dropped, stale and abandoned jobs count as worked, non-failed jobs in both the window and the per-class totals.",
+      "evidence": "counts_as_work excludes only Declined and Closed. The snapshot holds 111 dropped and 14 stale jobs (from `status --snapshot`). Jobs that never ran a model can enter the window and pad the \"closed\" total of \"code N/8 failed\".",
+      "location": "crates/athena-core/src/role_need.rs counts_as_work / is_failed",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two changed files are not on the expected deliverables list.",
+      "evidence": "The diff stat shows both files, and neither is among the expected deliverables. The test file supports criterion 4, and the shard-timings line registers the new test binary, so both are justified, but they are outside the stated scope.",
+      "location": "xtask/shard-timings.txt; crates/athena-cli/tests/status_role_need.rs",
+      "source": "verifier"
+    },
+    {
+      "severity": "major",
+      "summary": "The reading does not match the request, so passing criteria do not show the request was met",
+      "evidence": "The request asks for the cause to be fixed where it originates \"so the whole class is prevented\", preferably by giving the failing stage the missing information \"in its brief, in the system facts it is shown, or in the inputs its reader receives\". The cause it quotes includes \"Nothing required it to be run on the real records, or compared with known facts such as the steward, audience and auditor being active\". The reading narrowed this to one accessor plus one measure and claimed the accessor means \"a new measure cannot pick a partial source\". That is not true: JobRecords::invocations is still public and undocumented, nothing points a measure author to all_invocations, the system facts are unchanged, and no replay over real records against known-active roles is required or done. The criteria therefore check one fixed instance, not prevention of the class.",
+      "location": null,
+      "source": "athena"
+    }
+  ],
+  "request_reading_mismatch": "The request asks for the cause to be fixed where it originates \"so the whole class is prevented\", preferably by giving the failing stage the missing information \"in its brief, in the system facts it is shown, or in the inputs its reader receives\". The cause it quotes includes \"Nothing required it to be run on the real records, or compared with known facts such as the steward, audience and auditor being active\". The reading narrowed this to one accessor plus one measure and claimed the accessor means \"a new measure cannot pick a partial source\". That is not true: JobRecords::invocations is still public and undocumented, nothing points a measure author to all_invocations, the system facts are unchanged, and no replay over real records against known-active roles is required or done. The criteria therefore check one fixed instance, not prevention of the class.",
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the reading misread the request",
+    "the verifier's verdict is fail",
+    "3 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "The candidate adds Records::all_invocations and a role_need measure built on it, with tests showing steward, audience and auditor runs kept outside the jobs are counted. All seven acceptance criteria are met as written and the targeted tests pass. It still fails the request, which asks to fix the cause so the whole class is prevented. (1) The stated cause includes that nothing required a measure to be replayed over the real records and compared with known-active roles. The candidate did neither. I traced the measure by hand over the evidence snapshot: its window runs from 20261110-191432-ysr1 to 20261111-122652-1k8z, and the auditor's only runs are from 2026-10-17. So `athena status` on the real records would print \"role need  retire candidates: auditor\", a role the request calls known-active. (2) The class-level fix is an opt-in accessor. JobRecords::invocations stays public with no warning, docs/system-facts.md says nothing about where each role's runs are recorded, and no check requires a replay. The next usage measure could repeat the failure. Minor issues: dropped, stale and abandoned jobs count as non-failed work, and two changed files were not on the deliverables list."
+}

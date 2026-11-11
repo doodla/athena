@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `role_need` in `athena-core` (requirement OLY-9-11) and a `role need` line in `athena status`: roles with no runs
+  in the newest eight jobs that ran a model are retire candidates, printed only when one exists. Jobs that never
+  ran a model (dropped, stale, abandoned, declined, closed) are left out; failed, rejected and timed-out jobs are
+  counted as failed. The steward, audience and auditor run on demand, so they are listed as "not measured" and are
+  never candidates. Root cause of the earlier rejected attempt: the usage measure was blind to roles whose runs are
+  kept outside job records (the steward, audience and auditor) and would have advised retiring the auditor. The fix
+  is `Records::all_invocations`, the only source the measure reads, the split documented on
+  `JobRecords::invocations`, `Records` and in `docs/system-facts.md`, a store test that every loaded invocation is
+  in `all_invocations`, and tests that replay the measure over records holding those three roles.
+
 - `role_value` in `athena-core` (requirement OLY-9-12): judges a new role against a simpler alternative by reusing
   `method_experiment::compare`, and allows retiring a role only when all its knowledge items are recorded elsewhere.
 
