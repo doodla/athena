@@ -1,0 +1,177 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261111-145400-dx3z",
+  "n": 1,
+  "at": "2026-11-11T16:12:56.843696746Z",
+  "invocation_seq": 1,
+  "base_commit": "bb6eaa8bd2af4ed864c103acbe0149a4962826cb",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make usage measures see every role's runs; replay-test against active",
+  "summary": "Root cause: the retire rule (OLY-9-11) read only the per-job invocation list, so the steward, audience and auditor, whose runs live in separate Records lists, looked unused; nothing told the author or checked the measure against known-active roles. Retry of jobs 20261029-233051-jq6k, 20261029-233058-fveq and 20261111-122637-aawj: keep the all_invocations source and on-demand handling, and add the missing information (system facts, field doc) and a class-level replay test.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check that known-active roles are never flagged, via a test over records."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Behavior criteria run named cargo tests."
+    },
+    {
+      "id": "tested",
+      "how": "fmt, clippy and test pass criterion."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix at the source accessor and its documentation, not one measure."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: maintainers writing or judging usage/need measures; they must be told where each role's runs are recorded and have a test that fails when a measure misses a known-active role.",
+    "Code survey: read crates/athena-core/src/store.rs (JobRecords::invocations doc at line ~32, Records::all_invocations at ~524, test all_invocations_covers_every_loaded_invocation at ~713), crates/athena-core/src/role_need.rs (compute, analyze, source-scan test at ~433), status.rs and crates/athena-cli/src/display.rs, docs/spec.toml OLY-9-11. No new record or data file is added, so check_record_file/AnyRecord are not touched. The property is measured directly by running RoleNeed::compute over Records built via Records::from_parts.",
+    "Existing code: crates/athena-core/src/store.rs, crates/athena-core/src/role_need.rs, docs/system-facts.md and docs/spec.toml are extended, not recreated; the criteria reuse Records::all_invocations and RoleNeed::compute.",
+    "Job 20261029-233051-jq6k (rejected: steward/audience/auditor blind, no compute test, unwindowed class history, display test bypassing status()): addressed by the current role_need.rs, which reads all_invocations, is windowed, and treats on-demand roles as not measured; its files role_need.rs, status.rs, lib.rs, display.rs, spec.toml, CHANGELOG.md are kept as deliverables.",
+    "Job 20261029-233058-fveq (rejected: improvement_cycle evaluated stage always true, doc comment misplaced, loose chain): its introspection.rs, status_build_measurement.rs, status.rs work is a different requirement (OLY-10-02) and is out of scope here; not changed, not reverted.",
+    "Job 20261111-122637-aawj (rejected: no replay vs known-active roles, auditor flagged, opt-in accessor undocumented, dropped/stale jobs counted, extra files): kept store.rs, role_need.rs, status.rs, lib.rs, display.rs, spec.toml, CHANGELOG.md, status_role_need.rs, xtask/shard-timings.txt; the remaining findings are fixed here by documentation in system-facts, a replay test with a known-active role list, and excluding dropped/stale jobs from the window.",
+    "No refusal rule is added; the fix gives information (docs, field docs) and a test, so no share of past readings is refused (expected 0% of newly refused readings).",
+    "Environment: none; no CI, push or records access."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "docs/system-facts.md has a section stating that steward, audience and auditor runs are stored outside a job's invocations and that any usage/need/retire measure must read Records::all_invocations and be replayed over real records (Grep for 'all_invocations' in docs/system-facts.md).",
+      "kind": "content"
+    },
+    {
+      "text": "JobRecords::invocations in crates/athena-core/src/store.rs carries a doc comment naming the steward, audience and auditor as absent and pointing to Records::all_invocations.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-core role_need`: a new test builds Records via from_parts with a standalone steward, audience and auditor run (and none of them in any job's invocations) and asserts none is a retire candidate and each is reported active or not measured; it fails if compute reads job.invocations only, and passes with the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core role_need`: a test over a list of known-active roles asserts the measure yields both outcomes on a mixed record set (some role flagged, some not) and never flags a known-active role.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a test shows dropped, stale and abandoned jobs do not enter the closed-job window or the class totals; the existing all_invocations_covers_every_loaded_invocation test still passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli status_role_need`: rendering through status() prints the role need line only when a candidate exists and never names the auditor, steward or audience as a candidate.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry naming the root cause (usage measure read a partial run source) and the fix; docs/spec.toml OLY-9-11 mechanism and measure still end with `status: role need`.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`; all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/role_need.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/status_role_need.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "OLY-10-02 improvement_cycle in crates/athena-data/src/records/introspection.rs and crates/athena-cli/tests/status_build_measurement.rs (job 20261029-233058-fveq work, neither changed nor reverted)",
+    "Automatically creating or retiring roles",
+    "OLY-9-12 (value of a new role against a simpler alternative)",
+    "A generic refusal rule or gate on new measures",
+    "Changes to prompts, athena.toml or defaults.toml"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1900.0,
+        "p90": 4300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6784386617100372,
+      "p_user_intervenes": 0.06880269814502529,
+      "cost_usd": {
+        "p10": 0.5537234,
+        "p50": 1.4791114,
+        "p90": 5.221521
+      },
+      "wall_time_s": {
+        "p10": 583.8443690659323,
+        "p50": 2115.083783441914,
+        "p90": 4375.521232212725
+      }
+    }
+  },
+  "departures": "Slightly lower acceptance and verification than the reference because three prior attempts at this class were rejected."
+}
