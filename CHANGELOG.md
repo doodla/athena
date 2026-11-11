@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- An empty producer diff now fails with a recorded reason. Root cause of the repeated failure (jobs
+  20261027-011733-vrsk and 20261111-145400-dx3z, both ended "the producer made no change"): the producer was not
+  asked for a no-change outcome, and Athena discarded the report it had when the diff was empty, so an empty diff
+  was a bare failure that did not say whether the work was already done, blocked or abandoned. The producer's
+  structured output has a nullable `no_change` field (`already_done` with the evidence, `blocked` with the
+  blocker, or `gave_up` with the reason); the producer brief asks for it whenever the tree is left unchanged; the
+  kept report and the failure reason carry it, and a run that reports none says no reason was reported and names
+  the `no_change` field. The job still fails exactly as before; no check, gate or admission rule was added.
+  Records made earlier still parse. Left out of scope: a pre-dispatch check that refuses a job whose named source
+  symbol is absent; stating in the brief that the item already sits at its target is a possible follow-up.
 - Guards so a usage measure cannot go blind to a role again. Root cause of the repeated failure (usage measures
   that would have retired the steward, audience and auditor): invocations are kept in four places (each job's list
   and the steward, audience and auditor lists), and nothing guarded the list of sources or the list of roles, so a

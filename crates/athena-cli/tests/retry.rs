@@ -865,6 +865,106 @@ fn an_unseeded_run_whose_producer_changes_nothing_still_fails() {
     assert_eq!(fx.file("greeting.txt"), None, "nothing landed");
 }
 
+/// Runs a job whose producer changes nothing and reports `no_change` (or leaves the key out). Returns the
+/// finished job and the fixture, whose records hold the job's candidate.
+fn idle_job_with(no_change: Option<Value>) -> (athena_core::run::Finished, Fixture, String) {
+    let fx = Fixture::new();
+    let mut report = producer_report("Looked and left the tree as it was.", &[]);
+    if let Some(no_change) = no_change {
+        report["no_change"] = no_change;
+    }
+    let scenario = Scenario {
+        edits: vec![],
+        report,
+        ..Scenario::default()
+    };
+    let athena = fx.athena(scenario.script());
+    let job = athena
+        .ask("add a greeting", &Lines::default())
+        .unwrap()
+        .job
+        .to_string();
+    let finished = run_retry(&athena, &job);
+    assert_eq!(finished.state, OutcomeState::Failed, "{}", finished.reason);
+    (finished, fx, job)
+}
+
+#[test]
+fn an_idle_producer_reporting_already_done_fails_with_the_kind_and_evidence() {
+    let evidence = "Transport is already in gh/transport.rs (grep found it at line 12)";
+    let (finished, fx, job) = idle_job_with(Some(json!({
+        "kind": "already_done",
+        "detail": evidence
+    })));
+    assert!(
+        finished.reason.contains("the producer made no change"),
+        "{}",
+        finished.reason
+    );
+    assert!(
+        finished.reason.contains("already done"),
+        "{}",
+        finished.reason
+    );
+    assert!(finished.reason.contains(evidence), "{}", finished.reason);
+    // The kept candidate record holds the outcome too, for a later reader.
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let candidate = records.jobs[&job]
+        .candidate
+        .as_ref()
+        .expect("the failed job keeps its candidate");
+    let kept = candidate
+        .producer_report
+        .as_ref()
+        .and_then(|r| r.no_change.as_ref())
+        .expect("the report keeps the no-change outcome");
+    assert_eq!(kept.kind, "already_done");
+    assert_eq!(kept.detail, evidence);
+}
+
+#[test]
+fn an_idle_producer_reporting_blocked_fails_with_the_blocker() {
+    let (finished, _, _) = idle_job_with(Some(json!({
+        "kind": "blocked",
+        "detail": "BLOCKER-CANARY the named file is outside the working copy"
+    })));
+    assert!(
+        finished
+            .reason
+            .contains("it reported blocked: BLOCKER-CANARY")
+    );
+    assert!(!finished.reason.contains("already done"));
+}
+
+#[test]
+fn an_idle_producer_reporting_gave_up_fails_with_the_reason() {
+    let (finished, _, _) = idle_job_with(Some(json!({
+        "kind": "gave_up",
+        "detail": "GAVE-UP-CANARY the move needs a design the request does not give"
+    })));
+    assert!(
+        finished
+            .reason
+            .contains("it reported gave up: GAVE-UP-CANARY")
+    );
+}
+
+#[test]
+fn an_idle_producer_reporting_nothing_fails_naming_the_missing_no_change_field() {
+    let (finished, _, _) = idle_job_with(None);
+    assert!(
+        finished.reason.contains("the producer made no change"),
+        "{}",
+        finished.reason
+    );
+    assert!(
+        finished.reason.contains("reported no reason"),
+        "{}",
+        finished.reason
+    );
+    assert!(finished.reason.contains("no_change"), "{}", finished.reason);
+}
+
 #[test]
 fn an_unmet_behavior_criterion_retries_from_the_base() {
     let fx = Fixture::new();

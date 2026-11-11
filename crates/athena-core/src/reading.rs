@@ -3868,6 +3868,7 @@ mod tests {
             mistakes: vec![],
             learnings: vec![],
             desires: vec![],
+            no_change: None,
         });
         candidate
     }
