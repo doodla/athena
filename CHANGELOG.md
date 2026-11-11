@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Guards so a usage measure cannot go blind to a role again. Root cause of the repeated failure (usage measures
+  that would have retired the steward, audience and auditor): invocations are kept in four places (each job's list
+  and the steward, audience and auditor lists), and nothing guarded the list of sources or the list of roles, so a
+  measure author could read one source without knowing of the others. The source fix landed in 41539a7 and b670592
+  (`Records::all_invocations`, the split documented on `JobRecords::invocations` and in `docs/system-facts.md`).
+  This change adds: a test-only `ALL_ROLES` list in the store, with a test that fails when a `Role` variant is
+  missing from it; the store test that every loaded invocation is in `all_invocations` now loops over it;
+  `MEASURED_ROLES` in `role_need`, with a test that every role is measured or on demand, never both and never
+  neither; and a test that loads one run of every role through `Records::from_parts` and checks the output of
+  `RoleNeed::compute` (every role counted, the steward, audience and auditor not measured and never candidates).
 - The `role need` replay lists every role with its run count and the data source of that count. Root cause of the
   earlier wrong retire flags: the usage measure read a partial run source (the jobs' own invocation lists), which
   holds none of the steward, audience or auditor runs. Usage is now read only through `Records::all_invocations`;

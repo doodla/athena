@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261111-173705-mn8s",
+  "round": 3,
+  "at": "2026-11-11T17:48:00.93355484Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The root cause in the new CHANGELOG bullet differs from the cause the user accepted.",
+      "evidence": "The reading names the root cause as: a usage measure read only the per-job invocation list, nobody gave the measure author the fact that steward, audience and auditor runs are kept elsewhere, and nothing required a replay against roles known to be active. The plan's bullet instead says 'invocations are kept in four places and nothing guarded the list of sources or the list of roles.' That describes the gap this change's guards close, not the cause the introspections recorded. Acceptance criterion 1 requires the root cause to be named in the change description. Fix: Have the bullet state the accepted cause first: the measure read a partial source, and the author was never told the runs are split nor required to replay over known-active roles. Then say the information fix landed in 41539a7 and b670592, and present ALL_ROLES and MEASURED_ROLES as guards against the class reopening.",
+      "location": "Plan step 8 / Decision 6 (CHANGELOG bullet wording)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The completeness test parses another crate's Rust source as text. It is a fragile proxy and adds a new formatting dependency on athena-data that no file in this plan owns.",
+      "evidence": "The scan uses include_str!(\"../../athena-data/src/records.rs\"), cuts at `pub enum Role {`, and takes `<Ident>,` lines. Planner and Critic carry `///` doc comments (records.rs:28-31), which the scan skips. A later change to records.rs, such as an explicit discriminant, a trailing comment on a variant line or a multi-word variant, would break an athena-core test even though nothing in athena-core changed. The plan names this risk and the failure is loud, so this is a minor finding, not a soundness major. Fix: Keep the scan, but give its assertion message the file and line pattern it expects, so whoever edits records.rs sees why an athena-core test failed. Also add a line about this coupling to the dependents entry for the `Role` enum, and note there that a later job could add `Role::ALL` in athena-data and drop the scan.",
+      "location": "Decision 1 / step 3 (`all_roles_lists_every_role_variant`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new output test mostly repeats the base test at role_need.rs:433 and shows only one outcome (no retire candidates). The other outcome comes from tests that are not in the diff.",
+      "evidence": "`runs_kept_outside_job_records_are_counted_with_their_source_and_not_flagged` (role_need.rs:433-479) already goes through `Records::from_parts` and asserts count > 0, SOURCE_OUTSIDE_JOBS, unflagged, and not a retire candidate for steward, audience and auditor. The new test asserts `retire_candidates` is empty. Criterion 3 asks for both outcomes, which today come only from base tests at :335 and :410, and criterion 7 is judged from the diff. Fix: In the new test, also build a from_parts variant in which one measured role (for example planner) is left out of the in-window jobs. Assert that this role is the only retire candidate while steward, audience and auditor stay unflagged. Both outcomes then appear in the diff and go through the real routing.",
+      "location": "Step 6 / Criterion 3 demonstration (`every_role_loaded_through_from_parts_is_counted_and_classified`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The mutation check that shows the new tests are not vacuous is left only as a report, with no exact command or result format.",
+      "evidence": "Risk 3 admits that on pre-change code the new tests fail only by not compiling. Step 7 therefore carries the real 'fails without the behavior' evidence, but the plan says only 'report the result'. It does not name which read is swapped or which test names must fail. Fix: Name the exact swap: replace `records.all_invocations()` at role_need.rs:117 with `records.jobs.values().flat_map(|j| j.invocations.iter())`. Name the tests expected to fail (`every_role_loaded_through_from_parts_is_counted_and_classified`, and the existing :433 test). Require the producer to quote the failing assertion lines in its output.",
+      "location": "Step 7 (temporary mutation check)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot by reading the files. The pieces it relies on already exist in the base: the doc comment on `JobRecords::invocations` (store.rs:29-33); the routing by role in `from_parts` (store.rs:429-437); `all_invocations` (store.rs:524-531); the local role array in `compute` (role_need.rs:127-133); the source-scan test at l.577; the system fact; and the shard-timings entries at l.41 and l.51. Commits 41539a7 and b670592 are in HISTORY.txt. The plan correctly finds that the information fix (docs, the system fact, and `all_invocations` as the only source) landed before this job. It stays inside the deliverable files. Its new guards are sound: `ALL_ROLES`, a test that every role is either measured or on demand, and an output test driven through the real `from_parts` routing. Those tests do fail if `compute` reads the per-job lists, if a run list is left out of `all_invocations`, or if a role is never classified. I checked the plan's dependents against the repository's readers: the other `.invocations` readers are per-job uses, and the plan names the CHANGELOG readers in refusal_corpus and policy. No athena.toml field, external service or new test binary is involved, and the work fits one producer run. One gap is outside the accepted reading, so I am not raising it as a finding: the system-facts file reaches only the planner and critic briefs, not the producer or verifier briefs (briefs/planner.rs:87,167). My four findings are minor: the CHANGELOG bullet should name the accepted root cause; the enum-source scan couples athena-core tests to how records.rs is formatted; the new output test repeats the :433 test and shows only one outcome; and the mutation check needs an exact swap and expected failures. None is a blocker or major, so I accept the plan."
+}

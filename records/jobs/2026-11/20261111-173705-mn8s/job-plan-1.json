@@ -1,0 +1,196 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261111-173705-mn8s",
+  "round": 1,
+  "at": "2026-11-11T17:40:01.628458269Z",
+  "invocation_seq": 2,
+  "approach": "The working copy already carries the earlier fix. `JobRecords::invocations` is documented as partial (store.rs:29-33). `Records` documents the four-place split (store.rs:216-221). `Records::all_invocations` chains jobs, steward_runs, audience_runs and auditor_runs (store.rs:524-531). `RoleNeed::compute` reads only `all_invocations` (role_need.rs:83-125), with a window of jobs that ran a model, `ON_DEMAND_ROLES` reported as not measured, and `docs/system-facts.md:44-48` and `docs/spec.toml:1497-1499` updated. Root cause to name in the CHANGELOG: the invocation data is split over four places and nothing at the point of use said so; the author of a usage measure read the one visible list. The producer fills only three gaps. (1) The store test only proves that the existing role values come back out of `all_invocations`. A new `Vec<Invocation>` field on `Records` would still pass it. Add a source-structure test that every `Vec<Invocation>` field of `Records` is named in `all_invocations`. (2) `compute` hard-codes its measured-role list (role_need.rs:127-133), so a new `Role` variant would be silently unmeasured. Hoist the list to a `MEASURED_ROLES` const and add a test with an exhaustive `match` on `Role`, which fails to compile on a new variant, asserting every role is either measured or on demand. (3) Add the CHANGELOG sentence that names the standing class guard. Everything else is verified by Grep and left unchanged: system-facts.md, spec.toml, status.rs, display.rs, lib.rs, the status_role_need.rs test, and shard-timings.txt. shard-timings.txt already lists `athena-cli --test status_role_need` at line 41, and no new test binary is added. There is no refusal rule, so no corpus case and no refused-share number apply.",
+  "decisions": [
+    {
+      "choice": "Give the author the fact where the data is read: doc comments on `JobRecords::invocations` and `Records`, plus the system-facts entry. Keep one accessor, `all_invocations`, and add structure tests that fail when a list or a role is left out.",
+      "reason": "The failure came from missing information at the point of use, so the fix supplies it there. The structure tests keep the information from rotting when a fourth list or a ninth role appears.",
+      "rejected": [
+        {
+          "option": "A generic gate that refuses any new measure not replayed on real records",
+          "why": "Out of scope. Information is preferred over refusal, and giving the author the fact prevents the failure."
+        },
+        {
+          "option": "Make `JobRecords::invocations` private or rename it",
+          "why": "A wide change: it is read by many callers (close.rs:14, drain, steward, tests). It would not tell the author about the split any better than a doc comment plus a tested accessor."
+        }
+      ]
+    },
+    {
+      "choice": "The fourth-list guard reads store.rs with `include_str!`, takes the `pub struct Records {` block, and requires each `Vec<Invocation>` field name to appear in the `all_invocations` body.",
+      "reason": "A behavior test through `from_parts` can only cover lists that routing already sends somewhere. This test is the only way to catch a list added and never routed or chained. It uses the same pattern as the existing role_need.rs `this_module_reads_usage_only_through_all_invocations` test (l.577).",
+      "rejected": [
+        {
+          "option": "A macro or struct destructuring of every `Records` field",
+          "why": "It forces edits to about 25 unrelated fields and every `Records { .. }` construction site."
+        }
+      ]
+    },
+    {
+      "choice": "Do not change the status.rs `improvement_cycle` stage or introspection.rs.",
+      "reason": "They are listed in out_of_scope. role_need already has both-outcomes tests (role_need.rs:410-430, 482-522) showing the measure is neither all-true nor all-false.",
+      "rejected": [
+        {
+          "option": "Add a both-outcomes check for improvement_cycle",
+          "why": "Out of scope for this job, which is limited to the usage measure."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Add the test that every `Vec<Invocation>` field of `Records` is named in `all_invocations`. The docs on `JobRecords::invocations` and `Records` already exist; leave them.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/role_need.rs",
+      "action": "modify",
+      "purpose": "Hoist the hard-coded built-in role list in `compute` to a `MEASURED_ROLES` const. Add an exhaustive-`match` test that classifies every `Role` as measured or on demand.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add one sentence to the existing root-cause entry naming the standing guards: the `Records` field scan and the `Role` exhaustive match.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Grep each acceptance criterion against the working copy: store.rs:29-33, docs/system-facts.md:44-48, spec.toml:1497-1499, CHANGELOG.md:12-25 and shard-timings.txt:41. Change a file only if its Grep shows a gap.",
+    "In store.rs tests, add `every_invocation_list_of_records_is_chained_in_all_invocations`. Take `include_str!(\"store.rs\")`. Cut the `pub struct Records {` block. Collect the names of fields typed `Vec<Invocation>`. Assert the count is 3. Cut the `pub fn all_invocations` body. Assert that each name appears in it.",
+    "In role_need.rs, add `const MEASURED_ROLES: &[Role] = &[Reader, Planner, Critic, Producer, Verifier]` and use it in `compute` in place of the local `all_roles` array, in the same order. Add a test with an exhaustive `match` on `Role` that sends each variant to measured or on demand, and asserts the answer agrees with `MEASURED_ROLES` and `ON_DEMAND_ROLES`. The `match` has no wildcard arm, so a new variant fails to compile.",
+    "Extend the CHANGELOG entry at lines 12-25 with one sentence naming the two guards.",
+    "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings, and cargo test --locked. Fix any failures."
+  ],
+  "risks": [
+    {
+      "risk": "The source-scan test is brittle to formatting changes in store.rs.",
+      "mitigation": "Match the field-name pattern `pub <ident>: Vec<Invocation>` inside the text between `pub struct Records {` and the next line that is exactly `}`. Assert the count of fields found is 3, so a parser that goes silently empty fails loudly. rustfmt keeps that line shape."
+    },
+    {
+      "risk": "The producer may duplicate work already in the working copy, or edit files that need no change.",
+      "mitigation": "Step 1 is to Grep each criterion against the working copy first. Do not touch status.rs, display.rs, lib.rs, spec.toml, system-facts.md or the status_role_need test unless a Grep shows a mismatch."
+    },
+    {
+      "risk": "The plan has no replay over the real `records/` branch, because the snapshot has none. The all-roles check is fixture-based.",
+      "mitigation": "The fixture copies the real shape: the three out-of-job roles are separate Invocation records routed by `from_parts`. The status_role_need.rs test goes through the real status path."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "RoleNeed::compute and its public fields",
+      "dependent": "crates/athena-core/src/status.rs:1316 (`role_need: RoleNeed::compute(&records)`) and the `STATUS_MEASURE_LABELS` entry at status.rs:308",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test status_role_need",
+      "reason": "The plan does not change the signature or the fields of `RoleNeed`. It only moves the built-in role list into a `MEASURED_ROLES` const with the same order: reader, planner, critic, producer, verifier. Output order and text are unchanged."
+    },
+    {
+      "name": "RoleNeed::line and RoleNeed::replay",
+      "dependent": "crates/athena-cli/src/display.rs:1334-1341 (prints `role need` and the replay)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test status_role_need",
+      "reason": "Neither function is edited. The const hoist leaves the counts, labels and the `[retire candidate]` suffix as they are."
+    },
+    {
+      "name": "The invocations field and Records::all_invocations",
+      "dependent": "Every reader of `JobRecords::invocations`, such as crates/athena-core/src/run/close.rs:14 and the steward, auditor and audience code",
+      "kind": "code",
+      "test": null,
+      "reason": "Only doc comments and tests change. The field, its type and `all_invocations` behavior are unchanged, so these readers are unaffected."
+    },
+    {
+      "name": "Routing of steward, audience and auditor invocations in Records::from_parts (store.rs:429-437)",
+      "dependent": "Tests that load Records from parts: store.rs:713 `all_invocations_covers_every_loaded_invocation`, crates/athena-cli/tests/{steward,audience,auditor}.rs (`steward_runs`, `audience_runs`, `auditor_runs`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core store; cargo test -p athena-cli --test auditor --test audience --test steward",
+      "reason": "The routing is not edited. The new source-scan test only reads store.rs text and the `Records` struct block."
+    },
+    {
+      "name": "The OLY-9-11 mechanism and measure text",
+      "dependent": "docs/spec.toml OLY-9-11 (lines 1495-1501), checked by the spec and traceability tests in athena-core and xtask",
+      "kind": "rule",
+      "test": "cargo test --locked",
+      "reason": "The text already matches the code (all_invocations, on-demand roles, ends with `status: role need`). The plan does not edit it, so the spec checks see no change."
+    },
+    {
+      "name": "The system-facts file content",
+      "dependent": "docs/system-facts.md budget lines (test `system_facts_budgets_match_computed` in crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets",
+      "reason": "The plan does not edit the file. The budget lines count the always-loaded prompt sets, not this file, so no budget line moves."
+    },
+    {
+      "name": "Test-binary registry for CI shards",
+      "dependent": "xtask/shard-timings.txt line 41 (`athena-cli --test status_role_need`), the CI sharding input",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No test binary is added or renamed. New tests are unit tests inside the athena-core lib binary, which is already listed."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Grep the doc comment on `pub invocations` in JobRecords.",
+      "command": "Grep pattern 'PARTIAL source|Records::all_invocations' in crates/athena-core/src/store.rs (lines 29-33)",
+      "observes": "The comment says the steward, audience and auditor runs are never in the list and names `Records::all_invocations`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Grep system-facts.md for the entry 'Where invocations are recorded'.",
+      "command": "Grep 'JobRecords::invocations|steward_runs|audience_runs|auditor_runs|Records::all_invocations' in docs/system-facts.md (lines 44-48)",
+      "observes": "All five names appear in one fact that says a usage measure reads `Records::all_invocations`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Run the role_need tests. The fixture is `known_active()` in role_need.rs:301-332. It holds ten closed jobs with reader, producer and verifier runs, and steward, audience and auditor runs pushed only into the `Records` lists. Add one test there: an exhaustive `match` over `Role` that classifies each role as measured or on demand, checked against `MEASURED_ROLES` and `ON_DEMAND_ROLES`.",
+      "command": "cargo test -p athena-core role_need",
+      "observes": "known_active_roles_are_never_retire_candidates_and_an_unused_role_is (l.335) asserts that steward, audience and auditor are not candidates and are listed in `not_measured`, each with one run. It also asserts that retire_candidates is exactly planner, critic and the unused custom role scribe. The mixed fixture (l.410) gives an empty and a non-empty candidate list. The new test shows every Role is classified.",
+      "fails_without": "If `compute` read `job.invocations` instead of `all_invocations`, the steward, audience and auditor counts would be 0. The `not_measured == [(steward,1),(audience,1),(auditor,1)]` assertion (l.358) would fail. The `from_parts` test (l.433) asserts count > 0 for each. The source-scan test (l.577) also fails.",
+      "seam": "Production entry point `RoleNeed::compute(&Records)` (role_need.rs:82), called on a `Records` built by the in-module helpers `records()` and `out_of_job_run()`. The fixture is injected by direct field assignment (`r.steward_runs.push`). The seam exists (read at role_need.rs:283-332). The step that adds `MEASURED_ROLES` and the exhaustive-match test is plan step 3. The runs themselves are real `Invocation` values from `status::planning_cost_tests::invocation`, not a stand-in for the measure."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the store tests. The existing `all_invocations_covers_every_loaded_invocation` (store.rs:713) loads one Invocation record per Role through `Records::from_parts`. Add `every_invocation_list_of_records_is_chained_in_all_invocations`: it scans store.rs with `include_str!`.",
+      "command": "cargo test -p athena-core store",
+      "observes": "Every loaded invocation, for every Role value, comes back out of `all_invocations`. The new test finds each `Vec<Invocation>` field of the `Records` struct (today steward_runs, audience_runs, auditor_runs) and asserts the name appears in the `all_invocations` body. It also asserts the field count is 3 so the scan cannot go silently empty.",
+      "fails_without": "A fourth `Vec<Invocation>` field on `Records` that is not chained in `all_invocations` makes the source scan fail. A role routed to a list that `all_invocations` omits makes the `from_parts` coverage test fail.",
+      "seam": "Production entry points `Records::from_parts(&RecordSet, &[])` (store.rs, exists) and `Records::all_invocations` (exists, store.rs:524). The fixture is `RecordFile` values built in the test (exists, l.728-745). The source scan is a new test added by plan step 2. It reads the file with `include_str!(\"store.rs\")` and splits off the `#[cfg(test)]` module."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the existing window test `jobs_that_never_ran_a_model_are_left_out_of_the_window` (role_need.rs:535-566). It adds newer jobs closed as dropped, stale, abandoned, declined and closed, each holding planner and critic runs, plus a landed job with no invocation.",
+      "command": "cargo test -p athena-core role_need::tests::jobs_that_never_ran_a_model_are_left_out_of_the_window",
+      "observes": "window_jobs is 8. retire_candidates is still planner and critic, so the planner runs in non-work jobs are not counted. failed_jobs is 2.",
+      "fails_without": "If `counts_as_work` dropped the state check or the ran-a-model check, the dropped and stale jobs would enter the window. The planner and critic would be counted as used, and the candidates assertion would fail.",
+      "seam": "`RoleNeed::compute` with job fixtures from the `job()` helper (role_need.rs:252). Exists. The guard is `counts_as_work` (l.68-78), which needs a Closed landed, rejected, failed or timed-out state and a non-on-demand invocation under the job id."
+    },
+    {
+      "criterion": 6,
+      "method": "Grep for the three documentation items and read the CHANGELOG entry.",
+      "command": "Grep 'all_invocations|not measured|status: role need' in docs/spec.toml (OLY-9-11, lines 1495-1501); Grep 'Root cause' in CHANGELOG.md lines 12-25; Grep 'status_role_need' in xtask/shard-timings.txt",
+      "observes": "The mechanism names `Records::all_invocations` and says the steward, audience and auditor are reported as not measured. The measure ends with `status: role need`. The CHANGELOG names the root cause: a usage measure read the partial per-job list, and the steward, audience and auditor runs are kept outside job records. The producer adds one sentence naming the standing class guards (the `Records` field scan and the `Role` exhaustive match). shard-timings.txt line 41 already lists the only test binary this job touches. No new binary is added.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three checks Athena runs, then read the diff for the auditor, steward and audience assertions.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three pass. The tests added or kept assert the steward, audience and auditor outcomes directly: role_need.rs:347-371 and 471-477, and status_role_need.rs:160-168 through `athena status`. These tests fail on code that reads job invocations only.",
+      "fails_without": "A measure reading only `job.invocations` finds no steward, audience or auditor runs. The `not measured, run on demand: steward (1 runs` assertion at status_role_need.rs:165 fails, as does the `steward: 1 (runs outside job records` replay line at l.171.",
+      "seam": "The CLI path is `athena.status()` followed by `athena_cli::display::status(&view)`, on records seeded into a temporary git repo by `seed()` in status_role_need.rs:96. That harness exists. The auditor, steward and audience runs are seeded as separate Invocation records, so `from_parts` routes them to the out-of-job lists."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "1da223afd7c8b0fe577169a148eddd6479ec128fcf31b8a7180be6e9ea0d18f7"
+}
