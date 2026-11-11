@@ -16,6 +16,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `crates/athena-core/src/safeguard_trial.rs` judges a proposed safeguard on similar defects caught, regressions
+  and overhead against explicit limits (refused when the defect set is empty or a limit is missing, else Accepted
+  or Rejected with a distinct reason); OLY-9-06 records it as its mechanism (`status: not shown`). It is not
+  wired into runs.
+- `crates/athena-core/src/method_experiment.rs` defines a bounded baseline-versus-candidate experiment for a
+  change to an engineering method (refused when unbounded or incomplete, stopped over its bound, else Better,
+  Worse or NoDifference); OLY-9-05 records it as its mechanism (`status: not shown`). It is not wired into runs.
 - `athena status` prints a `specialization` section: per class of work, each producer model and effort with its
   first-pass rate and landed share against the class's most-used setting, flagged "specialization helps" only
   when a non-default setting with at least 3 jobs does better, otherwise "not enough jobs" or "no better

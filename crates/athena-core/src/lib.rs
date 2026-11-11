@@ -106,6 +106,7 @@ pub mod jev;
 pub mod labeled;
 pub mod land;
 pub mod manage;
+pub mod method_experiment;
 pub mod mirrors;
 pub mod nested;
 pub mod pin;
@@ -121,6 +122,7 @@ pub mod routing;
 pub mod run;
 #[cfg(test)]
 mod run_pin_tests;
+pub mod safeguard_trial;
 pub mod scope_guard;
 pub mod scoring;
 pub mod slots;
