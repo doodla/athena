@@ -610,6 +610,20 @@ impl Records {
     }
 }
 
+/// Every [`Role`], for tests that must cover them all. A test (`all_roles_lists_every_role_variant`) fails when
+/// a variant of `Role` is missing here, so a new role cannot slip past the tests that loop over this list.
+#[cfg(test)]
+pub(crate) const ALL_ROLES: [Role; 8] = [
+    Role::Reader,
+    Role::Producer,
+    Role::Verifier,
+    Role::Steward,
+    Role::Audience,
+    Role::Auditor,
+    Role::Planner,
+    Role::Critic,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,6 +631,38 @@ mod tests {
         Critique, CritiqueVerdict, DeliverableAction, Demonstration, Finding, FindingSource,
         JobKind, JobPlan, Owner, PlanFile, Replay, Severity,
     };
+
+    #[test]
+    fn all_roles_lists_every_role_variant() {
+        let source = include_str!("../../athena-data/src/records.rs");
+        let body = source
+            .split("pub enum Role {")
+            .nth(1)
+            .expect("the Role enum is in athena-data records.rs")
+            .split("\n}")
+            .next()
+            .unwrap();
+        let variants: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("///") && !l.starts_with("#["))
+            .map(|l| l.trim_end_matches(','))
+            .collect();
+        assert!(variants.len() >= 8, "enum scan found {variants:?}");
+        assert_eq!(
+            variants.len(),
+            ALL_ROLES.len(),
+            "ALL_ROLES must list every Role variant: {variants:?}"
+        );
+        for name in &variants {
+            let role = Role::parse(&name.to_lowercase())
+                .unwrap_or_else(|| panic!("Role::{name} is not parsed from its lower-case name"));
+            assert!(ALL_ROLES.contains(&role), "ALL_ROLES lacks Role::{name}");
+        }
+        for (n, role) in ALL_ROLES.iter().enumerate() {
+            assert!(!ALL_ROLES[..n].contains(role), "{role:?} is listed twice");
+        }
+    }
 
     fn job_id() -> JobId {
         JobId::parse("20261010-153012-k7q2").unwrap()
@@ -715,16 +761,7 @@ mod tests {
         use athena_gate::records::RecordFile;
         // One invocation record per role. Whichever list `from_parts` routes it to, it must come back out of
         // `all_invocations`; a fourth list added to `Records` without a place in `all_invocations` fails here.
-        let roles = [
-            Role::Reader,
-            Role::Producer,
-            Role::Verifier,
-            Role::Steward,
-            Role::Audience,
-            Role::Auditor,
-            Role::Planner,
-            Role::Critic,
-        ];
+        let roles = ALL_ROLES;
         let files: Vec<RecordFile> = roles
             .iter()
             .enumerate()

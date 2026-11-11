@@ -25,6 +25,17 @@ pub const WINDOW_JOBS: usize = 8;
 /// window cannot show their need, so they are reported as not measured and never as retire candidates.
 pub const ON_DEMAND_ROLES: &[Role] = &[Role::Steward, Role::Audience, Role::Auditor];
 
+/// Built-in roles measured by their runs in the window's jobs, in the order they are reported. Every role is in
+/// this list or in [`ON_DEMAND_ROLES`], never both; a test fails when a new role is in neither, so a new role is
+/// classified by its author and not left silently unmeasured.
+pub const MEASURED_ROLES: &[Role] = &[
+    Role::Reader,
+    Role::Planner,
+    Role::Critic,
+    Role::Producer,
+    Role::Verifier,
+];
+
 fn on_demand(role: Role) -> bool {
     ON_DEMAND_ROLES.contains(&role)
 }
@@ -124,13 +135,6 @@ impl RoleNeed {
             }
         }
 
-        let all_roles = [
-            Role::Reader,
-            Role::Planner,
-            Role::Critic,
-            Role::Producer,
-            Role::Verifier,
-        ];
         let mut used = Vec::new();
         let mut retire_candidates = Vec::new();
         let mut counts = Vec::new();
@@ -142,7 +146,7 @@ impl RoleNeed {
                 flagged,
             });
         };
-        for role in all_roles {
+        for role in MEASURED_ROLES.iter().copied() {
             let n = runs.get(&role).copied().unwrap_or(0);
             push_count(role.as_str(), n, SOURCE_JOB_RUNS, n == 0);
             if n > 0 {
@@ -296,6 +300,54 @@ mod tests {
 
     const JOB_ROLES: [Role; 3] = [Role::Reader, Role::Producer, Role::Verifier];
 
+    /// The outcomes of ten closed jobs, oldest first: landed, rejected, failed and timed out all appear.
+    const CLOSED_STATES: [OutcomeState; 10] = [
+        OutcomeState::Landed,
+        OutcomeState::Rejected,
+        OutcomeState::Landed,
+        OutcomeState::Failed,
+        OutcomeState::Landed,
+        OutcomeState::TimedOut,
+        OutcomeState::Landed,
+        OutcomeState::Landed,
+        OutcomeState::Landed,
+        OutcomeState::Landed,
+    ];
+
+    /// Writes every invocation and outcome in `records` as record files and loads them again with the real
+    /// `Records::from_parts`, which routes each invocation to a job's list or to a list kept outside jobs.
+    fn through_from_parts(records: &Records) -> Records {
+        use athena_data::records::AnyRecord;
+        use athena_gate::records::{RecordFile, RecordSet};
+        let mut any: Vec<AnyRecord> = Vec::new();
+        for j in records.jobs.values() {
+            any.extend(
+                j.invocations
+                    .iter()
+                    .map(|i| AnyRecord::Invocation(Box::new(i.clone()))),
+            );
+            any.push(AnyRecord::Outcome(Box::new(j.outcome.clone().unwrap())));
+        }
+        for i in records
+            .steward_runs
+            .iter()
+            .chain(&records.audience_runs)
+            .chain(&records.auditor_runs)
+        {
+            any.push(AnyRecord::Invocation(Box::new(i.clone())));
+        }
+        let files = any
+            .into_iter()
+            .map(|record| RecordFile {
+                path: record.canonical_path(),
+                record: Some(record),
+                error: None,
+                bytes: Vec::new(),
+            })
+            .collect();
+        Records::from_parts(&RecordSet { files }, &[])
+    }
+
     /// Ten closed jobs holding only reader, producer and verifier runs; recent steward, audience and auditor
     /// runs kept outside them, as the real records keep them.
     fn known_active() -> Records {
@@ -304,19 +356,7 @@ mod tests {
 
     /// As [`known_active`], with the newest job holding `newest_roles`.
     fn known_active_with(newest_roles: &[Role]) -> Records {
-        let states = [
-            OutcomeState::Landed,
-            OutcomeState::Rejected,
-            OutcomeState::Landed,
-            OutcomeState::Failed,
-            OutcomeState::Landed,
-            OutcomeState::TimedOut,
-            OutcomeState::Landed,
-            OutcomeState::Landed,
-            OutcomeState::Landed,
-            OutcomeState::Landed,
-        ];
-        let jobs = states
+        let jobs = CLOSED_STATES
             .iter()
             .enumerate()
             .map(|(k, s)| {
@@ -432,36 +472,7 @@ mod tests {
     #[test]
     fn runs_kept_outside_job_records_are_counted_with_their_source_and_not_flagged() {
         // The steward, audience and auditor runs appear in no job's invocations (built by from_parts).
-        use athena_data::records::AnyRecord;
-        use athena_gate::records::{RecordFile, RecordSet};
-        let base = known_active();
-        let mut any: Vec<AnyRecord> = Vec::new();
-        for j in base.jobs.values() {
-            any.extend(
-                j.invocations
-                    .iter()
-                    .map(|i| AnyRecord::Invocation(Box::new(i.clone()))),
-            );
-            any.push(AnyRecord::Outcome(Box::new(j.outcome.clone().unwrap())));
-        }
-        for i in base
-            .steward_runs
-            .iter()
-            .chain(&base.audience_runs)
-            .chain(&base.auditor_runs)
-        {
-            any.push(AnyRecord::Invocation(Box::new(i.clone())));
-        }
-        let files = any
-            .into_iter()
-            .map(|record| RecordFile {
-                path: record.canonical_path(),
-                record: Some(record),
-                error: None,
-                bytes: Vec::new(),
-            })
-            .collect();
-        let r = Records::from_parts(&RecordSet { files }, &[]);
+        let r = through_from_parts(&known_active());
         assert!(r.jobs.values().all(|j| {
             j.invocations
                 .iter()
@@ -476,6 +487,65 @@ mod tests {
             assert!(!rc.flagged);
             assert!(!need.retire_candidates.iter().any(|c| c == known));
         }
+    }
+
+    #[test]
+    fn every_role_is_measured_or_on_demand() {
+        for role in crate::store::ALL_ROLES {
+            let measured = MEASURED_ROLES.contains(&role);
+            let demand = ON_DEMAND_ROLES.contains(&role);
+            assert!(
+                measured != demand,
+                "{role:?} must be in exactly one of MEASURED_ROLES and ON_DEMAND_ROLES (measured: {measured}, on demand: {demand})"
+            );
+        }
+    }
+
+    #[test]
+    fn every_role_loaded_through_from_parts_is_counted_and_classified() {
+        // Ten closed jobs, each with one run of every role. from_parts moves the steward, audience and auditor
+        // runs out of the jobs, so the measure sees them only through `all_invocations`.
+        let jobs = CLOSED_STATES
+            .iter()
+            .enumerate()
+            .map(|(k, s)| job(k as u32 + 1, *s, &crate::store::ALL_ROLES))
+            .collect();
+        let r = through_from_parts(&records(jobs));
+        let in_jobs: Vec<Role> = r
+            .jobs
+            .values()
+            .flat_map(|j| j.invocations.iter().map(|i| i.role))
+            .collect();
+        for role in ON_DEMAND_ROLES {
+            assert!(!in_jobs.contains(role), "{role:?} stayed in a job's list");
+        }
+        let need = RoleNeed::compute(&r).expect("ten closed jobs ran a model");
+        for role in crate::store::ALL_ROLES {
+            let rc = need
+                .roles
+                .iter()
+                .find(|c| c.role == role.as_str())
+                .unwrap_or_else(|| panic!("{role:?} missing from the replay: {need:?}"));
+            assert!(rc.count > 0, "{role:?} has no counted runs: {need:?}");
+        }
+        for known in ["steward", "audience", "auditor"] {
+            let rc = need.roles.iter().find(|c| c.role == known).unwrap();
+            assert_eq!(rc.source, SOURCE_OUTSIDE_JOBS, "{known}");
+            assert!(!rc.flagged, "{known} flagged: {need:?}");
+            assert!(
+                need.not_measured
+                    .iter()
+                    .any(|(role, n)| role == known && *n > 0),
+                "{known} not reported as not measured with its runs: {need:?}"
+            );
+            assert!(
+                !need.retire_candidates.iter().any(|c| c == known),
+                "{known} is a retire candidate: {need:?}"
+            );
+        }
+        // Every measured role ran, so none is a candidate.
+        assert!(need.retire_candidates.is_empty(), "{need:?}");
+        assert_eq!(need.line(), None);
     }
 
     #[test]
