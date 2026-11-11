@@ -119,6 +119,7 @@ pub mod reading;
 pub mod reconcile;
 pub mod records_import;
 pub mod review;
+pub mod role_value;
 pub mod routing;
 pub mod run;
 #[cfg(test)]
