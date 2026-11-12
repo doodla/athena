@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013710-8gwp",
+  "round": 1,
+  "at": "2026-11-12T09:19:32.228153683Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The preflight never checks `gh`, a tool Athena itself needs for jobs on a GitHub remote, so the mechanism only partly does what the requirement says.",
+      "evidence": "GhCli::gh runs `Command::new(\"gh\")` (crates/athena-core/src/gh/transport.rs:23), and the error text is \"is the GitHub client installed?\". Per system facts, Athena opens the pull request when verification starts and `land` uses gh. needed_tools only looks at git and the first word of each check's command, so a job on a GitHub remote with no `gh` passes the preflight. It then fails later, after the producer and verifier have been paid for. That is exactly the late failure the requirement is meant to prevent. The plan turned down a hard-coded git+cargo list because it 'ignores per-capability needs', yet it hard-codes git and leaves out the other program Athena runs for itself. Fix: Pick one. (a) Add `gh` to the needs when the origin parses as a GitHub remote (`gh::parse_remote`). Make the probe seam visible to athena-cli integration tests too (`cfg(any(test, feature = \"test-support\"))`, as the CI seam does), so tests with a GitHub origin and no gh installed are not refused. Add a unit test showing gh is needed only for a GitHub origin. (b) If gh, and the agent binary, are deliberately left out, say so in a decision with the reason, and word the spec mechanism as 'git and check programs'. Either way, the spec entry must not claim every needed capability is checked when it is not.",
+      "location": "Plan decision 3 (needed tools) and the docs/spec.toml mechanism text",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "If the preflight stops a retry that was resuming kept work, that work can be lost for good.",
+      "evidence": "close_dispatched calls `self.state.remove_kept_work(&resumed.job)` whenever `ctx.resume` is set (run/close.rs:152-154). ctx.resume is the timeout seed (run/mod.rs:1307). So a retry of a timed-out job that the preflight stops deletes the earlier job's kept work tree. For a resume_from retry, the new job writes no resume mark. resume_seed looks for the retried job's own mark (run/mod.rs:542), so `athena retry <new job>` starts planning and producing from scratch, even though the original candidate is still marked on the older job. Fix: When the preflight stops a job that has a resume, timeout or stale seed, keep the seed for the next retry. Either do not remove the kept work (clear ctx.resume for this close) and copy the earlier resume mark to the new job id, or put the earlier job's id in the stop reason so the user retries that job instead. Add a test of a preflight stop on a resumed retry.",
+      "location": "Plan decisions 5 and 6 (stop before the resume_from branch; 'athena retry works once the tool is installed')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "One stated reason the test would fail without the change is false: the current measure already passes measure_problem.",
+      "evidence": "hestia.rs:4293 already asserts `measure_problem(&r.measure) == None` for every active requirement. That includes OLY-B-RUN-01, whose measure today is 'The spec gap list; status: requirement', and 'requirement' is a known status label (status.rs:321). Only the contains-path assertion would fail. Fix: Correct the text. Make the test stronger, as iris.rs:227-243 does: assert the measure contains the exact command `cargo test -p athena-core preflight`, that it ends with `status: not shown`, and that `hestia::spec_gaps(&requirements)` no longer lists OLY-B-RUN-01.",
+      "location": "Demonstration for criterion 1, 'Fails without the behavior'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Checking whether a program exists by running it with `--version` runs whatever programs athena.toml names, which can have side effects. A program that hangs adds up to 5 s per tool to every dispatch, and killing it leaves any child processes running.",
+      "evidence": "Check programs come from athena.toml and can be any script on PATH. A script that ignores `--version` does its real work. The plan kills only the direct child after 5 s, while the repository kills whole process groups elsewhere (athena-agent procs.rs `a_timeout_kills_the_whole_group`). The question the plan actually asks is whether the program can be found and started, and Command::new answers that by looking the name up on PATH. Fix: Prefer looking the bare name up in PATH entries for an executable file, which runs nothing and costs nothing. If `--version` is kept because the reading named it, spawn the probe in its own process group and kill the group, and lower the wait.",
+      "location": "Plan decision 4 / step 1 (SystemProbe runs `<tool> --version`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Copying about 250 lines of dispatch harness into a new module creates a second copy that will drift from the first.",
+      "evidence": "The plan says it copies the produce_and_verify_order_tests pattern (the Docs capability, the scripted FakeAgentDriver and the temp-repo setup) into preflight.rs's test module. run/tests.rs is under crates/ and inside the request's Files scope. Fix: Put the two dispatch tests in run/tests.rs, next to the harness they use, named with `preflight` so the filter still selects them. Keep the pure unit tests in preflight.rs.",
+      "location": "Plan step 7 (dispatch tests copy the harness from run/tests.rs:86-342 into preflight.rs)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A retry that the preflight also stops is wrongly recorded as having resumed kept work.",
+      "evidence": "scope_guard::resumed_candidate (scope_guard.rs:621-627) returns true when the job ran no producer and the job it retried is a resumable stop. A retry of a preflight-stopped job that is itself stopped by the preflight meets both conditions, so its attempt record says resumed=true although nothing was resumed. The dependents entry for scope_guard does not mention this. Fix: List resumed_candidate as a reader. Either accept the wrong flag with a stated reason, or have it require a non-preflight reason. Cover the choice in a test.",
+      "location": "Dependents: closing reason prefix `environment:` (scope_guard.rs)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "stop_preflight goes in pin.rs only because pin.rs is on the deliverables list, not because it belongs there.",
+      "evidence": "pin.rs holds repository pinning (`pin_repo`, `study_pin`). The helper it is modelled on, stop_planning, lives in planning.rs. Fix: Put stop_preflight in preflight.rs (as an `impl Athena` block) or in run/mod.rs, and list pin.rs as unchanged with that reason.",
+      "location": "Files: crates/athena-core/src/run/pin.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan relies on and it checks out. dispatch is at run/mod.rs:1015, the checks are built at line 1153, `note: None` is on the Job literal at line 1250, RunContext is built at 1285 and the resume_from branch is at 1312. StopCause::of sends any reason starting `environment:` to OtherEnvironment (disk.rs:450-462), and the scope guard then treats the stop as an environment stop, not a failure of the work (scope_guard.rs:565). check_seam (run/mod.rs:1497) is a usable model for the probe seam. The spec-entry test copies the pattern of iris.rs:227. No existing dispatching test uses a bare-name check program that is missing (I searched every `run = [...]` and config_with_change_checks call), so the 0% newly-refused claim holds for the test suites. Job.note has no readers in core or gate. The main problem: the list of needed tools comes only from git and the first word of each check's command. Athena itself runs `gh` for every job whose remote is on GitHub (gh/transport.rs:23), and the preflight never checks it. A mechanism recorded as checking \"each needed capability\" would claim more than it does. Smaller problems: a preflight stop on a retry that resumes kept work loses that kept work; one \"fails without\" claim in the criterion-1 demonstration is wrong; probing by running each program with `--version` has side effects; and the dispatch test harness gets copied instead of reused."
+}

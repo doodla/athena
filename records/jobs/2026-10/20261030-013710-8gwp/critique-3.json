@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013710-8gwp",
+  "round": 3,
+  "at": "2026-11-12T09:31:41.761089701Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan says a missing check program fails at its check today. It does not: such a job lands. So the 0% estimate, the drain-cost comparison and the split between bare names and paths all rest on a wrong premise.",
+      "evidence": "crates/athena-core/src/checks.rs:532-567: a program that cannot start becomes a failed CheckRun with the note 'could not start' on the baseline. crates/athena-cli/tests/lifecycle.rs:150-152 asserts: 'The command that cannot start fails on the candidate too, exactly as it failed on the base, so it is pre-existing and the job lands.' A bare-name program that is absent behaves the same way (the same `Command::new` spawn error), so today the job lands. With the plan, every job in a repository whose check runs an uninstalled bare-name tool becomes `failed`, where today it lands. The risk-5 claim 'far cheaper than today, where the producer runs before the check fails' is therefore wrong: a drain that loops reading and retrying such items replaces jobs that land today. The plan skips path-named programs so that this same lifecycle test keeps landing, but a path that does not exist is just as missing as a bare name. That is a special case kept to avoid changing a test, and it leaves a missing needed program unprobed and unrecorded, against 'checks and records each needed capability'. Fix: Correct the premise everywhere: today a missing check program is recorded as a pre-existing failure and the job lands. Say plainly that the preflight turns those landings into environment stops, and limit the 0% estimate to this repository's configured checks, which all run `cargo`. Pick one consistent rule for path programs. Either (a) probe them too (a file exists with an execute bit) and update `baseline_failure_does_not_stop_the_job` to keep testing a baseline failure with a program that exists but fails (Files allows crates/), or (b) list them in the note as 'not probed (path)' with the reason, and stop citing the lifecycle test as evidence that only missing tools refuse. Rewrite the drain risk without the false comparison.",
+      "location": "Decision 1 (path programs skipped), Decision 2 / Risks (finding 7 mitigation), Risks (finding 5 'far cheaper than today'), Criterion 5 demonstration ('would already fail at its check')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The probe reads Athena's own PATH, but checks run with a cleared environment rebuilt from `env_pass` plus the capability's `env` settings in athena.toml, which may set PATH. The probe can then disagree with where the check actually finds its program.",
+      "evidence": "crates/athena-core/src/checks.rs:534-535 (`env_clear().envs(ctx.env)`); crates/athena-agent/src/env.rs:65-111 builds that environment from `env_pass` and the capability's `env` templates, and nothing stops the templates from setting PATH. athena.toml:52 passes PATH today, so this repository is unaffected. Fix: Build the probe's PATH the way the check environment does: the capability's `env` PATH (expanded) when it sets one, otherwise Athena's own PATH when `env_pass` lists PATH. Or state this limit in the doc comment and the spec mechanism.",
+      "location": "Decision 2 (SystemProbe reads the process PATH)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Only dispatch follows the retry link. `Athena::retry` and `ask` still read the raw 'try again on J2' text, so the reader of J3 sees J2's preflight stop and not J1's context. J2, closed `failed`, also counts as a standing retry of J1 in `retries_by_job`.",
+      "evidence": "crates/athena-core/src/reading.rs:1220-1232 builds `try again on <id>` and calls `resumable_job` and `ask` on it. crates/athena-core/src/reading/retry.rs:246-268: `retries_by_job` leaves out only Dropped, Declined, Abandoned, Stale and Closed, so a Failed preflight stop stands as J1's retry in status follow-ups. Fix: State that the reader of a follow-up retry sees the preflight-stopped job and not the job it retried, or apply the same follow where `retry` prints the resume note. Note in the dependents that `retries_by_job` and `retry_follow_up` now name the preflight-stopped job.",
+      "location": "Decision 7 (`through_preflight_stops` applied only in dispatch)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The per-tool record goes into a free-text field that no command prints, so a user sees it only by opening job.json. Only the stop reason, and only for a blocked job, is visible.",
+      "evidence": "A grep for `.note` on Job across crates finds no reader (the plan agrees). status.rs and display.rs do not print `Job.note`. Fix: Say in the spec mechanism or the risks that the full per-tool record is only in job.json, so the verifier knows where 'records each needed capability' is shown.",
+      "location": "Decision 4 (record in Job.note)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The filter `preflight` also matches existing tests for the budget preflight, so the run reports more than the new tests.",
+      "evidence": "run/planning.rs and run/mod.rs:1095 already have a `preflight` method and tests that name it. Fix: Name the specific new tests in the measure and the demonstration runs, or use a narrower prefix such as `preflight_` plus the tool-specific names.",
+      "location": "Criterion 2 and spec measure ('cargo test -p athena-core preflight')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan's mechanics are sound when checked against the snapshot. The dispatch line numbers, the hook placement, the stop through `close_dispatched` with `resume: None` (close.rs:152-154), the `environment:` classification, `through_preflight_stops` against `timeout_seed` and `retried_job`, and Tests C and D can all work, and the tests can fail without the behavior. The test check comes from the `Docs` capability, not athena.toml, so the configuration hash does not change between Athena instances. One premise is false. The plan says a missing check program already fails at its check today. In fact the program fails to start on the base and the candidate alike, is marked pre-existing, and the job lands (lifecycle.rs:150-152). So the preflight turns landings into failures for any repository whose check runs an uninstalled bare-name tool. The 0% estimate and the 'cheaper than today' drain reasoning do not hold in general. Skipping path-named programs only to keep that test green is an arbitrary special case. Further minor points: the probe reads Athena's own PATH, not the PATH the checks get; the reader of a retry does not follow the retry link; and `Job.note` is not shown anywhere. The planner can fix all of these, so: revise."
+}

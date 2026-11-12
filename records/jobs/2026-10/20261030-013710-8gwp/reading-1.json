@@ -1,0 +1,143 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-013710-8gwp",
+  "n": 1,
+  "at": "2026-11-12T09:10:38.423732731Z",
+  "invocation_seq": 1,
+  "base_commit": "9fd203e95dd88641939c8f340e448de4dd4f2b08",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add capability preflight with blocker and workaround for OLY-B-RUN-01",
+  "summary": "Add a preflight in athena-core that checks each tool a job needs (git, cargo, and per-capability needs) before work starts, records the result, and turns anything missing into a blocker with a workaround plan. Record it as the mechanism, with owner and a measure ending `status: not shown` plus the test, for OLY-B-RUN-01 in docs/spec.toml. Audience: the Athena maintainer and the verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Criteria require a new failing-without/passing-with test and cargo test, clippy and fmt passing."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check a missing tool producing a blocker with workaround, not mere existence."
+    },
+    {
+      "id": "small",
+      "how": "One focused module plus a hook in the run path."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/run/pin.rs (pin_repo fails when a pinning capability lacks repo_url/repo_ref), run/planning.rs (an existing budget `preflight` method before planner/critic), run/mod.rs (job lifecycle entry, Athena::go), pin.rs, capability.rs (Capability trait, pins_repo), slots.rs and checks.rs (spawn cargo/git). No capability preflight exists today; the existing `preflight` is a budget reserve check and is not reused. The new module probes tools on PATH before the producer runs, then records and blocks.",
+    "Records: the preflight result is written as a finding or note on the job through existing record types (athena_data::records Severity::Blocker, FindingSource::Athena), so no new record or data file is added under crates/; if one were added, check_record_file, AnyRecord and the round-trip test would need to cover it.",
+    "Existing code: extends crates/athena-core/src/run/pin.rs and run/mod.rs flow and reuses Severity::Blocker findings from crates/athena-data; docs/spec.toml entries such as the role-split mechanism show the mechanism/owner/measure format.",
+    "Measure: no `athena status` line shows the preflight, so the measure ends with `status: not shown` and names the test that shows it. Adding a status line is out of scope.",
+    "The preflight probes tools by running `<tool> --version` through an injectable probe trait, so the test can simulate a missing tool without changing the machine.",
+    "Because a missing capability now blocks the job instead of failing later, this refuses more jobs when a tool is absent; for a normal environment with git and cargo present, expected 0% of newly refused readings."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "docs/spec.toml requirement OLY-B-RUN-01 has `mechanism` naming the new preflight source path under crates/athena-core/src (a file that exists in the diff), `owner = \"Athena\"`, and a `measure` ending in `status: not shown` plus the test name.",
+      "kind": "content"
+    },
+    {
+      "text": "A new unit test in crates/athena-core (run via `cargo test -p athena-core preflight`) uses a fake probe reporting a needed tool missing and asserts the preflight returns a blocker naming that tool with a non-empty workaround plan; the same test with all tools present asserts no blocker. The verifier checks the test fails when the preflight function body is stubbed out (reviewed in diff) and passes as written.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run via `cargo test -p athena-core` shows that the job's run path calls the preflight before the producer starts and that a missing capability stops the job with the blocker recorded, with each probed capability recorded even when all are present.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets` and `cargo test` all pass from the repository root.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The change refuses more jobs only when a needed tool is missing; expected 0% of newly refused readings, and the stricter behavior is intended.",
+      "kind": "content"
+    },
+    {
+      "text": "No governance files (athena.toml, defaults.toml, workflows) and no records/ change; CHANGELOG.md may gain one line.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "crates/athena-core/src/preflight.rs",
+      "action": "create",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/pin.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.35
+    }
+  ],
+  "out_of_scope": [
+    "Adding an `athena status` line for the preflight",
+    "Changing the existing budget preflight in run/planning.rs",
+    "Changes to athena.toml, defaults.toml, workflows or other requirements in docs/spec.toml"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6756756756756757,
+      "p_user_intervenes": 0.06677577741407528,
+      "cost_usd": {
+        "p10": 0.5521625047315417,
+        "p50": 1.4534939000000002,
+        "p90": 5.127941051899941
+      },
+      "wall_time_s": {
+        "p10": 590.6702579081548,
+        "p50": 2121.6919287915994,
+        "p90": 4377.667015644078
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass odds than reference because it touches the run pipeline and needs a fake-probe test seam.",
+  "hard_reason": "It adds a check that can refuse or hold a job (a missing capability becomes a blocker) in the run pipeline.",
+  "producer_effort": "high"
+}

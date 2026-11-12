@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013421-tfwf",
+  "round": 1,
+  "at": "2026-11-12T09:07:17.067056927Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/status_restarts.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/status_restarts.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "`via` records what the new context read to resume, not a fix in Athena, so the plan counts the wrong thing as \"fixes in Athena\" and will report false fixes.",
+      "evidence": "crates/athena-cli/src/main.rs:450 documents `--via` as \"What the new context read to resume (repeatable).\" The existing lifecycle test (crates/athena-cli/tests/lifecycle.rs:2946) records `via: [\"athena status\"]`, which is a resume source. The plan would count it as \"1 fix logged in Athena\", and a restart with that via and a loss would never count as \"lost with no fix\". Demonstration 3's own example via ('athena status shows the focus') is also a resume source, not a fix. The step 8 mechanism text, \"the fix in Athena (--via)\", contradicts the CLI help, and the step 5 note tells the user to \"record it with --via\". That would change what the flag means without updating its help or the existing records. This guesses at the field's meaning when the code states it, and it has obvious false positives. Fix: Record the fix in its own field. Add an optional `fixed: Vec<String>` to Restart in crates/athena-data/src/records.rs with `#[serde(default)]` so old records still load. The entries could be free text or the job ids of the fixes. Add a `--fixed` argument in main.rs and RestartArgs, then compute fixes, no_fix and lost_no_fix from `fixed`, not `via`. Criterion 5 already allows a new field if the round-trip test is updated. Add records.rs and main.rs to Files and Dependents, together with the round-trip and history-check tests. If the user rejects a schema change, keep `via` out of the fix count, label the line as resume sources, and write in the measure that the fix is not recorded. Do not claim to show \"causes fixed\".",
+      "location": "Plan decision 2, step 2 (RestartReview fixes/no_fix/lost_no_fix), step 8 (mechanism text), demonstration 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Minutes and tokens are summed across estimated and measured quantities with no sign of which is which.",
+      "evidence": "Manager::restart stores `Quantity::estimated` unless `--measured` is given (manage.rs:459-466). The plan sums `Quantity::value()` regardless of provenance and prints only how many restarts gave a value. Fix: Count how many summed values were measured, or mark the total as estimated when any part is (e.g. `minutes ~15`), so the line does not present recollection as measurement.",
+      "location": "Step 2 / step 4 (minutes and tokens totals)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "If the fix moves to a new field, the dependents list must cover the record schema and the CLI argument.",
+      "evidence": "The current list treats athena.restart/1 as read only (records.rs:1047). With the fix in the major finding, Restart gains a field. Its readers are AnyRecord round-trip tests in records.rs, Records::load (store.rs:226), check_history over records/restarts/ (lifecycle.rs:2956), and the clap definition in main.rs:436-455 and main.rs:1121-1131. Fix: List these readers with `cargo test -p athena-data` and `cargo test -p athena-cli --test lifecycle` as their tests, and add a test that loads an old restart record without the new field.",
+      "location": "Dependents",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The reading maps \"the causes are fixed in Athena\" to Restart.via. The code documents `--via` as \"What the new context read to resume\" (crates/athena-cli/src/main.rs:450), so that field does not record whether a cause was fixed. The other mappings hold: cost, minutes and tokens record the cost, and `lost` records what was lost. The fix part of the requirement has no matching field.",
+  "summary": "The plan's structure is sound. It reuses the O5-01 restart record, adds a separate `restart review` label and StatusView field that satisfy every_measure_label_names_a_status_view_field_and_a_printed_line (status.rs:1689-1708), and models its spec test on oly_b_o5_01 (status.rs:1660-1686). Its end-to-end demonstration goes through Manager::restart, Athena::status and display::status with the existing Fixture and Lines (common/mod.rs:308). StatusView has one constructor (status.rs:1285) and no Default, and no JSON snapshot reads \"restarts\", so the additive field is safe. The core of the mechanism is wrong, though. It counts `via` entries as \"fixes in Athena\", but `via` is documented as what the new context read to resume (main.rs:450), and the existing lifecycle test records `via: [\"athena status\"]`, which the review would count as a fix. The status line and the spec mechanism would therefore claim the causes are fixed when nothing records a fix. The planner should record fixes in their own field (an optional `fixed` with a serde default; criterion 5 already allows a new field) or stop claiming to show fixes. Athena's finding about the new test file is minor and acceptable."
+}

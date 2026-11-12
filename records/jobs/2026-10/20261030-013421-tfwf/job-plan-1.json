@@ -1,0 +1,230 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-013421-tfwf",
+  "round": 1,
+  "at": "2026-11-12T09:06:24.566156751Z",
+  "invocation_seq": 2,
+  "approach": "Extend the OLY-B-O5-01 restart mechanism rather than build a second one. Add a `RestartReview` summary to StatusView, computed in status.rs straight from `records.restarts` (the existing athena.restart/1 records, unchanged): restarts logged, summed minutes and tokens that carry a value, restarts and items lost, fixes logged in Athena (`via`), and restarts with a loss or no fix. `athena status` prints it as a new line `restart review ...`, and the label `restart review` is added to STATUS_MEASURE_LABELS. `Manager::restart` prints a note when a restart records losses and no fix, so the cause is not left unfixed. Then fill OLY-B-O5-02 in docs/spec.toml (mechanism, owner \"Athena\", measure ending `status: restart review`). Add tests: a spec test in status.rs, a pure-computation unit test, and an end-to-end CLI test that records restarts through Manager::restart. Add a CHANGELOG entry.",
+  "decisions": [
+    {
+      "choice": "New StatusView field `restart_review: RestartReview` and new label `restart review`, leaving `restarts: usize` and the O5-01 `restarts` line as they are.",
+      "reason": "O5-01's measure ends `status: restarts` and its test (status.rs:1660-1686) asserts that. A separate label gives O5-02 its own measure and every_measure_label_names_a_status_view_field_and_a_printed_line (status.rs:1689) needs a `pub restart_review:` field and a printed literal starting `\"restart review `.",
+      "rejected": [
+        {
+          "option": "Reuse the `restarts` label for O5-02",
+          "why": "Two requirements would share one measure, and the line would have to change what O5-01's test and measure describe. Out of scope: changing O5-01."
+        },
+        {
+          "option": "Add fields to the Restart record (a `fixed` flag, say)",
+          "why": "This would change the schema in crates/athena-data/src/records.rs:1047 and the round-trip tests. The existing `cost`, `minutes`, `tokens`, `lost` and `via` fields already hold what the requirement names."
+        }
+      ]
+    },
+    {
+      "choice": "The fix signal is `via` (what the user used to recover): a restart with lost items and an empty `via` counts as 'lost with no fix'; a restart with an empty `via` counts as 'no fix logged'.",
+      "reason": "This is the only field that records causes fixed in Athena. It keeps the record unchanged and lets a test measure the count from records.",
+      "rejected": [
+        {
+          "option": "Refuse `athena restart` when `lost` is set and `via` is empty",
+          "why": "Would change what the command accepts. The brief says current inputs stay accepted and cadence is not enforced."
+        }
+      ]
+    },
+    {
+      "choice": "Compute the review in a pure function `RestartReview::compute(&[Restart])` in status.rs, called from `status()` where `restarts: records.restarts.len()` is set (status.rs:1323).",
+      "reason": "One place reads the records, so the status line comes from Athena's records and the unit test needs no repository.",
+      "rejected": [
+        {
+          "option": "Compute in display.rs",
+          "why": "The JSON status view (`--json`) would lack the figures and display.rs would read raw records."
+        }
+      ]
+    },
+    {
+      "choice": "`Manager::restart` (manage.rs:444-496) keeps recording as now and, after the 'recorded' line, calls `ui.line` with a note when the new restart has lost items and no `via`.",
+      "reason": "Gives manage.rs a real part in the mechanism, so the owner is told at the moment of logging that the fix is missing. It does not change the return value or the stored record.",
+      "rejected": [
+        {
+          "option": "Leave manage.rs untouched",
+          "why": "manage.rs is a listed deliverable and the brief's mechanism names it. The restart command is where the loss and fix are given."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "Fill OLY-B-O5-02: mechanism naming Manager::restart (manage.rs) and the restart review line (status.rs, display.rs), owner Athena, measure ending `status: restart review`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add the label (\"restart review\", \"restart_review\"), the `RestartReview` struct with `compute(&[Restart])`, the `restart_review` field on StatusView set in status(), and the new tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Print `restart review ...` after the `restarts` line (display.rs:1411), or `restart review none logged` when there are none.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "purpose": "In Manager::restart, print a note through ui.line when the restart has lost items and no fix in via.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/status_restarts.rs",
+      "action": "create",
+      "purpose": "End-to-end test: Manager::restart records, then the status view and the printed line show cost, losses and fixes.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Under [Unreleased] / Added, say OLY-B-O5-02 now has a mechanism and name the new status line and label.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-core/src/status.rs add `(\"restart review\", \"restart_review\")` to STATUS_MEASURE_LABELS after the `restarts` pair (line 320).",
+    "In status.rs define `pub struct RestartReview { restarts, minutes (f64), minutes_given (usize), tokens (f64), tokens_given (usize), lost_items, lost_restarts, fixes, no_fix, lost_no_fix }` with Debug, Clone, Default, PartialEq, Serialize, and `RestartReview::compute(restarts: &[athena_data::records::Restart])` that sums `Quantity::value()` for minutes and tokens, counts `lost` entries and restarts with a non-empty `lost`, counts `via` entries, restarts with an empty `via`, and restarts with a non-empty `lost` and an empty `via`.",
+    "Add `pub restart_review: RestartReview,` to StatusView after `pub restarts: usize` (line 476) and set `restart_review: RestartReview::compute(&records.restarts)` after `restarts: records.restarts.len()` (line 1323).",
+    "In display.rs after the `restarts    {}` writeln (line 1411) print the line `restart review ...`: with no restarts `restart review none logged`; otherwise restarts logged, minutes and tokens with how many restarts gave each, lost items in N restarts, fixes in Athena logged, restarts with no fix, and restarts with a loss and no fix.",
+    "In manage.rs `Manager::restart`, after the `recorded   restart` line (line 494), add `if !restart.lost.is_empty() && restart.via.is_empty() { ui.line(\"note       lost items with no fix logged; fix the cause in Athena and record it with --via\") }`. Do not change the return value or the record.",
+    "In status.rs add tests: oly_b_o5_02_is_met_by_athena_restart_and_shown_by_the_restart_review_line (modelled on the O5-01 test, with the spec_gaps override to `none`), and a pure test of RestartReview::compute over hand-built Restart values (including no restarts and a restart with no quantities).",
+    "Create crates/athena-cli/tests/status_restarts.rs as described in demonstration 3, with the empty-repository case for `restart review none logged`.",
+    "Edit docs/spec.toml OLY-B-O5-02 (lines 2280-2289): `mechanism` = \"Manager::restart in crates/athena-core/src/manage.rs (the athena restart command) records each restart's cost (--cost, --minutes, --tokens), what was lost (--lost) and the fix in Athena (--via), and notes a loss with no fix; the restart review line of athena status (crates/athena-core/src/status.rs RestartReview, crates/athena-cli/src/display.rs) totals them from the restart records and counts restarts with no fix.\"; keep owner \"Athena\"; `measure` = \"Restarts with their cost, losses and fixes, and the restarts with a loss and no fix, counted from the records in athena status; whether every cause is actually fixed in Athena stays a judgement and is not enforced; status: restart review\". Leave statement, kind, status and source unchanged.",
+    "Add the CHANGELOG.md entry at line 11, directly under `### Added`.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix anything they flag."
+  ],
+  "risks": [
+    {
+      "risk": "The label check requires a string literal beginning `\"restart review ` in status.rs, display.rs or hestia.rs; a format string that splits the label would make every_measure_label_... fail.",
+      "mitigation": "Write the display line as a literal that starts with `restart review ` (for example `writeln!(out, \"restart review {}\", ...)`) and run that test."
+    },
+    {
+      "risk": "Minutes and tokens are optional and may be estimated, so the totals can understate cost.",
+      "mitigation": "Sum only quantities that have a value, and print the number of restarts that gave one (for example `minutes 15 (2 of 3 restarts gave one)`); the test asserts it."
+    },
+    {
+      "risk": "The new test file name or a status-text assertion elsewhere could collide with the new line.",
+      "mitigation": "Name the file status_restarts.rs (no such file today); other status tests match by prefix or substring and the new prefix is unique."
+    },
+    {
+      "risk": "The CHANGELOG.md is large (436 KB); an edit outside the Unreleased block would be wrong.",
+      "mitigation": "Insert the entry directly under `### Added` at CHANGELOG.md:10, before the O5-01 entry at line 12."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "new label `restart review` and field `restart_review`",
+      "dependent": "crates/athena-core/src/status.rs STATUS_MEASURE_LABELS (line 305) and test every_measure_label_names_a_status_view_field_and_a_printed_line (line 1689)",
+      "kind": "code",
+      "test": "cargo test -p athena-core every_measure_label_names_a_status_view_field_and_a_printed_line",
+      "reason": null
+    },
+    {
+      "name": "OLY-B-O5-02 mechanism and measure in docs/spec.toml",
+      "dependent": "crates/athena-core/src/hestia.rs measure_problem (line 1219) and spec_gaps",
+      "kind": "rule",
+      "test": "cargo test -p athena-core oly_b_o5_02",
+      "reason": null
+    },
+    {
+      "name": "docs/spec.toml requirement entry shape",
+      "dependent": "xtask/tests/spec.rs every_active_requirement_has_a_mechanism_an_owner_and_a_measure (line 627) and its `status:` marker check",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test spec",
+      "reason": "The new entry has a non-empty mechanism, owner and a measure ending `status: restart review`, the same shape as OLY-B-O5-01. The measure label is also checked by measure_problem in the core test. Both xtask and core tests run in `cargo test --locked`."
+    },
+    {
+      "name": "restarts count and `restarts` label",
+      "dependent": "OLY-B-O5-01 test oly_b_o5_01_... (status.rs:1660) and its `restarts` line (display.rs:1411)",
+      "kind": "code",
+      "test": "cargo test -p athena-core oly_b_o5_01",
+      "reason": "The `restarts: usize` field, its label and the `restarts    N` line are not changed; the new line has a different label."
+    },
+    {
+      "name": "Manager::restart behavior (adds a note line only when lost is set and via is empty)",
+      "dependent": "crates/athena-cli/tests/lifecycle.rs:2940-2959 (Manager::restart then status.restarts == 1), crates/athena-cli/src/commands.rs:498 and main.rs:1125 (the `athena restart` command)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test lifecycle and cargo test -p athena-cli --test status_restarts",
+      "reason": "The stored record, the return value and the accepted inputs are unchanged; that lifecycle test records lost and via together, so no note is printed. The note goes through `ui.line`, as the existing 'recorded' line does."
+    },
+    {
+      "name": "StatusView gains the `restart_review` field and one extra line of text",
+      "dependent": "StatusView's only constructor, status.rs:1285, plus every reader of `athena status` text or JSON (display::status callers in crates/athena-cli/tests/*.rs such as status_durations.rs and proposals.rs)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli",
+      "reason": "Those tests find lines by prefix or substring; the new line starts `restart review `, and no test asserts exact whole-status text or an exact line count. The field is additive in JSON."
+    },
+    {
+      "name": "athena.restart/1 record",
+      "dependent": "crates/athena-data/src/records.rs Restart (line 1047), AnyRecord::Restart, Records::load restarts (store.rs:226)",
+      "kind": "code",
+      "test": "cargo test -p athena-data",
+      "reason": "Read only; no field is added, so the schema, canonical path and the history checks that accept records/restarts/ are unchanged."
+    },
+    {
+      "name": "No prompt or always-loaded file changes",
+      "dependent": "crates/athena-context and crates/athena-cli/tests/budgets.rs (prompt budgets), docs/system-facts.md",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Only docs/spec.toml, CHANGELOG.md and Rust sources change; none is in a role's always-loaded set, so the budget lines in docs/system-facts.md stay correct."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test `oly_b_o5_02_is_met_by_athena_restart_and_shown_by_the_restart_review_line` in crates/athena-core/src/status.rs, next to oly_b_o5_01_... (status.rs:1659). It parses docs/spec.toml with `include_str!` and `hestia::parse_spec`, finds OLY-B-O5-02, and asserts that the mechanism is not `none` and contains manage.rs, status.rs and display.rs, the owner is `Athena`, the measure ends with `status: restart review`, and STATUS_MEASURE_LABELS contains (\"restart review\", \"restart_review\").",
+      "command": "cargo test -p athena-core oly_b_o5_02",
+      "observes": "The test passes with the spec entry filled; with the stock `mechanism = \"none\"` its first assert fails.",
+      "fails_without": "Without the spec edit, `req.mechanism != \"none\"` fails; without the label, `STATUS_MEASURE_LABELS.contains` fails.",
+      "seam": "Production entry points `hestia::parse_spec` and `STATUS_MEASURE_LABELS`; the fixture is the real docs/spec.toml via include_str!. Exists today (same pattern at status.rs:1666-1668)."
+    },
+    {
+      "criterion": 2,
+      "method": "In the same test, after the asserts: `hestia::measure_problem(&req.measure)` is None; `hestia::spec_gaps(&requirements)` has no gap with id OLY-B-O5-02; a clone with `mechanism = \"none\"` run through `spec_gaps(&[without])` returns exactly one gap with `no_mechanism` true (the pattern at status.rs:1682-1685).",
+      "command": "cargo test -p athena-core oly_b_o5_02",
+      "observes": "The requirement is not a gap with the mechanism, and is a no_mechanism gap with it set to none.",
+      "fails_without": "Before the change the real spec entry has mechanism none, so spec_gaps lists OLY-B-O5-02 and `gaps.iter().all(|g| g.id != ...)` fails.",
+      "seam": "Production `hestia::spec_gaps` and `hestia::measure_problem` (hestia.rs:1219); the fixture is the real spec, with the mechanism overridden in a clone. Exists today."
+    },
+    {
+      "criterion": 3,
+      "method": "New file crates/athena-cli/tests/status_restarts.rs (`mod common;`, as status_build_measurement.rs does). It builds `Fixture::new()` and `fx.athena(Scenario::default().script())`, then calls `athena.restart(&RestartArgs{..}, &Lines::default())` (the production path used by lifecycle.rs:2941) three times: (a) cost 'reread notes', minutes 10, tokens 4000, lost ['my notes'], via ['athena status shows the focus']; (b) cost 'rebuilt context', minutes 5, lost ['plan'], via []; (c) cost only. It then asserts: `view.restart_review` is 3 restarts, 15 minutes, 4000 tokens, 2 lost items in 2 restarts, 1 fix logged, 2 restarts with no fix, 1 restart with a loss and no fix; the line starting `restart review ` in `athena_cli::display::status(&view)` contains those figures; and the `Lines` output of restart (b) contains the 'lost items with no fix' note while (a) prints no note. A second test checks the line with no restarts reads `restart review none logged`.",
+      "command": "cargo test -p athena-cli --test status_restarts",
+      "observes": "The status view figures and the printed line are computed from the three records committed to the fixture repository, not from a hand-built view.",
+      "fails_without": "Without RestartReview and the display line, `view.restart_review` does not compile and the printed-line assertion fails; without the manage.rs note the note assertion fails.",
+      "seam": "Production `Manager::restart`, `Athena::status` and `display::status`. The Fixture (a temporary git repository) and the Scenario fake driver come from crates/athena-cli/tests/common/mod.rs and exist today; no model is called. `Lines` (common/mod.rs:308) is the injected Ui. The `restart_review` field and the printed line are added by the plan steps."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the existing test at status.rs:1689, then the full gates `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. The existing test checks each label in STATUS_MEASURE_LABELS against a `pub <field>:` in status.rs and a string literal `\"<label> ` in status.rs, display.rs or hestia.rs.",
+      "command": "cargo test -p athena-core every_measure_label_names_a_status_view_field_and_a_printed_line",
+      "observes": "The new label `restart review` finds `pub restart_review:` and the literal `\"restart review ` in display.rs; all three gates pass.",
+      "fails_without": "If the label were added without the field or printed line, that test fails naming the label.",
+      "seam": "Existing test; nothing is injected. Exists today."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the athena-data tests (record round-trips in records.rs and the canonical-path checks) with no change to crates/athena-data; `git diff --stat` shows no file under crates/athena-data and no new record file.",
+      "command": "cargo test -p athena-data",
+      "observes": "The athena-data tests pass unchanged and the diff touches only docs/spec.toml, CHANGELOG.md, crates/athena-core/src/{status,manage}.rs, crates/athena-cli/src/display.rs and the new test file.",
+      "fails_without": null,
+      "seam": "Existing tests; nothing is injected. Exists today."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "64d663af4b3f09f525ffb25c9d4e4930abd2d809e4776946fabc1bc3855c20ee"
+}
