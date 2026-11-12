@@ -5022,3 +5022,52 @@ should replace those estimates with its figures.
   test file, including a stray crate, a crate named only as a rejected alternative, and D36 alone. Not measured:
   whether a better maintained option exists for any crate; no reading rule changed, so no share of newly refused
   readings applies.
+
+## D174 · The reading gate tests each criterion against D43 and the append-only rules
+
+- **Case:** Jobs 20261024-045548-7qht and 20261102-005332-8gkv each ended on a criterion that no verifier could
+  judge. In the first, a behavior criterion named evidence the verifier could not observe (D115 later widened D43's
+  reading of recorded checks). In the second, the work needed an in-place edit of an existing decision, which the
+  append-only guard in `crates/athena-cli/src/decisions.rs` refuses. Root cause: the reading stage fixes criteria
+  from the request text, and nothing compared them with the defaults that govern how criteria are judged (D43) and
+  with the rule that `docs/decisions.md` and `records/` are only appended to. The fault sat at the gate where
+  criteria are first fixed, so a producer could not repair it later.
+- **Decision:** Amends D43 by adding a reading-time check, `check_judging_rules` in
+  `crates/athena-core/src/reading/surveys.rs`, the last `step!` of `refusing_check`. It reads only the parsed
+  criteria and deliverables and costs no model call.
+  - A behavior criterion may not cite a command the verifier cannot run. A command is cited only in a backticked
+    span right after run, running, execute or executing (and spans joined to it), or in a span that opens the
+    criterion and is followed by a colon or a result verb. The rules are those that hold for every verifier grant:
+    an environment prefix or `env`, `cargo fmt` without `--check`, a write program (`rm`, `mv`, `chmod`, `cp`,
+    `touch`, `mkdir`, `tee`, `curl`, `wget`, `gh`), a `git` write subcommand, and a `cargo` write subcommand. A
+    span that names code under test is not read.
+  - No criterion of any kind may tell the job to edit an existing decision in place: an edit verb in verb position
+    before a decision id, append or add to a decision id, a decision id said to be edited, or, with no id, an
+    existing entry edited in place. The repair is to append a new decision that cites the old one. No criterion may
+    tell the job to edit a file under `records/`. No deliverable may sit under `records/`, and the decision log may
+    not be deleted; a modify of the log stays accepted, since every append is one.
+  - The step is last, so the order in which the specific checks refuse does not change. A cited `git push` that
+    `check_environment_reach` refuses is refused again by this check once an Environment assumption is added, and
+    the error says an Environment assumption does not let the verifier run it.
+- **Alternatives:** Copying the verifier grant from `athena.toml` into the check, with a drift test, was declined: it
+  wrongly refuses a subcommand such as `cargo doc` on a target with a wider grant. Passing the live grant into
+  `refusing_check` reaches about 100 call sites and is the named follow-up; with it the check would judge the
+  subcommands the grant allows or forbids by target. Reading every backticked span refuses code-behavior sentences.
+  Refusing every modify of the decision log refuses every legitimate append. A new-id marker that excuses a clause
+  was dropped: the verb-position and between-word tests already accept the append sentences, and a marker lets a
+  sentence elsewhere excuse an in-place edit.
+- **Tradeoff:** The check refuses more readings; the higher refusal rate is intended. The share is an estimate, not
+  a measurement: expected 3% of newly refused readings; the replay at verification measures it. Known misses: a git
+  write command, `gh` or `curl` written outside a cited span; a decision edit written with no decision-log word,
+  or in the passive without "in place"; more words between the verb and the id than the entry words allow; an edit
+  verb in -ing form; a negation or description word placed to dodge the check; a grant-dependent subcommand such as
+  `cargo doc`. The verifier and D43's judge stay a second layer. The reader rules list gains a thirteenth line, so
+  other lines were shortened and the section baseline in `crates/athena-context/src/briefs.rs` rose to 3121 bytes.
+- **Reversal cost:** Low; remove the `step!` line, the function, its tests and corpus cases, and the rule line. No
+  record schema or config key was added.
+- **Provenance:** Read: D43, D115, `crates/athena-cli/src/decisions.rs`, `crates/athena-core/src/reading/checks.rs`,
+  `crates/athena-core/src/reading/surveys.rs`, `crates/athena-agent/src/policy.rs`, `athena.toml` (the verifier
+  grant), the two jobs' introspections. Measured: the unit tests `judging_rules_*` and the 24 corpus cases of
+  `crates/athena-core/tests/refusal_corpus.rs`, in which the cases for the two jobs are synthetic or modelled on a
+  commit subject because their recorded criteria were not in the snapshot. Not measured: the share of newly
+  refused readings (3% is an estimate), and how often the check refuses a criterion that could be judged.

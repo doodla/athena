@@ -5091,7 +5091,6 @@ mod tests {
             "The job branch is pushed to the remote",
             "A pull request is opened on the remote",
             "The pull request is opened with `gh pr create`",
-            "Run `git push`: the branch is published",
             "Athena opens the job's PR at verification start",
             "Open the job's PR early at verification start",
             "The early PR is reused by land",
@@ -5113,6 +5112,431 @@ mod tests {
             assert!(error.contains("`Environment:`"), "{text}: {error}");
             let fixed = with_environment(reading, CI_ENVIRONMENT);
             assert_eq!(refuser(&fixed), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_cited_git_push_is_refused_even_with_an_environment_assumption() {
+        let reading = behavior_reading(&["Run `git push`: the branch is published"]);
+        assert_eq!(refuser(&reading), Some("check_environment_reach"));
+        // The Environment assumption says where the push may happen, not what the verifier may run.
+        let fixed = with_environment(reading, CI_ENVIRONMENT);
+        let (name, error) = refusing_check(&fixed, "Review the guide", None, &[], None).unwrap();
+        assert_eq!(name, "check_judging_rules");
+        let error = error.to_string();
+        assert!(
+            error.contains("Environment assumption does not let the verifier run it"),
+            "{error}"
+        );
+        assert!(error.contains("`git log` or `git status`"), "{error}");
+    }
+
+    /// A docs reading whose criteria all have this kind and these texts, with these extra deliverables.
+    fn judging_reading(
+        kind: CriterionKind,
+        texts: &[&str],
+        deliverables: &[(&str, DeliverableAction)],
+    ) -> Reading {
+        let mut reading = governed_reading(&["docs/guide.md"], &["docs/guide.md exists"], &[]);
+        reading.acceptance_criteria = texts
+            .iter()
+            .map(|text| Criterion {
+                text: (*text).into(),
+                kind,
+            })
+            .collect();
+        for (path, action) in deliverables {
+            reading.deliverables.push(Deliverable {
+                path: (*path).into(),
+                action: *action,
+                p: 0.9,
+            });
+        }
+        reading
+    }
+
+    /// The error of `check_judging_rules` for these criteria, if it refuses.
+    fn judging_error(kind: CriterionKind, texts: &[&str]) -> Option<String> {
+        check_judging_rules(&judging_reading(kind, texts, &[]))
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    /// Asserts that `check_judging_rules` accepts this criterion text and the gate does not name it as the
+    /// refusing check.
+    fn assert_judging_accepts(kind: CriterionKind, text: &str) {
+        let reading = judging_reading(kind, &[text], &[]);
+        check_judging_rules(&reading).unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_ne!(
+            gate_refuser(&reading),
+            Some("check_judging_rules"),
+            "{text}"
+        );
+    }
+
+    /// Behavior criteria that have the verifier run a command it cannot run, each with its repair.
+    const JUDGING_REFUSED_COMMANDS: [(&str, &str); 9] = [
+        (
+            "Run `cargo fmt`: the tree is formatted",
+            "Run `cargo fmt --check`: the tree is formatted",
+        ),
+        (
+            "Run `cargo fmt --all` and `cargo test`: both pass",
+            "Run `cargo fmt --all --check` and `cargo test`: both pass",
+        ),
+        ("`cargo fmt` passes", "`cargo fmt --check` passes"),
+        (
+            "Run `cargo --locked fmt`: formatted",
+            "Run `cargo --locked fmt --check`: formatted",
+        ),
+        (
+            "Run `RUSTFLAGS=-D warnings cargo test`: passes",
+            "Run `cargo test`: passes",
+        ),
+        (
+            "Run `env FOO=1 cargo test`: passes",
+            "Run `cargo test`: passes",
+        ),
+        (
+            "Run `git commit -am x`: a commit exists",
+            "Run `git log`: a commit exists",
+        ),
+        ("Run `rm -rf target`: clean", "Run `git status`: clean"),
+        (
+            "Run `cargo install ripgrep`, then `cargo test`: both pass",
+            "Run `cargo test`: it passes",
+        ),
+    ];
+
+    /// Criteria of any kind that tell the job to edit an existing decision or a record, each with its repair.
+    const JUDGING_REFUSED_EDITS: [(&str, &str); 8] = [
+        // Modelled on the subject of commit 620c657 and the D150 title; the recorded 8gkv criterion is not
+        // known.
+        (
+            "Merge refusals no longer fire D87: append a note to D87 in docs/decisions.md",
+            "Append a new decision to docs/decisions.md that amends D87",
+        ),
+        (
+            "Edit the existing D87 entry in docs/decisions.md in place",
+            "Append a new decision to docs/decisions.md that amends D87",
+        ),
+        (
+            "Rewrite D87 in docs/decisions.md to say X",
+            "Append a new decision to docs/decisions.md that amends D87",
+        ),
+        (
+            "Edit existing entries of docs/decisions.md",
+            "Append a new decision to docs/decisions.md that amends D87",
+        ),
+        (
+            "The job must update D87 in the decision log",
+            "The job appends a new decision to the decision log that amends D87",
+        ),
+        (
+            "D87 is rewritten in docs/decisions.md",
+            "docs/decisions.md gains a new decision that amends D87",
+        ),
+        (
+            "Correct records/jobs/x/outcome.json to say landed",
+            "records/jobs/x/outcome.json is not changed",
+        ),
+        ("Edit records/ files by hand", "records/ is not changed"),
+    ];
+
+    #[test]
+    fn judging_rules_refuse_a_behavior_criterion_the_verifier_cannot_run() {
+        for (text, repaired) in JUDGING_REFUSED_COMMANDS {
+            let reading = judging_reading(CriterionKind::Behavior, &[text], &[]);
+            assert_eq!(
+                gate_refuser(&reading),
+                Some("check_judging_rules"),
+                "{text}"
+            );
+            let error = check_judging_rules(&reading).unwrap_err().to_string();
+            assert!(
+                error.starts_with("the reading was refused because criterion 1 ("),
+                "{error}"
+            );
+            assert!(error.contains(&format!("{text:?}")), "{error}");
+            assert_judging_accepts(CriterionKind::Behavior, repaired);
+        }
+        // A content criterion does not cite a command for the verifier to run.
+        assert_judging_accepts(
+            CriterionKind::Content,
+            "Run `cargo fmt`: the tree is formatted",
+        );
+    }
+
+    #[test]
+    fn judging_rules_refuse_each_kind_of_criterion_that_edits_a_decision_or_a_record() {
+        for kind in [CriterionKind::Behavior, CriterionKind::Content] {
+            for (text, repaired) in JUDGING_REFUSED_EDITS {
+                let reading = judging_reading(kind, &[text], &[]);
+                assert_eq!(
+                    gate_refuser(&reading),
+                    Some("check_judging_rules"),
+                    "{text}"
+                );
+                let error = check_judging_rules(&reading).unwrap_err().to_string();
+                assert!(error.contains("criterion 1"), "{error}");
+                assert!(error.contains(&format!("{text:?}")), "{error}");
+                assert_judging_accepts(kind, repaired);
+            }
+        }
+    }
+
+    #[test]
+    fn judging_rules_error_gives_the_repair_for_each_problem() {
+        let error =
+            judging_error(CriterionKind::Behavior, &["Run `cargo fmt`: formatted"]).unwrap();
+        assert!(error.contains("cargo fmt --check"), "{error}");
+        let error =
+            judging_error(CriterionKind::Behavior, &["Run `FOO=1 cargo test`: passes"]).unwrap();
+        assert!(error.contains("Athena sets the environment"), "{error}");
+        let error = judging_error(
+            CriterionKind::Content,
+            &["Edit the existing D87 entry in docs/decisions.md in place"],
+        )
+        .unwrap();
+        assert!(
+            error.contains("append a new decision to docs/decisions.md that amends the old one"),
+            "{error}"
+        );
+        let error =
+            judging_error(CriterionKind::Content, &["Edit records/ files by hand"]).unwrap();
+        assert!(error.contains("never edits it"), "{error}");
+    }
+
+    #[test]
+    fn judging_rules_name_each_refused_criterion_by_number() {
+        let error = judging_error(
+            CriterionKind::Behavior,
+            &[
+                "Run `cargo test`: passes",
+                "Run `cargo fmt`: formatted",
+                "Edit the existing D87 entry in docs/decisions.md in place",
+            ],
+        )
+        .unwrap();
+        assert!(!error.contains("criterion 1 ("), "{error}");
+        assert!(error.contains("criterion 2 ("), "{error}");
+        assert!(error.contains("criterion 3 ("), "{error}");
+    }
+
+    #[test]
+    fn another_criterion_about_a_decision_does_not_excuse_an_in_place_edit() {
+        let error = judging_error(
+            CriterionKind::Content,
+            &[
+                "CHANGELOG.md records the D87 fix",
+                "Edit the existing D87 entry in docs/decisions.md in place",
+            ],
+        )
+        .unwrap();
+        assert!(error.contains("criterion 2 ("), "{error}");
+        assert!(!error.contains("criterion 1 ("), "{error}");
+    }
+
+    #[test]
+    fn judging_rules_refuse_a_deliverable_under_records_and_a_delete_of_the_decision_log() {
+        for action in [
+            DeliverableAction::Create,
+            DeliverableAction::Modify,
+            DeliverableAction::Delete,
+        ] {
+            let reading = judging_reading(
+                CriterionKind::Content,
+                &["the greeting prints"],
+                &[("records/jobs/x/outcome.json", action)],
+            );
+            let error = check_judging_rules(&reading).unwrap_err().to_string();
+            assert!(error.contains("records/jobs/x/outcome.json"), "{error}");
+        }
+        let reading = judging_reading(
+            CriterionKind::Content,
+            &["the greeting prints"],
+            &[("docs/decisions.md", DeliverableAction::Delete)],
+        );
+        let error = check_judging_rules(&reading).unwrap_err().to_string();
+        assert!(error.contains("append-only"), "{error}");
+        // Every append is a modify of the decision log.
+        for action in [DeliverableAction::Modify, DeliverableAction::Create] {
+            let reading = judging_reading(
+                CriterionKind::Content,
+                &["docs/decisions.md gains a new decision"],
+                &[("docs/decisions.md", action), ("CHANGELOG.md", action)],
+            );
+            check_judging_rules(&reading).unwrap();
+        }
+    }
+
+    #[test]
+    fn judging_rules_do_nothing_for_a_reading_without_a_capability() {
+        let mut reading = judging_reading(
+            CriterionKind::Behavior,
+            &["Run `cargo fmt`: formatted"],
+            &[],
+        );
+        reading.capability = None;
+        check_judging_rules(&reading).unwrap();
+    }
+
+    #[test]
+    fn judging_rules_accept_commands_the_verifier_can_run_and_commands_named_as_code() {
+        for text in [
+            "cargo test passes",
+            "cargo test --locked passes",
+            "cargo fmt --check passes",
+            "Run `cargo test`: passes",
+            "Run `cargo --locked test`: passes",
+            "Run `cargo doc`: builds",
+            "Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets` and `cargo test --workspace`: all pass",
+            "Run `cargo fmt --check` | `cargo test`: both pass",
+            "Run `git status --short`: no file under records/ appears",
+            "Run `git log` and `git diff`: the change is in the diff",
+            "Run `athena status`: the counts print",
+            "Run `status`: the counts print",
+            "Run `cargo test -p athena-core format`: the step runs `cargo fmt --all` before `cargo fmt --all --check`",
+            "`cargo fmt --all` runs in the format step before `cargo fmt --all --check`",
+            "Run `cargo test -p athena-git`: the helper runs `git commit` and `git merge --ff-only`",
+            "The pull request is opened with `gh pr create`",
+            "Run `cargo test -p athena-core`: a unit test builds readings with (a) a behavior criterion \
+             requiring `cargo fmt` without --check, and (b) a criterion editing an existing D87 entry in \
+             place in docs/decisions.md; each is refused by the new check, naming the criterion; it fails \
+             with the check removed and passes with it.",
+        ] {
+            assert_judging_accepts(CriterionKind::Behavior, text);
+        }
+    }
+
+    #[test]
+    fn judging_rules_accept_criteria_about_the_decision_log_that_only_append() {
+        for text in [
+            "docs/decisions.md changes only by appending new text at the end",
+            "The log gains a new entry D175 that amends D87",
+            "Append a new decision to docs/decisions.md that supersedes D87",
+            "Append a new decision to docs/decisions.md that amends D87",
+            "Update docs/decisions.md with a new decision",
+            "Update docs/decisions.md and CHANGELOG.md",
+            "CHANGELOG.md is updated to name D174",
+            "the fix changes the behavior D43 describes",
+            "The fix is recorded as D174 in docs/decisions.md",
+            "docs/decisions.md is updated with a new decision D174",
+            "This change adds decision D174",
+            "Update docs/decisions.md to add D174",
+            "CHANGELOG.md records the D87 fix",
+            "Run `cargo test -p athena-cli decisions`: all pass, including the decisions append-only guard",
+        ] {
+            for kind in [CriterionKind::Behavior, CriterionKind::Content] {
+                assert_judging_accepts(kind, text);
+            }
+        }
+    }
+
+    #[test]
+    fn judging_rules_accept_criteria_that_name_records_as_a_subject() {
+        for text in [
+            "records/ is not changed",
+            "the status line shows counts read from records/",
+            "A squash commit that changes records/ but names no job is refused by the records check",
+            "land updates records/jobs/<id>/outcome.json with the landed state",
+            "Fix the records/ loader in store.rs",
+            "The gate refuses a change to records/ that names no job",
+        ] {
+            for kind in [CriterionKind::Behavior, CriterionKind::Content] {
+                assert_judging_accepts(kind, text);
+            }
+        }
+    }
+
+    #[test]
+    fn the_judging_check_is_the_last_step_and_has_one_step_line() {
+        let source = include_str!("reading/checks.rs");
+        let body = source
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .expect("refusing_check is defined")
+            .split("\n}\n")
+            .next()
+            .unwrap();
+        let steps: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("step!(check_"))
+            .collect();
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|l| **l == "step!(check_judging_rules(reading));")
+                .count(),
+            1
+        );
+        assert_eq!(steps.last(), Some(&"step!(check_judging_rules(reading));"));
+    }
+
+    #[test]
+    fn the_judging_check_names_its_root_cause_and_both_jobs() {
+        fn collapse(text: &str) -> String {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        let checks = collapse(include_str!("reading/checks.rs"));
+        let surveys = collapse(include_str!("reading/surveys.rs"));
+        for needle in [
+            "criteria are not tested against D43 and the append-only rules",
+            "20261024-045548-7qht",
+            "20261102-005332-8gkv",
+            "[`check_judging_rules`]",
+        ] {
+            assert!(checks.contains(needle), "checks.rs lacks {needle:?}");
+        }
+        for needle in [
+            "Root cause this check removes",
+            "20261024-045548-7qht",
+            "20261102-005332-8gkv",
+            "D43",
+            "D115",
+            "append-only",
+            "Judging subcommands against the live grant is the named follow-up",
+            "check_boundary_and_repo_files",
+            "Known misses",
+            "higher refusal rate is intended",
+            "expected 3% of newly refused readings",
+        ] {
+            assert!(surveys.contains(needle), "surveys.rs lacks {needle:?}");
+        }
+        let changelog = collapse(include_str!("../../../CHANGELOG.md"));
+        let unreleased = changelog
+            .split("## [Unreleased]")
+            .nth(1)
+            .unwrap()
+            .split(" ## [")
+            .next()
+            .unwrap();
+        let item = unreleased
+            .split("- ")
+            .find(|i| i.contains("reading::check_judging_rules"))
+            .expect("a changelog item names the check");
+        for needle in [
+            "20261024-045548-7qht",
+            "20261102-005332-8gkv",
+            "higher refusal rate is intended",
+            "expected 3% of newly refused readings",
+            "estimate",
+        ] {
+            assert!(item.contains(needle), "the changelog item lacks {needle:?}");
+        }
+        let decisions = include_str!("../../../docs/decisions.md");
+        let d174 = decisions.split("## D174").nth(1).expect("D174 is recorded");
+        let d174 = collapse(d174);
+        for needle in [
+            "Amends D43",
+            "20261024-045548-7qht",
+            "20261102-005332-8gkv",
+            "expected 3% of newly refused readings",
+            "estimate",
+            "live grant",
+        ] {
+            assert!(d174.contains(needle), "D174 lacks {needle:?}");
         }
     }
 

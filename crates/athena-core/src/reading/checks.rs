@@ -487,7 +487,10 @@ pub fn check_reading_references(
 /// deliverable paths and `content` criteria against the boundary
 /// words and the deliverables against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
 /// there is no repository to compare with), then the repo paths its text relies on against the same files
-/// ([`check_reading_references`]). It applies to a first attempt as well as a retry. It runs
+/// ([`check_reading_references`]), then each criterion against the rules that govern how criteria are judged
+/// ([`check_judging_rules`]: criteria are not tested against D43 and the append-only rules, which let jobs
+/// 20261024-045548-7qht and 20261102-005332-8gkv accept a criterion that could not be judged). It applies to
+/// a first attempt as well as a retry. It runs
 /// [`refusing_check`] and drops the name of the check that refused.
 pub fn check_reading_acceptance(
     reading: &Reading,
@@ -547,6 +550,10 @@ pub fn refusing_check(
     step!(check_scope_limit(reading));
     step!(check_boundary_and_repo_files(reading, repo_files));
     step!(check_reading_references(reading, repo_files));
+    // Root cause: criteria are not tested against D43 and the append-only rules (jobs 20261024-045548-7qht
+    // and 20261102-005332-8gkv). This is the broadest check, so it runs last and leaves the order in which
+    // the specific checks refuse unchanged.
+    step!(check_judging_rules(reading));
     None
 }
 

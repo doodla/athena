@@ -113,6 +113,564 @@ pub fn check_criteria_evidence(reading: &Reading) -> Result<()> {
     )
 }
 
+/// Programs that write to the work tree or reach a host. A behavior criterion that has the verifier run one
+/// cannot be judged: the verifier never writes. The download program is named in two parts so that the guard
+/// that scans for HTTP clients outside `src/gh/` does not read this list as a call.
+const WRITE_PROGRAMS: [&str; 10] = [
+    "rm",
+    "mv",
+    "chmod",
+    "cp",
+    "touch",
+    "mkdir",
+    "tee",
+    concat!("cu", "rl"),
+    "wget",
+    "gh",
+];
+
+/// `git` subcommands that change the repository, its refs or the work tree.
+const GIT_WRITE_SUBCOMMANDS: [&str; 20] = [
+    "commit",
+    "push",
+    "add",
+    "reset",
+    "checkout",
+    "switch",
+    "restore",
+    "merge",
+    "rebase",
+    "pull",
+    "fetch",
+    "clone",
+    "tag",
+    "stash",
+    "cherry-pick",
+    "revert",
+    "rm",
+    "mv",
+    "apply",
+    "am",
+];
+
+/// `cargo` subcommands that change files or publish.
+const CARGO_WRITE_SUBCOMMANDS: [&str; 7] = [
+    "install", "publish", "add", "remove", "update", "fix", "yank",
+];
+
+/// Words after which a backticked span is a command the criterion has the verifier run.
+const RUN_WORDS: [&str; 4] = ["run", "running", "execute", "executing"];
+
+/// Verbs that follow a backticked command at the start of a criterion and state its result.
+const RESULT_VERBS: [&str; 11] = [
+    "passes",
+    "passed",
+    "succeeds",
+    "succeeded",
+    "fails",
+    "exits",
+    "prints",
+    "shows",
+    "reports",
+    "returns",
+    "completes",
+];
+
+/// Words that join two cited commands.
+const JOIN_WORDS: [&str; 5] = ["and", "then", "&&", ";", "or"];
+
+/// Verbs that edit an entry, in base form.
+const EDIT_VERBS: [&str; 13] = [
+    "edit",
+    "rewrite",
+    "reword",
+    "revise",
+    "modify",
+    "update",
+    "correct",
+    "replace",
+    "remove",
+    "delete",
+    "overwrite",
+    "fix",
+    "change",
+];
+
+/// Participles of the edit verbs, and of append and add.
+const EDIT_PARTICIPLES: [&str; 14] = [
+    "edited",
+    "rewritten",
+    "reworded",
+    "revised",
+    "modified",
+    "overwritten",
+    "replaced",
+    "removed",
+    "deleted",
+    "changed",
+    "corrected",
+    "updated",
+    "fixed",
+    "appended",
+];
+
+/// Words that may sit between an edit verb and the decision id it edits.
+const ENTRY_WORDS: [&str; 16] = [
+    "the",
+    "a",
+    "an",
+    "this",
+    "existing",
+    "old",
+    "current",
+    "entry",
+    "entries",
+    "text",
+    "wording",
+    "title",
+    "body",
+    "decision",
+    "decisions",
+    "of",
+];
+
+/// Words that lead a verb in the imperative or after a modal.
+const VERB_LEADS: [&str; 9] = [
+    "to", "must", "should", "shall", "will", "and", "then", "please", "also",
+];
+
+/// Words that negate a verb up to three words later.
+const NEGATIONS: [&str; 5] = ["not", "never", "without", "no", "unchanged"];
+
+/// Words that make a verb part of a description of the reading and not an instruction.
+const META_WORDS: [&str; 6] = [
+    "criterion",
+    "criteria",
+    "reading",
+    "deliverable",
+    "text",
+    "rule",
+];
+
+/// Words that may sit between an edit verb and a `records/` path.
+const OBJECT_FILLERS: [&str; 8] = ["the", "a", "an", "any", "existing", "old", "file", "files"];
+
+/// Words that, after a bare `records/`, make it the object of the verb.
+const RECORDS_FOLLOWERS: [&str; 9] = [
+    "in", "to", "so", "directly", "by", "with", "and", "files", "file",
+];
+
+/// One problem a criterion has with the rules that govern how criteria are judged.
+enum JudgingProblem {
+    /// A cited command starts with an environment assignment or `env`.
+    EnvPrefix(String),
+    /// A cited `cargo fmt` without `--check`.
+    FormatWithoutCheck(String),
+    /// A cited command that writes or reaches a host.
+    WritesOrReachesHost(String),
+    /// An instruction to edit an existing decision in place.
+    DecisionEdit,
+    /// An instruction to edit a file under `records/`.
+    RecordsEdit,
+}
+
+/// The byte offsets of each pair of backticks in `text`.
+fn backtick_spans(text: &str) -> Vec<(usize, usize)> {
+    let ticks: Vec<usize> = text.match_indices('`').map(|(at, _)| at).collect();
+    ticks
+        .chunks_exact(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect()
+}
+
+/// The last word of `text`, lowercase and without punctuation around it.
+fn trailing_word(text: &str) -> String {
+    let last = text.split_whitespace().next_back().unwrap_or_default();
+    last.trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase()
+}
+
+/// Whether `gap` (the text between two backticked spans) only joins two commands.
+fn joins_commands(gap: &str) -> bool {
+    let words: Vec<&str> = gap
+        .split_whitespace()
+        .map(|w| w.trim_matches(','))
+        .filter(|w| !w.is_empty())
+        .collect();
+    !gap.trim().is_empty() && words.len() <= 2 && words.iter().all(|w| JOIN_WORDS.contains(w))
+}
+
+/// Whether `after` (the text after a closing backtick) states a result: a colon or a result verb.
+fn states_result(after: &str) -> bool {
+    let rest = after.trim_start();
+    rest.starts_with(':')
+        || RESULT_VERBS
+            .contains(&trailing_word(rest.split_whitespace().next().unwrap_or("")).as_str())
+}
+
+/// The commands a criterion has the verifier run: a backticked span right after run, running, execute or
+/// executing (and the spans joined to it by a comma, `and`, `then`, `&&`, `;` or `or`), and a backticked span
+/// that opens the criterion when a colon or a result verb follows it. A span elsewhere is a mention (of code
+/// under test, say) and is not read.
+fn cited_commands(text: &str) -> Vec<String> {
+    let mut cited: Vec<String> = Vec::new();
+    let mut previous_close: Option<usize> = None;
+    for (open, close) in backtick_spans(text) {
+        let after_run = RUN_WORDS.contains(&trailing_word(&text[..open]).as_str());
+        let joined = previous_close.is_some_and(|p| joins_commands(&text[p + 1..open]));
+        let opening = text[..open].trim().is_empty() && states_result(&text[close + 1..]);
+        if after_run || joined || opening {
+            cited.push(text[open + 1..close].to_string());
+            previous_close = Some(close);
+        } else {
+            previous_close = None;
+        }
+    }
+    cited
+}
+
+/// Whether `word` is an environment assignment, `NAME=value`.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
+/// The problem with one cited command, if it has one. Only rules that hold for every verifier grant are
+/// applied; a program or subcommand not listed here is not judged.
+fn command_problem(span: &str) -> Option<JudgingProblem> {
+    let simple = span.replace("&&", ";").replace("||", ";").replace('|', ";");
+    for command in simple.split(';') {
+        let words: Vec<&str> = command
+            .split_whitespace()
+            .map(|w| w.trim_matches(['"', '\'']))
+            .filter(|w| !w.is_empty())
+            .collect();
+        let Some(&program) = words.first() else {
+            continue;
+        };
+        let shown = words.join(" ");
+        if program == "env" || is_assignment(program) {
+            return Some(JudgingProblem::EnvPrefix(shown));
+        }
+        let args = &words[1..];
+        let problem = match program {
+            "cargo" => match athena_agent::policy::cargo_subcommand(args) {
+                Some("fmt") if !args.contains(&"--check") => {
+                    Some(JudgingProblem::FormatWithoutCheck(shown.clone()))
+                }
+                Some(sub) if CARGO_WRITE_SUBCOMMANDS.contains(&sub) => {
+                    Some(JudgingProblem::WritesOrReachesHost(shown.clone()))
+                }
+                _ => None,
+            },
+            "git" => args
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .filter(|sub| GIT_WRITE_SUBCOMMANDS.contains(sub))
+                .map(|_| JudgingProblem::WritesOrReachesHost(shown.clone())),
+            p if WRITE_PROGRAMS.contains(&p) => {
+                Some(JudgingProblem::WritesOrReachesHost(shown.clone()))
+            }
+            _ => None,
+        };
+        if problem.is_some() {
+            return problem;
+        }
+    }
+    None
+}
+
+/// The clauses of `text`: split at `;`, `:`, a new line and a full stop followed by white space or the end.
+fn clauses(text: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        let ends = match c {
+            ';' | ':' | '\n' => true,
+            '.' => chars.peek().is_none_or(|(_, next)| next.is_whitespace()),
+            _ => false,
+        };
+        if ends {
+            out.push(&text[start..at]);
+            start = at + c.len_utf8();
+        }
+    }
+    out.push(&text[start..]);
+    out
+}
+
+/// One word of a clause: lowercase, without punctuation around it (a `/` stays) and without a trailing `'s`.
+fn judging_word(raw: &str) -> String {
+    let lower = raw.to_lowercase().replace('\u{2019}', "'");
+    let keep = |c: char| c.is_alphanumeric() || c == '/';
+    let trimmed = lower.trim_matches(|c: char| !keep(c));
+    let trimmed = trimmed.strip_suffix("'s").unwrap_or(trimmed);
+    trimmed.trim_matches(|c: char| !keep(c)).to_string()
+}
+
+/// The words of a clause.
+fn judging_words(clause: &str) -> Vec<String> {
+    clause
+        .split_whitespace()
+        .map(judging_word)
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Whether `word` is a decision id: `d` and one to three digits.
+fn is_decision_id(word: &str) -> bool {
+    word.strip_prefix('d')
+        .is_some_and(|n| (1..=3).contains(&n.len()) && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Whether the word at `at` is in verb position: first in the clause or right after a leading word.
+fn in_verb_position(words: &[String], at: usize) -> bool {
+    at == 0 || VERB_LEADS.contains(&words[at - 1].as_str())
+}
+
+/// Whether the word at `at` is negated or part of a description of the reading: a negation, or a meta word,
+/// within the three words before it.
+fn is_excused(words: &[String], at: usize) -> bool {
+    words[at.saturating_sub(3)..at]
+        .iter()
+        .any(|w| NEGATIONS.contains(&w.as_str()) || META_WORDS.contains(&w.as_str()))
+}
+
+/// Whether the words hold `first second` one after the other.
+fn has_pair(words: &[String], first: &str, second: &[&str]) -> bool {
+    words
+        .windows(2)
+        .any(|w| w[0] == first && second.contains(&w[1].as_str()))
+}
+
+/// Whether a clause tells the job to edit an existing decision in place (rules i to iv of
+/// [`check_judging_rules`]).
+fn edits_existing_decision(words: &[String]) -> bool {
+    let logs_decisions = words.iter().any(|w| {
+        matches!(
+            w.as_str(),
+            "docs/decisions.md" | "decisions.md" | "decision" | "decisions"
+        )
+    });
+    if !logs_decisions {
+        return false;
+    }
+    let live = |i: usize| in_verb_position(words, i) && !is_excused(words, i);
+    for (i, word) in words.iter().enumerate() {
+        if EDIT_VERBS.contains(&word.as_str()) && live(i) {
+            // (i) the verb, a few entry words, and an id.
+            for next in words.iter().skip(i + 1).take(4) {
+                if is_decision_id(next) {
+                    return true;
+                }
+                if !ENTRY_WORDS.contains(&next.as_str()) {
+                    break;
+                }
+            }
+        }
+        if matches!(word.as_str(), "append" | "add") && live(i) {
+            // (ii) append or add to an id, with no "new" between.
+            for p in i + 1..=(i + 4).min(words.len().saturating_sub(2)) {
+                if words[p] == "new" {
+                    break;
+                }
+                if matches!(words[p].as_str(), "to" | "onto" | "into" | "in")
+                    && is_decision_id(&words[p + 1])
+                {
+                    return true;
+                }
+            }
+        }
+        // (iii) an id that is edited.
+        if is_decision_id(word)
+            && i + 2 < words.len()
+            && matches!(words[i + 1].as_str(), "is" | "are" | "gets" | "was")
+            && EDIT_PARTICIPLES.contains(&words[i + 2].as_str())
+            && !is_excused(words, i)
+        {
+            return true;
+        }
+    }
+    // (iv) no id: an existing entry, in place, and an edit verb.
+    !words.iter().any(|w| is_decision_id(w))
+        && (has_pair(words, "in", &["place"]) || has_pair(words, "existing", &["entry", "entries"]))
+        && words
+            .iter()
+            .enumerate()
+            .any(|(i, w)| EDIT_VERBS.contains(&w.as_str()) && live(i))
+}
+
+/// Whether a clause tells the job to edit a file under `records/`: an imperative edit verb with a `records/`
+/// object, or `records/` said to be edited in place or by this change.
+fn edits_records(words: &[String]) -> bool {
+    const BARE: &str = "records/";
+    let live = |i: usize| in_verb_position(words, i) && !is_excused(words, i);
+    for (i, word) in words.iter().enumerate() {
+        let verb = EDIT_VERBS.contains(&word.as_str()) || matches!(word.as_str(), "append" | "add");
+        if verb && live(i) {
+            let mut j = i + 1;
+            while j < words.len() && j <= i + 2 && OBJECT_FILLERS.contains(&words[j].as_str()) {
+                j += 1;
+            }
+            if let Some(object) = words.get(j).filter(|o| o.starts_with(BARE)) {
+                let next = words.get(j + 1).map(String::as_str);
+                if object.len() > BARE.len()
+                    || next.is_none_or(|n| RECORDS_FOLLOWERS.contains(&n) || n == "entries")
+                {
+                    return true;
+                }
+            }
+        }
+        if word.starts_with(BARE)
+            && i + 2 < words.len()
+            && matches!(words[i + 1].as_str(), "is" | "are" | "be" | "gets")
+            && (EDIT_PARTICIPLES.contains(&words[i + 2].as_str()) || words[i + 2] == "added")
+            && !is_excused(words, i)
+        {
+            let window = format!(" {} ", words[i + 3..(i + 7).min(words.len())].join(" "));
+            if [
+                " in place ",
+                " by this change ",
+                " by this job ",
+                " by this commit ",
+                " by this fix ",
+                " by the producer ",
+                " by hand ",
+                " manually ",
+            ]
+            .iter()
+            .any(|p| window.contains(p))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Refuses a reading whose criteria or deliverables contradict the defaults that govern how criteria are
+/// judged: D43 (a behavior criterion's evidence is the commands the verifier runs, within its grant, and the
+/// verifier never writes) and the append-only rule for `docs/decisions.md` and `records/`.
+///
+/// Root cause this check removes: the reading stage fixes criteria from the request text, and nothing tested
+/// each criterion against those defaults before it was accepted. A criterion that asks for evidence the
+/// verifier cannot produce, or that asks the job to edit an existing decision or a record in place, is
+/// accepted and then fails at the final verdict, however well the producer works. Jobs
+/// 20261024-045548-7qht (a behavior criterion whose evidence the verifier could not observe; D43 was amended
+/// as D115 afterwards) and 20261102-005332-8gkv (a change that needed an in-place edit of an existing
+/// decision, which the append-only guard refuses) are the two instances. The check runs where criteria are
+/// first fixed, reads only the parsed criteria and deliverables, and costs no model call.
+///
+/// Rules, applied to a reading with a capability:
+/// - A behavior criterion may not cite, as a command the verifier runs, one with an environment prefix
+///   (`NAME=value` or `env`), `cargo fmt` without `--check`, a write program (`rm`, `mv`, `chmod`, `cp`,
+///   `touch`, `mkdir`, `tee`, `wget`, `gh` and the other download program), a `git` write subcommand (`commit`, `push`, `merge` and
+///   the like) or a `cargo` write subcommand (`install`, `publish`, `add`, `update` and the like). A command
+///   is cited only in a backticked span right after run, running, execute or executing (and spans joined to
+///   it), or in a span that opens the criterion and is followed by a colon or a result verb. A span that
+///   names code under test is not read. These rules hold for every verifier grant, so no copy of the grant
+///   is kept; a subcommand the grant allows or forbids by target (`cargo doc`, for one) is not judged.
+///   Judging subcommands against the live grant is the named follow-up.
+/// - No criterion of any kind may tell the job to edit an existing entry of `docs/decisions.md` in place: an
+///   edit verb in verb position followed by a decision id (rule i), append or add to a decision id (rule
+///   ii), a decision id said to be edited (rule iii), or, with no id, an existing entry edited in place (rule
+///   iv). The repair is to append a new decision that amends the old one. No criterion may tell the job to
+///   edit a file under `records/`.
+/// - No deliverable may be a path under `records/`, and `docs/decisions.md` may not be deleted. A modify
+///   deliverable on `docs/decisions.md` stays accepted, since every append is one. In production a modify or
+///   delete of a path absent from the repository files is already refused by
+///   [`check_boundary_and_repo_files`], and `records/` is absent from main, so the deliverable rule matters
+///   for a create and for a check run with no repository files (`check_reading_text`, replay).
+///
+/// Known misses: a git write command, `gh` or a download program written outside a cited span; a decision edit written
+/// with no decision-log word, or in the passive without "in place"; more words between the verb and the id
+/// than the entry words allow; an edit verb in -ing form; a negation or description word placed to dodge
+/// the check. The verifier and D43's judge stay a second layer.
+///
+/// This check refuses more readings; the higher refusal rate is intended.
+/// The share is an estimate, not a measurement (the replay at verification measures it): expected 3% of newly refused readings.
+pub fn check_judging_rules(reading: &Reading) -> Result<()> {
+    if reading.capability.is_none() {
+        return Ok(());
+    }
+    let mut problems: Vec<String> = Vec::new();
+    for (i, criterion) in reading.acceptance_criteria.iter().enumerate() {
+        let mut found: Vec<JudgingProblem> = Vec::new();
+        if criterion.kind == CriterionKind::Behavior {
+            found.extend(
+                cited_commands(&criterion.text)
+                    .iter()
+                    .filter_map(|span| command_problem(span)),
+            );
+        }
+        let clause_words: Vec<Vec<String>> = clauses(&criterion.text)
+            .into_iter()
+            .map(judging_words)
+            .collect();
+        if clause_words.iter().any(|w| edits_existing_decision(w)) {
+            found.push(JudgingProblem::DecisionEdit);
+        }
+        if clause_words.iter().any(|w| edits_records(w)) {
+            found.push(JudgingProblem::RecordsEdit);
+        }
+        for problem in found {
+            let what = match problem {
+                JudgingProblem::EnvPrefix(command) => format!(
+                    "has the verifier run `{command}` with an environment variable or `env`; Athena sets the \
+                     environment, so the verifier cannot set one; cite the command without it"
+                ),
+                JudgingProblem::FormatWithoutCheck(command) => format!(
+                    "has the verifier run `{command}`, which rewrites files; the verifier never writes, so \
+                     cite `cargo fmt --check`"
+                ),
+                JudgingProblem::WritesOrReachesHost(command) => format!(
+                    "has the verifier run `{command}`, which writes or reaches a host; an Environment \
+                     assumption does not let the verifier run it; cite a command the verifier can run, for \
+                     example `git log` or `git status`, or a Grep"
+                ),
+                JudgingProblem::DecisionEdit => "tells the job to edit an existing entry of \
+                     docs/decisions.md in place; the log is append-only, so append a new decision to \
+                     docs/decisions.md that amends the old one"
+                    .to_string(),
+                JudgingProblem::RecordsEdit => "tells the job to edit a file under records/; Athena \
+                     writes records/ and the job never edits it; say what is read from records/ instead"
+                    .to_string(),
+            };
+            problems.push(format!("criterion {} ({:?}) {what}", i + 1, criterion.text));
+        }
+    }
+    for (i, deliverable) in reading.deliverables.iter().enumerate() {
+        let path = deliverable.path.trim().trim_start_matches("./");
+        if path == "records" || path.starts_with("records/") {
+            problems.push(format!(
+                "deliverable {} ({:?}) is under records/, which Athena writes and the job never edits",
+                i + 1,
+                deliverable.path
+            ));
+        } else if path == "docs/decisions.md" && deliverable.action == DeliverableAction::Delete {
+            problems.push(format!(
+                "deliverable {} ({:?}) deletes the decision log, which is append-only; append a new \
+                 decision that amends the old one",
+                i + 1,
+                deliverable.path
+            ));
+        }
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the reading was refused because {}; D43 judges a behavior criterion by commands the verifier runs, \
+         and the decision log and records/ are append-only; restate each so that it can be judged",
+        problems.join("; and ")
+    )
+}
+
 /// The `Code survey:` assumptions of a reading: those whose trimmed text starts with that label, in any case.
 pub(super) fn code_surveys(reading: &Reading) -> Vec<&str> {
     reading
