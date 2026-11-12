@@ -17,9 +17,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod planning;
 mod throughput;
+mod verification;
 
 pub use planning::*;
 pub use throughput::*;
+pub use verification::*;
 
 /// The paths the installed binary is built from: Athena's own code and the files that build and install it. A
 /// change to one of them after the build commit leaves the installed binary stale.
@@ -312,6 +314,7 @@ pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
     ("producers", "producer_settings"),
     ("specialization", "specialization"),
     ("mistakes", "mistakes"),
+    ("verification", "verification"),
     ("repeated", "repeated_causes"),
     ("code health", "code_health"),
     ("audit", "audit"),
@@ -470,6 +473,8 @@ pub struct StatusView {
     /// Mistakes per class and per cause, with the prevention proposed. Apart from `interventions_by_category`,
     /// which counts each mistake under its own category as before.
     pub mistakes: MistakeReport,
+    /// Verification cost, rejections caught, false positives and escapes (requirement OLY-B-A7-04).
+    pub verification: VerificationReport,
     /// Interventions that call for follow-up and that no later request job cites yet (see
     /// [`open_interventions`]). They are not in `open`, which lists jobs.
     pub open_interventions: Vec<OpenIntervention>,
@@ -1319,6 +1324,7 @@ impl Athena {
             interventions_by_category: by_category,
             interventions_by_class: by_class,
             mistakes: mistake_report(&records),
+            verification: verification_report(&records),
             open_interventions,
             restarts: records.restarts.len(),
             forecasts: class_forecasts(&records),
@@ -2980,6 +2986,81 @@ pub(crate) mod planning_cost_tests {
         assert_eq!(json["later_harm"]["unplanned"]["reverts"], 1);
         assert_eq!(json["later_harm"]["unplanned"]["fixes"], 1);
         assert_eq!(json["later_harm"]["unplanned"]["failures"], 1);
+    }
+
+    fn verified(
+        mut j: JobRecords,
+        agent: Option<athena_data::records::Verdict>,
+        verdict: athena_data::records::Verdict,
+        verifier_usd: f64,
+    ) -> JobRecords {
+        let job_id = j.id().clone();
+        j.invocations
+            .push(invocation(&job_id, 7, Role::Verifier, verifier_usd));
+        j.verification = Some(athena_data::records::Verification {
+            job: job_id,
+            candidate_commit: "0".repeat(40),
+            verified_fingerprint: "f".repeat(64),
+            tool_config_from_base: vec![],
+            checks: vec![],
+            check_cleanup: vec![],
+            verifier_invocation: Some(7),
+            criteria: vec![],
+            findings: vec![],
+            request_reading_mismatch: None,
+            agent_verdict: agent,
+            final_verdict: verdict,
+            reasons: vec![],
+            inputs: vec![],
+            summary: None,
+        });
+        j
+    }
+
+    #[test]
+    fn verification_report_counts_cost_caught_false_positives_and_escapes() {
+        use athena_data::records::Verdict::{Fail, Pass};
+        const REVERTED: &str = "20261020-100000-a1a1";
+        const REJECTED: &str = "20261020-110000-b2b2";
+        const OVERRULED: &str = "20261020-120000-c3c3";
+        const CLEAN: &str = "20261020-130000-d4d4";
+        let new =
+            |text: &str, state| job(text, "tidy", "2026-10-20T10:00:00Z", 0, None, state, 0.0);
+        let landed = OutcomeState::Landed;
+        let records = records(vec![
+            verified(new(REVERTED, landed), Some(Pass), Pass, 0.5),
+            verified(
+                new(REJECTED, OutcomeState::Rejected),
+                Some(Fail),
+                Fail,
+                0.25,
+            ),
+            // Rejected by the final verdict, then landed all the same: an overruled rejection.
+            verified(new(OVERRULED, landed), Some(Fail), Fail, 0.25),
+            verified(new(CLEAN, landed), Some(Pass), Pass, 0.5),
+            new("20261022-100000-h8h8", OutcomeState::Failed),
+        ]);
+        let mut records = records;
+        records
+            .jobs
+            .get_mut("20261022-100000-h8h8")
+            .unwrap()
+            .request
+            .as_mut()
+            .unwrap()
+            .text = format!("Revert job {REVERTED}: it breaks the drain.");
+
+        let report = verification_report(&records);
+        assert_eq!(report.verified, 4, "{report:?}");
+        assert!(close(report.cost_usd, 1.5), "{report:?}");
+        assert_eq!(report.caught, 2, "{report:?}");
+        assert_eq!(report.false_positives, 1, "{report:?}");
+        assert_eq!(report.escaped, 1, "{report:?}");
+        // No records: nothing verified, so nothing to count.
+        assert_eq!(
+            verification_report(&Records::default()),
+            VerificationReport::default()
+        );
     }
 
     /// The records of one request job whose stages took the minutes in `m`, starting at `start`: the reader,

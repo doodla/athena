@@ -95,7 +95,7 @@ pub struct KeepRule {
 
 /// How one later record cites a landed job as a cause of trouble (job-planning.md section 9, D143).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LaterCause {
+pub(super) enum LaterCause {
     /// An introspection of a later failure or rejection names the job in its cause or account of what happened.
     Failure,
     /// A later request that asks for a revert names the job.
@@ -115,7 +115,7 @@ fn has_word(text: &str, words: &[&str]) -> bool {
 /// cause or account of what happened; a later request job whose request text names it and asks for a revert or
 /// a fix. A request that names the job without asking for either (a retry, a follow-up, a citation) is not a
 /// cause. Whole-id matching only, so no record is ever rewritten and no new record kind is needed.
-fn later_causes(records: &Records, landed: &JobRecords) -> Vec<LaterCause> {
+pub(super) fn later_causes(records: &Records, landed: &JobRecords) -> Vec<LaterCause> {
     let id = landed.id();
     let mut found = Vec::new();
     let failed = records.introspections.iter().any(|i| {

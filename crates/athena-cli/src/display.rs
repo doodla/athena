@@ -1408,6 +1408,16 @@ pub fn status(v: &StatusView) -> String {
     if v.mistakes.total > 0 {
         out.push_str(&mistakes(&v.mistakes));
     }
+    let vr = &v.verification;
+    if vr.verified == 0 {
+        let _ = writeln!(out, "verification none yet");
+    } else {
+        let _ = writeln!(
+            out,
+            "verification {} verified, cost ${:.2}, caught {}, false positives {}, escaped {}",
+            vr.verified, vr.cost_usd, vr.caught, vr.false_positives, vr.escaped
+        );
+    }
     let _ = writeln!(out, "restarts    {}", v.restarts);
     out.push_str(&forecast_headline_lines(&v.forecasts));
     for (i, p) in v.pending.iter().enumerate() {
