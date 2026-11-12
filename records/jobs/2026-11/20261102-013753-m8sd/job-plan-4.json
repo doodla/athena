@@ -1,0 +1,433 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261102-013753-m8sd",
+  "round": 4,
+  "at": "2026-11-12T16:13:01.969808027Z",
+  "invocation_seq": 8,
+  "approach": "Root cause: the reading gate fixes criteria from the request text, and no step compares each criterion with the defaults that govern how criteria are judged (D43: a behavior criterion's evidence is commands the verifier ran, within its grant; D115; the append-only rule for docs/decisions.md and records/). Fix it at the gate with one new check, `check_judging_rules` (surveys.rs), registered as the last `step!` in `refusing_check` (checks.rs). It reads only the parsed criteria and deliverables and costs no model call. Round 4 changes four things. (a) The command rules are only those that hold for every verifier whatever its grant: an environment-variable prefix or leading `env` (policy.rs:584-591), `cargo fmt` without `--check` (athena.toml:75, reading.rs:627), and write programs or write subcommands (the verifier never writes). The hand-copied grant table and its drift test are dropped. Checking subcommands such as `cargo doc` against the live grant is the named follow-up. (b) The cargo subcommand is found with `athena_agent::policy::cargo_subcommand`, and None is unread. (c) The decision-id rule has no cross-criterion or cross-clause state: no 'new id' marker and no object skip, because the base-form verb-position test and the between-word set already accept the append sentences. Rules (i)-(iii) are the only refusals, so no marker can excuse them. The no-id rule needs all three of: a decision-log word, 'in place' or 'existing entry/entries', and an edit verb in verb position. (d) The dependents now list every reader of `check_reading_text` (steward queue, drain, `athena check-reading`). Other decisions from round 3 stay: cited-run spans only, the imperative `records/` rule, last step position, the three-place root-cause statement, the 13th reader-rule line, D174 appended with 'Amends D43' once, and a decision-links entry.",
+  "decisions": [
+    {
+      "choice": "Register `step!(check_judging_rules(reading));` as the last line of `refusing_check`, after `check_reading_references`.",
+      "reason": "Existing tests fix which check refuses first (reading.rs:5107 expects check_environment_reach; run_pin_tests.rs:1918 and :1985 expect check_criteria_evidence). A last step leaves them unchanged. It is the broadest check, so it runs after the specific ones accept.",
+      "rejected": [
+        {
+          "option": "Place it right after check_criteria_evidence",
+          "why": "It would take over readings that later checks refuse today and change the rule name recorded for them."
+        }
+      ]
+    },
+    {
+      "choice": "Read commands only from cited-run clauses: a backticked span right after run/running/execute/executing (joined to further spans by ',', 'and', 'then', '&&', ';' or 'or'), and an opening backticked span only when ':' or a result verb (passes, passed, succeeds, succeeded, fails, exits, prints, shows, reports, returns, completes) follows the closing backtick. Split each span into simple commands on `&&`, `||`, `;` and `|`. Spans elsewhere are unread.",
+      "reason": "D43 judges the commands a behavior criterion cites as evidence (decisions.md:968-974), not commands the code under test runs. run/format.rs:1 says Athena runs `cargo fmt` on the work tree, and commits.rs:6 names `git merge --ff-only`; criteria about them stay accepted, including '`cargo fmt --all` runs in the format step before `cargo fmt --all --check`'.",
+      "rejected": [
+        {
+          "option": "Read every opening span",
+          "why": "Refuses a code-behavior sentence that begins with a backticked command."
+        },
+        {
+          "option": "Read every backticked span and exempt criteria containing 'refus*' or 'reject*'",
+          "why": "Over-reads code-behavior mentions; the exemption words are topic vocabulary, not a dodge."
+        }
+      ]
+    },
+    {
+      "choice": "Enforce only grant-independent command rules, answering findings 5 and 6. For a cited simple command (words from the shell-style split of the span): (1) refuse a first word of the form NAME=value (NAME letters, digits, '_'; policy.rs:584-591) or the program `env`; (2) refuse `cargo fmt` with no `--check` word after it (athena.toml:75; reading.rs:627); (3) refuse a write program: rm, mv, chmod, cp, touch, mkdir, tee, curl, wget, gh; (4) refuse a git write subcommand: commit, push, add, reset, checkout, switch, restore, merge, rebase, pull, fetch, clone, tag, stash, cherry-pick, revert, rm, mv, apply, am; (5) refuse a cargo write subcommand: install, publish, add, remove, update, fix, yank. The cargo subcommand is found with `athena_agent::policy::cargo_subcommand(&args)` (policy.rs:519, skips allowed global flags, so `cargo --locked test` is `test`); None (an unknown flag or no subcommand) is unread, not refused. The git subcommand is the first non-option word. All other programs and subcommands are unread. Subcommands the grant allows or forbids by target (`cargo doc`) are not judged. The doc comment and D174 name checking against the live grant (`c.verifier_grant(jc).commands`, reading.rs:620-628, passed in through a context struct beside repo_files, about 100 call sites) as the follow-up.",
+      "reason": "No verifier grant allows writing: athena.toml:75 says 'The verifier never writes', and the policy refuses env assignments for every role. These rules cover both observed instances (cargo fmt without --check; the D87 in-place edit is the decision rule) without refusing a target whose grant is wider, so there is no table to drift and no drift test to maintain. The write lists are fixed facts about writing, not copies of a grant.",
+      "rejected": [
+        {
+          "option": "Keep VERIFIER_COMMANDS copied from athena.toml with a drift test",
+          "why": "Wrongly refuses `cargo doc` and similar on a target with a wider grant; the drift test ties it only to this repository (critic finding 5)."
+        },
+        {
+          "option": "Take the second word as the cargo subcommand",
+          "why": "Misreads `cargo --locked test` (critic finding 6); use cargo_subcommand and treat None as unread."
+        },
+        {
+          "option": "Pass the live grant into refusing_check now",
+          "why": "The change reaches 14 sites in reading.rs, replay.rs:55, run/mod.rs:2246 and :2316 and about 100 tests; it does not fit one producer run with the check. Named as the follow-up in D174."
+        },
+        {
+          "option": "An allow-list over all programs",
+          "why": "Refuses `athena status` and `status`, which existing tests accept."
+        }
+      ]
+    },
+    {
+      "choice": "Decision-id rule, applied to every criterion of any kind, with no state across clauses or criteria. Words: lowercase text split on white space, trimmed of leading and trailing characters other than letters, digits and '/', trailing '.' removed, trailing \"'s\" removed. Clauses: split on ';', ':', newline and '. '. An id token is 'd' plus 1 to 3 digits. A clause is read only if it holds a decision-log word (`docs/decisions.md`, `decisions.md`, 'decision', 'decisions'). Verb position: the word is the first of the clause or directly follows one of to, must, should, shall, will, and, then, please, also (an -ing form: directly follows 'by'). Edit verbs, base form only: edit, rewrite, reword, revise, modify, update, correct, replace, remove, delete, overwrite, fix, change. REFUSE when (i) an edit verb in verb position is followed by an id with only these words between (at most 3): the, a, an, this, existing, old, current, entry, entries, text, wording, title, body, decision, decisions, of; (ii) append or add in verb position is followed within 4 words by to/onto/into/in directly before an id, with no 'new' between the verb and that preposition; (iii) an id is directly followed by is/are/gets/was and one of edited, rewritten, reworded, revised, modified, overwritten, replaced, removed, deleted, changed, corrected, updated; (iv) a clause without an id has a decision-log word AND ('in place' OR 'existing entry' OR 'existing entries') AND an edit verb in verb position. All four conditions of (iv) are required (finding 2). SKIP a verb when a negation (not, never, without, no, unchanged) is within 3 words before it, or one of the 3 words before it is criterion, criteria, reading, deliverable, text or rule. There is no new-id marker and no amend/cite object skip (finding 1): they are unnecessary, because 'The fix is recorded as D174' (fix follows 'the'), 'docs/decisions.md is updated with a new decision D174' (-ed form), 'This change adds decision D174' (change follows 'this'; 'adds' is not an edit verb) and 'Update docs/decisions.md to add D174' (docs/decisions.md is not in the between-set) are not matched by (i)-(iv) in the first place. So a sentence elsewhere in the reading such as 'CHANGELOG.md records the D87 fix' cannot excuse 'Edit the existing D87 entry in docs/decisions.md in place' (refused by (i)), and 'Merge refusals no longer fire D87: append a note to D87 in docs/decisions.md' is refused by (ii) (clause after ':' is 'append a note to D87 in docs/decisions.md'). Accept: 'Update docs/decisions.md with a new decision' and 'Update docs/decisions.md and CHANGELOG.md' (no 'in place' or 'existing entries'), 'Append a new decision to docs/decisions.md that amends D87'.",
+      "reason": "Rules (i)-(iv) are the only refusals and nothing can excuse them, so the two instances this job exists to prevent are always refused. Removing the marker and skip removes the contradiction the critic found and the cross-criterion dodge. Each accept sentence is shown by the verb-position and between-word tests, not by an exemption.",
+      "rejected": [
+        {
+          "option": "Keep the new-id marker but apply it only after rules (i)-(iii) refuse, same clause only",
+          "why": "Still needs word lists to say what 'governs' an id; the base-form verb-position and between-set tests already accept every append sentence, so the marker adds a way to dodge and no accepts."
+        },
+        {
+          "option": "Whole-criterion exemption on refus*, reject*, append*, amend*, supersede*",
+          "why": "It would pass the real 8gkv change (commit 620c657, HISTORY.txt:1095)."
+        },
+        {
+          "option": "Refuse every Modify deliverable on docs/decisions.md",
+          "why": "Every legitimate append is a Modify, and this job lists it as a deliverable."
+        },
+        {
+          "option": "Rule (iv) as decision-log word OR in place OR existing entries",
+          "why": "Refuses 'Update docs/decisions.md and CHANGELOG.md' (critic finding 2)."
+        }
+      ]
+    },
+    {
+      "choice": "`records/` rule in criteria: refuse only a criterion that tells the job to edit it. (a) Imperative: an edit verb (edit, rewrite, reword, revise, modify, update, correct, replace, remove, delete, overwrite, fix, change, append, add) in verb position, then at most 2 words from {the, a, an, any, existing, old, file, files}, then a token starting `records/` that has a further path segment, or is followed by end of clause, in, to, so, directly, by, with, and, files, file, entries. (b) Passive about this change: a `records/` token followed directly by is/are/be/gets and an edit participle, then within 3 words 'in place', 'by this change/job/commit/fix', 'by the producer', 'by hand' or 'manually'. The same negation and meta-subject skips apply. Not refused: 'A squash commit that changes records/ but names no job is refused by the records check', 'Fix the records/ loader in store.rs', 'land updates records/jobs/<id>/outcome.json with the landed state', 'records/ is not changed', 'counts read from records/'. Deliverables: any path under `records/` with any action, and Delete of docs/decisions.md, are refused; a Modify of docs/decisions.md is accepted. The doc comment states that in production a Modify or Delete of a path absent from repo_files is already refused by check_boundary_and_repo_files (checks.rs:268-285), and records/ is absent from main after the cutover, so the deliverable rule matters for Create and for runs with repo_files None (`check_reading_text`, replay).",
+      "reason": "Athena's gate and store have records/ as their subject (crates/athena-gate/src/legacy.rs:61; athena.toml:163 'It changes records/ but names no job'); criteria about that behavior stay accepted. The refused shape is the instruction to the job. Finding 4: check_boundary_and_repo_files runs first, so the corpus case for the deliverable rule must be a Create.",
+      "rejected": [
+        {
+          "option": "Refuse a records/ token whenever an edit verb is within 3 words before it",
+          "why": "Refuses code-behavior criteria about the gate and store."
+        },
+        {
+          "option": "Drop the records/ criterion rule and keep only the deliverable rule",
+          "why": "The 8gkv introspection names records/ edits in criteria; the imperative form is unambiguous."
+        }
+      ]
+    },
+    {
+      "choice": "Errors begin 'the reading was refused because' and list 'criterion N (\"text\") ...' per problem. A refused git write, host command (gh, curl) or write program says that an Environment assumption does not let the verifier run it and that the criterion should cite a command the verifier can run, for example `git log` or `git status`, or a Grep. An env prefix says the environment is set by Athena. `cargo fmt` without --check says to use `cargo fmt --check`. A decision or records/ edit says to append a new decision to docs/decisions.md that amends the old one and never to edit records/.",
+      "reason": "check_environment_reach (reading.rs:5113-5115) tells the reader to add an Environment assumption; once added, check_judging_rules refuses the same `git push` criterion. Without this wording the reader meets conflicting advice.",
+      "rejected": [
+        {
+          "option": "Skip git push when an Environment assumption is present",
+          "why": "The Environment assumption states where the host action may happen, not what the verifier may run."
+        }
+      ]
+    },
+    {
+      "choice": "Root-cause statement in three places: the full doc comment of `check_judging_rules` (surveys.rs); a clause in the `check_reading_acceptance` doc (checks.rs) naming the cause and both job ids; a plain `//` comment above the step line that does not contain the text `step!(check_`.",
+      "reason": "Criterion 4 needs a doc comment in checks.rs. A `///` on a macro statement trips unused_doc_comments, an error under clippy -D warnings. The corpus extractor (refusal_corpus.rs:2877) counts `step!(check_` lines.",
+      "rejected": [
+        {
+          "option": "`///` directly on the step line",
+          "why": "unused_doc_comments fails clippy -D warnings."
+        }
+      ]
+    },
+    {
+      "choice": "Raise the reader rule list to 13 lines; the new line is 160 bytes or less and names `check_judging_rules`, D43 and append. Shorten the longest existing lines until the rules section meets READING_RULES_BASELINE_BYTES (3045), hard bound 3150 (briefs.rs:3707-3712); if that is not enough, raise the baseline to the measured size below 3150 and update its comment.",
+      "reason": "BudgetSet::Reader composes only the contract, frame, defaults and catalog (lib.rs:285); the comment at briefs.rs:3705 says the brief text sits outside it. The real limits are the section byte bounds and the 220-byte line cap (briefs.rs:3633).",
+      "rejected": [
+        {
+          "option": "Leave the new rule out of the reader list",
+          "why": "Criterion 6 requires it, and a rule the reader never sees is learned only through a refusal."
+        }
+      ]
+    },
+    {
+      "choice": "Record the rule as D174, appended after D173 at the end of docs/decisions.md. It says 'Amends D43' once, on one line; one [[link]] in decision-links.toml has that line number, older D43, newer D174, status amended. Elsewhere write 'supersede' and 'amend' without a trailing s and with no D-id after them. The entry states the command rules are the grant-independent ones, names passing the live grant as the follow-up, lists the known misses, the step position and the 3% estimate.",
+      "reason": "The guard (decisions.rs:218-232) hashes the first 359622 bytes; the file is longer, so an append passes. parse_supersessions (backtest.rs:78-82, 144-159) turns every 'amends Dnn' or 'supersedes Dnn' into a hit, and an unlisted hit fails decisions.rs:413.",
+      "rejected": [
+        {
+          "option": "Edit D43 or D115 in place",
+          "why": "Forbidden by the guard and by this job's out_of_scope."
+        }
+      ]
+    },
+    {
+      "choice": "Corpus cases carry honest provenance in their ids and comments. The `cargo fmt` case is 'synthetic: the class of 7qht'. The D87 case is 'modelled on the subject of commit 620c657 (HISTORY.txt:1095) and the D150 title; the recorded 8gkv criterion was not available'.",
+      "reason": "The snapshot has no records, so the 7qht and 8gkv criterion texts are not known.",
+      "rejected": [
+        {
+          "option": "Present the cases as the instances",
+          "why": "Unverifiable from the snapshot."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/surveys.rs",
+      "action": "modify",
+      "purpose": "Add `check_judging_rules(reading) -> Result<()>` after `check_criteria_evidence`, with helpers: the cited-run-span extractor and simple-command splitter; the grant-independent command rules (env prefix, `env`, `cargo fmt` without --check, write programs, git and cargo write subcommands, using `athena_agent::policy::cargo_subcommand` with None unread); the word tokenizer and clause splitter; verb-position, negation and meta-subject tests; the decision-id rules (i)-(iv) and the imperative and passive `records/` rules; the deliverable rules; and the error texts. The doc comment names the root cause, both jobs, D43, D115 and the append-only rule; says the rules hold for every grant and that checking subcommands against the live grant is the follow-up; says a Modify or Delete under records/ is already refused in production by check_boundary_and_repo_files; lists the known misses; and declares 'This check refuses more readings; the higher refusal rate is intended.' and 'expected 3% of newly refused readings' (an estimate).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "purpose": "Add `step!(check_judging_rules(reading));` as the last line of `refusing_check`, with a plain `//` comment above it naming the cause and both jobs. Extend the `check_reading_acceptance` doc with a clause linking [`check_judging_rules`], naming the cause (criteria are not tested against D43 and the append-only rules) and citing both job ids.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Tests only: the `judging_reading` helper; `judging_rules_*` refuse tests (including the cross-criterion test), accept tests (including the finding-1, 2, 4 and 6 sentences), one-step-line, error-text and doc/changelog/D174 tests; move the `Run `git push`` text out of the loop at :5089-5116 into its own test that asserts the new Environment-assumption wording.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add `judging_rules_cases()` with the six refuse and eighteen accept cases (ids in the criterion 3 demonstration, synthetic or modelled cases labelled as such), join it in `cases()`, add ten tags to `INPUT_FORMS` (array size 63 to 73) and add `judging_rules_refusal_is_declared_intended`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs/reader.rs",
+      "action": "modify",
+      "purpose": "Add the 13th `READING_RULES` line (160 bytes or less, naming `check_judging_rules`, D43 and append), change `[&str; 12]` to `[&str; 13]`, and shorten the longest existing lines without removing phrases that briefs.rs tests assert.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Update `the_reader_brief_names_each_reading_rule_in_one_short_line`: length 12 to 13, add `check_judging_rules` to the check list, assert the new line; update READING_RULES_BASELINE_BYTES and its comment only if shortening cannot keep 3045.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D174 after D173 with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance. It states the root cause and jobs, 'Amends D43' once, the grant-independent command rules, the decision-id rules without a new-id marker, the imperative records/ rule, the follow-up of passing the live grant, the known misses, the step position and the 3% estimate. No earlier byte changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Add one [[link]] with line set to the file line of D174's 'Amends D43' phrase, older D43, newer D174, status amended.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a bullet at the top of `### Added` under `## [Unreleased]`: `reading::check_judging_rules`, the root cause, both job ids, what is refused and still accepted, 'higher refusal rate is intended', 'expected 3% of newly refused readings' (an estimate) and the reader-rule line.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read surveys.rs:1-115 for the style of `check_criteria_evidence` and `has_phrase`. After it, add `check_judging_rules`, returning Ok when capability is None. Step A (Behavior criteria only): extract cited-run spans (backticked spans right after run/running/execute/executing, joined by ',', 'and', 'then', '&&', ';' or 'or') and opening spans only when ':' or a result verb follows; split each span on `&&`, `||`, `;` and `|`; for each simple command refuse an env prefix or leading `env`, a write program (rm, mv, chmod, cp, touch, mkdir, tee, curl, wget, gh), a git write subcommand, a cargo write subcommand (found with `athena_agent::policy::cargo_subcommand`, None is unread), and `cargo fmt` with no `--check`; skip everything else. Step B (every criterion): tokenize and split into clauses as in decision 4; apply verb-position, between-word set, rules (i), (ii), (iii) and (iv) (all three conditions), the negation skip and the meta-subject skip, with no new-id marker and no object skip and no state across clauses; apply the imperative and passive `records/` rules of decision 5. Step C: deliverables under `records/` (any action) and Delete of docs/decisions.md. The error begins 'the reading was refused because', lists 'criterion N (\"text\") ...' with the reason for each, and ends with the repair. Write the doc comment with the root cause, both job ids, the grant-independent rules and follow-up, the note about check_boundary_and_repo_files, the known misses and the 3% estimate.",
+    "In checks.rs add `step!(check_judging_rules(reading));` as the last line of `refusing_check`, after `check_reading_references`, with a `//` comment above it (not `///`, and without the text `step!(check_`). Add the clause to the `check_reading_acceptance` doc linking [`check_judging_rules`] with 'criteria are not tested against D43 and the append-only rules' and both job ids.",
+    "Check ordering by reading: the step is last, so no earlier refuser changes. The one existing test that changes is the `Run `git push`` text at reading.rs:5094 once an Environment assumption is present.",
+    "In reader.rs add the 13th `READING_RULES` line (160 bytes or less, naming `check_judging_rules`, D43 and append), change `[&str; 12]` to `[&str; 13]`, and shorten the longest existing lines until the section is within its bounds. In briefs.rs update the test at :3625-3713: 13 lines, the new check name, one assertion on the new line, and the baseline only if needed.",
+    "In reading.rs tests add the `judging_reading` helper and the `judging_rules_*` tests: the refuse list including the 8gkv-modelled wording and the cross-criterion reading ('CHANGELOG.md records the D87 fix' plus an in-place D87 edit); the accept list including this job's own criterion 1, `Run `cargo --locked test``, the code-behavior mentions after a cited run, the opening-span format-step sentence, the three finding-1 sentences, 'Update docs/decisions.md to add D174', 'Update docs/decisions.md with a new decision', 'Update docs/decisions.md and CHANGELOG.md', the two finding-2 records sentences and 'Fix the records/ loader in store.rs'; error text; one-step-line and last position; doc/changelog/D174. Move the `git push` text out of the loop at :5089-5116 into its own test that asserts the new Environment-assumption wording. Add a steward-level check only if `cargo test -p athena-core steward` shows a gap.",
+    "In refusal_corpus.rs add `judging_rules_cases()` to `cases()` with the twenty-four cases (Behavior kind on criterion 0 where needed; docs/decisions.md in `repo_files` for the decision cases; the records deliverable case as a Create). Label the synthetic and modelled cases in their comments. Add the ten tags to `INPUT_FORMS` and change the array size to 73. Add `judging_rules_refusal_is_declared_intended`.",
+    "Append D174 to docs/decisions.md after D173 (next id; Provenance bullet; 'Amends D43' once; no external crate or ontology term; the grant-independent rules and the follow-up stated). Grep its line number and add the matching [[link]] to docs/decision-links.toml. Add the CHANGELOG bullet at the top of `### Added`. Touch no earlier byte of the log.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` for the workspace. Check with `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-core judging_rules`, `cargo test -p athena-core steward`, `cargo test -p athena-context`, `cargo test -p athena-cli decisions`, `cargo test -p athena-cli --test drain` and `cargo test -p athena-cli --test budgets`."
+  ],
+  "risks": [
+    {
+      "risk": "The matcher refuses a legitimate criterion: one citing a command as part of the feature under test, one with a decision id near an edit noun, or one about the gate's or store's behavior toward records/.",
+      "mitigation": "Commands are read only from cited-run clauses and from opening spans followed by ':' or a result verb. Decision edits need a base-form edit verb in verb position, only entry words between it and the id, and a decision-log word in the clause. rule (iv) needs all three of its conditions. records/ edits need an imperative or an 'in place / by this change' passive. The accept tests and 18 accept corpus cases cover each shape in the critic findings."
+    },
+    {
+      "risk": "Known misses: a git write command, gh or curl written outside a cited span; a decision edit written without a decision-log word, or in the passive without 'in place'; an edit with more words between verb and id than the allowed set; a negation or meta-subject word used to dodge the check; a `cargo doc` or other grant-dependent subcommand is not judged.",
+      "mitigation": "D174 and the doc comment name these limits. The check blocks the observed instances and their common phrasings; the verifier and D43's judge stay a second layer. Judging subcommands against the live grant is the named follow-up."
+    },
+    {
+      "risk": "The newly refusing step changes which stored proposed readings the drain batch runs (steward.rs:424 uses check_reading_text), so some stored readings are left out until a person runs `athena go`.",
+      "mitigation": "Dependents list the steward, drain and check-reading callers with tests; the effect is the same as for any new reading check and is within the declared 3% estimate."
+    },
+    {
+      "risk": "The rules section of the reader brief is at or near its 3045-byte baseline, so a 13th line can fail the size test. I did not measure the current size.",
+      "mitigation": "The producer reads the measured size from the test failure, shortens existing lines while keeping the asserted phrases (check_records_measure, real records, expected range, independent source, landing time), and only then raises the baseline below the hard 3150 bound with a comment."
+    },
+    {
+      "risk": "A wrong line number in decision-links.toml, or an extra 'supersedes/amends Dnn' phrase in D174, fails the decisions tests.",
+      "mitigation": "Write 'Amends D43' once, find its line with Grep, and put that number in the link. Use 'supersede' and 'amend' with no trailing s and no following id elsewhere. `cargo test -p athena-cli decisions` shows any mismatch."
+    },
+    {
+      "risk": "The real share of newly refused readings is not measured; the planner snapshot has no records, so 3% is an estimate.",
+      "mitigation": "Declare 'expected 3% of newly refused readings' as an estimate in the doc, changelog, D174 and criterion 5. The replay at verification measures it."
+    },
+    {
+      "risk": "A reader who meets the check_environment_reach error for `git push`, adds an Environment assumption, then meets a second refusal.",
+      "mitigation": "The git/host-write error says an Environment assumption does not let the verifier run the command and gives `git log` or `git status` as the way to observe the result; the split-out test asserts that wording."
+    },
+    {
+      "risk": "Whether `athena_agent::policy` is re-exported with `cargo_subcommand` public to athena-core was read only as a pub fn at policy.rs:519, and admission.rs:22 already imports `athena_agent::policy::{Decision, Policy, evaluate}`.",
+      "mitigation": "The path `athena_agent::policy::cargo_subcommand` is the same module path admission.rs uses; if it fails to compile the producer reports it."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusing_check gains a last step that refuses more readings",
+      "dependent": "crates/athena-core/src/reading.rs:722 (production gate `refusing_check`, with the repo file set); crates/athena-core/src/reading/replay.rs:55 (`check_reading_acceptance` in `check_reading_text`); crates/athena-core/src/run/mod.rs:2246 and :2316 (`replay_cases` at verification)",
+      "kind": "code",
+      "test": "cargo test -p athena-core (the judging_rules tests, plus the many existing `check_reading_acceptance(..).unwrap()` accept tests in reading.rs, which stay accepted because commands are read only from cited-run clauses and the decision and records rules need a verb in verb position); cargo test -p athena-core --test refusal_corpus. The replay holds a candidate that newly refuses more than its declared share; criterion 5 declares 3%.",
+      "reason": null
+    },
+    {
+      "name": "check_reading_text (text-only gate) now also refuses stored readings that fail check_judging_rules",
+      "dependent": "crates/athena-core/src/steward.rs:405-431 (`queued_work`, calls check_reading_text at :424 and leaves a stored proposed reading out of the batch when it fails a check); crates/athena-cli/src/drain.rs:116 (doc: the batch runs only a stored reading that passes check_reading_text); crates/athena-cli/src/main.rs:661-687 (`athena check-reading`); crates/athena-core/src/run/mod.rs:2478 (replay builds run that subcommand); crates/athena-core/src/run/tests.rs:1817,1824,2142 and steward.rs:2765, reading.rs:8720-8728, crates/athena-cli/tests/drain.rs:4406-4453 (tests)",
+      "kind": "code",
+      "test": "Effect: a stored proposed reading that the new check newly refuses is left out of the drain batch until a person runs `athena go`, so the batch does not run it. A queued request is not re-read by this path. Tests: cargo test -p athena-core steward; cargo test -p athena-cli --test drain a_proposed_request_whose_latest_reading_fails_a_reading_check_is_not_run_by_the_batch (its 'good' reading must stay Accept); cargo test -p athena-core queued_work.",
+      "reason": null
+    },
+    {
+      "name": "The text 'Run `git push`: the branch is published' is accepted once an Environment assumption is added",
+      "dependent": "crates/athena-core/src/reading.rs:5088-5117 (`environment_reach_refuses_each_host_action_without_an_environment`)",
+      "kind": "code",
+      "test": "Step 5 moves that one text out of the loop into its own test. It asserts `refuser == Some(\"check_environment_reach\")` as before, then adds the Environment assumption and asserts the refuser is `check_judging_rules` with the error naming that an Environment assumption does not let the verifier run it and pointing to `git log` or `git status`. The other 14 texts keep the loop: cargo test -p athena-core environment_reach.",
+      "reason": null
+    },
+    {
+      "name": "The text of refusing_check and of the check_reading_acceptance doc",
+      "dependent": "crates/athena-core/src/reading.rs:4743, :4928, :5410, :7433/:7467, :8132/:8166, :8612, :8891 (tests that split `pub fn refusing_check(` or `check_reading_acceptance` and check step order or the doc)",
+      "kind": "code",
+      "test": null,
+      "reason": "Each finds specific step lines or doc links by name or relative position to a named step, not by position from the end. A new last line and one added doc clause change none of them. Run: cargo test -p athena-core records_measure_has_one_step_line scope_limit_has_one_step_line defined_terms_has_one_step_line_after_environment_reach check_outcome_state_doc_names_root_cause_and_scope environment_reach_has_one_step_line."
+    },
+    {
+      "name": "The corpus rule: every step! line needs a refusing case, and every case tag is in INPUT_FORMS",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs: INPUT_FORMS (:90), `corpus_covers_the_listed_input_forms` (:2826), `every_acceptance_check_has_a_refusing_corpus_case` (:2905), `an_extra_check_with_no_case_is_reported` (:2926), `no_check_bypasses_refusing_check` (:3210)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus (step 6 adds 24 cases and ten tags and changes the array size from 63 to 73)",
+      "reason": null
+    },
+    {
+      "name": "Existing accept cases whose criteria cite commands",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs existing accept cases with Behavior criteria such as `code-reading-with-a-survey` (:2024), `records-measure-change-with-real-records-range-history-json` (:426), `ci-drain-throughput-reading` and `records-throughput-record-types-no-measure-word`; reading.rs tests citing `Run `athena status``, `Run `status``, `Run `athena start`` and `Run `status --snapshot evidence``",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus; cargo test -p athena-core judging_rules_accept. Their cited commands are cargo test, cargo run or programs the check does not read; none cites cargo fmt without --check, a write program, a git or cargo write subcommand, an env-var prefix, an imperative decision edit or an imperative records/ edit.",
+      "reason": null
+    },
+    {
+      "name": "The verifier grant and the command policy",
+      "dependent": "athena.toml:74-76 and :107-108 (`producer_commands`, `verifier_commands`); crates/athena-core/src/reading.rs:620-628 (`verifier_can_run` from the live grant plus 'cargo fmt only with --check'); crates/athena-agent/src/policy.rs:519 (`cargo_subcommand`, called by the new check)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The check reads none of the grant and edits none of these (athena.toml is out of scope). It enforces only rules true for every grant: no env assignment (policy.rs:584-591), `cargo fmt` only with --check (athena.toml:75), no writes. A target with a wider grant (for example `cargo doc`) is not refused. Judging subcommands against the live grant is the follow-up named in D174. `cargo_subcommand` is a pub fn in athena-agent, which athena-core depends on (system facts: crate core deps agent); tested by the `Run `cargo --locked test`` accept test."
+    },
+    {
+      "name": "READING_RULES length and the rules-section size bounds",
+      "dependent": "crates/athena-context/src/briefs.rs:3625-3713 (`the_reader_brief_names_each_reading_rule_in_one_short_line`), READING_RULES_BASELINE_BYTES (:3588); crates/athena-context/src/briefs/reader.rs:287 and :520-523 (the array and the section writer)",
+      "kind": "code",
+      "test": "cargo test -p athena-context (step 4 changes 12 to 13, adds the check name and keeps the line and section bounds)",
+      "reason": null
+    },
+    {
+      "name": "Reader token budget",
+      "dependent": "docs/system-facts.md line `budget reader: 1998 of 2000`; `system_facts_budgets_match_computed`; crates/athena-cli/tests/budgets.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets",
+      "reason": "BudgetSet::Reader composes the contract, the reader frame, the defaults and the catalog (crates/athena-context/src/lib.rs:285). READING_RULES is in the brief, which sits outside that set (comment at briefs.rs:3705), so the figure does not move."
+    },
+    {
+      "name": "docs/decisions.md is append-only; a new entry needs the next id and a Provenance bullet",
+      "dependent": "crates/athena-cli/src/decisions.rs:198-259 (PINNED_LEN, PINNED_SHA256, `check_log`); crates/athena-core/src/mirrors.rs:354 (`decision_log_problems`); the producer-step rule on the decision log (run/checks.rs)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli decisions; cargo test -p athena-core mirrors",
+      "reason": "The change only appends D174 after D173, with a `- **Provenance:**` bullet. The pinned prefix is untouched, so the pinned constants need no change."
+    },
+    {
+      "name": "Supersession phrases in the log and the confirmed link list",
+      "dependent": "crates/athena-cli/src/backtest.rs:78-176 (`parse_supersessions`); crates/athena-cli/src/decisions.rs:105-120, :413-414 (`unlisted` and `not_found` against docs/decision-links.toml); crates/athena-data/src/decision_links.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli decisions (D174 has one 'Amends D43' phrase and one matching [[link]]: line = that phrase's line, older = D43, newer = D174, status = amended)",
+      "reason": null
+    },
+    {
+      "name": "Governed code must reconcile its decision",
+      "dependent": "docs/decision-links.toml [[governs]] D08 (crates/athena-git/src/snapshot.rs, crates/athena-core/src/run/candidate.rs); the D156 reconcile rule",
+      "kind": "rule",
+      "test": null,
+      "reason": "This change touches neither governed path, so no reconcile is needed."
+    },
+    {
+      "name": "Content of the new D174 entry",
+      "dependent": "crates/athena-core/tests/buy_first.rs and crates/athena-cli/tests/ontology.rs (read docs/decisions.md); the boundary-word scan in xtask/tests/policy.rs",
+      "kind": "rule",
+      "test": "cargo test --workspace --locked",
+      "reason": "buy_first reads only the Decision bullets of D36 and D173. D174 names no external crate or ontology term and follows the boundary-word rule."
+    },
+    {
+      "name": "The rule name recorded in ReadingRefusal.rule",
+      "dependent": "crates/athena-core/src/hestia.rs:606-720 (reading-rule refusal sweep, keyed by the recorded rule name); crates/athena-core/src/run_pin_tests.rs:1918 and :1985 (rule `check_criteria_evidence`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core hestia; cargo test -p athena-core run_pin_tests",
+      "reason": "Names are read from the records, so the sweep needs no list change. The new name appears only for readings that earlier checks accept, so the pinned tests still see check_criteria_evidence."
+    },
+    {
+      "name": "The statement of what the verifier can run",
+      "dependent": "crates/athena-core/src/reading.rs:627 ('cargo fmt only with --check'); crates/athena-context/src/briefs/reader.rs:537-540 (the 'What the verifier can run' section)",
+      "kind": "code",
+      "test": null,
+      "reason": "The check enforces that text and does not change it; neither is edited by this plan."
+    },
+    {
+      "name": "Criteria that describe what Athena's gate, store or land does to records/, and the records/ deliverable rule",
+      "dependent": "crates/athena-gate/src/legacy.rs:61 and athena.toml:163 (text 'It changes records/ but names no job'); crates/athena-core/src/store.rs (code that writes records/); crates/athena-core/src/reading/checks.rs:256-285 (`check_boundary_and_repo_files`, refuses a Modify or Delete of a path absent from repo_files before the new step)",
+      "kind": "code",
+      "test": "cargo test -p athena-core judging_rules_accept and the corpus cases gate-sentence-changes-records, store-behavior-updates-records-outcome, fix-the-records-loader, deliverable-under-records-directory",
+      "reason": "The records/ criterion rule refuses only an imperative edit verb in verb position with a records/ object, or a passive 'in place / by this change' form. Sentences about the gate or store use -s forms and are accepted. For deliverables, check_boundary_and_repo_files already refuses a Modify or Delete under records/ in production; the new rule adds Create and the repo_files None paths."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in crates/athena-core/src/reading.rs named `judging_rules_*` call `check_judging_rules` directly (for the error text) and `refusing_check` through the existing `gate_refuser` (reading.rs:7206) for the refusing check's name. Refused Behavior criteria: 'Run `cargo fmt`: the tree is formatted'; 'Run `cargo fmt --all` and `cargo test`: both pass'; '`cargo fmt` passes' (opening span plus result verb); 'Run `cargo --locked fmt`: formatted'; 'Run `RUSTFLAGS=-D warnings cargo test`: passes'; 'Run `git commit -am x`: a commit exists'; 'Run `rm -rf target`: clean'. Refused criteria of any kind: 'Merge refusals no longer fire D87: append a note to D87 in docs/decisions.md' (modelled on 620c657), 'Edit the existing D87 entry in docs/decisions.md in place', 'Rewrite D87 in docs/decisions.md to say X', 'Edit existing entries of docs/decisions.md', 'Correct records/jobs/x/outcome.json to say landed', 'Edit records/ files by hand'. A cross-criterion test (finding 1): one reading holding 'CHANGELOG.md records the D87 fix' and 'Edit the existing D87 entry in docs/decisions.md in place' is refused, naming the second criterion. Refused deliverables: any action on `records/jobs/x/outcome.json` and Delete of docs/decisions.md. Each refused case also asserts that its repaired text ('Run `cargo fmt --check`: ...', 'Append a new decision to docs/decisions.md that amends D87') is accepted. A split-out test for 'Run `git push`: the branch is published' first asserts refuser Some(\"check_environment_reach\"), then adds the Environment assumption (CI_ENVIRONMENT, reading.rs:5113) and asserts the refuser is Some(\"check_judging_rules\") and the error contains 'Environment assumption does not let the verifier run it' and 'git log' or 'git status'.",
+      "command": "cargo test -p athena-core judging_rules",
+      "observes": "Every refused reading gives Some(\"check_judging_rules\") from gate_refuser. The error contains 'criterion N', the quoted criterion text and the repair advice. The cross-criterion reading is refused. The git push error states that an Environment assumption does not let the verifier run the command.",
+      "fails_without": "Removing the `step!(check_judging_rules(reading));` line makes gate_refuser return None and the assertions fail. Removing the function makes the tests not compile. Re-adding a new-id exemption makes the cross-criterion test fail.",
+      "seam": "Production entry points: `check_judging_rules` in surveys.rs (step 1) and `refusing_check` in checks.rs:520 (step line added by step 2). Guard: capability must be Some, else Ok, like check_criteria_evidence at surveys.rs:92. Fixtures, which exist: `reading_with_criterion` (reading.rs:4461), `governed_reading` (:4558), `add_behavior` (:4705) and `gate_refuser` (:7206); the Reading is an argument, so there is no double. A `judging_reading(kind, texts, deliverables)` helper is added by step 5."
+    },
+    {
+      "criterion": 2,
+      "method": "Tests call `check_judging_rules` and `gate_refuser` on accepted shapes: 'cargo test passes'; 'cargo test --locked passes'; 'cargo fmt --check passes'; 'Run `cargo --locked test`: passes' (finding 6); 'Run `cargo doc`: builds' (the grant is not judged; a known limit); 'Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets` and `cargo test --workspace`: all pass'; 'Run `git status --short`: no file under records/ appears'; 'records/ is not changed'; 'the status line shows counts read from records/'; 'docs/decisions.md changes only by appending new text at the end'; 'The log gains a new entry D175 that amends D87'; 'Append a new decision to docs/decisions.md that supersedes D87'; 'Update docs/decisions.md with a new decision' and 'Update docs/decisions.md and CHANGELOG.md' (finding 2); 'Run `cargo test -p athena-core format`: the step runs `cargo fmt --all` before `cargo fmt --all --check`'; '`cargo fmt --all` runs in the format step before `cargo fmt --all --check`'; 'Run `cargo test -p athena-git`: the helper runs `git commit` and `git merge --ff-only`'; 'CHANGELOG.md is updated to name D174'; 'the fix changes the behavior D43 describes'; 'The fix is recorded as D174 in docs/decisions.md'; 'docs/decisions.md is updated with a new decision D174'; 'This change adds decision D174'; 'Update docs/decisions.md to add D174'; 'A squash commit that changes records/ but names no job is refused by the records check'; 'land updates records/jobs/<id>/outcome.json with the landed state'; 'Fix the records/ loader in store.rs'; the exact text of this job's criterion 1; and the existing `Run `athena status`` and `Run `status`` texts. Accepted deliverables: `docs/decisions.md` (Modify) with CHANGELOG.md.",
+      "command": "cargo test -p athena-core judging_rules_accept",
+      "observes": "check_judging_rules returns Ok for each text, and gate_refuser is not Some(\"check_judging_rules\"). The existing accept tests that run `check_reading_acceptance(..).unwrap()` keep passing under `cargo test -p athena-core`.",
+      "fails_without": "Over-matching fails them: reading every backticked span, refusing every Modify of docs/decisions.md, reading a decision id near an -s or -ed form or the nouns 'fix', 'change', 'update', an OR in rule (iv), taking the second word as the cargo subcommand, or refusing any `records/` mention near a verb.",
+      "seam": "Same production functions and in-file fixtures as criterion 1; nothing is injected. The `judging_reading` helper is added by step 5."
+    },
+    {
+      "criterion": 3,
+      "method": "`every_acceptance_check_has_a_refusing_corpus_case` (refusal_corpus.rs:2905) extracts each `step!(check_` line from `refusing_check` (via `function_body`, :2876) and requires a case in which that check refuses. Step 6 adds `judging_rules_cases()` to `cases()`, built with `case(..)` from `base_reading`. Refuse cases (6): `synthetic-class-of-7qht-cargo-fmt-without-check` (numbered `1.` parts); `modelled-on-620c657-append-note-to-d87` (star bullets; docs/decisions.md in `repo_files`); `criterion-edits-existing-d87-entry-in-place`; `other-criterion-records-d87-fix-does-not-excuse-in-place-edit`; `criterion-edits-records-file-imperative`; `deliverable-under-records-directory` (action Create, because check_boundary_and_repo_files, checks.rs:256-285, refuses a Modify or Delete of an absent path first; finding 4). Accept cases (18): `criterion-runs-cargo-fmt-check`; `criterion-cargo-test-passes`; `criterion-runs-cargo-locked-test`; `criterion-mentions-cargo-fmt-all-as-code-behavior`; `criterion-opens-with-cargo-fmt-span-as-code-behavior`; `criterion-appends-new-decision-amending-d87`; `deliverable-appends-a-new-decision`; `changelog-updated-to-name-d174`; `criterion-says-records-not-changed`; `fix-recorded-as-new-d174`; `decisions-updated-with-new-decision`; `update-decisions-with-new-decision-no-id`; `update-decisions-and-changelog`; `change-adds-decision-d174`; `update-decisions-to-add-d174`; `gate-sentence-changes-records`; `store-behavior-updates-records-outcome`; `fix-the-records-loader`. Input forms from the existing cases: `star-bullets`, `numbered-dot-parts`, `numbered-paren-parts-not-read-today` and `lettered-paren-parts-not-read-today` (the last two yield no criterion for this check). Ten tags are added to `INPUT_FORMS` (:90), array size 63 to 73: unrunnable-verifier-command, runnable-verifier-command, command-named-as-code-behavior, command-span-opens-criterion-as-code-behavior, in-place-edit-of-existing-decision, append-only-file-appended-only, decision-id-in-criterion-about-another-file, decision-id-recorded-as-new, records-path-edited, records-path-named-as-code-behavior. Behavior kind is set on criterion 0 as at :2022. I read the surrounding case code and ran none. A test `judging_rules_refusal_is_declared_intended` is added.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "Every case gives its expected outcome. `every_acceptance_check_has_a_refusing_corpus_case` passes with `check_judging_rules` among the extracted names. `corpus_covers_the_listed_input_forms` (:2826) passes with the ten tags used. `an_extra_check_with_no_case_is_reported` (:2926) and `no_check_bypasses_refusing_check` (:3210) still pass.",
+      "fails_without": "With the step line but no refusing case, the coverage test fails and names `check_judging_rules`. With the cases but no step line, the refuse cases get Accept and fail.",
+      "seam": "Production entry point `athena_core::reading::refusing_check`, called by `run(c)` in the corpus file (exists). Fixtures: `case`, `base_reading`, `deliverable` and the per-case `repo_files` map (exist). The new cases and tags are added by step 6."
+    },
+    {
+      "criterion": 4,
+      "method": "A content test modelled on `scope_limit_doc_and_changelog_name_the_cause` (reading.rs:8904) reads checks.rs and surveys.rs with include_str!. It asserts that `refusing_check` has exactly one `step!(check_judging_rules(reading));` line and it is last (after check_reading_references); that the `check_reading_acceptance` doc links [`check_judging_rules`] and contains 'criteria are not tested against D43 and the append-only rules' with 20261024-045548-7qht and 20261102-005332-8gkv; that the `//` comment above the step names the same cause and jobs; and that the doc comment of `check_judging_rules` names the grant-independent rules and the follow-up. Also `Grep step!\\(check_judging_rules crates/athena-core/src/reading/checks.rs`.",
+      "command": "cargo test -p athena-core judging_rules_doc_and_changelog_name_the_cause",
+      "observes": "One step line in last position, and the doc text, comment text and both job ids found.",
+      "fails_without": "Without the step line, the doc clause or the job ids the assertions fail.",
+      "seam": "include_str! of the source files, as at reading.rs:8908 (exists). The test is added by step 5."
+    },
+    {
+      "criterion": 5,
+      "method": "A test modelled on `records_measure_refusal_is_declared_intended` (refusal_corpus.rs:3138) calls `athena_core::reading::replay_declaration` on the 'expected 3% of newly refused readings' criterion text, on the doc comment of `check_judging_rules` and on the CHANGELOG item; each gives share Some(3). It also asserts that the changelog and D174 state 'higher refusal rate is intended' and call 3% an estimate, because the planner snapshot has no records to replay. The 3% is an estimate, not a measurement; the replay at verification measures it.",
+      "command": "cargo test -p athena-core --test refusal_corpus judging_rules_refusal_is_declared_intended",
+      "observes": "A declared share of 3 in the criterion, the doc comment, the CHANGELOG item and D174.",
+      "fails_without": "If the doc, changelog or D174 omit the declaration, the replay holds the job over its newly-refused limit and this test fails.",
+      "seam": "Production function `replay_declaration` (exists, called at refusal_corpus.rs:3140). Doc text via include_str! as at :3152. The test is added by step 6."
+    },
+    {
+      "criterion": 6,
+      "method": "Step 4 adds the 13th `READING_RULES` line in reader.rs (array type `[&str; 13]`) naming `check_judging_rules`, D43 and 'append'. The test at briefs.rs:3625-3713 expects 13 lines, adds the check name to its list and asserts the new line's content. It keeps the 220-byte line cap and the section bounds. Also run `cargo test -p athena-cli --test budgets` for `budget reader: 1998 of 2000`, unchanged because the list is outside BudgetSet::Reader (lib.rs:285).",
+      "command": "cargo test -p athena-context the_reader_brief_names_each_reading_rule_in_one_short_line",
+      "observes": "The reader brief shows 13 rule lines, one naming check_judging_rules. Section bytes are within the bounds. The budgets test passes.",
+      "fails_without": "Without the new line the length and name assertions fail. Without shortening the old lines the section-size assertion fails.",
+      "seam": "Production entry point `reader_brief`, with the test's own `reader_inputs(&reading())` fixture (exists, used at briefs.rs:3626)."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the checks Athena runs on the result: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. The test run includes the decisions guard (`the_decision_log_is_well_formed_and_only_appended_to`, decisions.rs:247), the decision-link tests (decisions.rs:413-414, :483), the mirror rule (mirrors.rs:354), buy_first and ontology, the budgets test, the boundary scan (xtask/tests/policy.rs), the steward and drain tests that call check_reading_text, and every test that calls check_reading_acceptance (reading.rs, replay.rs:55).",
+      "command": "cargo test --workspace --locked",
+      "observes": "All pass. D174 is the next id after D173, has a Provenance bullet and lies after the pinned bytes. Its single 'Amends D43' line number equals the new [[link]] line.",
+      "fails_without": "A malformed D174, a wrong link line, a clippy warning, a format difference or a regression in an existing test fails the matching job.",
+      "seam": "Existing test suites. The one fixture change is moving the `Run `git push`` text out of the loop at reading.rs:5089-5116 into its own test (step 5)."
+    },
+    {
+      "criterion": 8,
+      "method": "The guard `check_log` (decisions.rs:218) confirms the first 359622 bytes of docs/decisions.md still hash to the pinned value and that D174 is the next id. A content check by Read and Grep: CHANGELOG.md has a new bullet at the top of `### Added` under `## [Unreleased]` naming `reading::check_judging_rules`, the root cause, both job ids, 'higher refusal rate is intended', 'expected 3% of newly refused readings' and the refused and accepted examples. `git diff docs/decisions.md` shows only added lines at the end.",
+      "command": "cargo test -p athena-cli decisions",
+      "observes": "The pinned prefix is unchanged, the new entry follows D173, and the changelog item is present.",
+      "fails_without": "An in-place edit of any earlier entry changes the pinned prefix hash and fails the guard.",
+      "seam": "Existing guard `check_log` (decisions.rs:218, exists). The files are edited by step 7."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "0946167863feffc9a21456336d6a3f94b4a28e808142a891c169d2c50e351b82"
+}

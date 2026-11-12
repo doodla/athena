@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261102-013753-m8sd",
+  "round": 2,
+  "at": "2026-11-12T16:04:00.313031073Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The decision-id rule refuses criteria that only append a new decision, because 'fix', 'change' and 'update' are often nouns or append verbs, and rule (i) cannot tell a new id from an existing one.",
+      "evidence": "Rule (i) refuses when an edit verb in the list (it includes fix, change, update, and their -s/-ed/-ing forms) is within 4 words before an id and the clause has a decision-log word. The only exemptions are the amend/supersede/cite object rule, negation and the meta-subject words. Rule (ii) exempts 'new', but rule (i) does not. Worked through the plan's own tokenising: 'The fix is recorded as D174 in docs/decisions.md' puts 'fix' 4 words before d174, so it is refused. 'docs/decisions.md is updated with a new decision D174' puts 'updated' 4 words before, so it is refused. 'This change adds decision D174' puts 'change' 3 words before, so it is refused. Each describes a correct append, and each is the usual wording for a root-cause job that records a decision. None is in the Criterion 2 accept list. The gate never sees the log's content, so it cannot know that D174 is new. At verification the replay over accepted readings will count every such reading as newly refused, against the declared 3%. Fix: Treat an id as new when the same criterion or reading names it with new/add/adds/append/appends/record/records, or when it appears only as the subject of 'is recorded/added/appended'. Refuse under (i) only when the id is the direct object of an imperative edit verb ('Edit D87', 'Rewrite D87', 'update D87's text') or is followed by 'is edited/rewritten/reworded' (rule iii). Drop 'fix' and 'change' as triggers when they follow 'the', 'this' or 'a' (noun use). Add the three sentences above to the Criterion 2 accept test and to the corpus accept cases.",
+      "location": "Decision 4, rule (i) and the edit-verb list; Criterion 2 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The records/ rule refuses criteria that describe what Athena's code does to records/, which is the code-behavior false positive the plan already fixed for commands.",
+      "evidence": "The rule refuses a `records/` token whenever an edit verb is within 3 words before it, unless 'from', 'read', 'reads' or 'reading' is also there. Athena's gate and store work on records/ as their subject. crates/athena-gate/src/legacy.rs:61 and athena.toml:163 contain 'It changes records/ but names no job', so a criterion such as 'A squash commit that changes records/ but names no job is refused by the records check' is refused (no negation word, and no meta-subject word since 'commit' is not on the list). So are 'Fix the records/ loader in store.rs' and 'land updates records/jobs/<id>/outcome.json with the landed state'. Decision 2 limited command reading to cited-run clauses because 'mentions elsewhere are code behavior'. The records/ rule needs the same limit, and the accept list has only 'records/ is not changed' and 'counts read from records/'. Fix: Refuse a records/ path only in a criterion that tells the job itself to edit it: the edit verb opens the clause in the imperative ('Correct records/...', 'Edit records/...') or the clause is passive about the job's change ('records/x is edited/rewritten by this change'). Leave the deliverable rule as it is. Add the legacy.rs-style gate sentence and a store-behavior sentence to the accept tests and the corpus (tag decision-id-in-criterion-about-another-file or a new code-behavior tag).",
+      "location": "Decision 4, the `records/` window; Criterion 2 accept list",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The table copies the verifier grant from this repo's athena.toml, but the grant is read from the target commit's athena.toml for each job and is already at hand where the production gate is called.",
+      "evidence": "JobConfig::at reads athena.toml from the job's commit (capability.rs:33-52). The production caller computes the live grant per capability (`c.verifier_grant(jc).commands`, reading.rs:620-628) a hundred lines before it calls refusing_check (reading.rs:722). The drift test pins only this repository's file. A target whose grant allows, say, `cargo doc` for the verifier would be refused wrongly. The plan records this as interim in D174, so it is noted, not blocking. Fix: Keep the table as the default, but have D174 and the doc comment say that it reflects this repository's grant, not the target's. Better, if it fits: add the grant as an optional field of a small context struct that is passed alongside `repo_files`, defaulting to the table when absent, so the 85 calls change mechanically in one place.",
+      "location": "Decision 3 (VERIFIER_COMMANDS table) and the drift test",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A backticked span that opens a criterion is read as a cited command even when it describes code behavior.",
+      "evidence": "run/format.rs:1 says 'Athena runs `cargo fmt` on the producer's work tree'. A criterion written as '`cargo fmt --all` runs in the format step before `cargo fmt --all --check`' opens with the span, so the check reads it and refuses it because `cargo fmt` has no --check. The plan's accept test covers only the case where the mention comes after 'Run `cargo test ...`:'. Fix: Read an opening span only when it is followed by ':' or by a result verb (passes, succeeds, fails, exits, prints, shows). Add the format-step sentence above as an accept case.",
+      "location": "Decision 2 ('or that open the criterion')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "For `git push`, two checks now give conflicting repairs. check_environment_reach says to add an `Environment:` assumption; once that is done, check_judging_rules refuses the same criterion.",
+      "evidence": "reading.rs:5113-5115 asserts that adding CI_ENVIRONMENT clears the refusal for 'Run `git push`: the branch is published'. The plan's split-out test then expects check_judging_rules to refuse it. A reader following the first error would be refused a second time with different advice. Fix: In check_judging_rules' error for a git or host write command, say that an Environment assumption does not let the verifier run it, and that the criterion should cite a command or Grep the verifier can run (for example `git log` or `git status`) to observe the result. Assert that wording in the split-out test.",
+      "location": "Dependents entry for reading.rs:5088-5117 and the error text in Step 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the snapshot, and the plan's facts check out. `refusing_check` ends with `check_reading_references` (checks.rs:534-549). `verifier_commands` sit at athena.toml:76 and :108, and the producer-only programs are rm, mv and chmod (:74, :107). D173 is the last decision. PINNED_LEN is 359622. INPUT_FORMS is `[&str; 63]`. READING_RULES is `[&str; 12]`. The rules-section bounds are 3045 and 3150 (briefs.rs:3588, :3707-3712). The `git push` loop is at reading.rs:5089-5116. Placing the step last, the drift test for the command table, reading commands only after Run/Execute, and the D174 and link plan are all sound. The weak part is the append-only matcher. It is a word-window heuristic, and its edit-verb list includes words that are often nouns ('fix', 'change', 'update'). Rule (i) has no way to tell a new decision id from an existing one. So the most common wording for a correct append is refused, for example 'The fix is recorded as D174 in docs/decisions.md' or 'docs/decisions.md is updated with a new decision D174'. The `records/` window also refuses criteria that describe what Athena's code does to records/. The plan narrowed the command rule to avoid exactly this problem but did not narrow the records/ rule; the repo's own gate code has this shape (athena-gate legacy.rs:61, 'It changes records/ but names no job'). Both would refuse valid readings, and the verification replay would count them as new refusals beyond the declared 3%. They need narrowing and accept tests before the plan can be accepted."
+}
