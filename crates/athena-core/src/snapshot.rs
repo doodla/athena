@@ -15,7 +15,7 @@
 //! unchanged [`Throughput::text`], so the same records and history give the same throughput section.
 
 use crate::state::StateDir;
-use crate::status::Throughput;
+use crate::status::{ClassSpecialization, Throughput, specialization};
 use crate::store::{Records, landing_files};
 use anyhow::{Context, Result, bail};
 use athena_data::JobId;
@@ -243,6 +243,8 @@ pub struct SnapshotView {
     pub landing_records: usize,
     /// Throughput over the snapshot's records; none when no request job landed.
     pub throughput: Option<Throughput>,
+    /// Producer settings per class of work against the most-used one, as `athena status` shows them.
+    pub specialization: Vec<ClassSpecialization>,
     /// Files under `records/` that are not acceptable records.
     pub invalid_records: Vec<String>,
 }
@@ -274,6 +276,7 @@ pub fn status(dir: &Path) -> Result<SnapshotView> {
         jobs_by_state,
         landing_records: records.landings.len(),
         throughput: Throughput::compute(&records),
+        specialization: specialization(&records),
         invalid_records: records.invalid.clone(),
     })
 }
