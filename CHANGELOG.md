@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- OLY-B-O5-01 now has a mechanism: `athena restart` (`Manager::restart` in `crates/athena-core/src/manage.rs`) and
+  the `restarts` line of `athena status`. The measure ends `status: restarts`, and the new lifecycle test
+  `a_restart_raises_the_restarts_count_athena_status_prints` shows the count go from 0 to 1.
 - OLY-B-O1-01 now has a mechanism: `bootstrap_range` (rule M6) in `crates/athena-gate/src/invariant.rs`, which
   accepts `Athena-Job: bootstrap` commits only until `records/jobs/bootstrap/outcome.json` closes the range. The
   measure is `status: not shown` and names `cargo test -p athena-gate bootstrap` (the new
