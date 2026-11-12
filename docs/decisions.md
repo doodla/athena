@@ -4991,3 +4991,34 @@ should replace those estimates with its figures.
   Follow-ups, not done: call the check where a change lands; require a new heading through
   `athena_data::decision_links::headings`, which needs both log texts as inputs; merge the two constants. Not
   measured: the share of newly refused readings; no reading rule changed.
+
+## D173 · Buy before build: syn, proc-macro2 and toml_edit are adopted, and a test ties the dependency list to the record
+
+- **Case:** OLY-B-STD-03 (adopt maintained options, build only for needs they do not meet, name those needs) was
+  active with no mechanism. D36 records the crates adopted early on, but `proc-macro2`, `syn` and `toml_edit` are in
+  the root `[workspace.dependencies]` with no recorded call, and nothing stopped the next crate arriving the same way.
+- **Decision:**
+  - Adopted:
+    - `syn`, with `proc-macro2` for its spans, to read Rust source in `crates/athena-core/src/code_health.rs` and
+      `crates/athena-core/src/design_surface.rs`. The unmet need is function lengths and the public surface read
+      from a real syntax tree; counting braces breaks on strings, comments and macros.
+    - `toml_edit`, to read and rewrite configuration and proposals while keeping comments and layout. The unmet
+      need is edits that leave the owner's formatting alone, which `toml` does not do.
+  - D36 is unchanged. The test in `crates/athena-core/tests/buy_first.rs` reads the Decision bullets of D36 and of
+    this entry together, and fails when an external crate in the root `[workspace.dependencies]` is not named in
+    backticks in one of them. The OLY-B-STD-03 measure is `status: not shown` and names that test.
+- **Alternatives:** Brace counting or a regex scan of source, which misreads strings and macros. A lint tool run as a
+  subprocess, which adds an external program to the build. The `toml` crate alone, which drops comments on write.
+  A prose-only rule, as in `docs/enforcement.md`, which a new crate can pass unnoticed.
+- **Tradeoff:** The check shows that a call was recorded, not that no better maintained option exists; that stays a
+  verifier judgement. It reads only the root manifest, so a member crate that names a dependency directly in its own
+  manifest is not seen. It is one-way and keys on the heading text: a later decision that drops a crate is not
+  followed, and a record for a crate no longer in the manifest is not flagged. Only Decision bullets count, so a crate
+  named only under Alternatives is refused.
+- **Reversal cost:** Low; remove the test, the spec text and the timings line. No dependency was added or removed.
+- **Provenance:** Read: D36, `Cargo.toml`, `crates/athena-core/src/code_health.rs`,
+  `crates/athena-core/src/design_surface.rs`, `crates/athena-core/src/proposals.rs`,
+  `crates/athena-core/tests/model_roster.rs`, `crates/athena-core/src/hestia.rs` (spec review). Measured: the new
+  test file, including a stray crate, a crate named only as a rejected alternative, and D36 alone. Not measured:
+  whether a better maintained option exists for any crate; no reading rule changed, so no share of newly refused
+  readings applies.
