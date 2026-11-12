@@ -317,6 +317,7 @@ pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
     ("audit", "audit"),
     ("audience", "audience"),
     ("forecasts", "forecasts"),
+    ("restarts", "restarts"),
     ("requirement", "spec_gaps"),
     ("readings", "reading_rules"),
 ];
@@ -1648,6 +1649,35 @@ mod mistake_tests {
         let gaps = crate::hestia::spec_gaps(&requirements);
         assert!(gaps.iter().all(|g| g.id != "OLY-B-GOAL-03"));
         assert!(STATUS_MEASURE_LABELS.contains(&("forecasts", "forecasts")));
+        // Without the mechanism the requirement is a gap again.
+        let mut without = req.clone();
+        without.mechanism = "none".into();
+        let gaps = crate::hestia::spec_gaps(&[without]);
+        assert!(gaps.len() == 1 && gaps[0].no_mechanism);
+    }
+
+    #[test]
+    fn oly_b_o5_01_is_met_by_athena_restart_and_shown_by_the_restarts_line() {
+        assert!(STATUS_MEASURE_LABELS.contains(&("restarts", "restarts")));
+        assert_eq!(
+            crate::hestia::measure_problem("Restarts counted; status: restarts"),
+            None
+        );
+        let requirements =
+            crate::hestia::parse_spec(include_str!("../../../docs/spec.toml")).unwrap();
+        let req = requirements
+            .iter()
+            .find(|r| r.id == "OLY-B-O5-01")
+            .expect("OLY-B-O5-01 is in the spec");
+        assert!(req.mechanism != "none", "{}", req.mechanism);
+        assert!(req.mechanism.contains("manage.rs"), "{}", req.mechanism);
+        assert!(req.mechanism.contains("status.rs"), "{}", req.mechanism);
+        assert!(req.mechanism.contains("display.rs"), "{}", req.mechanism);
+        assert_eq!(req.owner, "Athena");
+        assert!(req.measure.ends_with("status: restarts"), "{}", req.measure);
+        assert_eq!(crate::hestia::measure_problem(&req.measure), None);
+        let gaps = crate::hestia::spec_gaps(&requirements);
+        assert!(gaps.iter().all(|g| g.id != "OLY-B-O5-01"));
         // Without the mechanism the requirement is a gap again.
         let mut without = req.clone();
         without.mechanism = "none".into();
