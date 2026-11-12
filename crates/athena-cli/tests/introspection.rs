@@ -289,6 +289,43 @@ fn athena_audit_prints_mistakes_before_any_audit() {
     assert_eq!(json["mistakes"]["by_cause"]["no cause recorded"], 1);
 }
 
+#[test]
+fn status_prints_a_verification_line_with_cost_caught_false_positives_and_escaped() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let mut view = athena.status().unwrap();
+    view.verification = athena_core::status::VerificationReport {
+        verified: 4,
+        cost_usd: 1.5,
+        caught: 2,
+        false_positives: 1,
+        escaped: 1,
+    };
+    let text = athena_cli::display::status(&view);
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("verification"))
+        .unwrap_or_else(|| panic!("no verification line in:\n{text}"));
+    assert_eq!(
+        line,
+        "verification 4 verified, cost $1.50, caught 2, false positives 1, escaped 1"
+    );
+}
+
+#[test]
+fn status_verification_line_says_none_yet_with_no_verifications() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let view = athena.status().unwrap();
+    let text = athena_cli::display::status(&view);
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("verification"))
+        .unwrap_or_else(|| panic!("no verification line in:\n{text}"));
+    assert_eq!(line, "verification none yet");
+    assert!(!line.contains('0'), "{line}");
+}
+
 fn athena_bin(fx: &Fixture) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_athena"));
     cmd.env_remove("ATHENA_NESTED")
