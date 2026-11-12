@@ -1428,9 +1428,60 @@ pub fn plan_spec_requests(gaps: &[SpecGap], records: &Records) -> SpecPlan {
     plan
 }
 
+/// The vocabulary file the requirements engineer owns beside [`SPEC_FILE`].
+pub const ONTOLOGY_FILE: &str = "docs/ontology.toml";
+
+/// The requirements engineer's check (OLY-A-07): the gaps in the spec and the shared vocabulary, one line
+/// each. An active requirement with a blank owner, a blank or `none` mechanism, or a failing measure is a
+/// gap, and so is an ontology `[[term]]` with no sources. `ontology` is `None` for a repository with no
+/// vocabulary file. A clean spec and vocabulary give no lines.
+pub fn requirements_engineer_gaps(spec: &str, ontology: Option<&str>) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for r in parse_spec(spec)?.iter().filter(|r| r.active) {
+        if r.owner.trim().is_empty() {
+            out.push(format!("requirement {} has no owner", r.id));
+        }
+        if blank_or_none(&r.mechanism) {
+            out.push(format!("requirement {} has no mechanism", r.id));
+        }
+        if let Some(problem) = measure_problem(&r.measure) {
+            out.push(format!(
+                "requirement {} has a failing measure: {problem}",
+                r.id
+            ));
+        }
+    }
+    if let Some(text) = ontology {
+        let doc: toml_edit::DocumentMut = text
+            .parse()
+            .context("docs/ontology.toml is not valid TOML")?;
+        if let Some(terms) = doc
+            .get("term")
+            .and_then(toml_edit::Item::as_array_of_tables)
+        {
+            for term in terms {
+                let name = term
+                    .get("name")
+                    .and_then(toml_edit::Item::as_str)
+                    .unwrap_or("(unnamed)");
+                let sourced = term
+                    .get("sources")
+                    .and_then(toml_edit::Item::as_array)
+                    .is_some_and(|s| !s.is_empty());
+                if !sourced {
+                    out.push(format!("ontology term `{name}` has no source"));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// What one spec review did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SpecReport {
+    /// The requirements engineer's gaps in the spec and the vocabulary ([`requirements_engineer_gaps`]).
+    pub engineer_gaps: Vec<String>,
     /// How many active requirements lack a mechanism or a valid measure.
     pub gaps: usize,
     /// The requests queued: requirement id and job.
@@ -1451,7 +1502,24 @@ impl Athena {
         let gaps = spec_gaps_at(&self.git, &head)?;
         let records = Records::load(&self.git, &head)?;
         let plan = plan_spec_requests(&gaps, &records);
+        let engineer_gaps = match self.git.show_file(&head, SPEC_FILE)? {
+            Some(bytes) => {
+                let spec = String::from_utf8(bytes).context("docs/spec.toml is not UTF-8")?;
+                let ontology = self
+                    .git
+                    .show_file(&head, ONTOLOGY_FILE)?
+                    .map(String::from_utf8)
+                    .transpose()
+                    .context("docs/ontology.toml is not UTF-8")?;
+                requirements_engineer_gaps(&spec, ontology.as_deref())?
+            }
+            None => Vec::new(),
+        };
+        for gap in &engineer_gaps {
+            ui.line(&format!("hestia     requirements engineer: {gap}"));
+        }
         let mut report = SpecReport {
+            engineer_gaps,
             gaps: gaps.len(),
             already_open: plan.already_open,
             deferred: plan.deferred,
@@ -4048,6 +4116,74 @@ mod tests {
         );
         assert!(parse_spec("this is not = = toml").is_err());
         assert_eq!(parse_spec("").unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn the_requirements_engineer_names_spec_and_vocabulary_gaps_and_nothing_for_a_clean_pair() {
+        let clean_spec = req(
+            "R-1",
+            "Athena checks.",
+            "active",
+            "a path",
+            "t; status: not shown",
+        );
+        let clean_onto = "[[term]]\nname = \"job\"\nsources = [\"D1\"]\n";
+        assert_eq!(
+            requirements_engineer_gaps(&clean_spec, Some(clean_onto)).unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(
+            requirements_engineer_gaps(&clean_spec, None)
+                .unwrap()
+                .is_empty()
+        );
+
+        let bad_spec = [
+            clean_spec.replace("owner = \"Hestia\"", "owner = \"\""),
+            req("R-2", "Two.", "active", "a path", ""),
+        ]
+        .concat();
+        let bad_onto = format!("{clean_onto}[[term]]\nname = \"orphan\"\nsources = []\n");
+        let gaps = requirements_engineer_gaps(&bad_spec, Some(&bad_onto)).unwrap();
+        assert!(
+            gaps.iter().any(|g| g == "requirement R-1 has no owner"),
+            "{gaps:?}"
+        );
+        assert!(
+            gaps.iter()
+                .any(|g| g.starts_with("requirement R-2 has a failing measure")),
+            "{gaps:?}"
+        );
+        assert!(
+            gaps.iter()
+                .any(|g| g == "ontology term `orphan` has no source"),
+            "{gaps:?}"
+        );
+        assert_eq!(gaps.len(), 3, "{gaps:?}");
+    }
+
+    #[test]
+    fn the_spec_review_reports_the_requirements_engineers_gaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let spec = req(
+            "R-1",
+            "Athena checks.",
+            "active",
+            "a path",
+            "t; status: not shown",
+        );
+        put_spec(
+            dir.path(),
+            &athena,
+            &spec.replace("owner = \"Hestia\"", "owner = \"\""),
+        );
+        let report = athena.spec_review(&crate::Quiet).unwrap();
+        assert_eq!(
+            report.engineer_gaps,
+            vec!["requirement R-1 has no owner".to_string()]
+        );
     }
 
     #[test]
