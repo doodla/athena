@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013714-we6c",
+  "round": 1,
+  "at": "2026-11-12T11:27:03.083921367Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "xtask/shard-timings.txt is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, xtask/shard-timings.txt",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Idempotence is checked only by finding the strings `fn gitleaks_present` and `already installed` in main.rs. That shows the code exists, not that a second run skips the install, even though behavior tests for the skip already exist.",
+      "evidence": "xtask/src/main.rs:988 `sccache_install_skips_when_present_and_fails_clearly` asserts that `install_sccache_at` never calls its runner when the binary is present (`bail!(\"must not run\")`, line 1006). xtask/src/main.rs:1116 `a_cached_gitleaks_is_skipped_only_when_it_reports_the_pinned_version` exercises `gitleaks_present` on a fake binary. The plan's measure names neither test, and the reading asks the test to show the path is idempotent. Fix: Name these two existing unit tests in the measure, for example `cargo test -p xtask --bin xtask sccache_install_skips_when_present a_cached_gitleaks_is_skipped`, as the evidence of the skip-if-present behavior. The string match in setup_repeatable.rs can stay as a guard, or be dropped.",
+      "location": "Step 2 `the_other_pins_are_exact` / Demonstration criterion 2 (g); Step 1 measure text",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "setup.sh has two `if ! command -v cargo` lines (lines 9 and 12). Checking that the curl and rustup-init lines come after that text passes against either guard, so it does not show the install is inside the cargo-missing block.",
+      "evidence": "setup.sh:9 is `if ! command -v cargo >/dev/null 2>&1 && [ -x ...cargo ]; then` (it only extends PATH). setup.sh:12 is the guard that wraps the download (lines 13-27), and it closes with `fi` at line 28. Fix: Anchor the check to the guard line that is exactly `if ! command -v cargo >/dev/null 2>&1; then` (no `&&`). Assert that the curl, checksum and rustup-init lines fall between it and the next line that is exactly `fi`, and that the `exec` line comes after that `fi`.",
+      "location": "Step 2 `the_rustup_install_runs_only_when_cargo_is_missing`; Demonstration criterion 2 (e)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. It records the existing setup path (setup.sh handing off to `xtask setup`) as the mechanism for OLY-B-RUN-02, adds a file-reading test in xtask/tests/, and adds a real `parse_spec`/`spec_gaps` test in hestia.rs. That hestia.rs test copies the OLY-B-O1-01 and OLY-B-SET-04 tests at hestia.rs:4315-4364, which I read. I checked these claims against the snapshot and they hold: the spec entry at docs/spec.toml:2304-2307 currently has mechanism `none`; setup.sh pins RUSTUP_VERSION=1.28.2 with four `sum=` arms, refuses to run on a checksum mismatch, and ends in one `exec cargo run --quiet --locked --release -p xtask -- setup \"$@\"`; `blank_or_none`, `measure_problem` and `spec_gaps` are at hestia.rs:1206/1219/1291; xtask already has regex, serde and toml as dev-dependencies (xtask/Cargo.toml:21-26), so no Cargo change is needed; `checked_in_timings_cover_every_workspace_test_unit` (ci_shards.rs:411) does require the new shard-timings line, and `policy`/`site_page` sit at lines 72-73. I grepped for other readers of docs/spec.toml (status.rs, iris.rs, preflight.rs, model_roster.rs, bootstrap_requirement.rs, and hestia.rs:4287). Each looks up its own requirement id or only asserts non-blank fields, so filling this entry does not break them. The demonstrations would fail without the change: with mechanism `none`, both the xtask entry test and the hestia not-a-gap assertion fail. The departure from criterion 5 (hestia.rs, CHANGELOG.md and shard-timings also change) is stated in the risks and is forced by listed deliverables and by cargo test. Athena already raised the shard-timings scope point. My two findings are minor: the idempotence check matches strings when behavior tests for it already exist, and the cargo-guard ordering check is ambiguous because setup.sh has two identical guards."
+}
