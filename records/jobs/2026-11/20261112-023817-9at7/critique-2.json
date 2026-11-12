@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261112-023817-9at7",
+  "round": 2,
+  "at": "2026-11-12T02:46:08.71369192Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out four non-test readers of Config::parse. Two of them swallow a refusal silently.",
+      "evidence": "I grepped `Config::parse(` across *.rs. Lines content.rs:99 (`Config::parse(&text).err()`, which raises Rule::Configuration for any commit that changes athena.toml) and content.rs:133 (new_exemptions) are in the gate content rule. That rule also runs on every past commit that touched athena.toml during `athena check --history`. invariant.rs:829-833 (trailers_stopped) and gh/records.rs:313-317 (cutover_job_for) both use `.ok()`. A parent config refused by the new rule makes them return false or None. That changes whether Athena- trailers are required, and whether the cutover runs, without reporting anything. xtask/src/main.rs:184 also loads athena.toml. None of these appear in the Dependents. The history entry names only check_history_with_exempt, Judged::new and config_at. Fix: Add these readers to the Dependents. For each, give its test: cargo test -p athena-gate for content.rs and invariant.rs, cargo test -p athena-core for gh/records.rs, and the xtask tests for main.rs. Extend the history risk to cover the content-rule path. State that trailers_stopped and cutover_job_for fall back silently, and either accept that with a reason (every athena.toml on the current path names all three families) or name the check that would show it, such as the CI `athena check --history` job together with a reconcile or cutover test.",
+      "location": "Plan, Dependents; crates/athena-gate/src/content.rs:99,133; crates/athena-gate/src/invariant.rs:832; crates/athena-core/src/gh/records.rs:314; xtask/src/main.rs:184",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "As worded, the spec-slice check on the measure line would fail on the TOML closing quote.",
+      "evidence": "spec.toml entries are written as `measure = \"...; status: requirement\"` (spec.toml:2023). The raw line ends with `\"`, not `status: not shown`, so a plain ends_with check on the line fails even when the entry is correct. Fix: Trim the trailing quote before the check, or parse the block with the toml crate (or hestia parse_spec) and assert on the measure value.",
+      "location": "Plan step 4(c) and the Criterion 1 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Part of the history evidence does not follow.",
+      "evidence": "The plan says that because validate keeps the verifier outside producer_allowed and the default producer inside it (config.rs:643-656), any config that parsed had an Opus-class verifier and Sonnet/Haiku producers. Those rules say nothing about model families, so they imply no such thing. Only the decisions.md records and the CI history job support the claim. Fix: Drop the inference from validate's old rules. Rely on docs/decisions.md and the named CI `athena check --history` run, and say that the producer reports a failing past commit instead of weakening the rule.",
+      "location": "Decision 2 and the Risks section",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "briefs.rs is listed as a deliverable to modify but is expected to have an empty diff.",
+      "evidence": "The expected deliverables list briefs.rs as (modify). The plan expects no change and asks the verifier not to count that against it. The briefs.rs fixtures never reach Config::parse, which the plan has already established. Fix: Keep the no-change explanation in the final report, as planned, so the verifier sees why the file is unchanged.",
+      "location": "Plan, Files: crates/athena-context/src/briefs.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The design is sound and fits the accepted reading. It enforces the families in Config::validate, which Config::parse calls on every load (config.rs:616-619). It drops the ROSTER and leaves jev.rs alone. The opus case uses a verifier outside producer_allowed, so VerifierCanProduce does not fire first. The text-changed helper stops a missed pattern from passing silently, and the shard-timings position is correct (shard-timings.txt:52-53). Several things I read match what the plan says: athena.toml:10-32, the jev constants at jev.rs:31-33, and OLY-B-SET-02 at spec.toml:2020-2023. One major problem remains: the dependents list is incomplete. A grep for Config::parse finds non-test readers the plan does not name. These are the gate content rule (athena-gate/src/content.rs:99 and :133), which re-parses every committed athena.toml, including during the history walk; trailers_stopped (athena-gate/src/invariant.rs:832); cutover_job_for (athena-core/src/gh/records.rs:314); and xtask/src/main.rs:184. Two of them call .ok() on the parse result. If a parent athena.toml is refused under the new rule, they quietly switch the trailer judgement and cutover detection instead of reporting a Configuration violation. The plan's history-risk reasoning covers only config_at and Judged::new. Two smaller issues: the spec-slice assertion as worded would fail on the TOML closing quote, and one sentence of the history evidence does not follow."
+}

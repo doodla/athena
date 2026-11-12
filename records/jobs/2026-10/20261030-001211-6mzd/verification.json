@@ -1,0 +1,162 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261030-001211-6mzd",
+  "candidate_commit": "ab9185fcc5e00e85ff9a0b452199ee9a87dc74fe",
+  "verified_fingerprint": "sha256:dae8be16586dad21dbe226c3bc83090ad179222481f4fbfc0893fac72b4af433",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/43141115910 for ab9185fcc5e00e85ff9a0b452199ee9a87dc74fe",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/43141115910 for ab9185fcc5e00e85ff9a0b452199ee9a87dc74fe",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/43141115910 for ab9185fcc5e00e85ff9a0b452199ee9a87dc74fe",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 4,
+  "criteria": [
+    {
+      "criterion": "docs/spec.toml entry OLY-B-SET-02 has a mechanism other than \"none\" naming the roster code path and test, owner Athena, and a measure ending with `status: not shown` and the test command.",
+      "kind": "content",
+      "met": true,
+      "evidence": "From the diff: the mechanism names `ROSTER`/`roster_entry` in crates/athena-core/src/jev.rs and the test crates/athena-core/tests/model_roster.rs. Owner is \"Athena\". The measure is \"Run `cargo test -p athena-core --test model_roster`; ... No `athena status` line shows the roster; status: not shown\". The xtask spec test passed 30/30, including the_real_spec_passes and every_active_requirement_has_a_mechanism_an_owner_and_a_measure.",
+      "commands": [
+        "git diff HEAD~1",
+        "cargo test -p xtask --test spec"
+      ],
+      "commands_verified": false
+    },
+    {
+      "criterion": "Run `cargo test -p athena-core` (the new roster test): it asserts the roster holds Opus, Sonnet and Haiku model names and Jev with the ai-gateway.vercel.sh endpoint; it fails when the roster entry for any of the four is removed and passes with the change.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "roster_holds_opus_sonnet_haiku_and_jev passed (1 passed). The test looks up opus, sonnet and haiku through roster_entry and checks each model starts with `claude-` and contains its family name. It checks Jev's model == MODEL and endpoint == Some(ENDPOINT), that ENDPOINT contains ai-gateway.vercel.sh, and that ROSTER.len() == 4. I could not mutate the files because the verifier role changes nothing, so the fail-without check is reasoned, not run: the test does not compile without ROSTER/roster_entry. Removing an entry either breaks the `[RosterEntry; 4]` type or, once resized, makes roster_entry return None (panic) and fails the len assertion.",
+      "commands": [
+        "cargo test -p athena-core --test model_roster"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "`cargo fmt --check`, `cargo clippy` and `cargo test` all pass; the xtask spec test (`cargo test -p xtask --test spec`) still passes with the edited spec.toml.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded checks for ab9185fc show fmt, clippy and test passing (CI run 43141115910). I ran `cargo test -p xtask --test spec` myself: 30 passed, 0 failed.",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked",
+        "cargo test -p xtask --test spec"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Existing Jev constants (ENDPOINT, MODEL in crates/athena-core/src/jev.rs) are reused, not duplicated; no secrets are written.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The Jev ROSTER entry is `model: MODEL, endpoint: Some(ENDPOINT)`, and the test compares against those same constants. The diff contains no keys or tokens. KEY_VAR is not touched or referenced.",
+      "commands": [
+        "git diff HEAD~1"
+      ],
+      "commands_verified": false
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Soundness: the roster is a hard-coded list that nothing reads, and its test only checks that constants exist. It does not show that work uses Opus, Sonnet and Haiku.",
+      "evidence": "A grep for ROSTER/roster_entry/RosterEntry finds only jev.rs, the new test, spec.toml and CHANGELOG.md. No code path uses it. The models work actually runs with come from athena.toml [models] (reader/producer_default = claude-sonnet-5-5, producer_allowed includes claude-haiku-5-5, verifier = claude-opus-5-5), loaded by crates/athena-data/src/config.rs. ROSTER copies those strings by hand. If athena.toml dropped Haiku or moved to a new model version, this test would still pass and ROSTER would silently go stale. That breaks the behavior-evidence default (\"check the requested behavior happening, not that types, files or wiring exist\"). It also departs from the accepted reading's \"Opus, Sonnet, Haiku via configured roles\". Simpler, more correct alternative: check the configured roles. For example, a test or config validation that loads the repository's athena.toml through athena-data's config loader and asserts its [models] roles cover an Opus, a Sonnet and a Haiku model, alongside the existing Jev ENDPOINT/MODEL check. Putting the Claude model list inside the Jev client module is also an odd home.",
+      "location": "crates/athena-core/src/jev.rs ROSTER; crates/athena-core/tests/model_roster.rs",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "A changed file is outside the expected deliverables: xtask/shard-timings.txt.",
+      "evidence": "The diff adds `athena-core --test model_roster 5.00`. The file is not on the deliverables list. The repository requires a line there for every new test file (docs/decisions.md around line 4333; xtask/tests/ci_shards.rs), so the edit is a needed consequence of adding the test, and its 5.00 seconds is an estimate.",
+      "location": "xtask/shard-timings.txt",
+      "source": "verifier"
+    },
+    {
+      "severity": "nit",
+      "summary": "crates/athena-core/src/lib.rs was a planned deliverable but was left unchanged.",
+      "evidence": "No change was needed: the jev module is already public, and the integration test compiles and imports athena_core::jev::ROSTER.",
+      "location": "crates/athena-core/src/lib.rs",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "1 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "The change adds a hard-coded `ROSTER` to jev.rs (Opus, Sonnet and Haiku model names, plus Jev reusing MODEL and ENDPOINT), adds a test that checks it, and fills in OLY-B-SET-02's mechanism, owner and measure (`status: not shown`). The new test passes. The xtask spec test passes (30/30). The recorded fmt, clippy and test checks passed. All four acceptance criteria are met. The verdict is still fail, on a major soundness finding: no code reads ROSTER. It is a hand copy of the model names that athena.toml [models] actually configures, so the test proves only that constants exist, not that work uses Opus, Sonnet and Haiku. Dropping Haiku from the config or moving to a new model version would leave the test green. The fix is to check the configured roles: load athena.toml through athena-data's config and assert the roles cover all three Claude families, next to the existing Jev constant check. Minor: xtask/shard-timings.txt changed outside the deliverables list, though the repository requires that line for a new test file. I did not run the remove-an-entry mutation, because the verifier may not edit files; the fail-without result is reasoned from the code."
+}

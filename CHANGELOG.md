@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- OLY-B-SET-02 now has a mechanism: `Config::validate` in `crates/athena-data/src/config.rs` refuses any
+  `athena.toml` Athena loads (this repository's or a user's) whose `[models]` roles (reader, producer_default,
+  producer_allowed, verifier, hard_producer_model) name no Opus, no Sonnet or no Haiku model, with the new
+  `ConfigError::ModelFamily`. The match is a case-insensitive substring of the model name, so a version bump
+  passes; `[models.names]` (display text) is not read. Unit tests in `config.rs` drop each family, and
+  `crates/athena-core/tests/model_roster.rs` loads the repository `athena.toml` through the real loader and
+  checks the Jev gateway constants. Jev stays shadow-only. The 5.00 s shard value for the new test is an
+  estimate. The measure stays `status: not shown` and names `cargo test -p athena-data` and
+  `cargo test -p athena-core --test model_roster`.
 - OLY-A-12 now has a mechanism: `undecided_surface_changes` in `crates/athena-core/src/design_surface.rs` takes the
   difference between two design-surface inventories and the changed paths, and reports one finding per surface
   kind with changes unless `docs/decisions.md` is among the paths. An empty difference gives no findings. It tests
