@@ -74,6 +74,8 @@
 //! - [`design_surface`]: a model-free inventory of Athena's design surface at a commit (commands and flags,
 //!   `athena.toml` sections and keys, record schemas, roles, crates), the diff of two inventories, and the
 //!   `athena.design-surface/1` record that keeps one for later comparison;
+//! - [`iris`]: the Iris budget guard: the committed spend ledger and the check that refuses a generation
+//!   which would take lifetime spend over $15;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only;
 //! - `test_support` (compiled for tests and the `test-support` feature only): the shared records-history
 //!   cutover fixture, a scratch repository with a bare remote and a history made through the real writers;
@@ -102,6 +104,7 @@ pub mod hestia;
 pub mod host_rules;
 pub mod introspect;
 pub mod invocation;
+pub mod iris;
 pub mod jev;
 pub mod labeled;
 pub mod land;

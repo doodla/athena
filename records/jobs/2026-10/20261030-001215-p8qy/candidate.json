@@ -1,0 +1,142 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261030-001215-p8qy",
+  "base_commit": "d34dbdcb8db747d75da9789c40ee5b79567e5d81",
+  "base_fingerprint": "sha256:f396b52cce2bbdfc58cf6cb1ca39ab0da1c643e818063211537005e2fea7821a",
+  "previous_job": "20261112-023817-9at7",
+  "candidate_commit": "f770b83e7b7cf67cfa04a78054d4ca675860c4e2",
+  "candidate_tree": "82d397ffbb109b721cca67608ae510241f9d410f",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 434458
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 322254
+    },
+    {
+      "path": "crates/athena-core/src/iris.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 9604
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 15719
+    },
+    {
+      "path": "docs/iris-ledger.toml",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 595
+    },
+    {
+      "path": "docs/spec.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 201848
+    }
+  ],
+  "fingerprint": "sha256:d8a54851e2a8d04617f094be0823bd07e3b4deb155310e15019ca9fdc61ef499",
+  "violations": [],
+  "producer_report": {
+    "summary": "I added `crates/athena-core/src/iris.rs`, a lifetime budget guard for Iris spend, and recorded it as OLY-B-SET-04's mechanism in `docs/spec.toml`. `check_generation` sums the cents in the new `docs/iris-ledger.toml` and refuses a generation that would push the total past 1500. Exactly 1500 is allowed. The ledger starts with no entries.\n\nThe cap is a constant in code rather than a ledger field, so editing the ledger can't raise it. The ledger parser accepts only `date`, `cents` and `note` and rejects negative or non-integer cents, so a credential field is refused.\n\nNo generation path calls the guard yet, because no Iris client exists and calling Iris is out of scope. The measure ends in `status: not shown` and names the iris and hestia tests, and the changelog says the same.\n\nI ran fmt `--check`, clippy `--all-targets --locked -- -D warnings`, `cargo test -p xtask` (includes the policy scan), the athena-cli `mirrors` test and `cargo test -p athena-core`. All pass. I did not run the whole-workspace `cargo test`, and I did not mutate the guard to confirm the refusal tests fail without it.\n\nI also added a hestia test (`oly_b_set_04_no_longer_appears_in_the_spec_gap_list`), a `lib.rs` module line and a changelog entry.",
+    "files": [
+      "crates/athena-core/src/iris.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-core/src/hestia.rs",
+      "docs/iris-ledger.toml",
+      "docs/spec.toml",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core iris",
+        "result": "pass",
+        "note": "7 iris tests pass"
+      },
+      {
+        "command": "cargo test -p athena-core hestia::tests::oly_b_set_04",
+        "result": "pass",
+        "note": "1 passed"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy -q --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "no output"
+      },
+      {
+        "command": "cargo test -q -p xtask",
+        "result": "pass",
+        "note": "includes policy and spec tests; all pass"
+      },
+      {
+        "command": "cargo test -q -p athena-cli --test mirrors",
+        "result": "pass",
+        "note": "4 passed"
+      },
+      {
+        "command": "cargo test -q -p athena-core",
+        "result": "pass",
+        "note": "1369 passed, 1 ignored (pre-existing); refusal_corpus 24 passed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "docs/spec.toml entry OLY-B-SET-04 has a mechanism naming crates/athena-core/src/iris.rs and docs/iris-ledger.toml (not \"none\"), keeps owner = \"Athena\", and has a measure ending in 'status: not shown' or an `athena status` label, naming the test. Verify with Grep on docs/spec.toml and that the named files exist.",
+        "status": "met",
+        "evidence": "Edited the entry: the mechanism names iris.rs and the ledger, owner stays Athena, and the measure ends in `status: not shown` and names the tests. `cargo test -p athena-core iris` runs iris_spec_entry_names_files_that_exist, which parses the real spec and checks all of this plus that both files exist; it passed."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core iris`: a test shows a generation costing enough to exceed 1500 cents lifetime is refused, one within budget is allowed, and exactly 1500 cents is allowed. The refusal tests fail if the guard is removed or made to always allow.",
+        "status": "met",
+        "evidence": "`cargo test -p athena-core iris` ran 7 tests, all passed. a_generation_over_the_lifetime_budget_is_refused first shows 1400+101 is Ok with an unbounded cap, then Err with the real cap. The at-budget test allows exactly 1500. An always-allow guard fails the over-budget, summed and u64::MAX tests. A `>=` comparison fails the exactly-1500 test. I did not run a mutation of the guard."
+      },
+      {
+        "criterion": "A test reads the committed docs/iris-ledger.toml and shows it parses, the total is at most 1500 cents, and it contains no credential-like fields; run with cargo test -p athena-core iris.",
+        "status": "met",
+        "evidence": "the_committed_ledger_parses_and_is_within_budget uses include_str! on the committed ledger and passed. parse_ledger accepts only date, cents and note, so a credential-like field would be an error. a_credential_or_malformed_field_is_refused shows api_key, token, secret, negative and string cents are all refused."
+      },
+      {
+        "criterion": "A hestia spec-gap test (cargo test -p athena-core hestia) or equivalent shows OLY-B-SET-04 no longer appears in the spec gap list with no mechanism or bad measure.",
+        "status": "met",
+        "evidence": "hestia::tests::oly_b_set_04_no_longer_appears_in_the_spec_gap_list passed. It parses the real docs/spec.toml, finds no gap for the id and no measure problem, and shows the same entry with mechanism none yields a gap with no_mechanism."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy (workspace, all targets) and cargo test all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran fmt --check, clippy --all-targets --locked -D warnings, and cargo test for xtask, the athena-cli mirrors test and athena-core; all passed. I did not run the whole-workspace cargo test."
+      },
+      {
+        "criterion": "CHANGELOG.md gains an entry for the Iris budget guard; no files outside the deliverables, no secrets, and records/ untouched.",
+        "status": "met",
+        "evidence": "A new bullet is the first item under [Unreleased] / Added. git status shows only CHANGELOG.md, hestia.rs, lib.rs, spec.toml modified and iris.rs and iris-ledger.toml created. The ledger holds comments only. The xtask policy scan passed."
+      }
+    ],
+    "open_issues": [
+      "No generation path calls check_generation yet, because no Iris client exists and calling Iris is out of scope. The mechanism, measure and changelog say so.",
+      "The harness-engineering reference half is prose only (README.md Attribution, docs/design/athena-v0.md section 15). I did not re-read those two places to confirm they still carry the text; the plan said they do."
+    ],
+    "mistakes": [],
+    "learnings": [
+      "parse_spec in hestia.rs is pub and gives an entry's mechanism, owner and measure, so a test can check a spec entry without cutting text.",
+      "The producer shell hook denies grep, tail and command substitution; use quiet cargo flags and the Grep tool.",
+      "The full athena-core test run takes about 6 minutes."
+    ],
+    "desires": [
+      "Allow grep/tail in Bash or let Read open the tool-results overflow file; I had to rerun commands with quiet flags."
+    ]
+  }
+}

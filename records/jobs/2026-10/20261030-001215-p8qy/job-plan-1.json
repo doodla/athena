@@ -1,0 +1,262 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-001215-p8qy",
+  "round": 1,
+  "at": "2026-11-12T03:55:40.724860443Z",
+  "invocation_seq": 2,
+  "approach": "Add one module, crates/athena-core/src/iris.rs. It parses the committed spend ledger docs/iris-ledger.toml (integer cents, no entries yet, only the keys date, cents and note) and has a pure guard, check_generation(entries, proposed_cents). The guard refuses when the lifetime total plus the proposed cost would exceed 1500 cents; exactly 1500 is allowed. Export the module from lib.rs. In docs/spec.toml, replace OLY-B-SET-04's mechanism \"none\" with text naming iris.rs, the ledger and the existing prose reference to the harness-engineering bundle, and set the measure to \"...; status: not shown\" naming the tests. Add a hestia.rs unit test that parses the real docs/spec.toml via include_str!, shows OLY-B-SET-04 is absent from spec_gaps, and shows the same entry with mechanism \"none\" is a gap. Add a CHANGELOG entry. Nothing calls the guard from a real Iris client, because none exists and calling Iris is out of scope. The guard is the check a future generation path must call.",
+  "decisions": [
+    {
+      "choice": "The cap is a Rust constant LIFETIME_CAP_CENTS = 1500, not a ledger field.",
+      "reason": "The ledger is data a job could edit. A cap in the same file could be raised along with the spend. The constant sits in code that the check and test gates cover. The ledger stays amounts only.",
+      "rejected": [
+        {
+          "option": "cap stored in docs/iris-ledger.toml",
+          "why": "A single edit to the data file could lift the cap."
+        },
+        {
+          "option": "cap in athena.toml",
+          "why": "athena.toml is governance and is not a deliverable (out of scope)."
+        }
+      ]
+    },
+    {
+      "choice": "Integer cents (u64) with saturating addition; a proposed cost of 0 is allowed; a total over 1500 is refused.",
+      "reason": "Integer cents avoid float error at the exact-1500 boundary. Saturating addition means a huge proposed cost is refused and cannot wrap.",
+      "rejected": [
+        {
+          "option": "f64 dollars",
+          "why": "Rounding at the boundary makes the exactly-$15 case unreliable."
+        }
+      ]
+    },
+    {
+      "choice": "parse_ledger uses toml_edit, already a dependency of athena-core (crates/athena-core/Cargo.toml:26). It accepts only the top-level key `entry`, and in each entry only date, cents and note. Any other key, or a negative or non-integer cents value, is an error.",
+      "reason": "This makes 'no credential-like fields' a property of the parser, so the test on the committed file shows it. A planted api_key field is refused, which demonstrates the check.",
+      "rejected": [
+        {
+          "option": "a name blocklist (key, token, secret)",
+          "why": "A blocklist misses new names. The allow-list does not."
+        },
+        {
+          "option": "add the toml crate to athena-core",
+          "why": "New dependency; toml_edit already does the job."
+        }
+      ]
+    },
+    {
+      "choice": "The ledger test reads the file with include_str!(\"../../../docs/iris-ledger.toml\") inside iris.rs, the same relative path that hestia.rs:4287 uses for docs/spec.toml.",
+      "reason": "The path is proven to work from crates/athena-core/src. The build fails if the committed ledger is missing.",
+      "rejected": [
+        {
+          "option": "std::fs read at run time",
+          "why": "Depends on the working directory; model_roster.rs needs CARGO_MANIFEST_DIR gymnastics for the same thing."
+        }
+      ]
+    },
+    {
+      "choice": "The 'harness-engineering bundle as a reference' half is prose only. The mechanism text points to the existing README.md Attribution section and docs/design/athena-v0.md section 15 (requirements-map.md:114 marks it Covered). No new code or doc is added for it.",
+      "reason": "The brief says to use the bundle as a reference, which is not machine-checkable. Small change: one module, one ledger, one spec entry.",
+      "rejected": [
+        {
+          "option": "a new doc or check for the reference half",
+          "why": "It adds files outside the deliverables and checks nothing the owner asked to enforce."
+        }
+      ]
+    },
+    {
+      "choice": "Measure ends in `status: not shown` and names `cargo test -p athena-core iris` and `cargo test -p athena-core hestia`.",
+      "reason": "None of the STATUS_MEASURE_LABELS (status.rs:305-321) prints Iris spend, and `athena status` does not show it. The `requirement` label (spec gaps) would only measure the gap list. The label `not shown` is accepted by measure_problem (hestia.rs:1229).",
+      "rejected": [
+        {
+          "option": "keep `status: requirement`",
+          "why": "It says the requirement is shown in the spec gap list, not that the budget is enforced."
+        },
+        {
+          "option": "add a new `athena status` section for Iris spend",
+          "why": "Changes the status view and its label table; larger than this request."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/iris.rs",
+      "action": "create",
+      "purpose": "Ledger parser, LIFETIME_CAP_CENTS = 1500, spent_cents, check_generation and its tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod iris;` (between `invocation` and `jev`) and one bullet in the Modules doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/iris-ledger.toml",
+      "action": "create",
+      "purpose": "Committed Iris spend ledger: header comments (cap, units, entry shape, no credentials) and zero entries.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "OLY-B-SET-04: real mechanism and a measure ending in `status: not shown`; owner stays Athena.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "Add a unit test that the real spec's OLY-B-SET-04 is not a spec gap, and is one with mechanism none.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased/Added bullet for the Iris budget guard, in the style of the OLY-B-SET-02 bullet.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/src/design_surface.rs header and one small test module for style; confirm `cargo test -p athena-core iris` will match module iris::tests.",
+    "Create crates/athena-core/src/iris.rs. Module doc: what the guard is, the ledger path, that Iris calls and credentials are out of scope, and that the harness-engineering reference is prose (README.md Attribution, docs/design/athena-v0.md section 15). Items: `pub const LEDGER_FILE: &str = \"docs/iris-ledger.toml\"`; `pub const LIFETIME_CAP_CENTS: u64 = 1500`; `#[derive(Debug, Clone, PartialEq, Eq)] pub struct LedgerEntry { pub date: String, pub cents: u64, pub note: String }`; `#[derive(Debug, Clone, PartialEq, Eq)] pub struct BudgetRefusal { pub spent_cents, pub proposed_cents, pub cap_cents }` with Display and std::error::Error via thiserror (a workspace dependency of core); `pub fn parse_ledger(text: &str) -> anyhow::Result<Vec<LedgerEntry>>` using toml_edit: top-level keys other than `entry` are an error, entry keys other than date/cents/note are an error, `cents` must be a non-negative integer, `date` a string; no `entry` table gives an empty list; `pub fn spent_cents(entries: &[LedgerEntry]) -> u64` (saturating sum); `pub fn check_generation(entries, proposed_cents) -> Result<(), BudgetRefusal>` calling `check_against(entries, proposed_cents, LIFETIME_CAP_CENTS)`, which refuses when `spent.saturating_add(proposed) > cap`.",
+    "In iris.rs add `#[cfg(test)] mod tests` with the cases in criteria 2 and 3: over, at and under budget over several entries; u64::MAX; empty ledger; committed ledger within budget; credential, token, negative-cents and string-cents inputs refused; plus iris_spec_entry_names_files_that_exist (criterion 1).",
+    "Create docs/iris-ledger.toml: comment header only (cap is 1500 cents in iris.rs; amounts in whole cents; each spend is a `[[entry]]` with date, cents, note; no credentials, keys or account data; append an entry only after a generation is allowed by the guard) and zero entries. Keep it free of email-like text and key-like strings.",
+    "Edit crates/athena-core/src/lib.rs: add `pub mod iris;` after `pub mod invocation;` and a Modules bullet for [`iris`].",
+    "Edit docs/spec.toml lines 2051 and 2053 only: mechanism = a sentence naming crates/athena-core/src/iris.rs (`check_generation`) and docs/iris-ledger.toml, with the prose-only reference in README.md Attribution and docs/design/athena-v0.md section 15; measure = \"cargo test -p athena-core iris shows over, at and under budget and the committed ledger; cargo test -p athena-core hestia shows the spec gap is gone; status: not shown\". Keep owner = \"Athena\". Do not touch the statement, kind, status or sources.",
+    "Add to hestia.rs tests, after the real-spec test at ~4312, `oly_b_set_04_no_longer_appears_in_the_spec_gap_list` (criterion 4).",
+    "Add the CHANGELOG.md bullet at the top of [Unreleased] / Added: OLY-B-SET-04 now has a mechanism, naming `check_generation`, the 1500-cent cap, the ledger, that no generation path calls it yet, the measure `status: not shown`, and the test commands.",
+    "Run cargo fmt --all, then the three checks, plus `cargo test -p athena-core --test refusal_corpus` and `cargo test -p xtask`; fix any clippy finding in the new code."
+  ],
+  "risks": [
+    {
+      "risk": "The guard is not yet called by any generation path, because no Iris client exists, so the requirement is met by a checked-in guard and not by a live gate.",
+      "mitigation": "The mechanism text and the changelog say so plainly. Out of scope: calling Iris. The measure is `status: not shown` and names the tests. This follows the OLY-A-12 entry, which also says it is not yet called (CHANGELOG.md:21-26)."
+    },
+    {
+      "risk": "The cap could be edited in code or the ledger edited to hide spend.",
+      "mitigation": "The cap is a constant in code that every job passes through review, tests and the verifier. The ledger is committed, so edits are visible in history. The parser rejects unknown fields."
+    },
+    {
+      "risk": "The include_str! path to docs/iris-ledger.toml breaks the build if the file moves.",
+      "mitigation": "It uses the same relative form as hestia.rs:4287. A missing file is a compile error, which makes the test fail without the ledger."
+    },
+    {
+      "risk": "A test name or filter mismatch: `cargo test -p athena-core iris` matches test names or module paths containing `iris`.",
+      "mitigation": "All new tests live in module iris::tests, so the filter matches them. The spec test in hestia uses a name starting oly_b_set_04 and is run by path hestia::tests::oly_b_set_04."
+    },
+    {
+      "risk": "The CHANGELOG.md is 433 KB; an edit needs care to land under [Unreleased] / Added.",
+      "mitigation": "Insert the new bullet at the top of the Added list, after line 10, with the same hanging indent as its neighbours."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "docs/spec.toml OLY-B-SET-04 mechanism and measure",
+      "dependent": "crates/athena-core/src/hestia.rs spec_gaps / measure_problem (1219, 1291) and the Hestia spec review (spec_review, ~1445) that queues a request for each gap",
+      "kind": "code",
+      "test": "New hestia test oly_b_set_04_no_longer_appears_in_the_spec_gap_list; existing the_real_spec_records_every_field_and_classes_the_acceleration_requirements_as_speed (hestia.rs:4286) checks every active requirement's measure",
+      "reason": null
+    },
+    {
+      "name": "docs/spec.toml OLY-B-SET-04 owner, mechanism and measure fields",
+      "dependent": "xtask/tests/spec.rs check_how_it_is_met (194-213)",
+      "kind": "rule",
+      "test": "cargo test -p xtask (spec test)",
+      "reason": "It requires only a non-empty mechanism and owner and a `status:` label. The new entry has all three. The source quotes are not touched."
+    },
+    {
+      "name": "spec gap list shown by athena status",
+      "dependent": "crates/athena-core/src/status.rs spec_gaps field (~506) and the `next` lines of `athena status`",
+      "kind": "code",
+      "test": null,
+      "reason": "The gap list is computed from docs/spec.toml at HEAD. The change removes one gap. No format changes. Tests that count gaps use fixture specs (hestia.rs:4243), not the real file."
+    },
+    {
+      "name": "docs/spec.toml text around OLY-B-SET-04",
+      "dependent": "crates/athena-core/tests/model_roster.rs spec_entry_has_a_real_mechanism (51-68)",
+      "kind": "code",
+      "test": null,
+      "reason": "It cuts the OLY-B-SET-02 entry only, up to the next [[requirement]]. Editing the SET-04 entry cannot move its text."
+    },
+    {
+      "name": "new module and new data file",
+      "dependent": "crates/athena-core/src/lib.rs module list and docs; xtask/tests/policy.rs (file-type scan at 464, boundary words at 88, dependency direction at 611)",
+      "kind": "rule",
+      "test": "cargo test --locked (policy tests)",
+      "reason": "The module adds no crate dependency (uses toml_edit, anyhow, already in athena-core). The ledger is .toml data. Text avoids banned boundary words and email-like strings, and holds no credential, so the gitleaks scan has nothing to match."
+    },
+    {
+      "name": "prompt budgets",
+      "dependent": "docs/system-facts.md budget lines and the always-loaded prompt sets (crates/athena-context)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No always-loaded prompt text is changed; the files changed are code, spec data and a changelog."
+    },
+    {
+      "name": "reading, plan and admission refusal rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and reading.rs",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "No parser, stem list or reading check is added or changed. The guard refuses only Iris generation. A grep for iris under crates/ found no existing code that reaches it. The corpus is run as a regression (criterion 5)."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A unit test in iris.rs (iris_spec_entry_names_files_that_exist) reads docs/spec.toml with include_str!, cuts the OLY-B-SET-04 entry, and checks the mechanism is not \"none\", names crates/athena-core/src/iris.rs and docs/iris-ledger.toml, owner = \"Athena\" is present, and the measure line ends in `status: not shown` and contains `cargo test -p athena-core iris`. It also checks that the two named files exist, using Path::new(env!(\"CARGO_MANIFEST_DIR\")). The verifier may also Grep docs/spec.toml and run ls on the two paths.",
+      "command": "cargo test -p athena-core iris_spec_entry && cargo test -p athena-core hestia::tests::oly_b_set_04",
+      "observes": "The test passes. Grep shows mechanism, owner and measure lines for OLY-B-SET-04. Both files are listed by ls.",
+      "fails_without": "With the entry's mechanism still \"none\", or with the files missing, the assertions on the mechanism text and on file existence fail.",
+      "seam": "The test calls the entry-cutting pattern of crates/athena-core/tests/model_roster.rs:51-68 (exists, read) and include_str! as at hestia.rs:4287 (exists). It uses the committed files and no fake. Step 4 adds the test."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in iris.rs call the production check_generation(&entries, proposed_cents) on in-memory entries parsed through parse_ledger from small TOML strings. Cases: (a) 1400 spent + 101 proposed (1501) is refused, and the refusal reports spent, proposed and cap; (b) 1400 + 100 (exactly 1500) is allowed; (c) 0 spent + 1500 is allowed; (d) 0 spent + 1501 is refused; (e) 800 + 700 is allowed and 800 + 701 is refused over two entries; (f) u64::MAX proposed is refused with no overflow panic; (g) an empty ledger allows a small cost. Test (a) also asserts that the same input would be Ok if the cap constant were larger, by calling an inner helper with an explicit cap (check_against(entries, proposed, cap)), so the test shows the allowed case with the same input and no protection, then the refusal with the protection.",
+      "command": "cargo test -p athena-core iris",
+      "observes": "All tests pass: refusal over budget, allow at and under budget.",
+      "fails_without": "If check_generation always returns Ok, tests (a), (d), (e) and (f) fail. If the comparison is `>=` instead of `>`, tests (b) and (c) fail.",
+      "seam": "Production entry points parse_ledger and check_generation, both pub, added in step 2. The fixtures are TOML string literals in the tests. No fake is used, and the logic under test is not in the test."
+    },
+    {
+      "criterion": 3,
+      "method": "Test committed_ledger_parses_and_is_within_budget: parse_ledger(include_str!(\"../../../docs/iris-ledger.toml\")) must be Ok, spent_cents(&entries) <= LIFETIME_CAP_CENTS, and every entry has only date, cents and note. A second test, a_credential_field_is_refused, feeds parse_ledger an entry with `api_key = \"x\"`, a top-level `token = \"x\"` key, a negative cents value and a string cents value, and asserts each is an Err. Together they show that the committed file has no credential-like field and that the parser would refuse one.",
+      "command": "cargo test -p athena-core iris",
+      "observes": "The tests pass. The committed ledger parses with zero entries and total 0.",
+      "fails_without": "If the parser skipped unknown keys, a_credential_field_is_refused fails. If the ledger file is missing, the crate does not compile (include_str!).",
+      "seam": "parse_ledger (step 2). The committed docs/iris-ledger.toml is the fixture (step 3). Planted bad TOML strings in the tests are the negative cases. No double."
+    },
+    {
+      "criterion": 4,
+      "method": "New hestia.rs test oly_b_set_04_no_longer_appears_in_the_spec_gap_list, next to the real-spec test at hestia.rs:4285-4312. It calls parse_spec(include_str!(\"../../../docs/spec.toml\")), then spec_gaps(&requirements), and asserts no gap has id OLY-B-SET-04. It then clones that requirement, sets mechanism = \"none\", and asserts spec_gaps returns one gap with no_mechanism true (the protection removed gives the gap). It also asserts measure_problem(&r.measure) is None. The rest of the spec is not asserted to be clean, so unrelated gaps cannot fail this test.",
+      "command": "cargo test -p athena-core hestia::tests::oly_b_set_04",
+      "observes": "Passes: the real entry yields no gap and the 'none' variant yields a gap.",
+      "fails_without": "With the mechanism still \"none\", spec_gaps returns a gap for OLY-B-SET-04 and the first assertion fails.",
+      "seam": "Production parse_spec and spec_gaps (hestia.rs:1172, 1291; exist). The fixture is the committed docs/spec.toml, plus an in-memory clone with the mechanism set to none. Step 5 adds the test. The existing test the_real_spec_records_every_field (4286) already runs measure_problem over every active requirement."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks. cargo test --locked also runs the xtask spec test (xtask/tests/spec.rs:194-213, requires a non-empty mechanism, owner and measure label), the boundary scan, and the tracked-file-type test (policy.rs:464, a .toml file is data). Also run cargo test -p athena-core --test refusal_corpus to show no reading rule moved.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All pass with no warnings. Not run by the planner.",
+      "fails_without": "A formatting, lint or test failure in the new code, or a malformed spec.toml, fails these commands.",
+      "seam": "The checks themselves (exist)."
+    },
+    {
+      "criterion": 6,
+      "method": "git status and git diff --stat show only these paths changed: docs/spec.toml, crates/athena-core/src/iris.rs, crates/athena-core/src/lib.rs, docs/iris-ledger.toml, CHANGELOG.md, crates/athena-core/src/hestia.rs. Grep CHANGELOG.md for the new `OLY-B-SET-04 now has a mechanism` bullet under [Unreleased] / Added. The ledger holds only comments and no entries. No records/ path appears.",
+      "command": "git status",
+      "observes": "Six paths changed, the changelog bullet is present, and no secret-like text is in the diff.",
+      "fails_without": null,
+      "seam": "No test seam; a content check on the diff."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "2b321518d7dedf0d0c91a7c80efd1b9b4a51a0d8059e0ca94bfe1d6cd0ef7904"
+}
