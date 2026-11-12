@@ -118,6 +118,7 @@ pub mod proposals;
 pub mod reading;
 pub mod reconcile;
 pub mod records_import;
+pub mod retriage;
 pub mod review;
 pub mod role_need;
 pub mod role_value;
