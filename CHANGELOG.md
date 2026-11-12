@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- OLY-B-O1-01 now has a mechanism: `bootstrap_range` (rule M6) in `crates/athena-gate/src/invariant.rs`, which
+  accepts `Athena-Job: bootstrap` commits only until `records/jobs/bootstrap/outcome.json` closes the range. The
+  measure is `status: not shown` and names `cargo test -p athena-gate bootstrap` (the new
+  `crates/athena-gate/tests/bootstrap_requirement.rs` plus the existing rule-M6 test) and the `athena-core` test
+  `oly_b_o1_01_no_longer_appears_in_the_spec_gap_list`. That v0 stays small remains prose. The gate and the
+  records are unchanged. The new test file is registered in `xtask/shard-timings.txt` with a 5.00 s estimate.
 - OLY-B-GOAL-03 now has a mechanism: `build_reading` in `crates/athena-core/src/reading.rs` commits the reader's
   forecast and a reference forecast in the reading before any work, `go_job` dispatches only a committed reading,
   and `class_forecasts` in `crates/athena-core/src/status.rs` scores them per class. Its measure ends
