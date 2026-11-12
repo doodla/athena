@@ -402,6 +402,35 @@ mod tests {
         assert!(parse_map("| X-1 | a | b | c | Maybe |").is_err());
     }
 
+    /// OLY-B-A1-02 must name this view as its mechanism, and the real files must give a clean report.
+    #[test]
+    fn strategy_view_is_the_mechanism_of_oly_b_a1_02() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let spec: toml::Table =
+            toml::from_str(&std::fs::read_to_string(root.join("docs/spec.toml")).unwrap()).unwrap();
+        let req = spec["requirement"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"].as_str() == Some("OLY-B-A1-02"))
+            .expect("OLY-B-A1-02 is in docs/spec.toml");
+        let mechanism = req["mechanism"].as_str().unwrap();
+        assert!(
+            mechanism.contains("athena strategy"),
+            "mechanism: {mechanism}"
+        );
+        let path = "crates/athena-cli/src/strategy.rs";
+        assert!(mechanism.contains(path), "mechanism: {mechanism}");
+        assert!(root.join(path).is_file());
+        assert_eq!(req["owner"].as_str(), Some("Athena"));
+        let measure = req["measure"].as_str().unwrap();
+        assert!(measure.ends_with("status: not shown"), "{measure}");
+        assert!(measure.contains("strategy_view_is_the_mechanism_of_oly_b_a1_02"));
+        let report = run(&root).unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(render(&report).contains("Total"));
+    }
+
     /// The real view's table must equal what the command computes from the real map.
     #[test]
     fn strategy_view_table_matches_the_map() {
