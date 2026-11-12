@@ -364,6 +364,63 @@ pub fn planning_cost(records: &Records) -> Option<PlanningCost> {
     })
 }
 
+/// How recorded job cost splits between the study and Athena's own work (OLY-B-O4-02).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct EffortSplit {
+    /// Jobs run under the `study` capability.
+    pub study_jobs: usize,
+    /// Jobs run under any other capability (Athena's own change work).
+    pub self_jobs: usize,
+    /// Cost of the study jobs, in USD.
+    pub study_usd: f64,
+    /// Cost of Athena's own jobs, in USD.
+    pub self_usd: f64,
+    /// `study_usd` share of the total cost; none when no cost is recorded, never a division by zero.
+    pub study_share: Option<f64>,
+    /// `self_usd` share of the total cost; none when no cost is recorded.
+    pub self_share: Option<f64>,
+}
+
+/// The capability a job ran under: the owner's capability, else the job's own.
+fn job_capability(job: &JobRecords) -> Option<&str> {
+    let j = job.job.as_ref()?;
+    j.owner.capability.as_deref().or(j.capability.as_deref())
+}
+
+/// Splits recorded job cost between study-capability jobs and Athena's own jobs, from each dispatched request
+/// job's capability and invocation cost. `None` when no dispatched job with a capability is recorded.
+pub fn effort_split(records: &Records) -> Option<EffortSplit> {
+    let mut out = EffortSplit {
+        study_jobs: 0,
+        self_jobs: 0,
+        study_usd: 0.0,
+        self_usd: 0.0,
+        study_share: None,
+        self_share: None,
+    };
+    for job in records.request_jobs() {
+        let Some(capability) = job_capability(job) else {
+            continue;
+        };
+        if capability == "study" {
+            out.study_jobs += 1;
+            out.study_usd += job.spent_usd();
+        } else {
+            out.self_jobs += 1;
+            out.self_usd += job.spent_usd();
+        }
+    }
+    if out.study_jobs + out.self_jobs == 0 {
+        return None;
+    }
+    let total = out.study_usd + out.self_usd;
+    if total > 0.0 {
+        out.study_share = Some(out.study_usd / total);
+        out.self_share = Some(out.self_usd / total);
+    }
+    Some(out)
+}
+
 /// The effort shown for a producer invocation recorded before effort was kept.
 pub const EFFORT_UNRECORDED: &str = "unrecorded";
 
