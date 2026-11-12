@@ -1,0 +1,305 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261112-194023-nyf7",
+  "round": 2,
+  "at": "2026-11-12T19:49:52.370101541Z",
+  "invocation_seq": 5,
+  "approach": "The root cause is that the reader brief (`reader_brief`, crates/athena-context/src/briefs/reader.rs:319) never states the rules that judge a criterion. It lists check names (`READING_RULES`) and the checkable-evidence rule, but not the verdict rules (D43, D63, D115), the append-only decision log and records, or the default-written CHANGELOG.md. The plan adds a section `# Rules that judge criteria`, written by a new function `criteria_judging_section` and called from `reference_and_rules_section` after `# Checkable criteria`. The section is built from `pub const` items in athena-context: a table `VERDICT_RULE_LINES` (id, source phrase, meaning) for the three rows of `VERDICT_RULES`, the two append-only phrases, the changelog path and default phrase, and the `DEFAULT_WRITTEN_FILES` reason. No refusal rule is added, no prompt file is edited, and `READING_RULES` is not touched. athena-context cannot depend on athena-core (system-facts \"Crate reach\"), so a test in briefs.rs reads the enforcing sources with `include_str!` and checks the brief against the enforcing tables. It parses every `id:` and `source:` row out of `VERDICT_RULES` and every string literal of `DEFAULT_WRITTEN_FILES`, so a new or reworded enforcing row fails it. The pins are anchored to production text only: the table slice, or the source before its first `#[cfg(test)]`. A second small test feeds the parsing helpers a synthetic table with a fourth row and shows the drift is reported. athena-core's `CHANGELOG_PATH` becomes a re-use of the shared constant.",
+  "decisions": [
+    {
+      "choice": "Add a separate section `# Rules that judge criteria` (function `criteria_judging_section`) after the Checkable criteria block, built from pub consts and one table in reader.rs.",
+      "reason": "The reader gets the facts in the brief where it writes criteria. The existing tests pin `READING_RULES` at 12 lines of at most 220 bytes and the section at 3045 bytes (briefs.rs:3630-3712), and each line there names a reading check. A new heading leaves those untouched. The brief sits outside every prompt budget (system-facts), so the reader set stays at 1998 of 2000.",
+      "rejected": [
+        {
+          "option": "Add rule lines to READING_RULES",
+          "why": "Each line names an enforcing reading check, and the tests pin the count and byte size. D43, D63, D115, append-only and the changelog default have no reading check, and none is to be added."
+        },
+        {
+          "option": "Edit crates/athena-context/prompts/reader.md",
+          "why": "The reader set is 1998 of 2000 tokens and prompt files are out of scope."
+        },
+        {
+          "option": "A code check at reading acceptance, as the four introspections proposed",
+          "why": "A refusal rule is allowed only when giving the information cannot prevent the failure. Here the reader lacked the information. Expected 0% of newly refused readings."
+        }
+      ]
+    },
+    {
+      "choice": "Drive the verdict-rule part of the pin test from the enforcing table. The test slices verify.rs from `const VERDICT_RULES` to `const REQUIRED_FIELDS`, extracts every `id: \"..\"` and `source: \"..\"` pair, and asserts the section has a line beginning `- <id>` that quotes that source. Add a D63 line (the whole-simple-command rule). Answers finding 1.",
+      "reason": "VERDICT_RULES (verify.rs:1197-1238) has three rows: D43, D63 and D115. The first plan quoted two and chose the list by hand. A fourth row or a reworded source now fails the test, because its id has no matching line. The brief states the whole-simple-command rule (D63) that the reader's criteria also depend on. The parser asserts at least the three known ids were found, so a changed table layout fails loudly and does not pass on an empty list.",
+      "rejected": [
+        {
+          "option": "A hand-written (constant, source) table in the test",
+          "why": "It only covers rules the brief already chose to quote, so it does not cover the class."
+        },
+        {
+          "option": "Import VERDICT_RULES from athena-core",
+          "why": "The struct is private to verify.rs and context cannot reach core. Making it public means editing verify.rs, which is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Do the same for DEFAULT_WRITTEN_FILES (checks.rs:574-577). The test slices the const up to `)];`, takes every string literal in it (the reasons, and any future literal path), and asserts each appears in the section. The section quotes the reason 'Athena always adds it to a change reading, and the job must record itself there' and names the path from the shared `CHANGELOG_PATH`. Answers findings 1 and 4.",
+      "reason": "The path in the current row is the identifier `CHANGELOG_PATH`, which the shared constant makes the same value in brief and check. The only literal is the reason. A second row, with either a literal path or a new reason, adds a literal the section lacks, so the test fails. This names the checks.rs pin explicitly.",
+      "rejected": [
+        {
+          "option": "Parse the (path, reason) tuples fully",
+          "why": "The first element is an identifier, so a full parse needs name resolution. Literal extraction is simpler and fails on any added row."
+        }
+      ]
+    },
+    {
+      "choice": "Anchor each pin to production text and drop the 'replace the phrase and check it is gone' assertion. For mirrors.rs, admission.rs and athena-gate/src/lib.rs the test searches only the text before the first `\\n#[cfg(test)]`. For verify.rs it uses the table slice. Answers finding 3.",
+      "reason": "`source.replace(p, \"x\")` can never contain `p`, so that assertion proved nothing. The phrases also appear in test code (verify.rs:3341, athena-data records.rs:67, mirrors.rs:1817, gate lib.rs:455), so a whole-file `contains` would pass after only the production message changed. Drift detection is shown by a second test that gives the extraction helpers synthetic enforcing text with a fourth verdict row and an extra default-written row, and asserts that the missing ids and literals are reported.",
+      "rejected": [
+        {
+          "option": "Whole-file contains",
+          "why": "Test copies satisfy it after the production wording changes."
+        }
+      ]
+    },
+    {
+      "choice": "Word the append-only line as: append a new decision with a Provenance bullet and never edit, annotate or remove an existing entry or anything under records/. Add a docs/decision-links.toml [[link]] only when the new entry supersedes or amends an earlier one, or the change touches a path listed under [[governs]]. Answers finding 2.",
+      "reason": "mirrors.rs:393-396 requires only a Provenance bullet. decisions.rs:5-19 says links are needed for superseded, supersedes and amends hits and for [[governs]] paths. Telling readers to always demand a link would make criteria that contradict how Athena judges the log, which is the failure class being fixed. Criterion 1's assertion uses this wording.",
+      "rejected": [
+        {
+          "option": "Always require a decision-links.toml link in the criterion",
+          "why": "False; D174 itself needs none."
+        }
+      ]
+    },
+    {
+      "choice": "Rule (d) states only what is new: CHANGELOG.md is a default-written deliverable (quoting the DEFAULT_WRITTEN_FILES reason), so a criterion must not forbid it, and the line points to the `Scope limit` rule above for how a limit is written. Answers finding 5.",
+      "reason": "READING_RULES already says a limiting criterion lists CHANGELOG.md or says `the deliverables` (reader.rs:295). The new line adds the reason and the prohibition, and does not repeat that wording.",
+      "rejected": [
+        {
+          "option": "Repeat the Scope limit wording",
+          "why": "Duplicates a line that already sits in the same brief."
+        }
+      ]
+    },
+    {
+      "choice": "Make athena-core's `CHANGELOG_PATH` (reading.rs:311) a `use` of athena_context::briefs::CHANGELOG_PATH.",
+      "reason": "core depends on context, so one constant serves both the brief and the changelog check, and the path cannot drift.",
+      "rejected": [
+        {
+          "option": "Keep two copies of the string",
+          "why": "Drift risk; the test would need a pin for it."
+        }
+      ]
+    },
+    {
+      "choice": "Append decision D174 to docs/decisions.md with a Provenance bullet, worded without the supersede and amend phrases, so docs/decision-links.toml needs no change.",
+      "reason": "D173 is the last entry (decisions.md:4995). The log is append-only (mirrors.rs:243-268). The backtest parses only those phrases and [[governs]] paths, and this change touches no governed path.",
+      "rejected": [
+        {
+          "option": "Edit D43 or D170 in place",
+          "why": "That is the failure being fixed, and `append_only_problem` refuses it."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs/reader.rs",
+      "action": "modify",
+      "purpose": "Add the pub consts and the `VERDICT_RULE_LINES` table (D43, D63, D115), the append-only phrases, `CHANGELOG_PATH`, `CHANGELOG_DEFAULT_PHRASE`, the default-written reason and `CRITERIA_RULES_HEADING`, each with a doc comment naming its source file and line. Add `fn criteria_judging_section`, called from `reference_and_rules_section` after the Checkable criteria block.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Re-export the new names in the `pub use reader::{..}` list (lines 28-31). Add the tests `the_reader_brief_states_the_rules_that_judge_criteria`, `the_criteria_rules_quote_the_wording_the_enforcing_code_uses` and `the_drift_helpers_report_a_new_or_reworded_enforcing_row`, with the parse helpers, to the `tests` module.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "purpose": "One line in the module documentation noting that the reader brief carries the rules that judge criteria. No code change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Replace `const CHANGELOG_PATH` (line 311) with an import of `athena_context::briefs::CHANGELOG_PATH` in the `use` list (lines 36-38), so the brief and the changelog default share one constant.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One Unreleased entry naming the root cause (the reader was never shown the rules that judge criteria) and what the diff does. It states that no refusal rule is added and the expected share of newly refused readings is 0%.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append `## D174` after the last line of D173, with Case, Decision, Alternatives, Tradeoff, Reversal cost and a Provenance bullet. No earlier byte changes.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Step 1, crates/athena-context/src/briefs/reader.rs: add the pub consts, each copied from the enforcing production text with a doc comment naming file and line. `VERDICT_RULE_LINES: [(&str, &str, &str); 3]` holds (id, source, meaning): D43 / 'must cite commands that ran (D43)' (verify.rs:1200); D63 / 'as one whole simple command inside a chained or piped one' (verify.rs:1217); D115 / 'Athena ran and recorded it on the same candidate tree and it passed' (verify.rs:1227). Also add DECISIONS_APPEND_ONLY_PHRASE = 'docs/decisions.md is append-only' (mirrors.rs:265), RECORDS_APPEND_ONLY_PHRASE = 'records are append-only' (athena-gate/src/lib.rs:101), CHANGELOG_PATH = 'CHANGELOG.md', CHANGELOG_DEFAULT_PHRASE = 'the changelog default applies' (admission.rs:999), DEFAULT_WRITTEN_REASON = 'Athena always adds it to a change reading, and the job must record itself there' (checks.rs:576) and CRITERIA_RULES_HEADING = '# Rules that judge criteria'.",
+    "Step 2, same file: write `fn criteria_judging_section(out: &mut String)`. It prints the heading, one lead sentence saying these are Athena's rules and not preferences, and one `- ` line per rule, built with `format!` from the consts. (a)-(c) one line per VERDICT_RULE_LINES row, starting `- D43`, `- D63` and `- D115`: the line quotes the source and the meaning. D43: a behavior criterion's evidence must cite commands that ran, and a content criterion names a file or diff line. D63: the verifier runs whole simple commands, so a chained command is judged per simple command. D115: a passing check Athena recorded on the same tree counts as a command run, so name fmt, clippy and test as evidence, but a failed record or another tree's record does not. (d) Append-only: docs/decisions.md and records/ entries are never edited, annotated or removed, and a criterion must not demand it. Write 'record in a new appended decision with a Provenance bullet'. Add a docs/decision-links.toml link only when the new entry supersedes or amends an earlier one, or the change touches a [[governs]] path. This line quotes both append-only phrases. (e) CHANGELOG.md is a default-written deliverable (quote the reason), so a criterion must not forbid touching it; see the Scope limit rule above for how a limit is written. No line starts with `# `. Call the function from `reference_and_rules_section` right after the `# Checkable criteria` block.",
+    "Step 3, crates/athena-context/src/briefs.rs: add the new names to the `pub use reader::{..}` list. In crates/athena-context/src/lib.rs, add the one module-doc line.",
+    "Step 4, briefs.rs `tests` module: add the helpers `verdict_rows(src) -> Vec<(String,String)>`, `string_literals(src) -> Vec<String>` and `production(src) -> &str` (text before the first `\\n#[cfg(test)]`), plus a finder that lists the ids and literals missing from a section. Add the three tests from the demonstrations. Include `include_str!` constants for ../../athena-core/src/verify.rs, mirrors.rs, admission.rs, reading/checks.rs and ../../athena-gate/src/lib.rs. Do not add a replace-and-check-gone assertion.",
+    "Step 5, crates/athena-core/src/reading.rs: delete the local `const CHANGELOG_PATH` (line 311) and add `CHANGELOG_PATH` to the `use athena_context::briefs::{..}` list (lines 36-38). Nothing in checks.rs changes.",
+    "Step 6, docs: append `## D174` to docs/decisions.md after D173 (id D174, Provenance bullet, no 'supersede' or 'amend' phrases). Its Case lists the four introspections and their jobs. Its Decision covers the section, the shared constant, the table-driven pin tests, no refusal rule and 'expected 0% of newly refused readings'. Add the CHANGELOG.md Unreleased entry naming the root cause. Leave docs/decision-links.toml unchanged. Grep the added text for 'supersed' and 'amends'.",
+    "Step 7, checks, each as its own command: `cargo fmt --all`, `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` and `cargo test -p athena-cli --test budgets`. No external service, CI run or deploy is involved."
+  ],
+  "risks": [
+    {
+      "risk": "Information in the brief may not change what the reader writes. The tests check the text the reader receives, not the model's behavior.",
+      "mitigation": "D174's Provenance states the effect as not measured. The class stays in Hestia's introspection sweep, so a recurrence shows in the records. A refusal rule is the fallback only if the class returns with the information present."
+    },
+    {
+      "risk": "The pin test reads sibling crates' source with `include_str!` and parses table layout (`id: \"..\"`, `source: \"..\"`, the const boundaries). A move, split or reformat of verify.rs, checks.rs, mirrors.rs, admission.rs or athena-gate/src/lib.rs breaks compilation or the parse.",
+      "mitigation": "A compile error names the path. The parser asserts it found D43, D63 and D115, and a non-empty literal list, so a layout change fails loudly and does not pass on empty input. The failure messages tell the maintainer to move the pin and the constant together. athena-core already uses `include_str!` on docs (reading.rs:7550)."
+    },
+    {
+      "risk": "The decision log rules or the backtest reject D174 (wrong id, no Provenance bullet, a supersede or amend phrase with no link).",
+      "mitigation": "Use D174 after D173 (decisions.md:4995), include the Provenance bullet, and keep 'supersedes' and 'amends' out of the added text. Grep the added text before finishing, and cargo test -p athena-cli runs the backtest."
+    },
+    {
+      "risk": "A public `CHANGELOG_PATH` in athena-context clashes with a name through a glob import.",
+      "mitigation": "It is defined only in athena-core reading.rs:311 today, and used in checks.rs and reading.rs. After the swap reading.rs imports it explicitly; clippy with -D warnings catches ambiguity or an unused import."
+    },
+    {
+      "risk": "Section text and size grow the reader brief and could crowd out other content.",
+      "mitigation": "The section is about six short lines. The brief sits outside every prompt budget, and the 12-line and 3045-byte READING_RULES tests are untouched."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "reader brief text (new section)",
+      "dependent": "crates/athena-core/src/reading.rs:609 (`reader_brief(&ReaderInputs {..})`), the only production caller, and the retry path `read_with_correction`",
+      "kind": "code",
+      "test": "cargo test -p athena-core, and `a_retry_reader_brief_carries_the_earlier_jobs_files_approach_and_checks` (crates/athena-core/src/run/tests.rs:5137). The signature and `ReaderInputs` are unchanged and the section is static text.",
+      "reason": null
+    },
+    {
+      "name": "reader brief headings",
+      "dependent": "Existing reader-brief tests in crates/athena-context/src/briefs.rs:3565-4235 that cut the brief by heading",
+      "kind": "code",
+      "test": "cargo test -p athena-context",
+      "reason": "They split on `\\n# ` after their own headings. The new heading sits between `# Checkable criteria` and `# What the verifier can run`, and the checkable-criteria test only needs the first before the second (briefs.rs:3810)."
+    },
+    {
+      "name": "Reading rules section size",
+      "dependent": "READING_RULES (12 lines) and READING_RULES_BASELINE_BYTES = 3045 (briefs.rs:3588, 3650, 3709)",
+      "kind": "rule",
+      "test": "the_reader_brief_names_each_reading_rule_in_one_short_line",
+      "reason": "The new content has its own heading, so the Reading rules section and `CODE_SURVEY_GUIDE` are unchanged."
+    },
+    {
+      "name": "CHANGELOG_PATH constant",
+      "dependent": "crates/athena-core/src/reading/checks.rs:270, 453, 575; reading.rs:322-360 (`ensure_changelog`, `changelog_unproduced`); admission.rs:808-830, 999",
+      "kind": "code",
+      "test": "changelog_unproduced_asks_for_the_root_changelog_on_a_change_reading (reading.rs:2334) and cargo test -p athena-core",
+      "reason": "The value is the same, `CHANGELOG.md`. checks.rs gets it through `use super::*`, which resolves to the new explicit import in reading.rs. admission.rs calls `changelog_unproduced` and does not use the constant."
+    },
+    {
+      "name": "verdict rule rows and source phrases (D43, D63, D115)",
+      "dependent": "crates/athena-core/src/verify.rs:1197-1238 (VERDICT_RULES), `check_verifier_prompt` (1288) and test `rule_sources_appear_in_the_header_or_judge_format_strings` (3344-3357)",
+      "kind": "rule",
+      "test": "the_criteria_rules_quote_the_wording_the_enforcing_code_uses; the_drift_helpers_report_a_new_or_reworded_enforcing_row",
+      "reason": "Read only through `include_str!`; verify.rs is not edited. A later new or reworded row makes the new pin test fail and names the id."
+    },
+    {
+      "name": "default-written files list",
+      "dependent": "crates/athena-core/src/reading/checks.rs:574-577 (DEFAULT_WRITTEN_FILES), used at checks.rs:725 and by `check_scope_limit`",
+      "kind": "rule",
+      "test": "the_criteria_rules_quote_the_wording_the_enforcing_code_uses",
+      "reason": "Read only, not edited. The pin test extracts every literal in the const, so an added row fails the test until the brief carries it."
+    },
+    {
+      "name": "append-only log and the new D174 entry",
+      "dependent": "crates/athena-core/src/mirrors.rs:243-268 (`append_only_problem`) and :346-396 (decision entries), applied to this change's own docs/decisions.md diff",
+      "kind": "rule",
+      "test": "git diff --numstat -- docs/decisions.md (0 deletions) and the mirrors.rs registry tests under cargo test -p athena-core",
+      "reason": "D174 is appended after the last byte of D173 with id D174 and a `- **Provenance:**` bullet, so both rules pass. No earlier byte changes."
+    },
+    {
+      "name": "decision-links.toml and the D174 wording",
+      "dependent": "crates/athena-cli/src/decisions.rs and backtest.rs (parse 'superseded by', 'supersedes' and 'amends' hits against docs/decision-links.toml), and the [[governs]] table (paths crates/athena-git/src/snapshot.rs and crates/athena-core/src/run/candidate.rs)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli (backtest and decisions tests read the real log and links)",
+      "reason": "D174 avoids those phrases, so no new hit appears and no link is needed. This change touches no governed path."
+    },
+    {
+      "name": "prompt token budgets",
+      "dependent": "docs/system-facts.md budget lines and `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs)",
+      "kind": "host_setting",
+      "test": "cargo test -p athena-cli --test budgets",
+      "reason": "The facts are added in code in the job brief, which sits outside the always-loaded prompt sets. No prompt file is edited."
+    },
+    {
+      "name": "reading acceptance checks",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and the reading checks in crates/athena-core/src/reading/",
+      "kind": "rule",
+      "test": "cargo test --locked (includes the unchanged refusal_corpus target)",
+      "reason": "Unchanged. The plan adds or changes no refusal or matching rule, so no input form needs a corpus case and none is cited."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A unit test in the `tests` module of crates/athena-context/src/briefs.rs builds `reader_brief(&reader_inputs(&reading()))`. It takes the text between `# Rules that judge criteria` and the next `\\n# ` and asserts the following. (a) D43: the line begins `- D43` and quotes 'must cite commands that ran (D43)'. (b) D115: the line begins `- D115`, quotes the source, and says a passing check Athena recorded on the same tree counts, so fmt, clippy and test can be named as evidence, while a failed record or another tree's record does not. (c) D63: the line begins `- D63` and says the verifier runs whole simple commands, so a chained command is judged per simple command. (d) docs/decisions.md and records/ are append-only: the section contains both enforcing phrases, says to append a new decision with a Provenance bullet, and says a decision-links.toml link is needed only for a superseding or amending entry or a [[governs]] path. It must NOT contain 'always add a docs/decision-links.toml link'. (e) CHANGELOG.md is named as a default-written deliverable that a criterion must not forbid, with the DEFAULT_WRITTEN_FILES reason quoted. (f) The heading appears once, after `# Checkable criteria` and before `# What the verifier can run`, and `READING_RULES` still has 12 lines.",
+      "command": "cargo test -p athena-context the_reader_brief_states_the_rules_that_judge_criteria",
+      "observes": "The test passes with the change. On the base commit it fails at the heading lookup, because no such section exists.",
+      "fails_without": "Without `criteria_judging_section` the brief has no `# Rules that judge criteria` heading, so the section lookup fails and every phrase assertion fails. The test also fails if the section mislabels the link rule or leaves out D63.",
+      "seam": "Production entry point `reader_brief` (reader.rs:319) through `reference_and_rules_section` (reader.rs:491). The fixture `reader_inputs(&reading())` exists (briefs.rs:3540) and is passed in directly. No double is used and the section text comes from the production function. `ReaderInputs` needs no new field. Step 2 adds the section function and step 4 adds the test."
+    },
+    {
+      "criterion": 2,
+      "method": "Two tests in briefs.rs, both reading the enforcing sources with `include_str!` of ../../athena-core/src/verify.rs, mirrors.rs, admission.rs, reading/checks.rs and ../../athena-gate/src/lib.rs. Test 1, `the_criteria_rules_quote_the_wording_the_enforcing_code_uses`: (i) slice verify.rs from `const VERDICT_RULES` to `const REQUIRED_FIELDS`; helper `verdict_rows` returns every (id, source) pair; assert the ids D43, D63 and D115 are all found, then assert that for every pair the section has a line starting `- <id>` that contains the source. (ii) slice checks.rs from `const DEFAULT_WRITTEN_FILES` to `)];`; helper `string_literals` returns every literal; assert there is at least one and each is in the section, and that the section names `CHANGELOG_PATH`'s value. (iii) For mirrors.rs, admission.rs and athena-gate/src/lib.rs, take the text before the first `\\n#[cfg(test)]`, assert it contains DECISIONS_APPEND_ONLY_PHRASE (mirrors.rs:265), CHANGELOG_DEFAULT_PHRASE (admission.rs:999) and RECORDS_APPEND_ONLY_PHRASE (lib.rs:101), and that the section contains each. Failure messages name the constant and the file to update. Test 2, `the_drift_helpers_report_a_new_or_reworded_enforcing_row`: gives `verdict_rows`, `string_literals` and the missing-line finder a synthetic table with four rows (a made-up D99 row, a reworded D43 source) and a second default-written row, and asserts each is reported as missing from the section. There is no tautological replace assertion.",
+      "command": "cargo test -p athena-context the_criteria_rules_quote_the_wording_the_enforcing_code_uses",
+      "observes": "Both tests pass now. If a fourth VERDICT_RULES row is added, or a source or the default-written reason is reworded without the brief following, test 1 fails and names the id or literal. A copy of the old wording left in a test or comment cannot satisfy it, because the search covers only the table slice or the pre-`#[cfg(test)]` text.",
+      "fails_without": "The tests do not compile without the constants and helpers. With the constants but a reworded verify.rs source, a new VERDICT_RULES row, or a new DEFAULT_WRITTEN_FILES row, test 1 fails. Test 2 shows the helpers detect a drifted or extra row, so the detection is not an empty check.",
+      "seam": "Production entry points are `reader_brief` and the pub consts and `VERDICT_RULE_LINES` in reader.rs, which step 1 adds. The fixtures are the enforcing source files themselves, read by `include_str!` at compile time, and in test 2 a synthetic text passed as an argument to the parse helpers. The brief-side section text is not a copy in the test: it comes from `reader_brief`. The helpers are test-local, parse only, and add no logic under test to a double. The seam is new and added by step 4."
+    },
+    {
+      "criterion": 3,
+      "method": "The verifier runs `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` as three separate whole simple commands on the final tree. Athena's recorded passes of the same three on the same tree count under D115. `cargo test --locked` runs the new tests, the READING_RULES size tests (briefs.rs:3650, 3709), `system_facts_budgets_match_computed`, `changelog_unproduced_asks_for_the_root_changelog_on_a_change_reading` (reading.rs:2334), the refusal_corpus target and the athena-cli backtest and decision tests.",
+      "command": "cargo test --locked",
+      "observes": "All three exit 0. The test run lists both new tests by name and the unchanged existing tests.",
+      "fails_without": "`cargo test` fails if the section is missing (test 1), if an enforcing row drifts from the brief (test 2), or if the section was added by growing READING_RULES (the 12-line and 3045-byte tests). Deleting athena-core's local CHANGELOG_PATH without adding the import fails to compile in reading.rs and checks.rs. Keeping both the local const and the import, or an unused import, fails clippy under -D warnings. Unformatted new code fails fmt. On the base commit the new tests do not exist, so this run cannot show them passing there.",
+      "seam": "The existing workspace checks at the workspace root; no fixture, double or new seam. The code under test is the real `reader_brief` and the `CHANGELOG_PATH` use sites in athena-core, reached through the tests added in step 4 and the existing tests named above."
+    },
+    {
+      "criterion": 4,
+      "method": "Content check of the diff. `fn criteria_judging_section` is in crates/athena-context/src/briefs/reader.rs and is called from `reference_and_rules_section`. Grep of the diff for `fn check_` finds nothing. `git diff -- crates/athena-core/src/reading` (the checks.rs and surveys.rs directory) is empty. reading.rs only swaps `const CHANGELOG_PATH` for an import.",
+      "command": "git diff --stat",
+      "observes": "The section function sits next to `reference_and_rules_section`, and no refusal function appears under crates/athena-core/src/reading/.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Content check. The added CHANGELOG entry and the added D174 each contain the phrase 'expected 0% of newly refused readings' and say that no refusal rule is added and the brief gives the information instead.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md",
+      "observes": "The phrase is present in both added entries. No criterion, check or corpus case is added.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Content check. (a) The CHANGELOG.md diff adds one entry under Unreleased that names the root cause (the reader was never shown the rules that judge criteria) and lists only what the diff does: the new brief section, the table-driven pin tests and the shared constant. (b) The decisions.md numstat shows added lines and 0 deleted lines. The added text starts after the last line of D173, with heading `## D174` and a `- **Provenance:**` bullet that says the effect on the reader's output is not measured. (c) docs/decision-links.toml is unchanged, because the added text has no 'supersede' or 'amends' phrase (Grep of the added text) and touches no [[governs]] path.",
+      "command": "git diff --numstat -- docs/decisions.md",
+      "observes": "Deletions are 0. The mirror rules 'append only' (mirrors.rs:243) and 'decision entries' (mirrors.rs:346-396) accept the diff at verification.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Content check plus Athena's budget test. `git diff --stat` lists no path under crates/athena-context/prompts/. The budgets test checks the docs/system-facts.md budget lines against the computed values, with the reader set at 1998 of 2000.",
+      "command": "cargo test -p athena-cli --test budgets",
+      "observes": "The diff touches only the files listed in the plan, and the budget test passes unchanged.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "107682cf47328a58532bfb9e9ea6763c150fc9395768cb1fa827f6d05eb2f773"
+}

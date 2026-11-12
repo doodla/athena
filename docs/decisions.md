@@ -5022,3 +5022,40 @@ should replace those estimates with its figures.
   test file, including a stray crate, a crate named only as a rejected alternative, and D36 alone. Not measured:
   whether a better maintained option exists for any crate; no reading rule changed, so no share of newly refused
   readings applies.
+
+## D174 · The reader brief states the rules that judge criteria, and tests tie its wording to the enforcing code
+
+- **Case:** Four jobs ended with a criterion that contradicts a rule Athena applies when it judges criteria: a
+  behavior criterion whose evidence D43 does not accept (introspection 20261024-045710-yn3g, job 20261024-045548-7qht),
+  an in-place edit of an existing decision (20261102-013736-k4jv, job 20261102-005332-8gkv), a criterion that annotates
+  an existing decision (20261106-062030-6pqw, job 20261106-041052-wzy7), and a criterion that forbids the
+  default-written `CHANGELOG.md` (20261112-135855-a39s, job 20261030-013721-4gwn). The reader brief listed the
+  reading checks and the checkable-evidence rule but never the rules that judge a criterion, so the reading stage
+  lacked the facts that decide whether a criterion can be met.
+- **Decision:** `reference_and_rules_section` in `crates/athena-context/src/briefs/reader.rs` now ends with a
+  section `# Rules that judge criteria`, written by `criteria_judging_section`. It has one line each for the verdict
+  rules D43, D63 and D115 (the `VERDICT_RULE_LINES` table), one for the append-only decision log and records (a new
+  appended decision with a Provenance bullet, and a `docs/decision-links.toml` link only for a replacing or
+  extending entry or a `[[governs]]` path), and one for the default-written `CHANGELOG.md`, which a criterion must
+  not forbid. Athena's changelog default now uses the path constant from `athena-context`, so the brief and the check
+  name one file. No refusal rule is added and no prompt file is edited, so the expected share of newly refused
+  readings is 0%: expected 0% of newly refused readings. Three tests in `crates/athena-context/src/briefs.rs` check
+  the section text, read the enforcing sources (`VERDICT_RULES` in `verify.rs`, `DEFAULT_WRITTEN_FILES` in
+  `reading/checks.rs`, and the opening phrases in `mirrors.rs`, `admission.rs` and `athena-gate`) and fail when a
+  row is added or reworded without the brief, and show that the parse helpers report such a row.
+- **Alternatives:** A check at reading acceptance, as the four introspections proposed. It refuses work the reader
+  could have written correctly had it known the rule, and a refusal is allowed only when giving the information
+  cannot prevent the failure. New lines in `READING_RULES`: each line there names a reading check, and none of these
+  rules has one. An edit to `crates/athena-context/prompts/reader.md`: the reader set is at its token budget.
+  Importing `VERDICT_RULES` from `athena-core`: `athena-context` cannot depend on it, and the struct is private.
+- **Tradeoff:** The tests read other crates' source text, so moving a table or reformatting a row breaks the parse
+  and the test names the file to follow. The brief gains about six lines. The brief states the rules; it cannot force
+  the reader to follow them, so a recurrence is still possible.
+- **Reversal cost:** Low; remove the section function, the constants, the tests and the import of the path
+  constant in `crates/athena-core/src/reading.rs`. No record schema or config key was added.
+- **Provenance:** Read: `crates/athena-context/src/briefs/reader.rs`, `crates/athena-core/src/verify.rs`,
+  `crates/athena-core/src/reading/checks.rs`, `crates/athena-core/src/mirrors.rs`,
+  `crates/athena-core/src/admission.rs`, `crates/athena-gate/src/lib.rs`, the four introspections above.
+  Measured: the new brief test, the pin test against the enforcing text and the drift-helper test. Not measured:
+  whether readings stop producing these criteria; the class stays in the introspection sweep. No reading rule
+  changed, so no readings are newly refused.
