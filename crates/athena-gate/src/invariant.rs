@@ -64,7 +64,7 @@ pub enum BootstrapRange {
     ClosedThrough(String),
 }
 
-/// The state of the bootstrap range as recorded in `treeish`.
+/// The state of the bootstrap range as recorded in `treeish`. It is the mechanism of requirement OLY-B-O1-01.
 pub fn bootstrap_range(git: &Git, treeish: &str) -> Result<BootstrapRange> {
     match git.show_file(treeish, BOOTSTRAP_OUTCOME)? {
         None => Ok(BootstrapRange::Open),

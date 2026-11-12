@@ -1,0 +1,283 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-013409-rwgy",
+  "round": 3,
+  "at": "2026-11-12T05:59:05.031904323Z",
+  "invocation_seq": 6,
+  "approach": "Point OLY-B-O1-01 in docs/spec.toml at the existing `athena_gate::invariant::bootstrap_range` (rule M6). Its single-line measure names the tests and ends `status: not shown`. Three tests show it. (a) New crates/athena-gate/tests/bootstrap_requirement.rs parses TOML with the `toml` crate, which is already a normal dependency of athena-gate. A pure `check_entry(&str)` validates the entry's fields. One test runs it on the real docs/spec.toml (expects Ok), one on a literal base-entry fixture wrapped in `[[requirement]]` (expects Err), and one drives the real `bootstrap_range` in a temp repo through Open then ClosedThrough. (b) A new in-source test in crates/athena-core/src/hestia.rs, modelled on `oly_b_set_04_no_longer_appears_in_the_spec_gap_list`, runs the real gap rule (`parse_spec`, `measure_problem`, `spec_gaps`) on the real spec. This is the rule that queues the request. It fails on the base tree. (c) The existing in-source rule-M6 test is the evidence that the gate refuses a bootstrap commit after the range closes. The plan also adds a doc-comment line on `bootstrap_range`, a CHANGELOG bullet and one line in xtask/shard-timings.txt. The gate's behavior does not change.\n\n**Reading versus brief.** The accepted reading's deliverables name a gate test file, but its Code survey, Existing code and Consumers lines do not name hestia.rs or xtask/shard-timings.txt. The brief's own \"Files: docs/spec.toml, crates/\" scope covers hestia.rs. shard-timings.txt is needed only because of the new test file (see decision 4).",
+  "decisions": [
+    {
+      "choice": "Mechanism is the existing `athena_gate::invariant::bootstrap_range` (rule M6). The measure says 'v0 stays small' is not mechanically enforced and ends `status: not shown`.",
+      "reason": "invariant.rs:60-79 defines the range. invariant.rs:175-197 refuses `Athena-Job: bootstrap` after the outcome record closes it. That mechanises 'recorded as such, the only work outside Athena'. The user accepted this reading. `measure_problem` (hestia.rs:1219-1239) accepts any measure whose last `status:` label starts with `not shown`, and xtask/tests/spec.rs needs only the `status: <label>` ending. The measure must stay on one line and contain `status:` exactly once, at the end, because `measure_label` uses `rsplit_once` (hestia.rs:1212).",
+      "rejected": [
+        {
+          "option": "Add a size limit for v0",
+          "why": "Out of scope. No threshold is defined."
+        },
+        {
+          "option": "Add an `athena status` label such as `status: bootstrap`",
+          "why": "Out of scope. It would change STATUS_MEASURE_LABELS. `athena status` already prints a `bootstrap` line from bootstrap_view (status.rs:1184), but the plan adds no label."
+        }
+      ]
+    },
+    {
+      "choice": "Answers finding 2: add an athena-core in-source test `oly_b_o1_01_no_longer_appears_in_the_spec_gap_list` in the tests module of crates/athena-core/src/hestia.rs, right after `oly_b_set_04_no_longer_appears_in_the_spec_gap_list` (hestia.rs:4315-4334). It parses `include_str!(\"../../../docs/spec.toml\")` with `parse_spec`. It finds OLY-B-O1-01 and asserts `measure_problem(&r.measure) == None`, mechanism != \"none\", mechanism contains `athena_gate::invariant::bootstrap_range`, and owner == \"Athena\". It asserts that `spec_gaps(&requirements)` has no entry with that id. It asserts that a clone with mechanism \"none\" gives exactly one gap with `no_mechanism`. The measure names it, and the verifier runs `cargo test -p athena-core oly_b_o1_01`.",
+      "reason": "`spec_gaps` (hestia.rs:1291-1308) is the code that re-queues 'Give requirement ... a mechanism' and fills the `athena status` spec_gaps. athena-gate cannot reach athena-core (crate reach: gate deps data git score), so only an athena-core test can run the real rule on the real entry. An in-source test needs no new test unit and no shard-timings line. The pattern is the existing one (hestia.rs:4315, status.rs:1631-1656). On the base tree this test fails, because mechanism is \"none\" and the entry is a gap. That is a real fails-without for the production rule.",
+      "rejected": [
+        {
+          "option": "Make a new crates/athena-core/tests/*.rs integration test",
+          "why": "It adds a test unit and so another shard-timings line, and the same coverage is available in-source."
+        },
+        {
+          "option": "Have the gate test re-implement the gap rule",
+          "why": "This was the critic's finding. A re-implementation is not the production rule, and gate cannot depend on core."
+        }
+      ]
+    },
+    {
+      "choice": "Answers finding 3: `check_entry(text: &str) -> Result<(), String>` in the gate test parses with `toml::from_str` into `struct Doc { #[serde(default)] requirement: Vec<Req> }` and `struct Req { #[serde(default)] id/mechanism/owner/measure: String }`. Serde ignores the other fields. It finds the entry whose id is `OLY-B-O1-01` and checks the fields. Mechanism must not be blank or \"none\" (case-insensitive), and must contain `athena_gate::invariant::bootstrap_range`. Owner must equal \"Athena\". The measure, trimmed, must end with `status: not shown`, contain `bootstrap`, and contain `status:` once. The base fixture is wrapped as `[[requirement]]` plus the entry lines.",
+      "reason": "Parsing fields is robust against quoting style, escapes and line layout. The `toml` crate is a normal dependency of athena-gate (Cargo.toml:20), and `serde` is one too (line 16), so the integration test reaches both and Cargo.toml and Cargo.lock stay unchanged. The real spec is about 200 KB of valid TOML that hestia::parse_spec already parses.",
+      "rejected": [
+        {
+          "option": "Slice raw text by `id = ` and `[[requirement]]` and match `measure = ` lines",
+          "why": "A literal string or an escaped quote would defeat the substring checks, and the line ends with a closing quote."
+        },
+        {
+          "option": "Parse with toml_edit as hestia does",
+          "why": "toml_edit is not a dependency of athena-gate, and the plain `toml` crate is."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the Open/ClosedThrough range test in the gate test file, but state plainly that criterion 3 rests on existing evidence. The refusal of a late `Athena-Job: bootstrap` commit is shown by the existing in-source test `bootstrap_commits_pass_while_the_range_is_open_and_not_after` (invariant.rs:1102-1122). The assert at invariant.rs:1121 is the evidence. The new range test calls the unchanged `bootstrap_range` and passes on the base tree. It is a direct check that the outcome record closes the range, and it is not counted for criterion 2.",
+      "reason": "Answers finding 4. The brief lists a gate test file, and the range test is cheap. Running the full `check` from an integration test needs the testkit as a dev-dependency, which would change Cargo.toml and Cargo.lock for nothing the in-source test does not already cover.",
+      "rejected": [
+        {
+          "option": "Drop the range test",
+          "why": "The `bootstrap` filter would then reach only the in-source test, and a direct range check is cheap."
+        },
+        {
+          "option": "Add a testkit dev-dependency to run `check` in the integration test",
+          "why": "This would change Cargo.toml and Cargo.lock for coverage that already exists."
+        }
+      ]
+    },
+    {
+      "choice": "Answers finding 1: keep the one-line xtask/shard-timings.txt change: add `athena-gate --test bootstrap_requirement 5.00` after `athena-gate --lib 10.00` (line 59). Label it an estimate in the changelog.",
+      "reason": "The brief requires the new file crates/athena-gate/tests/bootstrap_requirement.rs, and it is a new workspace test unit. `checked_in_timings_cover_every_workspace_test_unit` (xtask/tests/ci_shards.rs:410-421) asserts that the set of timed units equals the oracle, so the full test would fail without the line. The file is a data file, not a governance file (athena.toml, defaults.toml, workflows, lint config). Precedent: `athena-core --test model_roster 5.00` (line 53). The `--test` unit sorts after `--lib`.",
+      "rejected": [
+        {
+          "option": "Put the test in invariant.rs as an in-source test and add no file",
+          "why": "The brief lists the tests file as a deliverable, and the accepted reading says a new test file."
+        },
+        {
+          "option": "Run `cargo run -p xtask -- shard-timings`",
+          "why": "It reruns every unit and rewrites the whole file. A one-line estimate matches earlier practice."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "At OLY-B-O1-01 (line 2163): replace `mechanism = \"none\"` with text naming `athena_gate::invariant::bootstrap_range` (rule M6). Keep owner = \"Athena\". Set a one-line measure naming `cargo test -p athena-gate bootstrap`, crates/athena-gate/tests/bootstrap_requirement.rs and the hestia test `oly_b_o1_01_no_longer_appears_in_the_spec_gap_list`. The measure says 'v0 stays small' is not mechanically enforced and ends `status: not shown`, with `status:` only once. The statement and source lines are untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/tests/bootstrap_requirement.rs",
+      "action": "create",
+      "purpose": "Holds `repo_file`, the TOML-parsing `check_entry`, `spec_entry_names_the_bootstrap_range_gate`, `base_entry_is_rejected` and `bootstrap_range_is_open_then_closed_by_the_outcome_record`.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "Add one in-source test, `oly_b_o1_01_no_longer_appears_in_the_spec_gap_list`, after hestia.rs:4334 in the tests module. No production code change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "action": "modify",
+      "purpose": "Add one doc-comment line on `bootstrap_range` (line 67) naming OLY-B-O1-01 as the requirement it meets. No code change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a first bullet under [Unreleased] / Added: OLY-B-O1-01 now has a mechanism, `bootstrap_range` (rule M6), and the measure is `status: not shown` naming the gate and hestia tests. 'v0 stays small' stays prose. The gate and the records are unchanged. The new test file is registered in shard-timings with a 5.00 s estimate.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "purpose": "Add `athena-gate --test bootstrap_requirement 5.00` after line 59 so `checked_in_timings_cover_every_workspace_test_unit` passes. This is a registration of the new test unit, not a governance file. The brief's Files line only says `crates/`, so say so in the PR.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Edit docs/spec.toml at OLY-B-O1-01 (line 2163). Replace the mechanism line with text naming `athena_gate::invariant::bootstrap_range` (rule M6: `Athena-Job: bootstrap` commits are accepted only until records/jobs/bootstrap/outcome.json closes the range). Keep owner = \"Athena\". Write a single-line measure naming `cargo test -p athena-gate bootstrap`, crates/athena-gate/tests/bootstrap_requirement.rs and the hestia test `oly_b_o1_01_no_longer_appears_in_the_spec_gap_list`. The measure says 'v0 stays small' is not mechanically enforced and ends `status: not shown`, with `status:` used once. Use no double quote inside the string. Leave the statement and source lines alone.",
+    "Create crates/athena-gate/tests/bootstrap_requirement.rs. Add `repo_file` as in model_roster.rs:11-16 and `check_entry(text: &str) -> Result<(), String>`, which parses with `toml::from_str` into Doc/Req structs (`#[derive(serde::Deserialize)]`, `#[serde(default)]` on all fields). It finds id OLY-B-O1-01 and rejects: mechanism blank or \"none\"; mechanism without `athena_gate::invariant::bootstrap_range`; owner != \"Athena\"; a measure that, trimmed, does not end `status: not shown`, does not contain `bootstrap`, or has `status:` more than once. Tests: `spec_entry_names_the_bootstrap_range_gate` runs it on repo_file(\"docs/spec.toml\") and asserts Ok. `base_entry_is_rejected` runs it on a literal `[[requirement]]` fixture copied from the base entry (mechanism none, measure 'The spec gap list; status: requirement') and asserts Err mentioning the mechanism. `bootstrap_range_is_open_then_closed_by_the_outcome_record` makes a tempdir, runs `Git::isolated`, `git init -q -b main`, writes a file and commits it, and asserts `bootstrap_range(&git, \"HEAD\")` is `BootstrapRange::Open`. It then writes records/jobs/bootstrap/outcome.json (JSON copied from invariant.rs:1109 with `through_commit` set to the first commit id), commits it, and asserts `ClosedThrough(<id>)`.",
+    "Add the in-source test `oly_b_o1_01_no_longer_appears_in_the_spec_gap_list` in crates/athena-core/src/hestia.rs tests, after hestia.rs:4334. Parse the real spec with `parse_spec(include_str!(\"../../../docs/spec.toml\"))`, find the id with `.expect`, and assert mechanism != \"none\", mechanism contains `athena_gate::invariant::bootstrap_range`, owner == \"Athena\" and `measure_problem(&r.measure) == None`. Assert that `spec_gaps(&requirements)` has no gap with that id. Clone the entry with mechanism \"none\" and assert `spec_gaps(&[without])` has length 1 with `no_mechanism` true.",
+    "Add one doc-comment line on `bootstrap_range` in crates/athena-gate/src/invariant.rs (line 67) naming OLY-B-O1-01. Make no other code change.",
+    "Add `athena-gate --test bootstrap_requirement 5.00` to xtask/shard-timings.txt directly after `athena-gate --lib 10.00` (line 59), keeping the sorted order.",
+    "Add a first bullet under [Unreleased] / Added in CHANGELOG.md, in the style of the OLY-B-SET-02 entry (CHANGELOG.md:26-32). It says: OLY-B-O1-01 now has a mechanism, `bootstrap_range` (rule M6); the measure is `status: not shown` and names the gate and hestia tests; 'v0 stays small' stays prose; the gate and the records are unchanged; the new test file is registered in xtask/shard-timings.txt with a 5.00 s estimate.",
+    "Run `cargo fmt --all`. Then run `cargo test -p athena-gate`, `cargo test -p athena-core oly_b_o1_01`, `cargo test -p xtask --test ci_shards`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, to cover the xtask spec test, the shard-timings check and the policy scans over the new text."
+  ],
+  "risks": [
+    {
+      "risk": "The measure is parsed with `rsplit_once(\"status:\")` (hestia.rs:1212, xtask spec.rs:194-213). A second `status:` or a multi-line measure would break the ending.",
+      "mitigation": "Write the measure on one line with `status:` only once, at the end. `check_entry` enforces the same rule on the real entry, and the xtask spec test and the hestia test run it again."
+    },
+    {
+      "risk": "The literal base-entry fixture in `base_entry_is_rejected` could drift from the real spec.",
+      "mitigation": "It is a fixed copy of the base entry, kept only to show that the checker rejects mechanism \"none\". It does not read docs/spec.toml, so later spec edits cannot break it."
+    },
+    {
+      "risk": "The temp-repo test needs a git binary and identity settings in the checks' environment.",
+      "mitigation": "`Git::isolated` sets author, committer and gpgsign=false, the same setup as the in-source helpers (gate/src/lib.rs:396-418). The test runs `git init -q -b main` itself."
+    },
+    {
+      "risk": "The outcome JSON in the range test drifts from the `athena.outcome/1` schema, so parsing fails and `ClosedThrough` carries an empty id.",
+      "mitigation": "Copy the JSON from the string at invariant.rs:1109, which the existing test already parses, and assert `ClosedThrough(id)` with the real commit id."
+    },
+    {
+      "risk": "The 5.00 s timing is an estimate and could skew shard balance slightly.",
+      "mitigation": "The changelog bullet labels it an estimate. Balance does not affect correctness, and the file can be refreshed with `cargo run -p xtask -- shard-timings`."
+    },
+    {
+      "risk": "The new hestia test is in a large file, and a future spec edit that supersedes OLY-B-O1-01 would break `.unwrap()` on a missing id or the active-state assumption.",
+      "mitigation": "Use `.expect(\"OLY-B-O1-01 is in the spec\")`, as in status.rs:1637, and keep it independent of any other entry. Superseding the requirement should also drop the test."
+    },
+    {
+      "risk": "'v0 stays small' is not enforced, so the requirement is only partly mechanised.",
+      "mitigation": "The measure says so and ends `status: not shown`. The changelog bullet repeats it."
+    },
+    {
+      "risk": "`cargo fmt --all --check` fails on the new files.",
+      "mitigation": "Step 7 runs `cargo fmt --all` before the checks."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "OLY-B-O1-01 mechanism and measure in docs/spec.toml",
+      "dependent": "crates/athena-core/src/hestia.rs `spec_gaps` (1291-1308) and `measure_problem` (1219-1239): the reader that queues the 'Give requirement ... a mechanism' request, via `spec_gaps_at` (1311), and fills `athena status` spec_gaps (status.rs:507)",
+      "kind": "code",
+      "test": "New hestia.rs test `oly_b_o1_01_no_longer_appears_in_the_spec_gap_list` (`cargo test -p athena-core oly_b_o1_01`). It asserts that `measure_problem` is None, that `spec_gaps` omits the id, and that the entry with mechanism \"none\" is one `no_mechanism` gap. It fails on the base tree.",
+      "reason": null
+    },
+    {
+      "name": "OLY-B-O1-01 measure ending `status: <label>`",
+      "dependent": "xtask/tests/spec.rs `every_active_requirement_has_a_mechanism_an_owner_and_a_measure` (spec.rs:627) and `check_how_it_is_met` (spec.rs:194)",
+      "kind": "rule",
+      "test": "cargo test --locked. The measure ends `status: not shown` and `status:` appears once.",
+      "reason": null
+    },
+    {
+      "name": "The real docs/spec.toml entry values read by existing tests",
+      "dependent": "hestia.rs `the_real_spec_records_every_field_and_classes_the_acceleration_requirements_as_speed` (4286-4312)",
+      "kind": "code",
+      "test": null,
+      "reason": "It requires only a non-blank mechanism, a non-blank owner and `measure_problem == None` for every active requirement. The new entry meets all three. `is_speed` looks at the `throughput` and `checks` labels only, and `not shown` is neither."
+    },
+    {
+      "name": "Measure label `not shown` (no label added)",
+      "dependent": "crates/athena-core/src/status.rs STATUS_MEASURE_LABELS and the `athena status` bootstrap line (status.rs:1184, `bootstrap_view`)",
+      "kind": "code",
+      "test": null,
+      "reason": "No label is added or changed. `not shown` is accepted by `measure_problem` (hestia.rs:1229) and is not in the table. The bootstrap line in `athena status` is unchanged because only a doc comment changes in `bootstrap_range`."
+    },
+    {
+      "name": "bootstrap_range (doc-comment line only)",
+      "dependent": "Callers of `athena_gate::invariant::bootstrap_range`: invariant.rs:179 (`check`, rule M6) and crates/athena-core/src/status.rs:1184 (`bootstrap_view`)",
+      "kind": "code",
+      "test": "cargo test -p athena-gate bootstrap (invariant.rs:1102-1122). cargo test -p athena-core runs the status path. A doc comment changes no compiled behavior.",
+      "reason": null
+    },
+    {
+      "name": "Workspace test units: new unit `athena-gate --test bootstrap_requirement`",
+      "dependent": "xtask/tests/ci_shards.rs `checked_in_timings_cover_every_workspace_test_unit` (411) and `test_shard_6_is_disjoint_and_equals_the_workspace_target_set` (396); xtask/shard-timings.txt",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test ci_shards, after adding `athena-gate --test bootstrap_requirement 5.00`. The hestia test is in-source and adds no unit.",
+      "reason": null
+    },
+    {
+      "name": "athena-gate dependencies used by the new integration test",
+      "dependent": "crates/athena-gate/Cargo.toml dependencies (`toml`, `serde`, `tempfile`, `athena-git`, lines 11-20) and Cargo.lock",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged. All four are normal dependencies, so the integration test reaches them. Neither Cargo.toml nor Cargo.lock needs an edit. athena-core needs nothing new, since hestia.rs already uses `parse_spec` and `spec_gaps`."
+    },
+    {
+      "name": "CHANGELOG.md [Unreleased] / Added entry",
+      "dependent": "CHANGELOG.md consumers (any changelog-format test or release tooling)",
+      "kind": "code",
+      "test": null,
+      "reason": "The change adds one bullet in the same prose style as the neighbouring OLY-B-* bullets (CHANGELOG.md:12-32). The heading structure is unchanged."
+    },
+    {
+      "name": "New text in the spec, changelog and test files",
+      "dependent": "xtask/tests/policy.rs boundary scan and the `[personal_data]` allow-list in athena.toml",
+      "kind": "rule",
+      "test": "cargo test --locked (xtask policy tests). The new text names no person, machine or email address.",
+      "reason": null
+    },
+    {
+      "name": "Gate semantics of the bootstrap range (unchanged)",
+      "dependent": "docs/records.md (Closing the bootstrap) and docs/design/requirements-map.md (OM-3)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No gate behavior changes. Only a doc-comment line and tests are added, so these docs stay accurate."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "The test reads the real docs/spec.toml and runs `check_entry` on it. A second command, `cargo test -p athena-core oly_b_o1_01`, runs the real hestia gap rule on the same entry. `git diff docs/spec.toml` shows the edited lines.",
+      "command": "cargo test -p athena-gate --test bootstrap_requirement spec_entry_names_the_bootstrap_range_gate",
+      "observes": "The OLY-B-O1-01 entry has no mechanism \"none\". Its mechanism contains `athena_gate::invariant::bootstrap_range`. Its owner is \"Athena\". Its one-line measure names `cargo test -p athena-gate bootstrap`, the test file and the hestia test, and ends `status: not shown`. The statement and source lines are unchanged. `measure_problem` returns None and `spec_gaps` omits the id.",
+      "fails_without": "On the base tree the entry has mechanism \"none\" (docs/spec.toml:2164) and measure 'The spec gap list; status: requirement', so `check_entry` returns Err and the hestia test's assert on the mechanism fails.",
+      "seam": "Entry points: the new pure `check_entry(&str)` in crates/athena-gate/tests/bootstrap_requirement.rs, fed docs/spec.toml via `Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\")` (the model_roster.rs:11-16 approach), and the production `athena_core::hestia::{parse_spec, measure_problem, spec_gaps}`, fed `include_str!(\"../../../docs/spec.toml\")`. There is no double. `check_entry` and the hestia test are added by plan steps 2 and 3. The spec file and the hestia functions exist (read)."
+    },
+    {
+      "criterion": 2,
+      "method": "Run the new test file and `cargo test -p athena-core oly_b_o1_01`. Three tests in the gate file: `spec_entry_names_the_bootstrap_range_gate` (real entry gives Ok), `base_entry_is_rejected` (literal base entry gives Err), `bootstrap_range_is_open_then_closed_by_the_outcome_record`. The hestia test asserts that the real entry is not a gap and that the same entry with mechanism \"none\" is exactly one `no_mechanism` gap.",
+      "command": "cargo test -p athena-gate --test bootstrap_requirement",
+      "observes": "All pass with the change. `base_entry_is_rejected` passing shows the checker rejects the base text, so `spec_entry_names_the_bootstrap_range_gate` fails on the base docs/spec.toml. The hestia test fails on the base tree because the real entry is a gap there. The gate test target does not exist on the base tree, so the run fails there with 'no test target'.",
+      "fails_without": "With the base docs/spec.toml, `spec_entry_names_the_bootstrap_range_gate` fails on mechanism \"none\" and the hestia test fails on its gap assert. If `check_entry` accepted the base entry, `base_entry_is_rejected` would fail. If the gap rule did not flag mechanism \"none\", the hestia test's second half would fail.",
+      "seam": "Entry points: `check_entry` (gate test) with a fixture string compiled into the test as the base entry wrapped in `[[requirement]]`, and the production `spec_gaps` (hestia.rs:1291). The fixture is data. The logic under test is the real spec file plus the checker, and the real gap rule, not a double. The range test calls the real `athena_gate::invariant::bootstrap_range(&Git, \"HEAD\")` (invariant.rs:68) on a `tempfile::tempdir` repo made with `athena_git::Git::isolated`. Both crates are normal dependencies (Cargo.toml:11-19). Precondition: a git binary. The range test is not counted as proof of failure without the change. Plan steps 2 and 3 add the tests. `bootstrap_range` and `Git::isolated` exist (read)."
+    },
+    {
+      "criterion": 3,
+      "method": "The `bootstrap` filter runs the existing in-source `bootstrap_commits_pass_while_the_range_is_open_and_not_after` (invariant.rs:1102-1122) and the new `bootstrap_range_is_open_then_closed_by_the_outcome_record`. Both are in the filter, because the new test name contains `bootstrap`. Criterion 3 is existing evidence for the refusal, plus a new direct range check.",
+      "command": "cargo test -p athena-gate bootstrap",
+      "observes": "Bootstrap commits pass while the range is open and at the closing commit. A late `Athena-Job: bootstrap` commit after `through_commit` gets exactly one violation (assert at invariant.rs:1121). The new test sees `Open` and then `ClosedThrough(<commit id>)`.",
+      "fails_without": "If rule M6 accepted bootstrap commits after the outcome record, the `assert_eq!(judge(&git, \"HEAD\").len(), 1)` at invariant.rs:1121 would fail. If `bootstrap_range` ignored the outcome file, the new range test would fail. Neither fails on the base tree, because the gate is unchanged.",
+      "seam": "Entry points: `invariant::check` (invariant.rs:102) via the in-source `judge` helper (invariant.rs:885) and `owner_repo()` (invariant.rs:892), and `bootstrap_range` directly. Fixtures are real temporary git repos made inside the tests. All exist (read). The only new seam is the range test in step 2."
+    },
+    {
+      "criterion": 4,
+      "method": "The verifier runs `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` as separate commands.",
+      "command": "cargo test --locked",
+      "observes": "No fmt diff and no clippy warnings. Every test passes. That includes xtask `every_active_requirement_has_a_mechanism_an_owner_and_a_measure` (spec.rs:627), which uses the `status: <label>` check at spec.rs:194; `checked_in_timings_cover_every_workspace_test_unit` (ci_shards.rs:411); hestia `the_real_spec_records_every_field_and_classes_the_acceleration_requirements_as_speed` (hestia.rs:4286); and the xtask policy scans over the new text.",
+      "fails_without": "A measure without a trailing `status: <label>` fails the xtask spec test. A missing shard-timings line fails ci_shards.rs:411.",
+      "seam": "The workspace cargo commands, the xtask spec parse, the shard oracle in xtask/tests and the hestia tests. All exist (read)."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff stat and the new CHANGELOG.md bullet. CHANGELOG.md is a 435 KB file in the Keep-a-Changelog style, and each spec mechanism has a bullet under [Unreleased] / Added (the OLY-B-SET-02 entry, CHANGELOG.md:26-32).",
+      "command": "git diff --stat",
+      "observes": "Only docs/spec.toml, crates/athena-gate/tests/bootstrap_requirement.rs, crates/athena-gate/src/invariant.rs (doc comment only), crates/athena-core/src/hestia.rs (test only), CHANGELOG.md and xtask/shard-timings.txt change. athena.toml, defaults.toml, workflows, records/ and crates/athena-gate/Cargo.toml are untouched. The bullet is first under Added and labels the 5.00 s timing an estimate.",
+      "fails_without": "Content check; there is no behavior to fail.",
+      "seam": "None. This is a content check of the diff."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "94c4bd7f2356d7e6e01ad5a87d2f238d1dc294a4e8a40217228a38921034cafe"
+}

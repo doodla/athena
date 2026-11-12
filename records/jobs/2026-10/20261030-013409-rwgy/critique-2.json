@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013409-rwgy",
+  "round": 2,
+  "at": "2026-11-12T05:57:34.230415335Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "xtask/shard-timings.txt is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, xtask/shard-timings.txt",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "No test shows that the reader which queues this request, hestia::spec_gaps, stops listing OLY-B-O1-01. The spec check re-implements the gap rule instead of calling it.",
+      "evidence": "hestia.rs:1291-1308: `spec_gaps` flags a requirement when `blank_or_none(mechanism)` holds or `measure_problem` returns Some. This is the code that re-queues the request ('queued again at each drain') and fills `athena status` spec_gaps (status.rs:507). The plan's dependents entry for it has only a Reason and no Test. `check_entry` in athena-gate parses the text itself, and athena-gate cannot reach athena-core (crate reach: gate deps data git score). Existing precedent: hestia.rs:4315 `oly_b_set_04_no_longer_appears_in_the_spec_gap_list` and status.rs:1631-1655. Both parse the real spec with `parse_spec`, assert that `spec_gaps` excludes the id, and assert that the same entry with mechanism 'none' is a gap again. `the_real_spec_records_every_field...` (hestia.rs:4286) checks measure_problem only and allows mechanism 'none', so nothing in the plan runs the real gap rule on this entry. Fix: Add an athena-core test modelled on hestia.rs:4315, either in-source in hestia.rs tests or as crates/athena-core/tests/*.rs registered in shard-timings. It parses include_str!(docs/spec.toml) with `parse_spec`, asserts `measure_problem(&r.measure) == None`, asserts that `spec_gaps` does not contain OLY-B-O1-01, and asserts that a clone with mechanism 'none' yields exactly one gap with `no_mechanism`. Name it in the dependents entry and in the measure, and run `cargo test -p athena-core oly_b_o1_01`. Keep the athena-gate file for the spec-text and range checks.",
+      "location": "Dependents: 'Hestia sweep Athena::spec_review'; Decision 2 / Step 2 (check_entry)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "check_entry finds the fields by slicing raw text. Parsing the TOML would be more robust.",
+      "evidence": "The plan slices from `id = \"OLY-B-O1-01\"` to the next `[[requirement]]` and looks for a `measure = ` line ending `status: not shown`. That line actually ends with a closing quote, and a literal string ('...') or an escaped quote would defeat the substring checks. `toml` is already a normal dependency of athena-gate (Cargo.toml:20). xtask/tests/spec.rs and hestia::parse_spec both parse fields rather than lines. Fix: Have check_entry parse its input with `toml::from_str` into a `{ requirement: Vec<{id, mechanism, owner, measure}> }` table, wrapping the base fixture in `[[requirement]]`. Then check the fields: mechanism != 'none', mechanism contains `athena_gate::invariant::bootstrap_range`, owner == 'Athena', and measure.trim_end().ends_with(\"status: not shown\").",
+      "location": "Step 2, check_entry",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Criterion 3's 'fails without' argument depends on the existing in-source test. Nothing new is shown to fail there, so say plainly that criterion 3 is existing evidence.",
+      "evidence": "Decision 3 already says the new range test passes on the base tree. The demonstration repeats this correctly but is long. Fix: No change is required. You could shorten it to cite invariant.rs:1121 as the evidence.",
+      "location": "Demonstrations, Criterion 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code for this review. The plan's main claims hold. OLY-B-O1-01 sits at docs/spec.toml:2163-2169 with `mechanism = \"none\"` and the measure \"The spec gap list; status: requirement\". `bootstrap_range` is at invariant.rs:68. The M6 test is at invariant.rs:1102-1122. `Git::isolated` sets the author, the committer and gpgsign=false (athena-git lib.rs:179-196). `tempfile` and `athena-git` are already normal dependencies of athena-gate. xtask/shard-timings.txt is the only registration a new test unit needs. That file is required, so Athena's scope finding is not a reason to drop it. One real gap remains. The request exists because `hestia::spec_gaps` / `measure_problem` (crates/athena-core/src/hestia.rs:1219-1308) still flags this requirement, and that same code produces the status gap list. The plan does not test that the change takes OLY-B-O1-01 out of `spec_gaps`. Its dependents entry for that reader gives a reason but no test. The new `check_entry` re-implements the rule with string slicing instead of calling the real code. The repository already has tests that do this the right way: `oly_b_set_04_no_longer_appears_in_the_spec_gap_list` (hestia.rs:4315) and the OLY-B-GOAL-03 test (status.rs:1631). The plan should add one like them in athena-core. The gate-side tests can stay."
+}
