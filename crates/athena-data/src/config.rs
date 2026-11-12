@@ -598,6 +598,10 @@ pub enum ConfigError {
     #[error("[models] hard_producer_model {0} is not in producer_allowed")]
     HardProducerNotAllowed(String),
     #[error(
+        "[models] roles name no {0} model; every athena.toml Athena loads must name at least one Opus, one Sonnet and one Haiku model among reader, producer_default, producer_allowed, verifier and hard_producer_model (OLY-B-SET-02)"
+    )]
+    ModelFamily(&'static str),
+    #[error(
         "[budget] job_usd ${job_usd:.2} is ${short:.2} short of the ${required:.2} the configured caps need (the reader, every planning round, the producer and the verifier); raise job_usd or lower a cap"
     )]
     BudgetBelowReserve {
@@ -606,6 +610,9 @@ pub enum ConfigError {
         short: f64,
     },
 }
+
+/// The model families the configured roles must cover (OLY-B-SET-02), as lowercase name fragments.
+pub const MODEL_FAMILIES: [&str; 3] = ["opus", "sonnet", "haiku"];
 
 /// How far below an exact sum a budget may fall and still count as covering it, so that f64 rounding does not
 /// refuse a budget set to exactly the required amount.
@@ -671,6 +678,20 @@ impl Config {
             && !m.producer_allowed.contains(hard)
         {
             return Err(ConfigError::HardProducerNotAllowed(hard.clone()));
+        }
+        // OLY-B-SET-02: work uses Opus, Sonnet and Haiku. The rule holds for every athena.toml Athena loads:
+        // the configured roles must name a model of each family. The match is a case-insensitive substring of
+        // the model name, so a version bump passes. `names` is display text only and is not read here.
+        let roles: Vec<String> = [&m.reader, &m.producer_default, &m.verifier]
+            .into_iter()
+            .chain(m.producer_allowed.iter())
+            .chain(m.hard_producer_model.iter())
+            .map(|name| name.to_lowercase())
+            .collect();
+        for family in MODEL_FAMILIES {
+            if !roles.iter().any(|name| name.contains(family)) {
+                return Err(ConfigError::ModelFamily(family));
+            }
         }
         if !self.classes.list.iter().any(|c| c == "other") {
             return Err(ConfigError::NoOtherClass);
@@ -1331,6 +1352,95 @@ pub(crate) mod tests {
             config.validate(),
             Err(ConfigError::VerifierCanProduce(_))
         ));
+    }
+
+    /// REPO_CONFIG with each `(from, to)` replaced once; panics if a pattern misses, so a test cannot pass
+    /// because its edit did nothing.
+    fn edited(edits: &[(&str, &str)]) -> String {
+        let mut text = REPO_CONFIG.to_string();
+        for (from, to) in edits {
+            assert!(
+                text.contains(from),
+                "athena.toml no longer contains {from:?}"
+            );
+            text = text.replacen(from, to, 1);
+        }
+        assert_ne!(text, REPO_CONFIG, "the edit changed nothing");
+        text
+    }
+
+    fn family_refused(text: &str, family: &str) {
+        let error = Config::parse(text).expect_err("a config missing a family is refused");
+        assert!(
+            matches!(&error, ConfigError::ModelFamily(f) if *f == family),
+            "{error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains(family), "{message}");
+        assert!(message.contains("every athena.toml"), "{message}");
+    }
+
+    #[test]
+    fn roles_without_haiku_are_refused() {
+        let text = edited(&[(
+            r#"producer_allowed = ["claude-haiku-5-5", "claude-sonnet-5-5"]"#,
+            r#"producer_allowed = ["claude-sonnet-5-5"]"#,
+        )]);
+        family_refused(&text, "haiku");
+    }
+
+    #[test]
+    fn roles_without_sonnet_are_refused() {
+        let text = edited(&[
+            (
+                "reader = \"claude-sonnet-5-5\"",
+                "reader = \"claude-haiku-5-5\"",
+            ),
+            (
+                "producer_default = \"claude-sonnet-5-5\"",
+                "producer_default = \"claude-haiku-5-5\"",
+            ),
+            (
+                r#"producer_allowed = ["claude-haiku-5-5", "claude-sonnet-5-5"]"#,
+                r#"producer_allowed = ["claude-haiku-5-5"]"#,
+            ),
+            (
+                "hard_producer_model = \"claude-sonnet-5-5\"",
+                "hard_producer_model = \"claude-haiku-5-5\"",
+            ),
+        ]);
+        family_refused(&text, "sonnet");
+    }
+
+    #[test]
+    fn roles_without_opus_are_refused() {
+        // The verifier moves outside producer_allowed, so VerifierCanProduce cannot fire first.
+        let text = edited(&[(
+            "verifier = \"claude-opus-5-5\"",
+            "verifier = \"claude-other-5-5\"",
+        )]);
+        family_refused(&text, "opus");
+    }
+
+    #[test]
+    fn roles_with_all_three_families_load_and_case_does_not_matter() {
+        assert!(Config::parse(REPO_CONFIG).is_ok());
+        let upper = edited(&[(
+            "verifier = \"claude-opus-5-5\"",
+            "verifier = \"Claude-Opus-6-0\"",
+        )]);
+        assert!(Config::parse(&upper).is_ok());
+    }
+
+    #[test]
+    fn the_display_names_table_does_not_satisfy_the_family_check() {
+        // `[models.names]` still lists all three families; the check reads the roles only.
+        let text = edited(&[(
+            "verifier = \"claude-opus-5-5\"",
+            "verifier = \"claude-other-5-5\"",
+        )]);
+        assert!(text.contains("\"claude-opus-5-5\" = \"Claude Opus 5.5\""));
+        family_refused(&text, "opus");
     }
 
     #[test]

@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261112-023817-9at7",
+  "round": 1,
+  "at": "2026-11-12T02:43:22.77833861Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out the history check, which re-parses every historic athena.toml with the new rule",
+      "evidence": "check_history_with_exempt walks git.rev_list_reverse(tip) and calls Judged::new for each commit. Judged::new calls config_at on the first parent, which runs Config::parse. If that fails, it records config_error, and history.rs:239-242 pushes a Rule::Configuration violation for that commit. After the cutover (athena.toml:153 cutover_job), check_legacy (legacy.rs:192) still runs check_history_with_exempt up to C0, and its violations become LegacyHistory findings. CI runs `athena check --history` (ci.yml:606). So after this change, any past athena.toml whose roles lacked an Opus, Sonnet or Haiku name would fail the history job on main. The plan names config_at only with the repo_config test, which loads today's file. It mentions old commits only for JobConfig::at and states the risk cannot be checked. It names no test or check for the history walk. Fix: Add the history walk (gate Judged::new → check_history_with_exempt / check_legacy, run by the CI `athena check --history` job) as a dependent. State how it is covered. The producer has no history, so either (a) cite evidence that every past athena.toml had all three families (for example docs/design/athena-v0.md:1427 and docs/decisions.md:725 show the Sonnet/Haiku/Opus set from v0), and name the CI history job as the check the verifier or landing must see pass; or (b) add an athena-gate test with a parent athena.toml that lacks a family, showing the intended Configuration violation, so the effect is deliberate and visible. Add the gate's tests (`cargo test -p athena-gate`) to the dependents' test list.",
+      "location": "Plan Dependents and Risks (bullet 2); crates/athena-gate/src/history.rs:214, 235-243; crates/athena-gate/src/lib.rs:291-299; crates/athena-gate/src/legacy.rs:192; .github/workflows/ci.yml:606",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 1 demonstration's test passes whether or not the entry changed",
+      "evidence": "every_active_requirement_has_a_mechanism_an_owner_and_a_measure accepts the literal `none` (spec.rs:648-652 only prints the none list, and :695-697 shows none is valid). Passing that test does not show that OLY-B-SET-02 changed. Fix: Make the content check the main evidence: read docs/spec.toml:2020-2023 and confirm the mechanism names Config::validate in crates/athena-data/src/config.rs and the test, and that the measure ends `status: not shown`. Optionally assert in the new model_roster test that the OLY-B-SET-02 mechanism is not `none`.",
+      "location": "Plan Demonstrations, Criterion 1; xtask/tests/spec.rs:627-655",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new rule applies to every repository's athena.toml, not only this one",
+      "evidence": "Config::validate runs for every athena.toml Athena loads, including a user repository's config through wiring.rs:206. A repository that wants, say, only Sonnet models would be refused at load with ModelFamily. The requirement (BRIEF.md:25) describes Athena's own model set. Fix: State in the plan, the error message and the CHANGELOG that this applies to every athena.toml Athena loads, so the effect is deliberate. Make the error text say how to satisfy the rule.",
+      "location": "Plan Decision 1; crates/athena-cli/src/wiring.rs:206, crates/athena-core/src/admission.rs:933",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The external-calls guard scans the new files for HTTP client words",
+      "evidence": "The guard scans every .rs file under crates/ for `\\bcurl\\b`, `reqwest`, `hyper` and similar words outside src/gh/. jev.rs uses CurlHttp (jev.rs:25). A comment in model_roster.rs or the new doc comment in config.rs that explains how the Jev constants are used (for example mentioning curl) would fail that test. Fix: In steps 2 and 4, tell the producer to keep HTTP-client words (curl, reqwest, hyper and the others in forbidden()) out of the new comments and test text, and add external_calls_guard to the checks the producer runs.",
+      "location": "crates/athena-core/tests/external_calls_guard.rs:13-16, 57-73; plan steps 2 and 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "briefs.rs is listed as a deliverable but the plan makes no edit to it",
+      "evidence": "The plan says no edit is needed (briefs.rs fixtures at :1477, :3549 never reach Config::parse), and criterion 6's demonstration expects git diff to list only five files. Fix: Keep it as is, but state plainly that the deliverable is a no-change check, so the verifier does not count the empty diff against the deliverables list.",
+      "location": "Plan Files: crates/athena-context/src/briefs.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Overall the plan is sound and matches the accepted reading. The names it cites exist: Config::parse/validate at config.rs:616-674, ConfigError with HardProducerNotAllowed at :598, jev::ENDPOINT/MODEL at jev.rs:31-33, `pub mod jev` at lib.rs:105, `pub mod config` in athena-data, the shard-timings neighbours at lines 52-53, and OLY-B-SET-02 at spec.toml:2020 with mechanism \"none\". The check goes where the fault starts, in validate, which every load reaches. The demonstrations for criteria 3 and 4 use the real Config::parse with REPO_CONFIG or the repository athena.toml. Each has a guard against a replacement that does not match. Without the new check they would fail. I found no fixture that would be refused: the only `producer_allowed =` in the repository is athena.toml:14, and the only code that changes models in a test is config.rs:1329, which hits VerifierCanProduce first. One gap blocks acceptance: the dependents list leaves out the history check. `athena check --history` runs in CI (ci.yml:606). Through check_legacy → check_history_with_exempt (legacy.rs:192, history.rs:235-243) and Judged::new (gate lib.rs:295), it parses the parent's athena.toml of every commit up to C0 with the new binary. Any historic athena.toml that lacked a family would become a Configuration violation on main. The plan's risk note covers only JobConfig::at and gives no check for this case. The other findings are minor."
+}

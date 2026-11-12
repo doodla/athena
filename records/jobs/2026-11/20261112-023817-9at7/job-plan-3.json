@@ -1,0 +1,330 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261112-023817-9at7",
+  "round": 3,
+  "at": "2026-11-12T02:47:55.014958384Z",
+  "invocation_seq": 6,
+  "approach": "Add a family check to Config::validate (crates/athena-data/src/config.rs:639), after the hard_producer_model check at :670-674. Config::parse runs validate on every load (:616-619). The check matches lowercase substrings opus, sonnet and haiku across reader, producer_default, producer_allowed, verifier and hard_producer_model. A missing family returns a new ConfigError::ModelFamily(&'static str). Config unit tests edit REPO_CONFIG text to drop each family. A new integration test, crates/athena-core/tests/model_roster.rs, loads the repository athena.toml through the real loader, checks a haiku-less copy is refused, checks the OLY-B-SET-02 spec entry (parsed from its measure value with the closing quote trimmed), and checks jev::ENDPOINT and jev::MODEL. jev.rs, lib.rs, athena.toml, defaults.toml, workflows and briefs.rs stay unchanged. docs/spec.toml gets a real mechanism and a measure ending `status: not shown`. xtask/shard-timings.txt gets the new unit. CHANGELOG.md gets an entry. This revision lists all non-test readers of Config::parse in the dependents (gate content rule, trailers_stopped, cutover_job_for and its callers, xtask setup) and names the tests and the CI history job that cover them.",
+  "decisions": [
+    {
+      "choice": "Enforce the roles in Config::validate with ConfigError::ModelFamily(&'static str), matching lowercase substrings on reader, producer_default, producer_allowed, verifier and hard_producer_model. The message states that the rule applies to every athena.toml Athena loads and says how to satisfy it. The CHANGELOG entry says the same.",
+      "reason": "validate is the one non-test reader every load reaches: Config::parse (config.rs:616), config_at (athena-gate/src/lib.rs:184), JobConfig::at (capability.rs:41), admission (admission.rs:933), the gate content rule (content.rs:99, :133), trailers_stopped (invariant.rs:832), cutover_job_for (gh/records.rs:314), xtask setup (xtask/src/main.rs:184) and the user-repository load (athena-cli/src/wiring.rs:206). The rule is global on purpose: the requirement is Athena's own model set. A version bump such as claude-opus-5-6 keeps passing because no id list is used. [models] has no serde default for reader, producer_default, producer_allowed or verifier (config.rs:314-318), so every parsing config has the fields the check reads.",
+      "rejected": [
+        {
+          "option": "A hard-coded ROSTER constant in jev.rs checked by a test (prior job 20261030-001211-6mzd)",
+          "why": "Nothing read it, so removing a model from the real config left the test green."
+        },
+        {
+          "option": "Match exact ids such as claude-opus-5-5",
+          "why": "Every model upgrade would need a code change; the spec names families, not versions."
+        },
+        {
+          "option": "Count the keys of [models.names] as roles",
+          "why": "That table is display text for trailers (athena.toml:28-32). A stale entry there would hide a missing role."
+        },
+        {
+          "option": "Apply the rule only to this repository, for example in an xtask or a test",
+          "why": "Nothing at load time would refuse a config that dropped a family: the no-reader shape again."
+        }
+      ]
+    },
+    {
+      "choice": "Cover the readers that load past or parent configs with named existing tests plus the CI job `athena check --history` (ci.yml:606-607). Add no athena-gate test. State that trailers_stopped (invariant.rs:829-833) and cutover_job_for (gh/records.rs:312-318) fall back silently on a refused config (`.ok()` gives false or None), and accept that with a reason: both read only whether `[history] cutover_job` is set, and that key exists only in current-era configs, which descend from the present athena.toml with all three families. A parent config that lacked a family would already return false/None before the cutover key existed. The history evidence rests on docs/decisions.md:325-327 and :725-726 (Haiku and Sonnet producers, Opus verifier from v0) and on the CI history job. The old validate rules (verifier outside producer_allowed, default inside it) are not used as evidence, since they say nothing about families.",
+      "reason": "check_history_with_exempt (history.rs:235-243) judges every commit, and the content rule (content.rs:93-102) calls Config::parse on every commit that touches athena.toml, raising Rule::Configuration for a refusal. A past commit whose athena.toml named no opus, sonnet or haiku model would be reported by `athena check --history`. HISTORY.txt shows paths, not contents, so old text cannot be read here. If the CI history job fails on an old commit, the producer reports it and does not weaken the rule.",
+      "rejected": [
+        {
+          "option": "Add an athena-gate test with a parent athena.toml lacking a family",
+          "why": "It edits athena-gate, which is not a deliverable. Gate fixtures already build on BUILTIN_CONFIG (the real athena.toml), so they keep all three families."
+        },
+        {
+          "option": "Make trailers_stopped and cutover_job_for report a refusal instead of falling back",
+          "why": "Out of scope and a behavior change in the gate and landing; the fallback is safe for configs that carry the families."
+        }
+      ]
+    },
+    {
+      "choice": "Keep Jev shadow-only. The Jev clause is shown by asserting the existing jev::ENDPOINT and jev::MODEL in model_roster.rs. No HTTP-client words appear in new comments or test text.",
+      "reason": "Making Jev decide work is out of scope. external_calls_guard.rs:13-16 scans every .rs file under crates/ for reqwest, ureq, hyper, isahc, attohttpc, surf, curl, minreq, http_req and Command::new(\"gh\").",
+      "rejected": [
+        {
+          "option": "Add Jev to [models] or to the family check",
+          "why": "It would change athena.toml and put Jev on real work."
+        }
+      ]
+    },
+    {
+      "choice": "Add `athena-core --test model_roster 5.00` to xtask/shard-timings.txt between external_calls_guard and refusal_corpus.",
+      "reason": "xtask/tests/ci_shards.rs:410-421 asserts the timed units equal the workspace targets exactly. The value is an estimate.",
+      "rejected": [
+        {
+          "option": "Put the athena-core check inside the lib tests",
+          "why": "Criterion 4 names `cargo test -p athena-core --test model_roster`, which needs an integration test file."
+        }
+      ]
+    },
+    {
+      "choice": "The spec check in model_roster.rs slices docs/spec.toml from `id = \"OLY-B-SET-02\"` to the next `[[requirement]]`, takes the line starting `measure = `, strips the prefix and trims the trailing quote (and whitespace), then asserts the value ends with `status: not shown`. It also asserts the slice lacks `mechanism = \"none\"` and contains `Config::validate`.",
+      "reason": "Entries are written as `measure = \"...; status: requirement\"` (spec.toml:2023), so the raw line ends in a quote and a plain ends_with fails on a correct entry (finding 2). xtask/tests/spec.rs:204-210 and :627-655 accept the literal none, so passing them does not show the entry changed.",
+      "rejected": [
+        {
+          "option": "Parse the block with toml_edit or the hestia parse_spec",
+          "why": "More machinery for one line; trimming the quote is enough, and the test panics with a readable message when the id is missing."
+        },
+        {
+          "option": "Rely on cargo test -p xtask --test spec alone",
+          "why": "It passes whether or not the entry changed."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add ConfigError::ModelFamily(&'static str), the family check in Config::validate, and unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/model_roster.rs",
+      "action": "create",
+      "purpose": "Integration test: real loader on the repository athena.toml, a haiku-less copy refused, the OLY-B-SET-02 spec entry (measure value parsed with the closing quote trimmed), and the Jev constants.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "OLY-B-SET-02 (:2019-2026): replace mechanism none with the Config::validate mechanism and the tests; keep owner Athena; measure ends `status: not shown` with the test commands.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Added entry under [Unreleased] for the model-family check (applies to every athena.toml Athena loads), the tests, OLY-B-SET-02 and Jev staying shadow-only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "purpose": "Insert `athena-core --test model_roster 5.00` (an estimate) between external_calls_guard and refusal_corpus.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "A listed deliverable expected to stay unchanged: its model-name fixtures (:1477-1478, :3549-3550) never reach Config::parse. Edit it only if `cargo test -p athena-context` fails because of a refused config, which the survey does not expect. The final report says why the diff for this file is empty.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-data/src/config.rs, add to ConfigError (after HardProducerNotAllowed, ~line 598) a variant ModelFamily(&'static str) with the message: \"[models] roles name no {0} model; every athena.toml Athena loads must name at least one Opus, one Sonnet and one Haiku model among reader, producer_default, producer_allowed, verifier and hard_producer_model (OLY-B-SET-02)\". Keep the text free of HTTP-client words.",
+    "In Config::validate, after the hard_producer_model check (~line 674) and before the classes check, collect the lowercased reader, producer_default, every producer_allowed entry, verifier and hard_producer_model (if set). For each of [\"opus\",\"sonnet\",\"haiku\"] in that order, return Err(ConfigError::ModelFamily(family)) if no name contains it. Do not read models.names. Add a short doc comment citing OLY-B-SET-02 and saying the rule holds for every athena.toml Athena loads. Name no HTTP client in it (the words in external_calls_guard's forbidden()).",
+    "In the config.rs tests module, add a helper that applies (from, to) replacen edits to REPO_CONFIG and asserts the text changed. Add tests: haiku removed; sonnet removed (reader, producer_default, hard_producer_model and producer_allowed all moved to haiku); opus removed (verifier set to claude-other-5-5, outside producer_allowed); the unchanged REPO_CONFIG parses; uppercase names count; the stale [models.names] table does not satisfy the check. Assert the exact ModelFamily(family) and that the message names the family and says every athena.toml.",
+    "Create crates/athena-core/tests/model_roster.rs. A helper reads a repository-relative file via Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\") and panics with a readable message on failure. Tests: (a) athena.toml parses through athena_data::Config::parse and the lowercased roles contain opus, sonnet and haiku; (b) a copy with the haiku id removed from producer_allowed is refused with ConfigError::ModelFamily(\"haiku\"); (c) spec_entry_has_a_real_mechanism slices docs/spec.toml from `id = \"OLY-B-SET-02\"` to the next `[[requirement]]`, asserts it lacks `mechanism = \"none\"`, contains `Config::validate` and `owner = \"Athena\"`, finds the line starting `measure = `, strips that prefix, trims whitespace and the trailing `\"`, and asserts the result ends with `status: not shown`; (d) athena_core::jev::ENDPOINT contains \"ai-gateway.vercel.sh\" and athena_core::jev::MODEL == \"typesafe-ai/jev\". Keep the forbidden HTTP-client words out of the file.",
+    "Insert `athena-core --test model_roster 5.00` into xtask/shard-timings.txt between `athena-core --test external_calls_guard 5.00` and `athena-core --test refusal_corpus 10.00`.",
+    "Edit docs/spec.toml OLY-B-SET-02: set mechanism to a sentence naming Config::validate in crates/athena-data/src/config.rs (it refuses a [models] section whose roles lack an Opus, a Sonnet or a Haiku model, for every athena.toml Athena loads), the unit tests in that file, and crates/athena-core/tests/model_roster.rs, which also checks the Jev gateway constants. Keep owner Athena. Set measure to `cargo test -p athena-data; cargo test -p athena-core --test model_roster; status: not shown`.",
+    "Add the CHANGELOG.md entry under [Unreleased] / Added, in the style of CHANGELOG.md:12-20: OLY-B-SET-02 now has a mechanism, Config::validate refuses any athena.toml (this repository's or a user's) whose roles lack a family, the new ConfigError::ModelFamily, the tests, Jev still shadow-only, the 5.00 s shard value as an estimate, and the measure stays `status: not shown`.",
+    "Leave briefs.rs, jev.rs, lib.rs, athena.toml, defaults.toml and the workflows unchanged. Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Then run `cargo test -p athena-data`, `cargo test -p athena-core --test model_roster`, `cargo test -p athena-core --test external_calls_guard`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-core`, `cargo test -p athena-gate`, `cargo test -p athena-cli`, `cargo test -p xtask --test spec`, `cargo test -p xtask --test ci_shards` and `cargo test -p xtask --test policy`. Fix any fixture a failing test shows (none expected). In the final report say that CI's `athena check --history` job covers the history and content-rule readers and that trailers_stopped and cutover_job_for fall back silently by design, and that briefs.rs is a deliberate no-change deliverable because its fixtures never reach Config::parse."
+  ],
+  "risks": [
+    {
+      "risk": "A past athena.toml may lack a family by name, so `athena check --history` would report a Configuration violation for that commit (content.rs:99, history.rs:239-242). HISTORY.txt lists paths, not contents, so old text was not checked.",
+      "mitigation": "docs/decisions.md:325-327 and :725-726 record Haiku and Sonnet producers and an Opus verifier from v0. The match is a substring, so version bumps pass. CI `athena check --history` (ci.yml:606-607) and `cargo test -p athena-gate` are the named checks. If the history job fails on an old commit, the producer reports it and does not weaken the rule silently."
+    },
+    {
+      "risk": "trailers_stopped (invariant.rs:829-833) and cutover_job_for (gh/records.rs:313-317) turn a refused parent config into false or None without a report. That would change whether Athena- trailers are required and whether the cutover runs.",
+      "mitigation": "Both read only `[history] cutover_job`, which exists only in current-era configs that carry all three families. Gate and landing tests (invariant.rs:1016-1031, gh/tests.rs:4107-4179, cutover_fixture.rs:216-222) build on the real athena.toml and pass through the check. The CI history job would show any commit where it changes."
+    },
+    {
+      "risk": "A future model alias without opus, sonnet or haiku in its name would be refused.",
+      "mitigation": "The error names the family and says how to satisfy the rule. The match is a case-insensitive substring, so version bumps and vendor prefixes pass. An alias change needs a deliberate edit of the rule."
+    },
+    {
+      "risk": "A text-replacement test passes for the wrong reason if the pattern misses or another error fires first.",
+      "mitigation": "The helper asserts the text changed. Each case asserts the exact ModelFamily variant and family. The opus case uses a verifier outside producer_allowed, so VerifierCanProduce cannot fire first."
+    },
+    {
+      "risk": "Comments or test text that describe the Jev constants use an HTTP-client word and fail external_calls_guard.",
+      "mitigation": "Steps 2 and 4 forbid those words; external_calls_guard is in the producer's check list."
+    },
+    {
+      "risk": "The spec check depends on the layout of docs/spec.toml (the id line, the next `[[requirement]]` header, a single-line `measure = \"...\"`).",
+      "mitigation": "It slices on those markers, the layout of the entries at :2019-2026, trims the closing quote, and panics with a readable message if the id or the measure line is not found."
+    },
+    {
+      "risk": "The 5.00 s timing for the new shard unit is a guess.",
+      "mitigation": "The file header already marks the values as estimates; the CHANGELOG labels the value as an estimate."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Config::validate new ModelFamily refusal",
+      "dependent": "crates/athena-core/src/admission.rs:933 (admission of a candidate's athena.toml)",
+      "kind": "code",
+      "test": "New config.rs tests cover the refusal. A candidate whose athena.toml drops a family is reported as `athena.toml does not parse: ...` with the new message, which is intended. Existing admission tests (BASE_CONFIG at admission.rs:1083, :1805, :1939) parse the real athena.toml, which has all three families: cargo test -p athena-core.",
+      "reason": null
+    },
+    {
+      "name": "Config::parse refusal as a gate Configuration violation",
+      "dependent": "crates/athena-gate/src/content.rs:93-102 (Config::parse(&text).err() raises Rule::Configuration for any commit that changes athena.toml) and :133 new_exemptions (Config::parse(text) else returns no violations)",
+      "kind": "code",
+      "test": "cargo test -p athena-gate: content.rs a_configuration_that_does_not_parse_is_refused (:382) still sees a violation, and a_new_section_with_its_schema_change_in_one_commit_is_not_refused (:393) builds on include_str!(athena.toml), which has all three families. In `athena check --history` the same rule runs on every past commit that touched athena.toml, so a past config without a family name would report a violation. The check that shows this is the CI job `athena check --history` (ci.yml:606-607); the producer reports a failing past commit and does not weaken the rule.",
+      "reason": null
+    },
+    {
+      "name": "Config::parse refusal swallowed by .ok()",
+      "dependent": "crates/athena-gate/src/invariant.rs:825-834 trailers_stopped (parent's athena.toml parsed with .ok(); false if refused), used at :149 and :170",
+      "kind": "code",
+      "test": "cargo test -p athena-gate: invariant.rs cutover_repo (:1016-1028) builds the parent config from crate::BUILTIN_CONFIG (the real athena.toml), so with_cutover_job true/false behave as before (test after_the_cutover_trailer_free_records_and_intervention_commits_pass_by_content, :1031). Silent fallback accepted: trailers_stopped is true only when the parent config sets `[history] cutover_job`, a current-era key; those configs descend from the present athena.toml, which names all three families. A parent that lacks a family already gave false before the cutover existed. The CI history job would show any commit where this changes.",
+      "reason": null
+    },
+    {
+      "name": "Config::parse refusal swallowed by .ok()?",
+      "dependent": "crates/athena-core/src/gh/records.rs:312-318 cutover_job_for (.ok()? gives None on refusal) and its callers status.rs:1360, commits.rs:76, run/close.rs:494, auditor.rs:206, gh/landing.rs:80 and :89, gh/records.rs:263 and :382",
+      "kind": "code",
+      "test": "cargo test -p athena-core (gh/tests.rs cutover_job_is_read_from_the_commit_given_not_the_checkout :4172, built from the repository config at :4107-4115; a_land_whose_config_names_no_cutover_job_writes_no_import :4254) and cargo test -p athena-cli (cutover_fixture.rs :216-222, trailer_stop.rs). These fixtures start from the real athena.toml text, with only the cutover_job line changed, so the families stay. Silent None accepted for the same reason as trailers_stopped: only a config that sets cutover_job matters, and those carry the families. A grep of *.rs finds no literal `[models]` section outside config.rs messages, so no fixture builds a hand-written models table.",
+      "reason": null
+    },
+    {
+      "name": "Config::parse in xtask setup",
+      "dependent": "xtask/src/main.rs:184 setup (Config::parse of athena.toml; refusal becomes `athena.toml: ...` error)",
+      "kind": "code",
+      "test": null,
+      "reason": "It loads the repository athena.toml, which is unchanged and names all three families, so setup behaves as before. cargo test -p xtask runs with the real file; the model_roster test proves the real file passes the loader."
+    },
+    {
+      "name": "Config::validate applied to every historic athena.toml",
+      "dependent": "crates/athena-gate/src/history.rs:203-261 check_history_with_exempt; Judged::new (athena-gate/src/lib.rs:291-299); config_at and builtin_config (lib.rs:178-197); check_legacy (legacy.rs:165); CI step `athena check --history` (.github/workflows/ci.yml:606-607)",
+      "kind": "code",
+      "test": "cargo test -p athena-gate (history fixtures use crate::BUILTIN_CONFIG, history.rs:341-347 and :714-720); cargo test -p athena-data --test repo_config (builtin_config calls expect, repo_config.rs:18 parses the real file). Past real configs: docs/decisions.md:325-327 and :725-726 record Haiku and Sonnet producers and an Opus verifier from v0. HISTORY.txt shows paths only, so no old text was read. CI `athena check --history` is the check that shows it.",
+      "reason": null
+    },
+    {
+      "name": "The rule applies to every athena.toml Athena loads",
+      "dependent": "crates/athena-cli/src/wiring.rs:206 (user repository athena.toml load)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli. A user repository whose [models] lacks a family is now refused at load, with a message that says how to satisfy the rule. This is deliberate and stated in the error text, the doc comment and the CHANGELOG entry. cli tests load the real athena.toml (common/mod.rs:42, live.rs:51, job_plan.rs:1126, drain.rs:7510).",
+      "reason": null
+    },
+    {
+      "name": "Config::parse of the config at a commit and test loads",
+      "dependent": "crates/athena-core/src/capability.rs:41 JobConfig::at; reading.rs:1537, run/tests.rs:302, introspect.rs:2079, invocation.rs:378, routing.rs:871, env.rs:330, cap-change lib.rs:141, cap-study lib.rs:169, score lib.rs:690",
+      "kind": "code",
+      "test": "cargo test --locked. These configs come from include_str! of the real athena.toml; helpers change [job_plan] or the cutover job, not [models]. Grep finds no other test that edits producer_allowed and then parses, apart from config.rs:1327-1329.",
+      "reason": null
+    },
+    {
+      "name": "[models] producer_allowed and the other role fields",
+      "dependent": "crates/athena-core/src/reading.rs:617, 644 and 797 (producer_allowed picks and checks the producer)",
+      "kind": "code",
+      "test": "cargo test -p athena-core",
+      "reason": "The check refuses a config and changes no field or value; reading.rs reads the roles as before and athena.toml is unchanged."
+    },
+    {
+      "name": "Model names in brief fixtures",
+      "dependent": "crates/athena-context/src/briefs.rs:1477-1478 and 3549-3550 (model names in brief fixtures)",
+      "kind": "code",
+      "test": "cargo test -p athena-context",
+      "reason": "They are fields of plain structs (ReaderInputs, producer_models) that never pass through Config::parse or validate, so the new rule cannot refuse them. briefs.rs stays unchanged."
+    },
+    {
+      "name": "Config::validate error order",
+      "dependent": "crates/athena-data/src/config.rs tests: repository_config_parses_and_validates (:1076), a_config_without_effort_keys_still_parses_with_the_default_effort (:1050), verifier_that_can_produce_is_rejected (:1325-1329)",
+      "kind": "code",
+      "test": "cargo test -p athena-data. They start from REPO_CONFIG, which has all three families. The verifier test hits VerifierCanProduce (:643) before the new check, which goes after the hard_producer_model check, so existing precedence is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "OLY-B-SET-02 mechanism and measure",
+      "dependent": "docs/spec.toml OLY-B-SET-02 (:2019-2026), read by xtask/tests/spec.rs:204-210 and :627-655, athena-core hestia parse_spec and spec_gaps, and status.rs:506",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test spec; cargo test -p athena-core hestia; cargo test -p athena-core --test model_roster. The measure ends `status: not shown` plus the commands, the form those tests accept. A mechanism other than none removes the requirement from the spec-gap queue. No test names OLY-B-SET-02 today (searched crates/ and xtask/).",
+      "reason": null
+    },
+    {
+      "name": "Workspace test target list",
+      "dependent": "xtask/shard-timings.txt, read by xtask test-shard and xtask/tests/ci_shards.rs:410-421; .github/workflows/ci.yml shards",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test ci_shards. Adding tests/model_roster.rs adds the unit `athena-core --test model_roster`, and the timings file must list it. ci.yml picks shards by index, so the workflow is not edited.",
+      "reason": null
+    },
+    {
+      "name": "New comments in config.rs and model_roster.rs",
+      "dependent": "crates/athena-core/tests/external_calls_guard.rs:13-16, 57-73",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test external_calls_guard. New text must not contain reqwest, ureq, hyper, isahc, attohttpc, surf, curl, minreq or http_req.",
+      "reason": null
+    },
+    {
+      "name": "New text in CHANGELOG.md, spec.toml and the test file",
+      "dependent": "xtask/tests/policy.rs boundary_words and the [personal_data] allow-list in athena.toml",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test policy. The new text names models and a gateway host only and has no email-like text or names of who runs Athena.",
+      "reason": null
+    },
+    {
+      "name": "Always-loaded prompt sets",
+      "dependent": "docs/system-facts.md (system_facts_budgets_match_computed) and crates/athena-cli/tests/budgets.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "The change edits no prompt file, brief or docs/system-facts.md. The budgets count only role prompt sets, which do not include config.rs, the spec or the changelog."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read docs/spec.toml OLY-B-SET-02 (starts at :2019): the mechanism names Config::validate in crates/athena-data/src/config.rs and the tests, owner is Athena, and the measure ends `status: not shown` with the test commands. The test spec_entry_has_a_real_mechanism in model_roster.rs reads docs/spec.toml via Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\"), slices the OLY-B-SET-02 block, and asserts no `mechanism = \"none\"`, the text `Config::validate`, `owner = \"Athena\"`, and a measure value (prefix stripped, closing quote trimmed) ending `status: not shown`. A second command, `cargo test -p xtask --test spec`, shows the spec format tests still accept the entry (a format check only).",
+      "command": "cargo test -p athena-core --test model_roster",
+      "observes": "spec_entry_has_a_real_mechanism passes and the spec file read shows the new mechanism text; xtask spec tests pass.",
+      "fails_without": "If the entry still reads mechanism = \"none\", or does not name Config::validate, or the measure does not end `status: not shown`, spec_entry_has_a_real_mechanism fails.",
+      "seam": "Entry point: a plain file read of docs/spec.toml in the integration test. No fake. Added by plan step 4 (test) and step 6 (spec edit)."
+    },
+    {
+      "criterion": 2,
+      "method": "Read config.rs: Config::validate (called by Config::parse at :616-619) returns ConfigError::ModelFamily when a family is missing. Grep `ROSTER` under crates/ finds no match. `git status` and `git diff` list no change to crates/athena-core/src/jev.rs or lib.rs. The criterion 3 tests drive the variant through Config::parse, which shows validate is its caller. Non-test callers of validate through parse: config_at (athena-gate/src/lib.rs:184), JobConfig::at (capability.rs:41), admission.rs:933, content.rs:99 and :133, invariant.rs:832, gh/records.rs:314, xtask/src/main.rs:184, athena-cli wiring.rs:206.",
+      "command": "cargo test -p athena-data",
+      "observes": "The crate builds with the new variant; the ModelFamily tests pass through Config::parse; grep finds no ROSTER; the diff does not list jev.rs or lib.rs.",
+      "fails_without": "If validate does not return ModelFamily, the criterion 3 tests fail, so the variant cannot sit unread.",
+      "seam": "Entry point Config::parse (config.rs:616). No fake. The seam exists (read in config.rs)."
+    },
+    {
+      "criterion": 3,
+      "method": "New unit tests in the config.rs tests module (it imports super::*; REPO_CONFIG = include_str!(athena.toml) at config.rs:888). A helper applies (from, to) replacen edits to REPO_CONFIG and asserts the text changed, so a pattern that misses cannot pass silently. Cases: (haiku) producer_allowed becomes [\"claude-sonnet-5-5\"], so no role names haiku; (sonnet) reader, producer_default, hard_producer_model and producer_allowed all become claude-haiku-5-5; (opus) verifier becomes claude-other-5-5, outside producer_allowed, so VerifierCanProduce cannot fire first. [models.names] still lists all three, which shows the check does not read it. Each case asserts matches!(Config::parse(&text), Err(ConfigError::ModelFamily(\"haiku\" | \"sonnet\" | \"opus\"))) with the exact family, and that the message names the family and says every athena.toml. Controls: the unchanged REPO_CONFIG parses; uppercase names such as Claude-Haiku still count.",
+      "command": "cargo test -p athena-data",
+      "observes": "Each removal returns the matching ModelFamily error; both controls parse.",
+      "fails_without": "If the family check is deleted from validate, the three removal cases parse and the matches! assertions fail. If a replacen misses, the text-changed assertion fails.",
+      "seam": "Entry point Config::parse, which calls validate. Fixture: the real athena.toml text edited in memory. No fake. The seam exists; the helper and tests are added by plan step 3."
+    },
+    {
+      "criterion": 4,
+      "method": "The integration test reads athena.toml from Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\"), as crates/athena-data/tests/repo_config.rs:10-15 does, and panics with a readable message if the read fails (never skips). It calls athena_data::Config::parse (the real loader and validate) and asserts the lowercased roles contain opus, sonnet and haiku separately. A mutation test removes the haiku id from producer_allowed in the text and asserts ConfigError::ModelFamily(\"haiku\"). It asserts athena_core::jev::ENDPOINT contains \"ai-gateway.vercel.sh\" and athena_core::jev::MODEL == \"typesafe-ai/jev\".",
+      "command": "cargo test -p athena-core --test model_roster",
+      "observes": "All assertions pass on the repository files; the mutated copy is refused.",
+      "fails_without": "If a family is removed from the real athena.toml or the validate check is removed, the parse assertion or the mutation assertion fails. If ENDPOINT or MODEL change, the Jev assertions fail.",
+      "seam": "Entry points: athena_data::Config::parse and the pub consts athena_core::jev::ENDPOINT and MODEL (jev.rs:31-33). athena-data is a normal dependency of athena-core, so an integration test can use it. No fake. The consts and loader exist; the test file is added by plan step 4."
+    },
+    {
+      "criterion": 5,
+      "method": "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Also run `cargo test -p xtask --test spec`, `cargo test -p xtask --test ci_shards`, `cargo test -p xtask --test policy`, `cargo test -p athena-core --test external_calls_guard`, `cargo test -p athena-gate`, `cargo test -p athena-core` (gh/tests.rs cutover tests, admission tests), `cargo test -p athena-cli` (cutover_fixture, trailer_stop) and `cargo test -p athena-data --test repo_config`. The CI job `athena check --history` is the check that covers past configs; it runs in CI and cannot be run here. The rule is a config check on structured TOML, not a request parser, so no refusal_corpus case applies; `cargo test -p athena-core --test refusal_corpus` is run only as a regression check and I read no corpus case for it.",
+      "command": "cargo fmt --all --check",
+      "observes": "No formatting diff, no clippy warnings, a full green run. ci_shards' checked_in_timings_cover_every_workspace_test_unit sees the model_roster line. external_calls_guard passes.",
+      "fails_without": "Without the shard-timings line, checked_in_timings_cover_every_workspace_test_unit fails. An HTTP-client word in the new files fails external_calls_guard.",
+      "seam": "Entry points are the cargo commands. The ci_shards oracle lists targets from the crates' tests/ directories, so the new file is picked up automatically. The seam exists."
+    },
+    {
+      "criterion": 6,
+      "method": "Read CHANGELOG.md and confirm a new entry under [Unreleased] / Added, in the style of the entries at CHANGELOG.md:12-20. It says OLY-B-SET-02 now has a mechanism, that Config::validate refuses a [models] section whose roles lack an Opus, a Sonnet or a Haiku model for every athena.toml Athena loads, names the tests, and says Jev stays shadow-only. Run `git status` and `git diff` to show no change to athena.toml, defaults.toml, .github/workflows, jev.rs or lib.rs. The policy test runs the boundary-word and personal-data scan.",
+      "command": "cargo test -p xtask --test policy",
+      "observes": "The policy scan passes. The diff lists docs/spec.toml, crates/athena-data/src/config.rs, crates/athena-core/tests/model_roster.rs, CHANGELOG.md and xtask/shard-timings.txt. briefs.rs is absent on purpose (see Files).",
+      "fails_without": "The changelog read fails if the entry is missing. The policy test fails if an email-like string or a banned word is added.",
+      "seam": "Entry points: a file read, git diff and the xtask policy test. No fake. The seam exists."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "e0486a2d335cfdc6828e7c7efb29cde3a33eaa3a05df76f3000e3f7911b5dc6c"
+}
