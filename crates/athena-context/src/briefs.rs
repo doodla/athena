@@ -3584,8 +3584,9 @@ mod tests {
         );
     }
 
-    /// The size of the reader's reading rules section before the real-records rule line was added.
-    const READING_RULES_BASELINE_BYTES: usize = 3045;
+    /// The measured size of the reader's reading rules section with the judging rules line (the thirteenth).
+    /// It was 3045 before that line; shortening the other lines did not make room for all of it.
+    const READING_RULES_BASELINE_BYTES: usize = 3121;
 
     /// The size of the planner brief's Report section with empty inputs before the real-records rule was
     /// added (bytes after the `## Report` heading).
@@ -3643,11 +3644,19 @@ mod tests {
             "check_defined_terms",
             "check_scope_limit",
             "check_records_measure",
+            "check_judging_rules",
             "build_reading",
         ] {
             assert!(section.contains(check), "no rule for {check}:\n{section}");
         }
-        assert_eq!(READING_RULES.len(), 12);
+        assert_eq!(READING_RULES.len(), 13);
+        assert!(
+            lines.iter().any(|l| l.contains("`check_judging_rules`")
+                && l.contains("D43")
+                && l.contains("append")
+                && l.len() <= 165),
+            "no short rule line names the judging check, D43 and append:\n{section}"
+        );
         // Exactly one line states the real-records rule: a records-computed measure, real records, an
         // expected range and an independent source.
         let records_lines: Vec<&&str> = lines
@@ -3698,10 +3707,10 @@ mod tests {
                     && l.contains("`check_design_existing_code`")),
             "no rule line names Existing code: and its check:\n{section}"
         );
-        // The section adds little to the brief: twelve rule lines and the code survey guide paragraph. The
+        // The section adds little to the brief: thirteen rule lines and the code survey guide paragraph. The
         // section was about 2540 bytes with eight rules, measured 2718 with the ninth and 3045 with the
-        // eleventh. The twelfth (the real-records rule) replaced wording in the other lines, so the section
-        // does not grow past the 3045 bytes measured before it. The bound below is this section's own limit
+        // twelfth. The thirteenth (the judging rules line) is 3121 bytes in all after other lines were
+        // shortened, so the baseline is that figure. The bound below is this section's own limit
         // of 3150 bytes, not the reader's prompt budget set: `BudgetSet` in `lib.rs` composes only the
         // contract, frames, defaults and catalog, so the brief text sits outside it.
         assert!(section.len() < 3150, "{} bytes", section.len());

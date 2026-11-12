@@ -87,7 +87,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 63] = [
+const INPUT_FORMS: [&str; 73] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -151,6 +151,16 @@ const INPUT_FORMS: [&str; 63] = [
     "ci-drain-throughput",
     "ci-wait-time-spent",
     "record-types-module-no-measure",
+    "unrunnable-verifier-command",
+    "runnable-verifier-command",
+    "command-named-as-code-behavior",
+    "command-span-opens-criterion-as-code-behavior",
+    "in-place-edit-of-existing-decision",
+    "append-only-file-appended-only",
+    "decision-id-in-criterion-about-another-file",
+    "decision-id-recorded-as-new",
+    "records-path-edited",
+    "records-path-named-as-code-behavior",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -308,6 +318,7 @@ fn cases() -> Vec<Case> {
     out.extend(defined_terms_cases());
     out.extend(scope_limit_cases());
     out.extend(records_measure_cases());
+    out.extend(judging_rules_cases());
     out
 }
 
@@ -2743,6 +2754,263 @@ fn boundary_word_cases() -> Vec<Case> {
     out
 }
 
+/// A docs reading whose request bullets (each starting with `marker`) are its criteria, all of this kind. The
+/// decision log and the changelog are in the file set, so a criterion may name them.
+fn judging_case(
+    id: &'static str,
+    source: &'static str,
+    forms: &'static [&'static str],
+    marker: &str,
+    bullets: &[&str],
+    kind: CriterionKind,
+    expected: Expected,
+) -> Case {
+    let mut text = vec!["Update the guide.".to_string()];
+    text.extend(bullets.iter().map(|b| format!("{marker}{b}")));
+    let mut c = case(id, source, forms, &text.join("\n"), bullets.len(), expected);
+    for criterion in &mut c.reading.acceptance_criteria {
+        criterion.kind = kind;
+    }
+    let mut files = repo_files();
+    files.insert("docs/decisions.md".into());
+    files.insert("CHANGELOG.md".into());
+    c.repo_files = Some(files);
+    c
+}
+
+/// Cases for `check_judging_rules`: criteria that cite a command the verifier cannot run or tell the job to
+/// edit an existing decision or a record, which are refused, and criteria that look alike but are fine.
+///
+/// No recorded criterion of jobs 20261024-045548-7qht or 20261102-005332-8gkv was available when the cases
+/// were written (the records are not in the repository snapshot), so each case says in `source` whether it is
+/// synthetic or modelled on a named commit or decision title.
+fn judging_rules_cases() -> Vec<Case> {
+    const SOURCE_7QHT: &str = "synthetic: the class of job 20261024-045548-7qht, a behavior criterion whose command the verifier cannot run; the recorded criterion was not available";
+    const SOURCE_8GKV: &str = "modelled on the subject of commit 620c657 (merge refusals) and the D150 title; the recorded criterion of job 20261102-005332-8gkv was not available";
+    const SOURCE_RULES: &str = "synthetic: a sentence about D43, the decision log or records/, written for check_judging_rules";
+    let behavior = CriterionKind::Behavior;
+    let content = CriterionKind::Content;
+    let refuse = Expected::Refuse("check_judging_rules");
+    let mut out = vec![
+        judging_case(
+            "synthetic-class-of-7qht-cargo-fmt-without-check",
+            SOURCE_7QHT,
+            &["number-dot-parts", "unrunnable-verifier-command"],
+            "1. ",
+            &["Run `cargo fmt`: the tree is formatted"],
+            behavior,
+            refuse.clone(),
+        ),
+        judging_case(
+            "modelled-on-620c657-append-note-to-d87",
+            SOURCE_8GKV,
+            &["star-bullet", "in-place-edit-of-existing-decision"],
+            "* ",
+            &["Merge refusals no longer fire D87: append a note to D87 in docs/decisions.md"],
+            content,
+            refuse.clone(),
+        ),
+        judging_case(
+            "criterion-edits-existing-d87-entry-in-place",
+            SOURCE_8GKV,
+            &["dash-bullet", "in-place-edit-of-existing-decision"],
+            "- ",
+            &["Edit the existing D87 entry in docs/decisions.md in place"],
+            content,
+            refuse.clone(),
+        ),
+        judging_case(
+            "other-criterion-records-d87-fix-does-not-excuse-in-place-edit",
+            SOURCE_8GKV,
+            &[
+                "dash-bullet",
+                "in-place-edit-of-existing-decision",
+                "decision-id-in-criterion-about-another-file",
+            ],
+            "- ",
+            &[
+                "CHANGELOG.md records the D87 fix",
+                "Edit the existing D87 entry in docs/decisions.md in place",
+            ],
+            content,
+            refuse.clone(),
+        ),
+        judging_case(
+            "criterion-edits-records-file-imperative",
+            SOURCE_RULES,
+            &["dash-bullet", "records-path-edited"],
+            "- ",
+            &["Edit records/ files by hand"],
+            content,
+            refuse.clone(),
+        ),
+    ];
+    // A deliverable under records/ is a create here: a modify or delete of a path absent from the file set is
+    // refused earlier, by check_boundary_and_repo_files.
+    let mut under_records = judging_case(
+        "deliverable-under-records-directory",
+        SOURCE_RULES,
+        &["dash-bullet", "records-path-edited"],
+        "- ",
+        &["The guide describes the change"],
+        content,
+        refuse,
+    );
+    under_records.reading.deliverables.push(deliverable(
+        "records/jobs/x/outcome.json",
+        DeliverableAction::Create,
+    ));
+    out.push(under_records);
+    let accept = |id: &'static str,
+                  source: &'static str,
+                  forms: &'static [&'static str],
+                  kind: CriterionKind,
+                  text: &str| {
+        judging_case(id, source, forms, "- ", &[text], kind, Expected::Accept)
+    };
+    out.extend([
+        accept(
+            "criterion-runs-cargo-fmt-check",
+            SOURCE_7QHT,
+            &["dash-bullet", "runnable-verifier-command"],
+            behavior,
+            "Run `cargo fmt --check`: the tree is formatted",
+        ),
+        accept(
+            "criterion-cargo-test-passes",
+            SOURCE_RULES,
+            &["dash-bullet", "runnable-verifier-command"],
+            behavior,
+            "cargo test passes",
+        ),
+        accept(
+            "criterion-runs-cargo-locked-test",
+            SOURCE_RULES,
+            &["dash-bullet", "runnable-verifier-command"],
+            behavior,
+            "Run `cargo --locked test`: it passes",
+        ),
+        accept(
+            "criterion-mentions-cargo-fmt-all-as-code-behavior",
+            SOURCE_RULES,
+            &["dash-bullet", "command-named-as-code-behavior"],
+            behavior,
+            "Run `cargo test -p athena-core format`: the step runs `cargo fmt --all` before `cargo fmt --all --check`",
+        ),
+        accept(
+            "criterion-opens-with-cargo-fmt-span-as-code-behavior",
+            SOURCE_RULES,
+            &["dash-bullet", "command-span-opens-criterion-as-code-behavior"],
+            behavior,
+            "`cargo fmt --all` runs in the format step before `cargo fmt --all --check`",
+        ),
+        accept(
+            "criterion-appends-new-decision-amending-d87",
+            SOURCE_8GKV,
+            &["dash-bullet", "append-only-file-appended-only"],
+            content,
+            "Append a new decision to docs/decisions.md that amends D87",
+        ),
+        accept(
+            "changelog-updated-to-name-d174",
+            SOURCE_RULES,
+            &["dash-bullet", "decision-id-in-criterion-about-another-file"],
+            content,
+            "CHANGELOG.md is updated to name D174",
+        ),
+        accept(
+            "criterion-says-records-not-changed",
+            SOURCE_RULES,
+            &["dash-bullet", "records-path-named-as-code-behavior"],
+            content,
+            "records/ is not changed",
+        ),
+        accept(
+            "fix-recorded-as-new-d174",
+            SOURCE_RULES,
+            &["dash-bullet", "decision-id-recorded-as-new"],
+            content,
+            "The fix is recorded as D174 in docs/decisions.md",
+        ),
+        accept(
+            "decisions-updated-with-new-decision",
+            SOURCE_RULES,
+            &["dash-bullet", "decision-id-recorded-as-new"],
+            content,
+            "docs/decisions.md is updated with a new decision D174",
+        ),
+        accept(
+            "update-decisions-with-new-decision-no-id",
+            SOURCE_RULES,
+            &["dash-bullet", "append-only-file-appended-only"],
+            content,
+            "Update docs/decisions.md with a new decision",
+        ),
+        accept(
+            "update-decisions-and-changelog",
+            SOURCE_RULES,
+            &["dash-bullet", "append-only-file-appended-only"],
+            content,
+            "Update docs/decisions.md and CHANGELOG.md",
+        ),
+        accept(
+            "change-adds-decision-d174",
+            SOURCE_RULES,
+            &["dash-bullet", "decision-id-recorded-as-new"],
+            content,
+            "This change adds decision D174",
+        ),
+        accept(
+            "update-decisions-to-add-d174",
+            SOURCE_RULES,
+            &["dash-bullet", "decision-id-recorded-as-new"],
+            content,
+            "Update docs/decisions.md to add D174",
+        ),
+        accept(
+            "gate-sentence-changes-records",
+            SOURCE_RULES,
+            &["dash-bullet", "records-path-named-as-code-behavior"],
+            content,
+            "A squash commit that changes records/ but names no job is refused by the records check",
+        ),
+        accept(
+            "store-behavior-updates-records-outcome",
+            SOURCE_RULES,
+            &["dash-bullet", "records-path-named-as-code-behavior"],
+            content,
+            "land updates records/jobs/<id>/outcome.json with the landed state",
+        ),
+        accept(
+            "fix-the-records-loader",
+            SOURCE_RULES,
+            &["dash-bullet", "records-path-named-as-code-behavior"],
+            content,
+            "Fix the records/ loader in store.rs",
+        ),
+    ]);
+    // A deliverable that only appends a new decision is a modify of the decision log, and it is accepted.
+    let mut appends = judging_case(
+        "deliverable-appends-a-new-decision",
+        SOURCE_8GKV,
+        &["dash-bullet", "append-only-file-appended-only"],
+        "- ",
+        &["docs/decisions.md gains a new decision that amends D87"],
+        content,
+        Expected::Accept,
+    );
+    appends
+        .reading
+        .deliverables
+        .push(deliverable("docs/decisions.md", DeliverableAction::Modify));
+    appends
+        .reading
+        .deliverables
+        .push(deliverable("CHANGELOG.md", DeliverableAction::Modify));
+    out.push(appends);
+    out
+}
+
 /// The cases that fail their expectation, each as a line naming the case and its source.
 fn mismatches(cases: &[Case]) -> Vec<String> {
     let mut found = Vec::new();
@@ -3204,6 +3472,72 @@ fn records_measure_refusal_is_declared_intended() {
     ] {
         assert!(changelog.contains(needle), "the changelog lacks {needle:?}");
     }
+}
+
+#[test]
+fn judging_rules_refusal_is_declared_intended() {
+    // The declared share is read from the criterion text by the replay.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: "The change refuses more readings and the higher refusal rate is intended: expected 3% of newly refused readings".into(),
+            kind: CriterionKind::Content,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(3));
+    assert!(acceptance_check_names(reading_source()).contains(&"check_judging_rules".to_string()));
+    let doc = reading_source()
+        .split("pub fn check_judging_rules(")
+        .next()
+        .unwrap()
+        .lines()
+        .rev()
+        .take_while(|l| l.starts_with("///"))
+        .map(|l| l.trim_start_matches('/').trim())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "This check refuses more readings; the higher refusal rate is intended.",
+        "expected 3% of newly refused readings",
+        "estimate",
+        "20261024-045548-7qht",
+        "20261102-005332-8gkv",
+    ] {
+        assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+    }
+    // The doc's own declaration parses to the same share.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: doc.clone(),
+            kind: CriterionKind::Content,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(3));
+    let changelog = include_str!("../../../CHANGELOG.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let decisions = include_str!("../../../docs/decisions.md")
+        .split("## D174")
+        .nth(1)
+        .expect("D174 is recorded")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for (label, text) in [("changelog", &changelog), ("D174", &decisions)] {
+        for needle in [
+            "higher refusal rate is intended",
+            "expected 3% of newly refused readings",
+            "estimate",
+        ] {
+            assert!(text.contains(needle), "the {label} lacks {needle:?}");
+        }
+    }
+    assert!(changelog.contains("reading::check_judging_rules"));
 }
 
 #[test]
