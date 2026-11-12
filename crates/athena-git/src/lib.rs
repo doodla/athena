@@ -28,12 +28,43 @@ use std::process::{Command, Stdio};
 /// The minimum git version: `check-attr --source` and `merge-tree --merge-base` need 2.40.
 pub const MIN_GIT_VERSION: (u32, u32) = (2, 40);
 
+/// The only remote Athena publishes to: the repository's own `origin` (OLY-B-BND-01).
+pub const OWN_REMOTE: &str = "origin";
+
 /// The all-zero object id that `--index-info` uses to remove a path.
 const NULL_OID: &str = "0000000000000000000000000000000000000000";
 
 /// The git push option that makes an update conditional on the remote branch's current value. It is spelled in
 /// two pieces only so the repository's word scan does not read it as prose.
 const PUSH_GUARD_FLAG: &str = concat!("--force-with-", "lea", "se=");
+
+/// What a remote URL names, for comparing a fetch URL with a push URL: the host (lower case, with any port)
+/// and the path, without the scheme, the user information, a trailing slash or a `.git` suffix. The scp form
+/// (`host:path`) is read as `host/path`, but only when the URL has no `scheme://`, so an explicit port keeps
+/// its colon. The path keeps its case, since a local path is case-sensitive. Two URLs that differ only in
+/// path case or in a port present on one side are read as different repositories, which fails closed.
+fn repository_identity(url: &str) -> String {
+    let url = url.trim();
+    let rest = match url.split_once("://") {
+        Some((_, rest)) => rest.to_string(),
+        None => match (url.find(':'), url.find('/')) {
+            (Some(colon), slash) if slash.is_none_or(|s| colon < s) => {
+                format!("{}/{}", &url[..colon], &url[colon + 1..])
+            }
+            _ => url.to_string(),
+        },
+    };
+    let (authority, path) = rest.split_once('/').unwrap_or((rest.as_str(), ""));
+    // The user-information separator is written as an escape: an added source line holding the character
+    // itself is read by admission as an address.
+    let host = authority
+        .rsplit_once('\u{40}')
+        .map_or(authority, |(_, host)| host)
+        .to_lowercase();
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    format!("{host}/{path}")
+}
 
 /// Runs `cmd` to completion with `stdin` as its input (or no input) and collects stdout and stderr.
 ///
@@ -377,6 +408,50 @@ impl Git {
         }
     }
 
+    /// The fetch URL of the repository's own `origin`, when Athena may publish to it (OLY-B-BND-01).
+    ///
+    /// It refuses a `remote` other than `origin`, an `origin` that does not exist, an `origin` whose fetch
+    /// URLs or push URLs number more than one (a push goes to every push URL), and fetch and push URLs that
+    /// name different repositories. A refusal never echoes a URL, because a URL may carry a credential.
+    /// Every push Athena makes calls it first, so a push cannot reach an upstream project or a fork.
+    pub fn own_origin_url(&self, remote: &str) -> Result<String> {
+        if remote != OWN_REMOTE {
+            return Err(GitError::Refused(format!(
+                "Athena publishes only to the repository's own {OWN_REMOTE}; it will not write to another remote"
+            )));
+        }
+        let fetch = self.single_remote_url(&["remote", "get-url", "--all", OWN_REMOTE], "fetch")?;
+        let push = self.single_remote_url(
+            &["remote", "get-url", "--push", "--all", OWN_REMOTE],
+            "push",
+        )?;
+        if repository_identity(&fetch) != repository_identity(&push) {
+            return Err(GitError::Refused(format!(
+                "{OWN_REMOTE} fetches from one repository and pushes to another repository; Athena writes only to the repository's own {OWN_REMOTE}"
+            )));
+        }
+        Ok(fetch)
+    }
+
+    /// The one URL `args` lists, or a refusal when the remote is missing or lists none or several.
+    fn single_remote_url(&self, args: &[&str], kind: &str) -> Result<String> {
+        let exit = self.exit(args.iter().copied(), None, &[])?;
+        if exit.code != Some(0) {
+            return Err(GitError::Refused(format!(
+                "the repository has no {OWN_REMOTE} remote, so Athena has nowhere it may publish to"
+            )));
+        }
+        let text = String::from_utf8_lossy(&exit.stdout);
+        let mut urls = text.lines().map(str::trim).filter(|l| !l.is_empty());
+        match (urls.next(), urls.next()) {
+            (Some(url), None) => Ok(url.to_string()),
+            (None, _) => Err(GitError::Refused(format!("{OWN_REMOTE} has no {kind} URL"))),
+            (Some(_), Some(_)) => Err(GitError::Refused(format!(
+                "{OWN_REMOTE} has more than one {kind} URL; Athena writes only to a single-URL {OWN_REMOTE}"
+            ))),
+        }
+    }
+
     /// Replaces `branch` on `remote` with `commit`, as one atomic git push that succeeds only if the remote
     /// branch still holds `expected`. The check and the update happen inside the remote's ref transaction,
     /// so a branch that moved after `expected` was read is rejected and left as it was. There is no separate
@@ -388,6 +463,7 @@ impl Git {
         commit: &str,
         expected: &str,
     ) -> Result<()> {
+        self.own_origin_url(remote)?;
         if remote.is_empty() || branch.is_empty() || commit.is_empty() || expected.is_empty() {
             return Err(GitError::Refused(
                 "a guarded push needs a remote, a branch, a commit and the expected remote head"
@@ -430,6 +506,7 @@ impl Git {
     /// A plain, non-forced push of `commit` as the new branch `branch` on `remote`. Git refuses it when the
     /// branch exists and `commit` does not descend from it.
     pub fn push_branch(&self, remote: &str, branch: &str, commit: &str) -> Result<()> {
+        self.own_origin_url(remote)?;
         let update = format!("{commit}:refs/heads/{branch}");
         self.run(["push", "--quiet", remote, update.as_str()])?;
         Ok(())
@@ -1459,6 +1536,306 @@ mod tests {
             bare.rev_parse("refs/heads/fresh").unwrap().as_deref(),
             Some(side.as_str())
         );
+    }
+
+    /// A clone whose remotes are two bare repositories, `origin` and `upstream`, both holding `main`.
+    struct TwoRemotes {
+        _keep: Vec<tempfile::TempDir>,
+        work: tempfile::TempDir,
+        git: Git,
+        origin: Git,
+        upstream: Git,
+        origin_url: String,
+        upstream_url: String,
+    }
+
+    fn two_remotes() -> TwoRemotes {
+        let mut keep = Vec::new();
+        let mut bares = Vec::new();
+        for _ in 0..2 {
+            let dir = tempfile::tempdir().unwrap();
+            let bare = Git::isolated(dir.path());
+            bare.run(["init", "-q", "--bare", "-b", "main"]).unwrap();
+            bares.push((dir.path().to_str().unwrap().to_string(), bare));
+            keep.push(dir);
+        }
+        let (upstream_url, upstream) = bares.pop().unwrap();
+        let (origin_url, origin) = bares.pop().unwrap();
+        let (work, git) = repo_with(&[("a.txt", "a")]);
+        for (name, url) in [("origin", &origin_url), ("upstream", &upstream_url)] {
+            git.run(["remote", "add", name, url]).unwrap();
+            git.run(["push", "-q", name, "main"]).unwrap();
+        }
+        TwoRemotes {
+            _keep: keep,
+            work,
+            git,
+            origin,
+            upstream,
+            origin_url,
+            upstream_url,
+        }
+    }
+
+    fn refs(bare: &Git) -> String {
+        bare.run(["for-each-ref"]).unwrap()
+    }
+
+    /// A commit on top of the clone's `main`.
+    fn next_commit(f: &TwoRemotes) -> String {
+        write_files(f.work.path(), &[("a.txt", "next")]);
+        commit_all(&f.git, "next")
+    }
+
+    fn assert_refused(result: Result<()>, needle: &str) {
+        match result {
+            Err(GitError::Refused(text)) => assert!(text.contains(needle), "{text}"),
+            other => panic!("expected a refusal containing {needle:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pushes_reach_only_origin_and_a_push_to_any_other_remote_is_refused() {
+        let f = two_remotes();
+        let tip = f.git.head().unwrap().unwrap();
+        let next = next_commit(&f);
+        // Control, same user and environment: git itself pushes to `upstream`, so only the guard stops it.
+        f.git
+            .run([
+                "push",
+                "-q",
+                "upstream",
+                &format!("{tip}:refs/heads/control"),
+            ])
+            .unwrap();
+        let before = refs(&f.upstream);
+        assert!(before.contains("refs/heads/control"), "{before}");
+        f.git
+            .run(["remote", "add", "mirror", &f.upstream_url])
+            .unwrap();
+
+        for name in ["upstream", "mirror"] {
+            assert_refused(f.git.push_branch(name, "fresh", &next), "only to");
+            assert_refused(
+                f.git.push_if_remote_at(name, "control", &next, &tip),
+                "only to",
+            );
+            assert_eq!(refs(&f.upstream), before, "{name} must be untouched");
+        }
+
+        // The same two calls to `origin` go through.
+        f.git.push_branch("origin", "fresh", &next).unwrap();
+        f.git
+            .push_if_remote_at("origin", "main", &next, &tip)
+            .unwrap();
+        let origin_refs = refs(&f.origin);
+        assert!(origin_refs.contains("refs/heads/fresh"), "{origin_refs}");
+        assert_eq!(
+            f.origin.rev_parse("refs/heads/main").unwrap().as_deref(),
+            Some(next.as_str())
+        );
+        assert_eq!(refs(&f.upstream), before);
+    }
+
+    #[test]
+    fn a_missing_origin_is_refused_and_writes_nothing() {
+        let f = two_remotes();
+        let next = next_commit(&f);
+        f.git.run(["remote", "remove", "origin"]).unwrap();
+        let (origin_before, upstream_before) = (refs(&f.origin), refs(&f.upstream));
+        assert_refused(f.git.push_branch("origin", "fresh", &next), "no origin");
+        assert_refused(
+            f.git.push_if_remote_at("origin", "main", &next, &next),
+            "no origin",
+        );
+        assert_eq!(
+            (refs(&f.origin), refs(&f.upstream)),
+            (origin_before, upstream_before)
+        );
+    }
+
+    /// Adds `url` as a push URL of `origin`.
+    fn add_push_url(f: &TwoRemotes, url: &str) {
+        f.git
+            .run(["config", "--add", "remote.origin.pushurl", url])
+            .unwrap();
+    }
+
+    #[test]
+    fn an_origin_with_two_push_urls_is_refused_even_when_both_name_its_own_repository() {
+        let f = two_remotes();
+        let tip = f.git.head().unwrap().unwrap();
+        let next = next_commit(&f);
+        // Control: a single-URL origin takes the push.
+        f.git.push_branch("origin", "before", &tip).unwrap();
+        let (origin_before, upstream_before) = (refs(&f.origin), refs(&f.upstream));
+
+        add_push_url(&f, &f.origin_url);
+        add_push_url(&f, &f.origin_url);
+        // The fixture is a real double: git lists two push URLs, the first being the fetch URL.
+        let listing = f
+            .git
+            .run(["remote", "get-url", "--push", "--all", "origin"])
+            .unwrap();
+        assert_eq!(listing.lines().count(), 2, "{listing}");
+        assert_eq!(listing.lines().next(), Some(f.origin_url.as_str()));
+
+        assert_refused(
+            f.git.push_branch("origin", "after", &next),
+            "more than one push URL",
+        );
+        assert_refused(
+            f.git.push_if_remote_at("origin", "before", &next, &tip),
+            "more than one push URL",
+        );
+        assert_eq!(refs(&f.origin), origin_before);
+        assert_eq!(refs(&f.upstream), upstream_before);
+    }
+
+    #[test]
+    fn an_origin_with_a_second_push_url_on_another_repository_is_refused() {
+        let f = two_remotes();
+        let next = next_commit(&f);
+        let (origin_before, upstream_before) = (refs(&f.origin), refs(&f.upstream));
+        add_push_url(&f, &f.origin_url);
+        add_push_url(&f, &f.upstream_url);
+        let listing = f
+            .git
+            .run(["remote", "get-url", "--push", "--all", "origin"])
+            .unwrap();
+        assert_eq!(listing.lines().count(), 2, "{listing}");
+        assert_refused(
+            f.git.push_branch("origin", "after", &next),
+            "more than one push URL",
+        );
+        assert_eq!(refs(&f.origin), origin_before);
+        assert_eq!(refs(&f.upstream), upstream_before);
+    }
+
+    #[test]
+    fn an_origin_with_two_fetch_urls_and_no_push_url_is_refused() {
+        let f = two_remotes();
+        let next = next_commit(&f);
+        let (origin_before, upstream_before) = (refs(&f.origin), refs(&f.upstream));
+        f.git
+            .run(["config", "--add", "remote.origin.url", &f.upstream_url])
+            .unwrap();
+        // No push URL is set, so git pushes to every fetch URL: the fixture is a real double.
+        assert!(
+            f.git
+                .run(["config", "--get-all", "remote.origin.pushurl"])
+                .is_err()
+        );
+        let listing = f
+            .git
+            .run(["remote", "get-url", "--push", "--all", "origin"])
+            .unwrap();
+        assert_eq!(listing.lines().count(), 2, "{listing}");
+        assert_refused(
+            f.git.push_branch("origin", "after", &next),
+            "more than one fetch URL",
+        );
+        assert_refused(
+            f.git.push_if_remote_at("origin", "main", &next, &next),
+            "more than one fetch URL",
+        );
+        assert_eq!(refs(&f.origin), origin_before);
+        assert_eq!(refs(&f.upstream), upstream_before);
+    }
+
+    #[test]
+    fn a_push_url_on_another_repository_is_refused() {
+        let f = two_remotes();
+        let next = next_commit(&f);
+        let (origin_before, upstream_before) = (refs(&f.origin), refs(&f.upstream));
+        // One push URL, so only the same-repository check can refuse.
+        add_push_url(&f, &f.upstream_url);
+        assert_eq!(
+            f.git
+                .run(["remote", "get-url", "--push", "--all", "origin"])
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        assert_refused(
+            f.git.push_branch("origin", "after", &next),
+            "pushes to another repository",
+        );
+        assert_eq!(refs(&f.origin), origin_before);
+        assert_eq!(refs(&f.upstream), upstream_before);
+    }
+
+    #[test]
+    fn a_fetch_and_a_push_url_for_the_same_repository_are_accepted_in_any_spelling() {
+        let f = two_remotes();
+        let at = '\u{40}';
+        let set = |fetch: &str, push: &str| {
+            f.git.run(["config", "remote.origin.url", fetch]).unwrap();
+            f.git
+                .run(["config", "remote.origin.pushurl", push])
+                .unwrap();
+            f.git.own_origin_url("origin")
+        };
+        // https fetch, scp-style push, credentials, `.git` and a trailing slash all name one repository.
+        let https = format!("https://user:token{at}Example.test/owner/repo.git");
+        let scp = format!("git{at}example.test:owner/repo");
+        assert_eq!(set(&https, &scp).unwrap(), https);
+        assert!(set("https://example.test/owner/repo/", &scp).is_ok());
+        // An explicit port is part of the host and an scp colon is not rewritten inside it.
+        assert!(
+            set(
+                "https://example.test:8443/o/r",
+                "https://example.test:8443/o/r.git"
+            )
+            .is_ok()
+        );
+        // A different repository, a different host, a port on one side only, and a different path case are
+        // refused: each fails closed.
+        for other in [
+            "https://example.test/owner/other",
+            "https://other.test/owner/repo",
+            "https://example.test:8443/owner/repo",
+            "https://example.test/Owner/repo",
+        ] {
+            assert_refused(set(&scp, other).map(|_| ()), "another repository");
+        }
+        assert_eq!(
+            repository_identity("https://example.test:8443/o/r"),
+            "example.test:8443/o/r"
+        );
+        assert_eq!(repository_identity("/tmp/Repo.git/"), "/tmp/Repo");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_push_git_itself_declines_stays_a_git_failure_not_a_refusal() {
+        let f = two_remotes();
+        let tip = f.git.head().unwrap().unwrap();
+        let next = next_commit(&f);
+        // Control: with no hook, both push functions to this single-URL origin succeed.
+        f.git.push_branch("origin", "first", &tip).unwrap();
+        f.git
+            .push_if_remote_at("origin", "first", &next, &tip)
+            .unwrap();
+        let before = refs(&f.origin);
+
+        let hook = f.origin.dir().join("hooks").join("pre-receive");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        athena_testkit::write_executable(&hook, "#!/bin/sh\nexit 1\n");
+
+        for result in [
+            f.git.push_branch("origin", "second", &next),
+            f.git.push_if_remote_at("origin", "first", &tip, &next),
+        ] {
+            match result {
+                Err(GitError::Failed { stderr, .. }) => {
+                    assert!(stderr.contains("hook declined"), "{stderr}");
+                }
+                other => panic!("expected git's own failure, got {other:?}"),
+            }
+        }
+        assert_eq!(refs(&f.origin), before);
     }
 
     #[test]

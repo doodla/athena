@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261112-135930-pczv",
+  "round": 3,
+  "at": "2026-11-12T14:21:30.781604295Z",
+  "invocation_seq": 9,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The CI-result reader keeps the old origin read, so for a doubled or mismatched GitHub origin the run skips the CI push but still waits for a CI run that was never pushed.",
+      "evidence": "client.rs:1024-1025 says origin_repository decides whether a GitHub origin exists 'by the same rule as the push of the CI branch'. After the change, early.rs github_repository returns None for a doubled or mismatched origin, so push_ci_branch skips. run/mod.rs github_origin still uses raw `get-url origin` plus origin_repository, so has_github_origin stays true. with_ci_source then polls the job's CI branch for up to ci_wait_s, and the baseline lookup at checks.rs:768 does the same, before both fall back to local checks. This costs time but writes nothing. The Dependents entry calls this reader 'a read only' and does not mention that it is coupled to the push. Fix: Say this in Risks as a known, bounded cost (the wait, then local checks). Better: make github_origin use the same checked read (own_origin_url then origin_repository) so the push and the read agree. That puts run/mod.rs in the change, so name it in the dependents with a test showing a doubled origin gives NoCi.",
+      "location": "Plan decision 9 and the Dependents entry 'CI read of the origin repository'; crates/athena-core/src/run/mod.rs:1709-1722, run/checks.rs:768",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Removing parse_remote from land_pr leaves its import in landing.rs unused, which fails `cargo clippy -- -D warnings`.",
+      "evidence": "grep shows landing.rs uses parse_remote only at line 867; line 8 imports it. After step 5 the import is unused, and rustc's unused_imports warning becomes an error under -D warnings. Fix: In step 5, also drop parse_remote from the `use` list at landing.rs:8 and import own_origin_repository from super::remote, which is a private module re-exported only in part at gh/mod.rs:65.",
+      "location": "Plan step 5; crates/athena-core/src/gh/landing.rs:8 and 867",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "'Lower-case the host only' is undefined for local-path origins, which every test and most fixtures use.",
+      "evidence": "A local path such as /tmp/x has no scheme and no scp colon. If the producer treats the first path segment as the host, /TMP/x and /tmp/x would compare equal, which the plan says it refuses (case-sensitive local paths). Fix: State that a URL with no `scheme://` and no scp form (`host:path` with no slash before the colon) is a path, compared exactly after the trailing-slash and `.git` strip. Pin it with one unit test.",
+      "location": "Plan decision 3 and step 2 (normalisation)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Refusing ssh and scp GitHub origins in land_pr is stricter than the boundary needs.",
+      "evidence": "parse_remote already resolves `ssh://[email]/o/r` to the same repository that git pushes to. The dangerous case is a non-GitHub host whose path contains github.com. The plan's choice is consistent with early.rs and with the system fact on SSH, and it is announced in the CHANGELOG, so it is acceptable. Fix: Optional: accept the ssh and scp forms whose authority host is exactly github.com, or keep the refusal as planned and say in the error text how to switch to an https origin.",
+      "location": "Plan decision 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read remote.rs, the push functions in athena-git lib.rs, records_branch.rs append_to_remote, land_pr in landing.rs (lines 832-893), early.rs (lines 327-463), client.rs origin_repository and parse_remote, run/mod.rs github_origin, the hestia spec functions, the OLY-B-BND-01 entry in spec.toml, and the two pushurl fixtures. I also grepped every caller of push_branch, push_if_remote_at, append_to_remote, for_remote and `GitRemote {`. The plan's line citations match the code. Every production and test caller passes the literal \"origin\" with one local URL. The only fixtures that set a pushurl are the two the plan names, and their assertions do not depend on why the push failed. The measure format matches the repository's convention and passes measure_problem. The demonstrations use real git over temp bare repos and the existing EarlyFake, Lines and ScriptRunner seams. The tests that tell the checks apart (doubled push URL to the same repo, doubled fetch URL, push URL on another repo, the example.com/github.com URL, the pre-receive hook giving Failed rather than Refused) would each fail without the behavior. Earlier rounds' findings are addressed. What is left is minor: the CI-result reader in run/mod.rs now disagrees with the new early push gating for doubled or mismatched origins, removing parse_remote from land_pr leaves an unused import that fails clippy, and the normalisation's \"host\" is undefined for local paths. No blocker or major finding remains."
+}

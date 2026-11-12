@@ -16,6 +16,7 @@ use crate::state::StateDir;
 use crate::{Athena, Ui};
 use anyhow::Result;
 use athena_data::JobId;
+use athena_git::OWN_REMOTE;
 use std::time::Duration;
 
 /// How often land looks at the early commit's runs while it waits.
@@ -360,9 +361,19 @@ fn publish_ci_branch(remote: &dyn Remote, branch: &str, commit: &str) -> Result<
 impl Athena {
     /// The `owner/name` of the origin remote when it is an https URL on github.com; `None` for no origin or
     /// any other kind.
+    ///
+    /// OLY-B-BND-01: origin is read through [`athena_git::Git::own_origin_url`], so an origin with more than
+    /// one URL, or a push URL on another repository, is no GitHub origin and nothing is pushed to it.
     fn github_repository(&self) -> Option<String> {
-        let url = self.git.run(["remote", "get-url", "origin"]).ok()?;
+        let url = self.git.own_origin_url(OWN_REMOTE).ok()?;
         https_github_repository(&url)
+    }
+
+    /// Whether origin exists but the OLY-B-BND-01 guard refuses it (more than one URL, or fetch and push URLs
+    /// on different repositories), as opposed to no origin at all.
+    fn origin_is_refused(&self) -> bool {
+        self.git.run(["remote", "get-url", OWN_REMOTE]).is_ok()
+            && self.git.own_origin_url(OWN_REMOTE).is_err()
     }
 
     /// Runs `act` on the remote the CI branch lives on: origin, or, in tests, the fake in the early seam.
@@ -386,7 +397,13 @@ impl Athena {
             return;
         }
         if self.github_repository().is_none() {
-            ui.line("ci         CI branch push is skipped because there is no GitHub origin");
+            if self.origin_is_refused() {
+                ui.line(
+                    "ci         CI branch push is skipped because origin has more than one URL or names two repositories",
+                );
+            } else {
+                ui.line("ci         CI branch push is skipped because there is no GitHub origin");
+            }
             return;
         }
         let branch = ci_branch(job);
