@@ -35,6 +35,47 @@ pub const MODEL: &str = "typesafe-ai/jev";
 pub const KEY_VAR: &str = "AI_GATEWAY_API_KEY";
 /// Set to `1` to ask the real Jev in shadow. Without it no Jev is asked outside tests.
 pub const SHADOW_VAR: &str = "ATHENA_JEV_SHADOW";
+/// One model Athena's work may use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RosterEntry {
+    /// The short family name: `opus`, `sonnet`, `haiku` or `jev`.
+    pub family: &'static str,
+    /// The model name sent in a request.
+    pub model: &'static str,
+    /// Where the model is reached: `None` for a Claude model run by the agent, the endpoint for Jev.
+    pub endpoint: Option<&'static str>,
+}
+
+/// The models Athena's work uses (OLY-B-SET-02): Opus, Sonnet and Haiku, plus Jev through the Vercel AI Gateway
+/// for fast, cheap structured decisions. Jev reuses [`MODEL`] and [`ENDPOINT`] and stays shadow-only.
+pub const ROSTER: [RosterEntry; 4] = [
+    RosterEntry {
+        family: "opus",
+        model: "claude-opus-5-5",
+        endpoint: None,
+    },
+    RosterEntry {
+        family: "sonnet",
+        model: "claude-sonnet-5-5",
+        endpoint: None,
+    },
+    RosterEntry {
+        family: "haiku",
+        model: "claude-haiku-5-5",
+        endpoint: None,
+    },
+    RosterEntry {
+        family: "jev",
+        model: MODEL,
+        endpoint: Some(ENDPOINT),
+    },
+];
+
+/// The roster entry for a family name, if there is one.
+pub fn roster_entry(family: &str) -> Option<&'static RosterEntry> {
+    ROSTER.iter().find(|e| e.family == family)
+}
+
 /// What the gateway's chat endpoint says when asked for Jev.
 const CHAT_REFUSAL: &str = "a decision model, not a language model";
 

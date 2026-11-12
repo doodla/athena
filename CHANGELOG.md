@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- OLY-B-SET-02 now has a mechanism: `ROSTER` and `roster_entry` in `crates/athena-core/src/jev.rs` list the Opus,
+  Sonnet and Haiku model names and Jev (reusing `MODEL` and `ENDPOINT`). `cargo test -p athena-core --test
+  model_roster` fails when any entry is removed. Jev stays shadow-only; `athena status` does not show the roster.
 - OLY-A-12 now has a mechanism: `undecided_surface_changes` in `crates/athena-core/src/design_surface.rs` takes the
   difference between two design-surface inventories and the changed paths, and reports one finding per surface
   kind with changes unless `docs/decisions.md` is among the paths. An empty difference gives no findings. It tests
