@@ -2,10 +2,11 @@
 //! `Athena::land_pr` with what follows a merge.
 
 use super::early::{replace_early, wait_for_checks};
+use super::remote::own_origin_repository;
 use super::{
     Checks, GhClient, GitLandingRecords, GitRemote, HostErrorLog, LandingFacts, LandingRecords,
     NewPr, PAGES_WAIT_DELAY, PAGES_WAIT_LOOKS, PagesHost, PrDraft, PrHost, PrState, Remote, Runner,
-    cutover_job_for, parse_remote, watch_pages,
+    cutover_job_for, watch_pages,
 };
 use crate::pr::{
     Ancestry, Content, GitContent, Host, LinkState, PrLink, PushRequest, check_push, clear_early,
@@ -828,7 +829,9 @@ pub fn rebase_job_branch(
 
 impl Athena {
     /// `athena land --pr <job>`: takes a verified job to an open pull request, or, when one exists, looks at
-    /// it again (see the module text).
+    /// it again (see the module text). The repository it targets is read from the repository's own origin
+    /// through the OLY-B-BND-01 guard ([`own_origin_repository`]): origin must have one URL and be an https
+    /// github.com URL.
     pub fn land_pr(
         &self,
         job_ref: &str,
@@ -863,8 +866,10 @@ impl Athena {
             .as_ref()
             .with_context(|| format!("job {id} has no candidate record"))?;
         let remote_name = "origin";
-        let url = self.git.run(["remote", "get-url", remote_name])?;
-        let (host_name, repository) = parse_remote(&url)?;
+        // OLY-B-BND-01: the pull request, the pushes and the records all go to the repository's own origin.
+        // A missing, doubled, mismatched or non-GitHub origin stops the landing here, before the remote and
+        // the records sink are built.
+        let (host_name, repository) = own_origin_repository(&self.git)?;
         let config = athena_gate::config_at(&self.git, Some(&head))?;
         let branch = work_branch(&id);
         let title = job.title();

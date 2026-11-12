@@ -4880,6 +4880,27 @@ mod stacked {
         assert!(parse_pr_status(&json!({"state": "open"})).is_err());
         assert!(parse_pr_status(&json!({"state": "weird", "head": {"sha": "h1"}})).is_err());
     }
+
+    /// A regression note, not the evidence for the origin guard: a client built from the checked origin read
+    /// sends every call to that repository's paths. The refusals are in
+    /// `origin_repository_reads_only_the_parsed_owner_and_repo`.
+    #[test]
+    fn a_client_built_from_the_checked_origin_calls_only_that_repository() {
+        let (_dir, git) = repo_with_origin("https://github.com/example/project.git");
+        let (_, repository) = crate::gh::remote::own_origin_repository(&git).unwrap();
+        let runner = ScriptRunner {
+            calls: RefCell::new(vec![]),
+            fails_at: None,
+        };
+        GhClient::new(&runner, repository)
+            .close_pr(9, "carried")
+            .unwrap();
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        for args in calls.iter() {
+            assert!(args[3].starts_with("repos/example/project/"), "{args:?}");
+        }
+    }
 }
 
 /// A host client that must not be reached: the job lookup fails or stops the landing before any call.
@@ -4927,4 +4948,460 @@ fn land_pr_records_worktree_decides_which_job_is_found() {
     assert!(found(&tree_job), "{tree_job}");
     let worktree_job = land(WORKTREE_JOB);
     assert!(missing(&worktree_job), "{worktree_job}");
+}
+
+// ---- OLY-B-BND-01: Athena's writes reach only the repository's own origin ----
+
+/// A clone with two bare remotes, `origin` and `upstream`, both holding the branch `seed`. `next` is a
+/// local commit on top of `seed` that neither bare holds.
+struct Remotes {
+    _keep: Vec<tempfile::TempDir>,
+    git: Git,
+    origin: Git,
+    upstream: Git,
+    origin_url: String,
+    upstream_url: String,
+    seed: String,
+    next: String,
+}
+
+fn remotes() -> Remotes {
+    let mut keep = Vec::new();
+    let mut bares = Vec::new();
+    for _ in 0..2 {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = Git::isolated(dir.path());
+        bare.run(["init", "-q", "--bare", "-b", "main"]).unwrap();
+        bares.push((dir.path().to_str().unwrap().to_string(), bare));
+        keep.push(dir);
+    }
+    let (upstream_url, upstream) = bares.pop().unwrap();
+    let (origin_url, origin) = bares.pop().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let git = Git::isolated(work.path());
+    git.run(["init", "-q", "-b", "main"]).unwrap();
+    let step = |text: &str| {
+        std::fs::write(work.path().join("a.txt"), text).unwrap();
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", text]).unwrap();
+        git.head().unwrap().unwrap()
+    };
+    let seed = step("seed");
+    for (name, url) in [("origin", &origin_url), ("upstream", &upstream_url)] {
+        git.run(["remote", "add", name, url]).unwrap();
+        git.run(["push", "-q", name, "main:refs/heads/seed"])
+            .unwrap();
+    }
+    let next = step("next");
+    keep.push(work);
+    Remotes {
+        _keep: keep,
+        git,
+        origin,
+        upstream,
+        origin_url,
+        upstream_url,
+        seed,
+        next,
+    }
+}
+
+/// Every ref of a bare repository, as one text.
+fn heads(bare: &Git) -> String {
+    bare.run(["for-each-ref"]).unwrap()
+}
+
+impl Remotes {
+    /// What both bare repositories hold now.
+    fn snapshot(&self) -> (String, String) {
+        (heads(&self.origin), heads(&self.upstream))
+    }
+
+    /// Adds `url` as a push URL of `origin`.
+    fn add_push_url(&self, url: &str) {
+        self.git
+            .run(["config", "--add", "remote.origin.pushurl", url])
+            .unwrap();
+    }
+
+    /// The push URLs git lists for `origin`.
+    fn push_urls(&self) -> Vec<String> {
+        self.git
+            .run(["remote", "get-url", "--push", "--all", "origin"])
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Asserts that a push, a replace and a delete through `GitRemote { name }` each fail with `needle` in the
+    /// error, and that neither bare repository changed.
+    fn assert_writes_refused(&self, name: &str, needle: &str) {
+        let before = self.snapshot();
+        let remote = GitRemote {
+            git: &self.git,
+            name,
+        };
+        for result in [
+            remote.push("feature", &self.next),
+            remote.replace("seed", &self.next, &self.seed),
+            remote.delete_branch("seed"),
+        ] {
+            let error = format!("{:#}", result.unwrap_err());
+            assert!(error.contains(needle), "{error}");
+        }
+        assert_eq!(self.snapshot(), before, "a refused write changed a remote");
+    }
+}
+
+#[test]
+fn git_remote_refuses_writes_to_any_remote_but_origin() {
+    let f = remotes();
+    // Control, same user and environment: git itself pushes to `upstream`, so only the guard stops Athena.
+    f.git
+        .run([
+            "push",
+            "-q",
+            "upstream",
+            &format!("{}:refs/heads/control", f.next),
+        ])
+        .unwrap();
+    let before = heads(&f.upstream);
+    assert!(before.contains("refs/heads/control"), "{before}");
+    f.git
+        .run(["remote", "add", "mirror", &f.upstream_url])
+        .unwrap();
+
+    f.assert_writes_refused("upstream", "only to the repository's own origin");
+    f.assert_writes_refused("mirror", "only to the repository's own origin");
+    assert_eq!(heads(&f.upstream), before);
+
+    // The same three calls to origin succeed.
+    let origin = GitRemote {
+        git: &f.git,
+        name: "origin",
+    };
+    origin.push("feature", &f.next).unwrap();
+    assert_eq!(
+        origin.remote_head("feature").unwrap().as_deref(),
+        Some(f.next.as_str())
+    );
+    origin.replace("seed", &f.next, &f.seed).unwrap();
+    assert_eq!(
+        origin.remote_head("seed").unwrap().as_deref(),
+        Some(f.next.as_str())
+    );
+    origin.delete_branch("seed").unwrap();
+    assert_eq!(origin.remote_head("seed").unwrap(), None);
+    assert_eq!(heads(&f.upstream), before, "origin writes reached upstream");
+}
+
+#[test]
+fn git_remote_with_no_origin_refuses_and_writes_nothing() {
+    let f = remotes();
+    f.git.run(["remote", "remove", "origin"]).unwrap();
+    f.assert_writes_refused("origin", "no origin remote");
+}
+
+#[test]
+fn git_remote_refuses_a_doubled_push_url() {
+    let f = remotes();
+    let origin = GitRemote {
+        git: &f.git,
+        name: "origin",
+    };
+    // Control: a single-URL origin takes a push.
+    origin.push("control", &f.next).unwrap();
+
+    // Two push URLs, both naming origin's own repository: only the count can refuse.
+    f.add_push_url(&f.origin_url);
+    f.add_push_url(&f.origin_url);
+    let urls = f.push_urls();
+    assert_eq!(urls.len(), 2, "{urls:?}");
+    assert_eq!(urls[0], f.origin_url);
+    f.assert_writes_refused("origin", "more than one push URL");
+}
+
+#[test]
+fn git_remote_refuses_a_second_push_url_on_another_repository() {
+    let f = remotes();
+    f.add_push_url(&f.origin_url);
+    f.add_push_url(&f.upstream_url);
+    assert_eq!(f.push_urls().len(), 2);
+    f.assert_writes_refused("origin", "more than one push URL");
+}
+
+#[test]
+fn git_remote_refuses_a_doubled_fetch_url() {
+    let f = remotes();
+    let origin = GitRemote {
+        git: &f.git,
+        name: "origin",
+    };
+    origin.push("control", &f.next).unwrap();
+    // A second fetch URL and no push URL: git pushes to every fetch URL, so a push would reach both.
+    f.git
+        .run(["config", "--add", "remote.origin.url", &f.upstream_url])
+        .unwrap();
+    assert!(
+        f.git
+            .run(["config", "--get-all", "remote.origin.pushurl"])
+            .is_err()
+    );
+    assert_eq!(f.push_urls().len(), 2);
+    f.assert_writes_refused("origin", "more than one fetch URL");
+}
+
+#[test]
+fn git_remote_refuses_a_push_url_naming_another_repository() {
+    let f = remotes();
+    // One push URL, so only the same-repository check can refuse.
+    f.add_push_url(&f.upstream_url);
+    assert_eq!(f.push_urls().len(), 1);
+    f.assert_writes_refused("origin", "pushes to another repository");
+}
+
+/// An empty repository whose `origin` is `url` (nothing is contacted).
+fn repo_with_origin(url: &str) -> (tempfile::TempDir, Git) {
+    let dir = tempfile::tempdir().unwrap();
+    let git = Git::isolated(dir.path());
+    git.run(["init", "-q", "-b", "main"]).unwrap();
+    git.run(["remote", "add", "origin", url]).unwrap();
+    (dir, git)
+}
+
+#[test]
+fn origin_repository_reads_only_the_parsed_owner_and_repo() {
+    use super::remote::own_origin_repository;
+    let at = '\u{40}';
+    let good = |url: &str| {
+        let (_dir, git) = repo_with_origin(url);
+        own_origin_repository(&git).unwrap()
+    };
+    let host_and_repo = ("github.com".to_string(), "example/project".to_string());
+    assert_eq!(
+        good("https://github.com/example/project.git"),
+        host_and_repo
+    );
+    assert_eq!(
+        good(&format!("https://user:token{at}github.com/example/project")),
+        host_and_repo
+    );
+
+    let refused = |git: &Git, secret: &str| {
+        let error = format!("{:#}", own_origin_repository(git).unwrap_err());
+        assert!(!error.contains(secret), "the error echoes the URL: {error}");
+        error
+    };
+    // No origin at all.
+    let dir = tempfile::tempdir().unwrap();
+    let bare = Git::isolated(dir.path());
+    bare.run(["init", "-q", "-b", "main"]).unwrap();
+    assert!(refused(&bare, "nothing").contains("no origin"));
+    // A local path, even one that holds the host name, and another host that names github.com in its path.
+    let local = tempfile::tempdir().unwrap();
+    let path = local.path().to_str().unwrap().to_string();
+    for url in [
+        path.clone(),
+        format!("{path}/github.com/owner/repo"),
+        "https://example.com/github.com/owner/repo".to_string(),
+        "ssh://github.com/example/project.git".to_string(),
+        "http://github.com/example/project.git".to_string(),
+    ] {
+        let (_dir, git) = repo_with_origin(&url);
+        let error = refused(&git, "owner/repo");
+        assert!(error.contains("https github.com"), "{error}");
+    }
+    // A GitHub origin with a doubled push URL, or a push URL on another repository.
+    let github = "https://github.com/example/project.git";
+    let (_dir, git) = repo_with_origin(github);
+    for url in [github, github] {
+        git.run(["config", "--add", "remote.origin.pushurl", url])
+            .unwrap();
+    }
+    assert!(refused(&git, "example/project").contains("more than one push URL"));
+    let (_dir, git) = repo_with_origin(github);
+    git.run([
+        "config",
+        "--add",
+        "remote.origin.pushurl",
+        "https://github.com/upstream/project.git",
+    ])
+    .unwrap();
+    assert!(refused(&git, "upstream/project").contains("another repository"));
+}
+
+/// What one run of the early steps does with the early seam holding a recording fake, given an origin set up
+/// by `setup`: the fake and the lines shown.
+fn early_steps(
+    setup: impl FnOnce(&Git),
+) -> (std::rc::Rc<crate::test_support::EarlyFake>, Vec<String>) {
+    let (_dir, _state, athena) = crate::code_health::tests::set_up();
+    setup(&athena.git);
+    let fake = crate::test_support::EarlyFake::new(|| 0);
+    let _seam = super::early_seam::install(fake.clone(), fake.clone());
+    let lines = Lines(RefCell::new(vec![]));
+    let job = JobId::parse("20261031-230906-3rze").unwrap();
+    let commit = athena.git.head().unwrap().unwrap();
+    athena.early_pr(&job, &commit, "title", &lines);
+    athena.push_ci_branch(&job, &commit, &lines);
+    athena.delete_ci_branch(&job, &lines);
+    let shown = lines.0.borrow().clone();
+    (fake, shown)
+}
+
+const NO_GITHUB_ORIGIN: &str = "there is no GitHub origin";
+const REFUSED_ORIGIN: &str = "origin has more than one URL or names two repositories";
+
+#[test]
+fn a_single_url_github_origin_reaches_the_early_steps() {
+    // The control for the three tests below: the fake is reachable, so an empty record there is a refusal.
+    let (fake, lines) = early_steps(|git| {
+        git.run([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/project.git",
+        ])
+        .unwrap();
+    });
+    assert_eq!(fake.of("push").len(), 1, "{lines:?}");
+    assert_eq!(fake.of("open_pr").len(), 1, "{lines:?}");
+    assert_eq!(fake.ci_of("push").len(), 1, "{lines:?}");
+    assert_eq!(fake.ci_of("delete").len(), 1, "{lines:?}");
+}
+
+#[test]
+fn a_local_path_origin_makes_no_host_or_remote_call() {
+    let (fake, lines) = early_steps(|git| {
+        git.run(["remote", "add", "origin", "/srv/some/local/origin"])
+            .unwrap();
+    });
+    assert!(fake.calls.borrow().is_empty() && fake.ci_calls.borrow().is_empty());
+    assert!(
+        lines.iter().any(|l| l.contains(NO_GITHUB_ORIGIN)),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains(REFUSED_ORIGIN)),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_doubled_github_origin_makes_no_host_or_remote_call() {
+    let (fake, lines) = early_steps(|git| {
+        let url = "https://github.com/example/project.git";
+        git.run(["remote", "add", "origin", url]).unwrap();
+        for _ in 0..2 {
+            git.run(["config", "--add", "remote.origin.pushurl", url])
+                .unwrap();
+        }
+        // A real double: git lists two push URLs.
+        let listing = git
+            .run(["remote", "get-url", "--push", "--all", "origin"])
+            .unwrap();
+        assert_eq!(listing.lines().count(), 2, "{listing}");
+    });
+    assert!(fake.calls.borrow().is_empty() && fake.ci_calls.borrow().is_empty());
+    assert!(
+        lines.iter().any(|l| l.contains(REFUSED_ORIGIN)),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains(NO_GITHUB_ORIGIN)),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_mismatched_github_push_url_makes_no_host_or_remote_call() {
+    let (fake, lines) = early_steps(|git| {
+        git.run([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/project.git",
+        ])
+        .unwrap();
+        git.run([
+            "config",
+            "--add",
+            "remote.origin.pushurl",
+            "https://github.com/upstream/project.git",
+        ])
+        .unwrap();
+    });
+    assert!(fake.calls.borrow().is_empty() && fake.ci_calls.borrow().is_empty());
+    assert!(
+        lines.iter().any(|l| l.contains(REFUSED_ORIGIN)),
+        "{lines:?}"
+    );
+}
+
+/// A source-text check of the order only: `Athena::land_pr` reads the checked origin before it builds the
+/// remote and the records sink. That nothing is written earlier is not claimed here; the writes themselves
+/// recheck origin (see `git_remote_refuses_writes_to_any_remote_but_origin`).
+#[test]
+fn land_pr_builds_the_remote_and_sink_only_after_the_checked_origin_read() {
+    let source = include_str!("landing.rs");
+    let start = source
+        .find("    pub fn land_pr(\n        &self,")
+        .expect("Athena::land_pr is in landing.rs");
+    let body = &source[start..];
+    let read = body
+        .find("own_origin_repository(&self.git)")
+        .expect("the checked read");
+    let remote = body.find("GitRemote {").expect("the remote is built");
+    let sink = body
+        .find("GitLandingRecords::for_remote")
+        .expect("the sink is built");
+    assert!(read < remote && read < sink, "{read} {remote} {sink}");
+    assert!(
+        !body[..sink].contains("\"get-url\""),
+        "land_pr must not read origin outside the checked read"
+    );
+}
+
+#[test]
+fn oly_b_bnd_01_names_the_origin_guard_as_its_mechanism() {
+    let requirements =
+        crate::hestia::parse_spec(include_str!("../../../../docs/spec.toml")).unwrap();
+    let req = requirements
+        .iter()
+        .find(|r| r.id == "OLY-B-BND-01")
+        .expect("OLY-B-BND-01 is in the spec");
+    assert_ne!(req.mechanism, "none");
+    assert!(req.mechanism.contains("gh/remote.rs"), "{}", req.mechanism);
+    assert!(
+        req.mechanism.contains("athena-git/src/lib.rs"),
+        "{}",
+        req.mechanism
+    );
+    assert_eq!(req.owner, "Themis");
+    assert!(
+        req.measure.ends_with("status: not shown"),
+        "{}",
+        req.measure
+    );
+    assert_eq!(crate::hestia::measure_problem(&req.measure), None);
+    // The measure names a test that exists in this file.
+    let name = req
+        .measure
+        .split("gh::tests::")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .next()
+        })
+        .expect("the measure names a gh::tests test");
+    assert!(
+        include_str!("tests.rs").contains(&format!("fn {name}(")),
+        "no test {name}"
+    );
+    assert!(
+        crate::hestia::spec_gaps(&requirements)
+            .iter()
+            .all(|g| g.id != "OLY-B-BND-01")
+    );
 }

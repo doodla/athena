@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261112-135930-pczv",
+  "round": 1,
+  "at": "2026-11-12T14:09:03.457349762Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out some readers of the guarded GitRemote and records-push paths, and lists only test lines for the production attribution writer.",
+      "evidence": "Found by Grep. crates/athena-core/src/test_support.rs:620-645 `land_through_pr` builds `GitRemote { name: \"origin\" }` and `GitLandingRecords::for_remote(git, \"origin\")`. It is called from crates/athena-cli/tests/trailer_stop.rs and from inside test_support.rs. crates/athena-cli/tests/reconcile.rs:118 uses `for_remote(git, \"origin\")`, and crates/athena-cli/tests/binary.rs:507 calls `append_to_remote(\"origin\", …)`. The production checkpoint writer is crates/athena-gate/src/attribution.rs:785 (`append_to_remote(remote, …)` with `DEFAULT_REMOTE = \"origin\"` at line 510). The plan's entry for it names only the test pushes at lines 1160 and 1612. None of these appear in the list. Fix: Add entries for test_support.rs land_through_pr with its callers (trailer_stop.rs and the Rig users), athena-cli tests/reconcile.rs and binary.rs:507, and the production checkpoint writer attribution.rs:785 (run_check). For each, say it passes the literal origin with a single local URL and name the test that covers it, for example `cargo test -p athena-cli --test trailer_stop --test reconcile --test binary` and `cargo test -p athena-gate`.",
+      "location": "Plan › Dependents",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The early.rs change is not shown by any test. The local-path case already gives None today, so test (e) passes with or without the change.",
+      "evidence": "early.rs:363-366 `github_repository` already returns None for a non-GitHub URL (`https_github_repository`). The plan's fails-without for criterion 4 says 'without own_origin_repository in github_repository, the doubled-origin case would return a repository', but no listed test runs github_repository or early_pr with a doubled GitHub origin. Test (d) calls own_origin_repository directly. Fix: Add a case to (e): set origin to `https://github.com/example/project.git`, add a second push URL with `git remote set-url --add --push`, install the EarlyFake, call early_pr and push_ci_branch, and assert the fake's `calls` and `ci_calls` stay empty. Before the change the fake records a push and an open_pr, so this test fails without the change.",
+      "location": "Demonstrations › Criterion 4 (e); Files › early.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test name says 'before any write', but land_pr calls `self.reconcile` at landing.rs:842 before the origin read, and reconcile can write records.",
+      "evidence": "landing.rs:842 runs reconcile before line 866. reconcile.rs:403-408 reads origin with a raw `get-url` and writes through GitLandingRecords and append_to_remote. With no origin, reconcile skips, so the property holds in that case. With a doubled origin, only the git-level guard stops reconcile's writes. Fix: Rename the test or narrow its claim to 'before GitRemote and the records sink are built'. In the plan, say that reconcile's earlier writes are bounded by the Git::push_branch and push_if_remote_at guard, and point to the athena-git twin test as the evidence.",
+      "location": "Demonstrations › Criterion 4 (f) `land_pr_reads_origin_before_any_write`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 'scp-style colon to slash' and 'lower-case host only' rules need care, or they will refuse or merge URLs wrongly.",
+      "evidence": "Applying colon-to-slash after removing the scheme turns `https://github.com:443/o/r` into `github.com/443/o/r`. GitHub owner and repo names are case-insensitive, so `https://github.com/Example/Project` with `[email]:example/project` would be refused. Both errors fail closed, so they are safe, but they are surprising false refusals. Fix: Only rewrite the colon when the URL has no `scheme://` (true scp form `[user@]host:path`). Add one unit test showing that an https URL with an explicit port is still compared correctly. Optionally state that differences in path case are refused on purpose.",
+      "location": "Steps › 2 (URL normalisation)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After the change, the two 'push fails, verdict kept' tests hit the new guard instead of a real git push failure, so a failing push to a valid single-URL origin is no longer exercised.",
+      "evidence": "Both fixtures set `remote.origin.pushurl` to a missing path next to the fetch URL. Under the plan, own_origin_url refuses this because the URLs name different repositories, before git runs. Their assertions still hold, but the path they were written to cover (git push itself failing) is no longer reached. Fix: Record this as a known coverage change. If fixing it is in scope later, switch those fixtures to a bare origin with a `pre-receive` hook that exits 1. Root does not bypass a hook, and the guard allows a single URL.",
+      "location": "Risks › pushurl fixtures; Dependents › attribution.rs:1690-1707, binary.rs:631-660",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Two other raw `get-url origin` readers are not mentioned. Both only read.",
+      "evidence": "crates/athena-cli/src/commands.rs:530 (`check --host-rules`) and crates/athena-core/src/host_rules.rs:72 `check_origin`; host_rules says 'Every call is a GET'. Fix: List them as read-only and unchanged, next to run/mod.rs github_origin.",
+      "location": "Plan › Dependents (origin readers)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan names: remote.rs, athena-git lib.rs push_branch and push_if_remote_at, records_branch append_to_remote, landing.rs land_pr, early.rs github_repository, reconcile.rs, run/mod.rs github_origin, host_rules.rs, client.rs call_loop and repo_path, hestia parse_spec, measure_problem and spec_gaps, xtask spec.rs, and the two pushurl fixtures. The design holds up. Every production push goes through GitRemote's three methods or through Git::push_branch and push_if_remote_at, and every production caller passes the literal \"origin\". Every `gh` call is `gh api` on `repos/{repository}/…`, and that repository comes from origin's URL. The planned single-URL check reads `get-url --all` and `get-url --push --all`, which covers both cases that matter: a doubled push URL, and doubled fetch URLs with no push URL. A guard refusal leaves the remote tip unchanged, so append_to_remote returns a plain error and does not retry. The spec measure form (`…; status: not shown`) matches existing entries and passes measure_problem. The include_str path `../../../../docs/spec.toml` resolves from gh/. Each demonstration uses real git against bare repos and runs a control push first. One major gap: the dependents list leaves out some readers of the changed write paths. These are test_support.rs land_through_pr (it builds GitRemote and GitLandingRecords on origin) and its caller athena-cli/tests/trailer_stop.rs, athena-cli/tests/reconcile.rs and binary.rs:507, and the production checkpoint writer at attribution.rs:785. All of them pass a single-URL local origin and run under `cargo test --locked`, so the fix is only to list them with their tests. Minor points: the early.rs change is not shown by any test (case (e) passes without it); the land_pr text check's name overstates what it proves; the URL normalisation needs care with ports; and the two pushurl fixtures lose coverage of a real git push failure."
+}

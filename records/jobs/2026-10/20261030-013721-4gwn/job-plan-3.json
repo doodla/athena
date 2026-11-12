@@ -1,0 +1,365 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-013721-4gwn",
+  "round": 3,
+  "at": "2026-11-12T13:56:38.232075699Z",
+  "invocation_seq": 8,
+  "approach": "Enforce the boundary at the lowest shared write points, by remote name and by target repository, and keep the change small. (1) athena-git lib.rs gets `ORIGIN` and `require_origin`, called first in `Git::push_branch` and `Git::push_if_remote_at`. Every records-branch push (landing sink, attribution checkpoint, cutover import) ends in one of these two, so they are covered without touching records_branch.rs, records.rs or reconcile.rs. (2) athena-core remote.rs gets `require_origin`, called first in `GitRemote::push`, `replace` and `delete_branch`. It also gets `origin_url`, which reads origin's fetch and push URLs, compares them by owner/name when both are https github.com URLs and by exact string otherwise, and refuses a split or multi-valued push URL. It gets `origin_client`, which returns a GitHub client only for an https github.com origin. (3) landing.rs builds its client with `origin_client`. early.rs reads origin through `origin_url` and uses `ORIGIN`. This follows the accepted reading (guard in remote.rs, landing.rs and early.rs). Tests use temp git repos with `origin` and `upstream` bare remotes, the existing `ScriptRunner`/`UnreachedHost` and the early-seam `EarlyFake`; no network. The spec entry is filled and pinned by a test. CHANGELOG.md stays untouched, as criterion 7 requires.",
+  "decisions": [
+    {
+      "choice": "Narrow the file set to the listed deliverables plus one extra file, crates/athena-git/src/lib.rs. Drop gh/mod.rs, gh/records.rs, reconcile.rs and athena-git records_branch.rs. (Answers findings 1-5.)",
+      "reason": "`origin_client` and `origin_url` are private-module items in gh/remote.rs. landing.rs, early.rs and gh/tests.rs are descendants of `gh`, so they reach them as `super::remote::...` (remote.rs is declared `mod remote;` at mod.rs:40). That needs no re-export, so mod.rs is not touched. reconcile.rs is not a publishing path: its only host question is `merged_pr(commit)` (reconcile.rs:74, 284) and it writes only to origin through the records sink, so it stays untouched and the lookalike-path point is named as a read-only limit. `GitLandingRecords::for_remote` (records.rs:86) and `append_to_remote_with_hook` (records_branch.rs:413) both end in `push_branch` / `push_if_remote_at` (records_branch.rs:442-444), so one guard in lib.rs covers them; their tests live in gh/tests.rs. lib.rs is kept because it is the single choke point for the three production records pushes (records.rs:156, 365; attribution.rs:785; records_import.rs:206), and the request's Files line allows crates/. This is the root-cause default: guard where the push is made.",
+      "rejected": [
+        {
+          "option": "Guard only GitRemote and leave the athena-git helpers",
+          "why": "Leaves three production git push paths with a free remote name."
+        },
+        {
+          "option": "Add guards in records_branch.rs, records.rs and reconcile.rs as well",
+          "why": "Widens the file set. The lib.rs guard already refuses those pushes. The only unguarded step is the read `sync_from`, which cannot write to the remote."
+        },
+        {
+          "option": "Make no change under athena-git",
+          "why": "The records branch push would still accept any remote name."
+        }
+      ]
+    },
+    {
+      "choice": "Allow exactly the remote name `origin` (case-sensitive) through `athena_git::require_origin`. The empty string, `origin2`, `Origin` and `upstream` are refused with a message that names OLY-B-BND-01.",
+      "reason": "Every production caller passes the literal origin: landing.rs:865, early.rs:376 and 460, attribution DEFAULT_REMOTE, main.rs:1751. The existing athena-git tests (lib.rs:1385-1457, records_branch.rs:846-1048), gh/tests.rs and the athena-gate tests push to \"origin\", so none break. The existing empty-argument refusal at lib.rs:1415 still errors, because `require_origin` runs first and also errors.",
+      "rejected": [
+        {
+          "option": "Compare the remote URL with the project's GitHub repository",
+          "why": "A clone's origin may point anywhere; the PR target is parsed from origin itself."
+        }
+      ]
+    },
+    {
+      "choice": "`origin_client(git, runner, log, ui) -> Result<GhClient>` in remote.rs is the single place landing builds its GitHub client. It calls `origin_url` and then `GhClient::origin_repository` (client.rs:1026), the strict https + host rule early.rs already uses, and fails when the result is `None`.",
+      "reason": "`parse_remote` finds the host by substring (client.rs:1199), so a local path such as `<dir>/github.com/owner/project` became a PR target. One function builds the client, so a test of it is not circular with the land_pr call site. A missing origin or an unsupported one errors in `land_pr` before the GitRemote, the records sink and `attempt()` exist (landing.rs:865-893 then 896+); all pushes, records writes and PR calls happen only inside `attempt()`.",
+      "rejected": [
+        {
+          "option": "Keep `parse_remote` in land_pr",
+          "why": "The substring rule lets a lookalike local path name an upstream owner/repo as the PR target."
+        },
+        {
+          "option": "Tighten `parse_remote` itself",
+          "why": "It is tested directly (gh/tests.rs:1187-1197) and used by `origin_repository`; changing it widens the job."
+        }
+      ]
+    },
+    {
+      "choice": "`origin_url(git)` reads `git remote get-url origin` and `git remote get-url --push origin`. It refuses when the push output has more than one line. When both URLs are https github.com URLs it compares `GhClient::origin_repository(fetch)` with `GhClient::origin_repository(push)`; otherwise it requires exact string equality (after trim). (Answers finding 8.)",
+      "reason": "`git push origin` honors `remote.origin.pushurl` and `pushInsteadOf`, while the PR target comes from the fetch URL. A split would send the push to one repository and the PR to another. Comparing owner/name accepts harmless spellings of the same repository: `parse_remote` strips a trailing `/` and `.git` (client.rs:1197-1198) and `origin_repository` drops userinfo (client.rs:1032-1034). A fetch/push pair where one is GitHub and the other is not falls to string equality and is refused. The error text names OLY-B-BND-01 and does not echo either URL.",
+      "rejected": [
+        {
+          "option": "Raw string comparison of the two URLs",
+          "why": "Refuses a `.git` / no-`.git` pair or a push URL with userinfo, and landing then fails outright."
+        },
+        {
+          "option": "Only name the split-URL gap in the spec",
+          "why": "The check is two git calls and is testable."
+        }
+      ]
+    },
+    {
+      "choice": "Test the early path's new rule with its own test, `the_early_step_skips_when_origins_push_url_differs_from_its_fetch_url` in gh/tests.rs. It uses `crate::code_health::tests::set_up()` (gh/tests.rs:4898 already does) and `early_seam::install` with an `EarlyFake`. (Answers finding 6.)",
+      "reason": "`github_repository` (early.rs:363) is checked before `push_ci_branch` (:388), `delete_ci_branch` (:406) and `early_pr` (:429). Origin is set to `https://github.com/example/project.git` and `remote.origin.pushurl` to a local path. The three entry points are then called and the fake must record no calls. A control with a push URL that differs only by `.git` must record exactly one `push`, which shows the fake can observe the calls and that the accepted spelling still passes. If `github_repository` kept its old `get-url origin` call, the split case would record a push and the test would fail.",
+      "rejected": [
+        {
+          "option": "Extend `a_missing_or_non_github_origin_skips_the_early_step_silently` (run_pin_tests.rs:582)",
+          "why": "Its `early_run` helper (run_pin_tests.rs:413) only adds a fetch URL and lives in a file outside the deliverables."
+        }
+      ]
+    },
+    {
+      "choice": "Land-level ordering is shown by reading and by the unit tests, not by a new end-to-end land test. (Answers finding 9.)",
+      "reason": "Building a verified job record for `Athena::land_pr` needs the cli drain fixtures. The core rig `land_pr_records_worktree_decides_which_job_is_found` (gh/tests.rs:4894) has no verification record, so `land_pr` stops before the origin lookup. The plan therefore (a) puts the `origin_client(...)?` call before `config_at`, `GitContent`, `GitRemote`, `GitLandingRecords::for_remote` and `attempt` (landing.rs:868-933), with every write inside `attempt`; (b) tests the same refusal against a repository with only an `upstream` remote and no origin: `origin_client` is Err with zero runner calls, and `GitRemote{name:\"origin\"}.push` is Err with upstream refs unchanged; (c) leaves the existing cli land tests (drain.rs:3114, 3142, https origin) as the proof that the happy path still works. The demonstration says so.",
+      "rejected": [
+        {
+          "option": "Add a land-level test with a hand-built verified job",
+          "why": "Needs records and candidate fixtures that exist only in athena-cli; this would widen the job."
+        }
+      ]
+    },
+    {
+      "choice": "Leave CHANGELOG.md untouched.",
+      "reason": "Accepted criterion 7 says CHANGELOG.md, athena.toml and defaults.toml are untouched, and the request's Files line is `docs/spec.toml, crates/`.",
+      "rejected": [
+        {
+          "option": "Add a changelog line",
+          "why": "Fails criterion 7."
+        }
+      ]
+    },
+    {
+      "choice": "Pin the spec entry with a test, `spec_entry_oly_b_bnd_01_names_the_guard_and_is_not_a_gap`, that parses docs/spec.toml with `hestia::parse_spec` and checks it with `spec_gaps` and `measure_problem` (hestia.rs:1172, 1219, 1291).",
+      "reason": "The xtask presence check does not pin the named files or the test name. A measure that does not end `status: not shown` or a known label is a gap (hestia.rs:1229-1238).",
+      "rejected": [
+        {
+          "option": "Rely on the xtask spec check only",
+          "why": "It would not catch a mechanism that names a file that does not exist."
+        }
+      ]
+    },
+    {
+      "choice": "The measure ends `status: not shown` and names the tests.",
+      "reason": "No `athena status` line reports upstream writes; adding one is out of scope.",
+      "rejected": [
+        {
+          "option": "Add an `athena status` line",
+          "why": "Out of scope."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "OLY-B-BND-01 (lines 2396-2402): mechanism names the guard files and states its limits; owner stays Themis; measure names the tests and ends `status: not shown`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub const ORIGIN` and `pub fn require_origin(remote) -> Result<()>` (GitError::Refused, text naming OLY-B-BND-01); call it first in `push_branch` and `push_if_remote_at`; `non_origin_*` tests. Kept outside the reading's deliverables because it is the one choke point for the records-branch pushes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/remote.rs",
+      "action": "modify",
+      "purpose": "Add `require_origin`, called first in `GitRemote::push`, `replace` and `delete_branch`; add `origin_url` and `origin_client`; update doc comments.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "purpose": "`Athena::land_pr` builds its client with `origin_client` (reached as `super::remote::origin_client`), uses `athena_git::ORIGIN`, and drops the `parse_remote` lookup.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/early.rs",
+      "action": "modify",
+      "purpose": "Use `ORIGIN` in `with_ci_remote` and `early_pr_to`; `github_repository` reads origin through `origin_url` before `https_github_repository`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Add the upstream-refusal test, the records-append test, the `origin_client_*` tests (in the module holding `ScriptRunner`), the early split-push-URL test and the spec pin test.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-git/src/lib.rs add `pub const ORIGIN: &str = \"origin\"` and `pub fn require_origin(remote: &str) -> Result<()>`. It returns `GitError::Refused(\"refused: push to remote {remote:?}; Athena publishes only to origin (OLY-B-BND-01)\")` unless `remote == ORIGIN`. Call it as the first statement of `Git::push_branch` (:432) and `Git::push_if_remote_at` (:384, before the empty-argument check). Add tests named `non_origin_*` in the test module near lib.rs:1370: a work repo with bare `origin` and `upstream`; seed upstream by a direct push; both helpers with `upstream`, `\"\"`, `origin2` and `Origin` return Err and the upstream listing is unchanged; both helpers with `origin` succeed.",
+    "In crates/athena-core/src/gh/remote.rs add `pub fn require_origin(name: &str) -> Result<()>` (maps `athena_git::require_origin`) and call it as the first statement of `GitRemote::push`, `replace` and `delete_branch`, before any `self.git.run`. Add `pub(super) fn origin_url(git: &Git) -> Result<String>`: run `remote get-url origin` and `remote get-url --push origin`, trim both, bail if the push output has more than one line, and accept when both are https github.com URLs with equal `GhClient::origin_repository`, or when the strings are equal. The bail text names OLY-B-BND-01 and does not echo the URLs. Add `pub(super) fn origin_client<'a>(git: &Git, runner: &'a dyn Runner, log: Option<&'a HostErrorLog>, ui: Option<&'a dyn Ui>) -> Result<GhClient<'a>>`: `origin_url`, then `GhClient::origin_repository`, else bail `origin is not an https github.com repository`; build with `GhClient::new` and set `log` and `ui`. Do not change the `Remote` trait. Keep the `concat!` pinned-force flag.",
+    "In landing.rs `Athena::land_pr` replace lines 865-867 and the client construction at 881-886: use `athena_git::ORIGIN` for `remote_name`; call `origin_client(&self.git, runner, Some(&log), Some(ui))?` right after the candidate read and before `config_at`, `GitContent`, `GitRemote`, `GitLandingRecords::for_remote` and `attempt`; take `repository` from `client.repository` and the host name from the `HOST` constant early.rs uses. Remove `parse_remote` from the imports if it is no longer used. Do not change gh/mod.rs: use `super::remote::{origin_client, ...}`.",
+    "In early.rs use `athena_git::ORIGIN` in `with_ci_remote` and `early_pr_to`, and make `github_repository` use `super::remote::origin_url(&self.git).ok()` and then `https_github_repository`.",
+    "Do not touch records.rs, records_branch.rs, reconcile.rs or gh/mod.rs. Their pushes are covered by step 1, and reconcile is read-only toward the host.",
+    "In gh/tests.rs add `git_remote_refuses_push_replace_and_delete_to_a_non_origin_remote` as in demonstration 3, using the fixtures of tests.rs:2681-2699 with a second bare `upstream`. Seed upstream with a direct push first. Check refusal of push, replace (pinned to the correct old head c1) and delete_branch for the names `upstream`, `\"\"`, `origin2` and `Origin`, each with an `OLY-B-BND-01` message and a byte-identical upstream `for-each-ref`. Then for origin check `remote_head` after each call: c1, c2, None. Add `records_append_refuses_a_remote_other_than_origin`: `RecordsWriter::new(&git).append_to_remote(\"upstream\", ..)` is Err with upstream refs unchanged, and `append_to_remote(\"origin\", ..)` writes.",
+    "In the gh/tests.rs module that holds `ScriptRunner` (:4794) add `origin_client_refuses_no_origin_a_local_path_a_lookalike_path_a_split_push_url_and_several_push_urls` (use `UnreachedHost` or a counting runner, assert Err and no gh call, and upstream refs unchanged where an upstream exists), `origin_client_accepts_an_https_origin_and_confines_calls_to_its_repository` (origin `https://github.com/example/project.git`; push URLs differing only by `.git`, a trailing slash or userinfo are accepted; `close_pr(9, ..)` records only paths under `repos/example/project/`; a `GitRemote` named origin changes only origin's bare repo with `upstream` present) and `origin_client_with_only_an_upstream_remote_publishes_nothing` (origin_client Err; `GitRemote{name:\"origin\"}.push` Err; upstream unchanged). At the top level of gh/tests.rs add `the_early_step_skips_when_origins_push_url_differs_from_its_fetch_url`: `crate::code_health::tests::set_up()`, origin `https://github.com/example/project.git`, `remote.origin.pushurl` set to a local path, `EarlyFake::new(|| 0)` installed with `early_seam::install`; call `push_ci_branch`, `early_pr` and `delete_ci_branch` and assert `fake.calls` is empty. Control: a push URL `https://github.com/example/project` makes `push_ci_branch` record exactly one `push`.",
+    "Add `spec_entry_oly_b_bnd_01_names_the_guard_and_is_not_a_gap` in gh/tests.rs: `crate::hestia::parse_spec(include_str!(\"../../../../docs/spec.toml\"))`. Find OLY-B-BND-01 and assert owner `Themis`; mechanism contains `crates/athena-core/src/gh/remote.rs` and `crates/athena-git/src/lib.rs`; `measure_problem` is None; the measure contains `git_remote_refuses_push_replace_and_delete_to_a_non_origin_remote` and ends `status: not shown`; `spec_gaps` does not list the id; and the named files exist under the repository root.",
+    "Edit docs/spec.toml OLY-B-BND-01. mechanism = \"`require_origin` in crates/athena-core/src/gh/remote.rs refuses GitRemote push, replace and delete_branch to any remote but origin; `origin_client` and `origin_url` there give landing a GitHub client only for an https github.com origin whose push and fetch URLs name the same repository, and the early pull request and CI branch steps use the same origin check; `require_origin` in crates/athena-git/src/lib.rs guards push_branch and push_if_remote_at, which every records-branch push uses. Assumes origin is the project's own repository. Not covered: direct Git::run pushes outside those helpers, reads of a non-origin remote, and reconcile's read-only host question. Agents' push and write-form gh are denied separately by crates/athena-agent/src/policy.rs.\" owner stays Themis. measure = \"cargo test -p athena-core git_remote_refuses_push_replace_and_delete_to_a_non_origin_remote and cargo test -p athena-core origin_client show that a non-origin push is refused and the PR target is origin's own repository; status: not shown\". Leave CHANGELOG.md, athena.toml and defaults.toml untouched.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, then `cargo test -p athena-core --test external_calls_guard`, `--test refusal_corpus`, `cargo test -p athena-cli` and `cargo test -p xtask --test spec --test policy`. Mutation checks, each restored afterwards and recorded in the report: (a) remove `require_origin` from `GitRemote::push`, confirm the criterion 3 test fails; (b) revert `github_repository` to `get-url origin`, confirm the early split test fails; (c) drop the push-URL comparison from `origin_url`, confirm the `origin_client` split case fails."
+  ],
+  "risks": [
+    {
+      "risk": "Landing now accepts only an https github.com origin (the early path already did). An SSH-style or plain-http origin that `parse_remote` accepted (gh/tests.rs:1187-1192) is refused for landing, and a split push URL is refused for landing and the early path.",
+      "mitigation": "Matches the system fact that SSH remotes are refused at admission and the early path's rule (early.rs:329). The error says why. Existing land tests use the https GITHUB constant (drain.rs:3114). Raised as a Host question."
+    },
+    {
+      "risk": "The guard assumes origin is the project's own repository. A plain clone of a third-party project has origin pointing at that project, and nothing here detects it. The guard also does not stop code that runs `git push` through `Git::run` directly, and the records writer's `sync_from` still reads a non-origin remote before the push is refused.",
+      "mitigation": "The spec mechanism states these limits so Themis can see what is not covered. The accepted reading makes the same assumption. Reads cannot change the remote; the only local effect is on the local records ref."
+    },
+    {
+      "risk": "reconcile.rs still builds its client with the substring `parse_remote`, so a lookalike local origin can still name a host repository for reconcile's read-only `merged_pr` question.",
+      "mitigation": "Out of the write boundary: reconcile issues no outbound write. It is named in the spec mechanism. Changing it would need reconcile.rs and the cli reconcile test, outside the deliverables."
+    },
+    {
+      "risk": "Direct `GitRemote` calls check the name only; the split push URL is refused in landing (`origin_client`) and the early path (`github_repository`), not inside `GitRemote::push`.",
+      "mitigation": "Every production `GitRemote` is built after `origin_url` has run: landing via `origin_client`, early via `github_repository`. The spec text names this limit."
+    },
+    {
+      "risk": "A pre-existing test pushes through a non-origin name that Grep missed.",
+      "mitigation": "Grep over `push_branch(`, `push_if_remote_at(`, `append_to_remote(` and `GitRemote{` found only \"origin\" or a variable set to origin. The producer runs the full `cargo test --locked` and the other crates' suites in criterion 6."
+    },
+    {
+      "risk": "Lifetime friction when `land_pr` takes `log` and `ui` through `origin_client`.",
+      "mitigation": "`GhClient` fields are references and plain values (client.rs:478-488), so `'a` shrinks freely. `log` is created before the client at landing.rs:881."
+    },
+    {
+      "risk": "No end-to-end test of `Athena::land_pr` with no origin: the ordering rests on statement order in landing.rs.",
+      "mitigation": "The ordering is checked by reading landing.rs and stated in demonstration 4; the same refusal is tested at `origin_client` and `GitRemote` level. The producer must not move any write before the `origin_client(...)?` call."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "land_pr's origin lookup goes through `origin_client` (https github.com host, equal fetch and push repository) instead of `parse_remote`",
+      "dependent": "crates/athena-core/src/gh/landing.rs `Athena::land_pr` (callers: crates/athena-cli/src/drain.rs:3483, including the parallel drain path; crates/athena-cli/src/commands.rs:286; gh/tests.rs:4909)",
+      "kind": "code",
+      "test": "New `origin_client_*` tests in gh/tests.rs. Existing cli land tests (crates/athena-cli/tests/drain.rs, origin `https://github.com/owner/repo` at drain.rs:3114, 3142) stay green because that URL passes the strict rule. `land_pr_records_worktree_decides_which_job_is_found` (gh/tests.rs:4894) stops before the lookup and is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "`GitRemote` push/replace/delete_branch refuse non-origin names; `github_repository` also needs equal fetch and push URLs",
+      "dependent": "crates/athena-core/src/gh/early.rs `publish_ci_branch`, `push_ci_branch`, `delete_ci_branch`, `early_pr`, `early_pr_to`, `github_repository` and `with_ci_remote`; run_pin_tests.rs:488-610; run/tests.rs:5895 and 6272",
+      "kind": "code",
+      "test": "New `the_early_step_skips_when_origins_push_url_differs_from_its_fetch_url` (split: no calls; control: one push). Existing `a_missing_or_non_github_origin_skips_the_early_step_silently` (run_pin_tests.rs:582) and the early-seam tests use the fake `Remote`. run/tests.rs sets a plain origin URL whose push URL equals the fetch URL. The real path passes the `ORIGIN` constant, covered by the origin half of the criterion 3 test.",
+      "reason": null
+    },
+    {
+      "name": "read methods of GitRemote",
+      "dependent": "crates/athena-core/src/gh/landing.rs `rebase_job_branch` (:761-770) and `GitRemote::remote_head` / `commits_after`",
+      "kind": "code",
+      "test": null,
+      "reason": "Only the three write methods and the two athena-git push helpers change. `ls-remote`, `ensure_commit` and `fetch_remote_branch` are reads and are not guarded; the spec states this."
+    },
+    {
+      "name": "`push_branch` and `push_if_remote_at` refuse a remote other than origin (reached through `append_to_remote`)",
+      "dependent": "crates/athena-gate/src/attribution.rs `write_checkpoint` (:754-794, remote from `Options::with_remote` :524, default `DEFAULT_REMOTE` :510); its tests at :1135-1612 (push_branch at :1160 and :1612 pass \"origin\")",
+      "kind": "code",
+      "test": "athena-git `non_origin_*` tests plus gh/tests.rs `records_append_refuses_a_remote_other_than_origin`; the existing attribution tests use \"origin\" and run under `cargo test -p athena-gate`.",
+      "reason": null
+    },
+    {
+      "name": "records sink writes go through the guarded athena-git push helpers",
+      "dependent": "crates/athena-core/src/gh/records.rs `GitLandingRecords::for_remote` (:86; callers landing.rs:893, reconcile.rs:408 and :535, athena-cli/tests/reconcile.rs:118, gh/tests.rs:3978) and its writes at :156 and :365",
+      "kind": "code",
+      "test": "gh/tests.rs `records_append_refuses_a_remote_other_than_origin`; all existing callers pass \"origin\" (searched with Grep) and stay green.",
+      "reason": null
+    },
+    {
+      "name": "cutover import pushes through `append_to_remote`, now guarded",
+      "dependent": "crates/athena-core/src/records_import.rs `import_at_cutover` (:189-206), reached from records.rs:362 and the cutover test at reconcile.rs:1005",
+      "kind": "code",
+      "test": "`cargo test -p athena-core reconcile` (the cutover test passes \"origin\"); refusal of a non-origin name is covered by the `append_to_remote` test.",
+      "reason": null
+    },
+    {
+      "name": "reconcile's client construction with `parse_remote`",
+      "dependent": "crates/athena-core/src/reconcile.rs `try_reconcile` (:403-436) and crates/athena-cli/tests/reconcile.rs:97-145",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged. Reconcile asks the host only `merged_pr(commit)` (reconcile.rs:74, 284), a read, and writes only to origin through the records sink. It is not an outbound write, so it is outside this requirement. Its lookalike-path behaviour and the cli reconcile test are untouched, and this limit is named in the spec mechanism."
+    },
+    {
+      "name": "`push_branch`, `push_if_remote_at`, `append_to_remote` refuse non-origin",
+      "dependent": "crates/athena-cli/src/main.rs:1751 and the athena-git tests lib.rs:1385-1457, records_branch.rs:846-1048",
+      "kind": "code",
+      "test": "`cargo test -p athena-git` and `cargo test -p athena-cli`; every existing call passes \"origin\" (Grep), and the empty-argument refusal at lib.rs:1415 still errors.",
+      "reason": null
+    },
+    {
+      "name": "`GhClient::origin_repository`",
+      "dependent": "`GhClient::origin_repository` (the strict rule `origin_client` reuses): crates/athena-core/src/run/mod.rs:1714-1716 and host_rules.rs:73",
+      "kind": "code",
+      "test": "client.rs:1251 `origin_repository_is_the_owner_and_name_of_an_https_github_url_only` (unchanged)",
+      "reason": "The function is only called, not modified."
+    },
+    {
+      "name": "Agent denial of push and write-form gh",
+      "dependent": "crates/athena-agent/src/policy.rs `check_git` / `check_gh`",
+      "kind": "rule",
+      "test": null,
+      "reason": "Unchanged and out of scope: it polices agents' commands; the new guard polices Athena's own publishing. The two do not interact."
+    },
+    {
+      "name": "OLY-B-BND-01 mechanism and measure",
+      "dependent": "docs/spec.toml OLY-B-BND-01: xtask/tests/spec.rs, crates/athena-core/src/hestia.rs `spec_gaps` / `measure_problem` / `spec_request`, and the status spec section",
+      "kind": "rule",
+      "test": "`cargo test -p xtask --test spec` and the new `spec_entry_oly_b_bnd_01_names_the_guard_and_is_not_a_gap`; with a real mechanism and a valid measure hestia no longer queues this request.",
+      "reason": null
+    },
+    {
+      "name": "gh calls stay under crates/athena-core/src/gh/",
+      "dependent": "crates/athena-core/tests/external_calls_guard.rs",
+      "kind": "rule",
+      "test": "`cargo test -p athena-core --test external_calls_guard`",
+      "reason": "All new gh-related code is in gh/remote.rs and gh/landing.rs and adds no `Command::new(\"gh\")` or HTTP client name."
+    },
+    {
+      "name": "New error text, spec text and test names",
+      "dependent": "xtask/tests/policy.rs boundary scan and the `[personal_data]` allow-list in athena.toml",
+      "kind": "rule",
+      "test": "`cargo test -p xtask --test policy`",
+      "reason": "New text uses neutral words and no email-like text; the pinned-force flag stays split with `concat!` (remote.rs:61)."
+    },
+    {
+      "name": "No classification function changes",
+      "dependent": "Landing, history-check and attribution classification (commit-shape rules)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Only the remote name and origin URL are checked before a push; no function that classifies commits (job commit, records-only, owner-path, intervention, retry-after-block) is read or changed. So no commit-shape table or realistic-branch fixture applies. The suites of every crate that reaches the changed push helpers (athena-git, athena-gate, athena-core, athena-cli) run in criterion 6."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of the OLY-B-BND-01 entry, then run the spec checks and the pin test that parses docs/spec.toml.",
+      "command": "git diff docs/spec.toml && cargo test -p xtask --test spec && cargo test -p athena-core --lib gh::tests::spec_entry_oly_b_bnd_01_names_the_guard_and_is_not_a_gap",
+      "observes": "Mechanism names crates/athena-core/src/gh/remote.rs (`require_origin`, `origin_client`, `origin_url`) and crates/athena-git/src/lib.rs, and states the limits (origin is assumed to be the project's own repository; direct `Git::run` pushes outside the guarded helpers, reads of a non-origin remote and reconcile's read-only host question are not covered; agents' push and write-form gh are denied separately by crates/athena-agent/src/policy.rs). Owner is still \"Themis\". The measure names `git_remote_refuses_push_replace_and_delete_to_a_non_origin_remote` and ends `status: not shown`. The pin test asserts those strings, that `measure_problem` is None, that `spec_gaps` does not list OLY-B-BND-01, and that the named files exist under the repository root.",
+      "fails_without": "With mechanism \"none\" or a measure that does not end in `status:` plus a known label or `not shown`, the pin test and the xtask spec test fail.",
+      "seam": "`hestia::parse_spec`, `measure_problem` and `spec_gaps` over `include_str!(\"../../../../docs/spec.toml\")` (path from crates/athena-core/src/gh/tests.rs to the repository root). The functions exist (hestia.rs:1172, 1219, 1291); the test is added by plan step 8."
+    },
+    {
+      "criterion": 2,
+      "method": "Grep the mechanism file for the guard and its three calls, then run the behavior test that exercises them.",
+      "command": "cargo test -p athena-core --lib gh::tests::git_remote_refuses_push_replace_and_delete_to_a_non_origin_remote",
+      "observes": "Grep `require_origin` in crates/athena-core/src/gh/remote.rs shows one definition and a call as the first statement of `push`, `replace` and `delete_branch`; Grep in crates/athena-git/src/lib.rs shows the guard as the first statement of `push_branch` and `push_if_remote_at`. The test passes.",
+      "fails_without": "Without the three calls the criterion 3 test fails at the first refused name.",
+      "seam": "Wiring is read by Grep; the behavior is shown by the criterion 3 test. Exists after steps 1-2."
+    },
+    {
+      "criterion": 3,
+      "method": "Real git in temp dirs. Work repo with commits c1 and c2, a bare `origin` and a bare `upstream` (`Git::isolated` as at gh/tests.rs:2681-2699). Seed `upstream` with branch `b` at c1 by a direct `git push upstream`, which shows the push is possible for this user; record upstream's `for-each-ref`. Call `GitRemote{name:\"upstream\"}` `.push(b,c2)`, `.replace(b,c2,c1)` (the pin is correct, so unguarded it would succeed) and `.delete_branch(b)`: each must be Err containing `OLY-B-BND-01` and the upstream listing must be byte-identical. Repeat for names `\"\"`, `origin2` and `Origin`. Then with name `origin`: push succeeds and `remote_head` is c1, replace to c2 succeeds and `remote_head` is c2, delete_branch succeeds and `remote_head` is None. A second test calls `RecordsWriter::new(&git).append_to_remote(\"upstream\", ...)`: Err, upstream refs unchanged; `append_to_remote(\"origin\", ...)` still writes. athena-git tests cover `push_branch` and `push_if_remote_at` with the same names.",
+      "command": "cargo test -p athena-core --lib gh::tests::git_remote_refuses_push_replace_and_delete_to_a_non_origin_remote && cargo test -p athena-core --lib gh::tests::records_append_refuses_a_remote_other_than_origin && cargo test -p athena-git non_origin",
+      "observes": "An error for every non-origin name with upstream refs unchanged; success for origin with the head sequence c1, c2, None; the records append to upstream refused and to origin written.",
+      "fails_without": "With `require_origin` removed from `GitRemote::push`, the push to `upstream` succeeds, `unwrap_err` panics and the upstream listing differs from the recorded one. The same holds for replace and delete_branch, and for the athena-git helpers and the records append.",
+      "seam": "Production entry points `GitRemote::push/replace/delete_branch` (remote.rs:52-79), `Git::push_branch` (lib.rs:432), `Git::push_if_remote_at` (lib.rs:384) and `RecordsWriter::append_to_remote` (records_branch.rs:401). Fixture: real temp repos via `Git::isolated` and `tempfile`; no double. The seam exists; the tests add an `upstream` remote (plan steps 1, 2 and 6)."
+    },
+    {
+      "criterion": 4,
+      "method": "The three origin cases, plus the split cases. (a) No origin: in a repo with only a bare `upstream` remote, `origin_client` is Err and the runner (`UnreachedHost`, which fails on any call) has no call; `GitRemote{name:\"origin\"}.push` is Err and upstream refs are unchanged. (b) Local-path origin and the lookalike `<tmp>/github.com/example/project.git`: `origin_client` is Err and no gh call. A `remote.origin.pushurl` set to a different repository, and a push URL set twice (`git config --add`), are Err with no gh call. (c) Origin `https://github.com/example/project.git`: `origin_client` returns a client for `example/project`, and with `ScriptRunner` `close_pr(9, ..)` makes calls whose paths all start with `repos/example/project/`. A push URL that differs only by `.git`, a trailing slash or userinfo is accepted. A `GitRemote{name:\"origin\"}` push with `upstream` present changes only origin's bare repository. (d) Early path: origin `https://github.com/example/project.git` with a split `pushurl`: `push_ci_branch`, `early_pr` and `delete_ci_branch` through the early seam record no calls; the control with a `.git`-only difference records one `push`. Landing order: `Athena::land_pr` is not run end to end (the verified-job fixtures exist only in athena-cli). Reading landing.rs shows `origin_client(...)?` before `config_at`, the `GitRemote`, `GitLandingRecords::for_remote` and `attempt()`, and every write happens inside `attempt()`; the cli land tests cover the happy path.",
+      "command": "cargo test -p athena-core --lib origin_client && cargo test -p athena-core --lib the_early_step_skips_when_origins_push_url_differs_from_its_fetch_url && cargo test -p athena-core --lib a_missing_or_non_github_origin_skips_the_early_step_silently && cargo test -p athena-cli --test drain",
+      "observes": "Err and zero runner calls with no origin, a local path, a lookalike path, a split push URL and a multi-valued push URL. For the https origin every recorded gh path is under repos/example/project/ and the `.git`/slash/userinfo variants are accepted. The early fake records nothing for the split push URL and one push for the control. The existing early-skip test and the cli land tests still pass.",
+      "fails_without": "If `origin_client` used the substring `parse_remote`, the lookalike case would build a client and fail. If `origin_url` ignored `pushurl`, the split cases would fail. If `github_repository` kept its old `get-url origin` call, the early test would see a push. If the client were built for another repository, the path-confinement assertion would fail.",
+      "seam": "Production entry points `origin_client` and `origin_url` (added by plan step 2; `origin_client` is called from `Athena::land_pr` by step 3), `Athena::push_ci_branch`, `early_pr` and `delete_ci_branch` (early.rs:384, 405, 425; they exist), `GhClient::close_pr` (exists) and `GitRemote::push`. Fixtures: `Git::isolated` temp repos with `git remote add origin <url>` (an https origin is only a URL string; nothing is fetched or pushed to it), the existing `ScriptRunner` (gh/tests.rs:4794) and `UnreachedHost` (gh/tests.rs:4886), and `EarlyFake` installed with `early_seam::install` (mod.rs:99). `Athena` comes from `crate::code_health::tests::set_up()`. These doubles hold no origin or parse logic. The seams exist; the tests are added by steps 6 and 7."
+    },
+    {
+      "criterion": 5,
+      "method": "Diff review plus a mutation run by the producer. The diff must show the new test asserting `is_err()` plus the `OLY-B-BND-01` text for push, replace and delete_branch to `upstream`, and comparing upstream's ref listing before and after. The producer temporarily removes the `require_origin` call from `GitRemote::push`, runs the criterion 3 test and records the failure at the push-to-upstream assertion in its report, then restores the call. It repeats with the `origin_url` call in `github_repository` (early test fails) and the pushurl comparison in `origin_url` (origin_client test fails). The verifier has no edit command, so it checks the diff and the recorded runs.",
+      "command": "git diff crates/athena-core/src/gh/tests.rs",
+      "observes": "Assertions on refusal and on unchanged upstream refs, not wiring only; the recorded mutation run fails at the push-to-upstream assertion.",
+      "fails_without": "The `push` refusal assertion for `upstream`: without the guard the push succeeds and the upstream ref moves.",
+      "seam": "Same as criterion 3: `GitRemote::push` (remote.rs:52) over the temp-repo fixture. Exists."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs, then the other suites that reach the changed paths.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked && cargo test -p athena-core --test external_calls_guard --test refusal_corpus && cargo test -p xtask --test policy --test spec",
+      "observes": "All pass. This includes the athena-git, athena-gate (attribution checkpoint), athena-core (landing, early, reconcile, cutover import) and athena-cli (land and reconcile) suites. `external_calls_guard` sees no new `gh` or HTTP client name. `refusal_corpus` holds reading checks; this change adds no reading check, parser or stem list, so I cite no case id and no result. The input forms of the new remote-name rule (`origin`, `upstream`, empty, `origin2`, `Origin`) and of the push-URL rule (equal, `.git` spelling, userinfo, split, multi-valued, local path, lookalike path, non-GitHub host) are covered by the unit tests named above, not by corpus cases. The policy test passes because the new text uses neutral words, no email-like text, and the pinned-force flag stays split with `concat!` (remote.rs:61).",
+      "fails_without": "cargo test fails if the guard is missing (new tests), if it wrongly refuses `origin` (existing landing, early, reconcile, attribution and records tests), or if the spec entry lacks a mechanism or a `status:` ending. Clippy and fmt fail on any warning or drift.",
+      "seam": "Whole-workspace cargo commands over the changed crates; no double added. Exists."
+    },
+    {
+      "criterion": 7,
+      "method": "List the changed paths.",
+      "command": "git status",
+      "observes": "Only docs/spec.toml and files under crates/ changed: crates/athena-git/src/lib.rs and crates/athena-core/src/gh/{remote,landing,early,tests}.rs. CHANGELOG.md, athena.toml, defaults.toml and .github/workflows are untouched.",
+      "fails_without": "Any edit to CHANGELOG.md, athena.toml, defaults.toml or a workflow would show in `git status`.",
+      "seam": "git status over the working tree. Exists."
+    }
+  ],
+  "open_questions": [
+    "User: Criterion 7 says CHANGELOG.md is untouched, while the expected deliverables list it. The plan leaves it untouched. Say if a line should be added and criterion 7 changed.",
+    "Host: Does any clone Athena runs in have an SSH or plain-http origin, or a `pushurl` / `pushInsteadOf` that differs from the fetch URL? The code now refuses landing and the early pull request for those. The system facts say SSH remotes are refused at admission, but the code that refuses them was not found."
+  ],
+  "producer_section_sha256": "5930dfdde7bc993610d9bb7e87d48a9a3c8d46c099feb8363f107baa3332a6ab"
+}

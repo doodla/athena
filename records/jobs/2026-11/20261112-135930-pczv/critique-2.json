@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261112-135930-pczv",
+  "round": 2,
+  "at": "2026-11-12T14:13:51.47321563Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The 'doubled push URL' fixtures actually build one push URL that names another repository, so the push-URL count check is never tested.",
+      "evidence": "In git, `git remote set-url --add --push origin X` on a remote with no remote.origin.pushurl adds a single pushurl X; the fetch URL is not copied into the push list. Afterwards `git remote get-url --push --all origin` prints one line (X). Every 'doubled push URL' case in the plan is therefore refused by the same-repository comparison. If the implementation dropped the 'exactly one line' check on the --push output, all these tests would still pass. Criterion 4 asks that 'a doubled push URL ... (is) refused', and the stated fails_without ('Without the single-URL and same-repo checks') bundles two checks so that removing either one alone is not caught. The doubled fetch URL case (`set-url --add origin`, no pushurl) is genuinely doubled and is fine. Fix: Build a real double: `git config --add remote.origin.pushurl <origin's own URL>` (or `git remote set-url --push origin <same URL>`), then `git remote set-url --add --push origin <second bare>`. Assert that `get-url --push --all` prints two lines, that the first one matches the fetch URL, and that push is Err with both bares unchanged. Keep the mismatched single pushurl as its own case (c). State fails_without separately: removing the count check makes the real double push to both bares. Apply the same correction to the early.rs doubled-GitHub case and to 4(d).",
+      "location": "Demonstrations, criterion 4 (b), (d) and (e, doubled GitHub origin); plan step 3; Decision 6",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "own_origin_repository uses the loose parse_remote, so land_pr can still open and merge pull requests on a GitHub repository that is not origin.",
+      "evidence": "client.rs:1196-1209: parse_remote finds HOST anywhere in the URL (`url.find(HOST)`) and checks neither scheme nor host. The strict reader GhClient::origin_repository (client.rs:1026-1039, host checked) has a test at client.rs:1260 listing `https://example.com/github.com/owner/repo` as a URL it refuses; parse_remote accepts that URL as owner/repo. With such an origin, the planned land_pr gets ('github.com', 'owner/repo') from own_origin_repository, pushes to example.com, and sends open, merge and close calls to GitHub owner/repo, which is the upstream case OLY-B-BND-01 forbids. early.rs:329-338 already uses the host-checked https_github_repository, so the two publishing paths would disagree. Fix: Have own_origin_repository use a host-checked parse: require an https URL whose authority, after stripping userinfo, equals HOST, as GhClient::origin_repository and https_github_repository do. Add `https://example.com/github.com/owner/repo` and a local path containing `github.com/o/r` as Err cases to test 4(d). SSH and scp forms are refused at admission, so this changes no supported setup.",
+      "location": "Plan step 4 (`own_origin_repository` = own_origin_url then parse_remote); Files: landing.rs; Demonstration criterion 4 (d)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The pre-receive hook test cannot tell git's rejection from a wrong guard refusal.",
+      "evidence": "The test asserts that push_branch / push_if_remote_at return Err on a valid single-URL origin. A guard that wrongly refused a valid origin would return Err too, so the test passes either way. The plan's control ('control push without hook first') does not say it goes through push_branch, and it does not show that the hook runs. Separately, Git::isolated passes core.hooksPath=/dev/null only through `-c` (lib.rs:190), and git does not pass that setting to a local receive-pack, so the bare repo's hook should run. Fix: Run the control through push_branch and push_if_remote_at themselves (Ok with no hook). With the hook in place, assert that the error is GitError::Failed carrying git's 'pre-receive hook declined' text, not GitError::Refused.",
+      "location": "Plan step 3 and Decision 7 (pre-receive hook test)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The dependents list misses the tests that read every active entry of the real spec.",
+      "evidence": "hestia.rs:4286 `the_real_spec_records_every_field_and_classes_the_acceleration_requirements_as_speed` asserts measure_problem == None for every active requirement in docs/spec.toml, OLY-B-BND-01 included. iris.rs:227 and preflight.rs:597 also include_str the real spec (they read other ids). The list names buy_first.rs and model_roster.rs but not these. The planned measure (`...; status: not shown`) passes measure_problem, so the risk is low, and `cargo test --locked` runs them. Fix: Add hestia.rs:4286 (and note iris.rs:227 and preflight.rs:597) to the spec dependents entry, with `cargo test -p athena-core hestia::` as its test.",
+      "location": "Dependents: 'The OLY-B-BND-01 mechanism and measure'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The GhClient path check in 4(d) passes without the change.",
+      "evidence": "GhClient already builds its paths from the repository it is given (client.rs). A ScriptRunner close_pr(9) call reaching only repos/example/project/... holds on the base commit, so this part only shows existing behavior. Note too that ScriptRunner is declared inside a nested test module (tests.rs:4794, indented), so new tests that use it must be placed in that module. Fix: Keep the call as a regression check, but do not count it as evidence for criterion 4. The own_origin_repository Err cases (doubled, mismatched, non-GitHub host per the finding above) carry the behavior. Place the test in the module that defines ScriptRunner.",
+      "location": "Demonstration criterion 4 (d), the ScriptRunner close_pr part",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A refused doubled origin prints the misleading line 'no GitHub origin'.",
+      "evidence": "push_ci_branch (early.rs:388-390) prints 'CI branch push is skipped because there is no GitHub origin' whenever github_repository is None. After the change, a doubled or mismatched GitHub origin also gives None, so the user is told there is no GitHub origin when there is one that the guard refused. Fix: Optionally tell the two cases apart (for example, 'origin has more than one URL or names two repositories'), without echoing a URL.",
+      "location": "Files: early.rs github_repository",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the accepted reading. It puts one origin-identity check in athena-git (`Git::own_origin_url`), calls it from `push_branch` / `push_if_remote_at` and from GitRemote's three write methods, and pins land_pr and early.rs to the checked read. Checked against the snapshot: remote.rs:52-79, lib.rs:384/432, early.rs:363-377/458, landing.rs:865-893, parse_remote, the hestia functions and the pushurl fixtures all exist as described. Every push caller found by grep passes the literal \"origin\" with one URL. The evidence for criteria 3 and 5 is sound: real git, bare repos, a control push, and refs compared before and after. Two problems need a revision. (1) The \"doubled push URL\" cases use `git remote set-url --add --push` on a remote with no push URL yet. In git that creates a single push URL, so these cases only test a mismatched push URL; the push-side count check is never exercised and criterion 4's doubled-push-URL case goes unshown. (2) `own_origin_repository` relies on `parse_remote`, which accepts any URL containing \"github.com\". An origin such as `https://example.com/github.com/owner/repo` would let land_pr open and merge pull requests on GitHub owner/repo, a repository other than origin. That breaks the boundary the plan claims, and early.rs already uses a stricter host-checked reader. Smaller points: the hook test does not tell a git rejection from a guard refusal; the dependents list misses the tests that read every entry of the real spec; and one 4(d) sub-check passes without the change."
+}
