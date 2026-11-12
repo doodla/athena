@@ -1,0 +1,153 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-013721-4gwn",
+  "n": 1,
+  "at": "2026-11-12T13:40:01.107985407Z",
+  "invocation_seq": 2,
+  "base_commit": "70da7511a6a467912f44da73693c7b3802772797",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Give OLY-B-BND-01 a mechanism: refuse writes to any non-origin remote",
+  "summary": "Add a guard so Athena's own publishing (git push, replace, delete of branches, and PR/GitHub API writes) can reach only the repository's own `origin`, never another remote such as `upstream`. Record it in docs/spec.toml as OLY-B-BND-01's mechanism and measure, with a test that fails without the guard. Goal: the spec owner (Themis) can see the boundary enforced by code and a test.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Criteria require a new failing-without-mechanism test and cargo test, clippy and fmt to pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check refusal of push to a non-origin remote by running tests."
+    },
+    {
+      "id": "root-cause",
+      "how": "Guard sits in the shared GitRemote write methods so every publishing path is covered."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced by code and recorded in docs/spec.toml."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Reading: 'upstream project' means any repository other than the one Athena works in, i.e. any git remote other than `origin` and any GitHub repository other than the one parsed from `origin`. Athena's own push of job branches and PRs to `origin` is the project's own repository and is allowed.",
+    "Environment: the guard runs locally inside the Athena process (the orchestrator's own working copy and its landing/early-push code in crates/athena-core/src/gh), not in a CI job or a producer. It acts through `git` and the `gh` runner with the owner's existing credentials; the new tests use only temporary local git repositories and a fake runner, with no network and no real GitHub access. Reach: refs `refs/heads/<job branch>` on `origin` only. With no origin, `git remote get-url origin` fails and the landing/push path errors before any write (test asserts no push). With a non-GitHub origin (local path or other host), pushes go to that origin only and GitHub PR/API writes are not attempted (`origin_repository` returns None). With a GitHub origin, pushes and PR calls target only that owner/repo. A remote named anything other than `origin` (for example `upstream`) is refused for push, replace and delete_branch.",
+    "Code survey: read crates/athena-core/src/gh/remote.rs (Remote trait; GitRemote push, replace, delete_branch take a free `name`), crates/athena-core/src/gh/landing.rs (landing hard-codes remote_name = \"origin\", parses it with parse_remote, builds GhClient for that repository), crates/athena-core/src/gh/early.rs (early push uses origin), crates/athena-core/src/gh/client.rs (GhClient::origin_repository, HostOperation), and crates/athena-agent/src/policy.rs (check_git allow-list denies push for agents; check_gh allows only GET reads). The entry points are the Remote impl methods and landing; the new check runs before any `git push` call. No record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are not affected. The property is measured directly by calling GitRemote::push/replace/delete_branch against a temp repo that has an `upstream` bare remote and observing that its refs do not change.",
+    "Existing code: extends crates/athena-core/src/gh/remote.rs (GitRemote) and reuses crates/athena-agent/src/policy.rs denial of agent push and write-form gh; docs/spec.toml gets the mechanism, owner and measure on the existing OLY-B-BND-01 entry.",
+    "The measure ends `status: not shown` and names the test that shows it, because no `athena status` line reports upstream writes.",
+    "Governance files (athena.toml, defaults.toml, workflows) are not needed and do not change.",
+    "The new refusal affects only publishing calls, not readings; the replay-of-readings refusal-rate rule does not apply (expected 0% of newly refused readings)."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "docs/spec.toml entry OLY-B-BND-01 has `mechanism` naming crates/athena-core/src/gh/remote.rs (the guard) instead of \"none\", keeps owner Themis, and its `measure` ends with `status: not shown` plus the name of the test that shows it (check with git diff docs/spec.toml).",
+      "kind": "content"
+    },
+    {
+      "text": "The mechanism path named in the spec exists: Grep finds the guard function and its use in GitRemote push, replace and delete_branch in crates/athena-core/src/gh/remote.rs.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-core` : a new test creates a temp repo with `origin` and `upstream` bare remotes, calls GitRemote push/replace/delete_branch with name `upstream`, and asserts an error and that the upstream refs are unchanged; the same test pushes to `origin` and succeeds.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: tests cover the three origin cases: no origin (landing/push errors, no write), a local-path origin (no GitHub call made by the fake runner), and a GitHub-style https origin (writes target only the parsed owner/repo).",
+      "kind": "behavior"
+    },
+    {
+      "text": "The new test fails when the guard call is removed from GitRemote::push (the verifier can check the diff shows the test asserting on the refusal and not only on wiring).",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Only docs/spec.toml and files under crates/ change; CHANGELOG.md, athena.toml and defaults.toml are untouched.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "crates/athena-core/src/gh/remote.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-core/src/gh/early.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Changing how agents' git/gh commands are policed in crates/athena-agent/src/policy.rs beyond what already exists.",
+    "Blocking Athena's own pushes and PRs to the project's `origin`.",
+    "Adding an `athena status` line for upstream writes.",
+    "Changes to athena.toml, defaults.toml or .github/workflows."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1900.0,
+        "p90": 4300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6774193548387096,
+      "p_user_intervenes": 0.06644951140065146,
+      "cost_usd": {
+        "p10": 0.5537699423918236,
+        "p50": 1.4729476067643412,
+        "p90": 5.185407328304635
+      },
+      "wall_time_s": {
+        "p10": 595.2804451829234,
+        "p50": 2151.233744606,
+        "p90": 4381.075874239108
+      }
+    }
+  },
+  "departures": null,
+  "hard_reason": "Adds a rule that refuses publishing (a guard in the push and landing path), which is a gate on how work lands.",
+  "producer_effort": "high"
+}
