@@ -1,8 +1,17 @@
-//! Pinning the studied repository and rereading after a configuration change (design §3.4, D38).
+//! Pinning the studied repository and rereading after a configuration change (design §3.4, D38), and the stop
+//! of a job whose capability preflight found a needed program missing (`stop_preflight`).
 
 use super::*;
 
 impl Athena {
+    /// Ends the job at the capability preflight: a program its checks need is missing, so it fails before any
+    /// agent ran, with an `environment:` reason (see [`crate::preflight::PREFLIGHT_BLOCKED`]) that names the
+    /// program and the workaround. Its verification result is unknown, not false.
+    pub(super) fn stop_preflight(&self, ctx: &RunContext<'_>, closing: &mut Closing, reason: &str) {
+        closing.happened = self.failure(ctx, reason);
+        closing.happened.verification_passed = None;
+    }
+
     /// For a capability that pins, resolves the commit to read and checks its tree out under the job's
     /// directory. Nothing is pinned for other capabilities.
     ///

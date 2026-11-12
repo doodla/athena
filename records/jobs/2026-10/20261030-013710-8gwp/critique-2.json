@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013710-8gwp",
+  "round": 2,
+  "at": "2026-11-12T09:25:53.713194668Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/scope_guard.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/scope_guard.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Test C's precondition and its fails-without claim do not hold: a login-expiry stop keeps no directory under kept/ and writes no resume mark",
+      "evidence": "The existing test a_producer_login_expiry_keeps_its_edits_and_closes_as_an_environment_stop (run/tests.rs:5368-5369) asserts `athena.state.read_resume(&first) == None` and `!athena.state.kept_work_dir(&first).exists()`. The edits are kept as a candidate commit. state.rs:107-111 says remove_kept_work does nothing for a job that kept a commit. So C's 'keeps work in state.root()/kept/<first> (precondition asserted)' fails, and so does its 'read_resume ... still found' assertion. If those were dropped, keeping `resume` on a blocked job would remove nothing, and C would pass without decision 6's change. The Dependents entry for kept work therefore has no test that covers it. Fix: In Test C, after the first job closes, create `athena.state.kept_work_dir(&first)` by hand, as run/tests.rs:5249-5250 does, so remove_kept_work has something to remove. Then assert that directory survives the preflight stop. Drop the read_resume assertion. Keep `athena.timeout_seed(&records, \"try again on <first>\", &head)` returning Some after the stop. State the fails-without claim against that directory: with `resume` kept, close.rs:152-154 removes kept/<first>.",
+      "location": "Demonstrations, criterion 3, Test C (preflight_stop_on_a_resumed_retry_keeps_the_earlier_work); Dependents entry 'kept work of a resumed retry'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A git blocker can never be recorded. Athena runs the git binary long before the hook, so a missing git fails dispatch first.",
+      "evidence": "athena-git runs the `git` binary (Command::new(\"git\") in crates/athena-git/src/lib.rs). dispatch calls JobConfig::at(&self.git, head) at run/mod.rs:1029 and pin_repo at 1100, and the prediction commit (1261) needs git. A missing git fails at the first of these, with no record. So the note always says `git: present`, and the git workaround branch is reachable only through FakeProbe. Fix: Either drop git from the needs and say so in the spec mechanism, or keep it but state in the mechanism and a code comment that git is listed for the record only and is checked earlier, implicitly, by Athena's own git use. Do not claim a git blocker can stop a job.",
+      "location": "Decision 1 (git as a need), step 1 (git-specific workaround step), spec mechanism wording",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "While a tool is missing, a drain keeps reading, dispatching and retrying every item that needs it. Each item costs a reading and a retry reading, and the run never stops.",
+      "evidence": "drain.rs:2706-2711 ends the run only for ProducerAuth and LowDisk (UsageLimit ends it earlier). An OtherEnvironment preflight stop lets every later item fail twice the same way. The plan presents this as fine ('a preflight stop does not end a drain'). The preflight is still far cheaper than today's behaviour, where the producer runs before the check fails. Fix: Add a risk note naming this cost. Note a follow-up, outside this job's deliverables, to stop the drain on a preflight stop. Do not claim the current drain behaviour is the desired one.",
+      "location": "Dependents entry 'closing reason prefix environment:'; Risks",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The drain's own second attempt retries the preflight-stopped job, not the earlier one, so it does not reach the earlier job's kept work",
+      "evidence": "drain.rs:222-227: after a failed run, the second attempt is `athena retry <last job>`. timeout_seed and resume_seed read only the directly retried job (run/mod.rs:888-896, 542). The hint naming the earlier job helps only a person reading the reason. Fix: A small general fix inside run/mod.rs: when the retried job closed with a preflight reason (is_preflight_reason), have timeout_seed and resume_seed follow that job's own 'try again on' link to its target. Alternatively, record in the Risks that drain-driven retries lose the resume, and why that is accepted.",
+      "location": "Decision 6; Risk 'A retry of the preflight-stopped job itself starts from scratch'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "'Any execute bit set' is looser than the exec lookup, which checks execute permission for the current user",
+      "evidence": "A file with mode 0700 owned by another user passes the probe but cannot be run. Rare. Fix: Optionally use access(X_OK) semantics through rustix or libc if the crate already depends on one. Otherwise note the approximation.",
+      "location": "Decision 2, SystemProbe",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Read the plan against the code: run/mod.rs dispatch (1015-1349), run/close.rs close_dispatched (152-155), settle_resume_marks (860-874), timeout_seed, disk.rs StopCause, resumable_stop and keeps_unfinished_work (450-545), scope_guard::resumed_candidate (621-627), state.rs remove_kept_work and kept_work_dir (103-112), checks.rs run_check (532-540), the run/tests.rs harness (90-219, 5230-5379), hestia.rs spec functions and their tests, xtask/tests/spec.rs, and drain.rs (2692-2711). Most of the plan is sound. The hook point exists. The stop reason classes as OtherEnvironment. The spec test follows the iris.rs pattern. The PATH-scan probe matches how checks resolve their programs, and leaving gh out is well argued. One major problem: Test C, the only demonstration for decisions 6 and 7 (the resume: None change and the resumed_candidate fix), is built on a wrong premise. A login-expiry stop keeps its work as a candidate commit. It leaves no kept directory and no resume mark, and the existing test at run/tests.rs:5368-5369 asserts both are absent. So C's precondition fails as written. With no directory, remove_kept_work does nothing, so the claim that C fails without the resume: None change is false. Three minor points: probing git can never block, because Athena runs the git binary well before the hook. A drain keeps reading and retrying every item while a tool is missing. And the drain's own retry of a preflight-stopped job does not reach the earlier job's kept work."
+}

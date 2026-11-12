@@ -1129,6 +1129,14 @@ impl Athena {
             Some(StaleSeed::Conflict(conflict)) => (resume_from, Some(conflict)),
             None => (resume_from, None),
         };
+        // The earlier job whose kept work this job builds on, if any. A preflight stop (below) leaves that
+        // work alone.
+        let earlier: Option<JobId> = retry_seed
+            .as_ref()
+            .map(|s| s.job.clone())
+            .or_else(|| resume.as_ref().map(|r| r.job.clone()))
+            .or_else(|| resume_from.as_ref().map(|r| r.job.clone()))
+            .or_else(|| stale_conflict.as_ref().map(|c| c.job.clone()));
         // A retry that starts from the base still carries the blocker and major findings of the job it retries.
         let earlier_findings =
             if retry_seed.is_none() && resume.is_none() && stale_conflict.is_none() {
@@ -1151,6 +1159,12 @@ impl Athena {
         // The prediction commit: the accepted reading's job record and the producer brief, before any work.
         let producer_grant = capability.producer_grant(&jc);
         let checks = capability.checks(&jc);
+        // The capability preflight (OLY-B-RUN-01): each program the checks run is looked up and recorded in
+        // the job's note, in the prediction commit below, before any agent runs. A missing one stops the job
+        // after that commit.
+        let tools = crate::preflight::check_tools(&checks);
+        let preflight_note = redactor.redact(&tools.note())?;
+        let blocked = tools.stop_reason(earlier.as_ref());
         let accepted = AcceptedReading::new(&reading, &jc.defaults, is_governance);
         let check_views: Vec<CheckView> = checks
             .iter()
@@ -1247,7 +1261,7 @@ impl Athena {
             request_sha256: None,
             cost: None,
             tokens: None,
-            note: None,
+            note: Some(preflight_note),
             pin: pinned.as_ref().map(|(record, _)| record.clone()),
             // The branch the job lands on; the empty string records a detached HEAD.
             dispatch_branch: Some(self.git.current_branch()?.unwrap_or_default()),
@@ -1304,8 +1318,15 @@ impl Athena {
                 .as_ref()
                 .map(|conflict| conflict.paths.clone())
                 .unwrap_or_default(),
-            resume,
+            // A job stopped at the preflight did none of the work: it leaves the earlier job's kept work (and
+            // its resume mark) alone, which `close_dispatched` would otherwise remove.
+            resume: if blocked.is_some() { None } else { resume },
         };
+        if let Some(reason) = &blocked {
+            let mut closing = Closing::new();
+            self.stop_preflight(&ctx, &mut closing, reason);
+            return self.close_dispatched(&ctx, closing);
+        }
         // Job planning (docs/design/job-planning.md): one accepted round, before the producer. The round
         // seeds the closing with its invocations, plan and critique, so the producer's invocation is
         // numbered after them and the budget check below counts what planning cost (review F1).

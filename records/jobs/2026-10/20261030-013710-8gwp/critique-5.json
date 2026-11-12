@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013710-8gwp",
+  "round": 5,
+  "at": "2026-11-12T09:41:47.959753383Z",
+  "invocation_seq": 11,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "retry_target can get past the interrupted-retry guard when the target job already has a newer retry",
+      "evidence": "Read reading.rs:1199-1211. The guard refuses a second retry of an interrupted job when `retries_by_job` already lists a standing retry for it. The plan applies the guard only to the id the user gave (J2, which is closed, so the guard is skipped) and then retries J1. Counterexample: J1 is interrupted. It is retried as J2, which the preflight stops. The user then retries J1 directly as J4, which is running or landed. Now `athena retry J2` resolves to J1 and starts a third retry of J1, even though J4 still stands for that work. That is the double work the guard exists to prevent. The plan's argument that 'J2 did no work, so retrying through it to J1 cannot double work' only holds when J2 is J1's newest standing retry. Fix: In `retry_target`, follow J2 to J1 only when `retries_by_job(records).get(J1) == Some(J2)`, meaning J2 is J1's newest standing retry. Otherwise return J2 unchanged. Alternatively, run the interrupted-retry guard on the target as well as on the given id. Add a case for this to test E.",
+      "location": "Plan decision 7 / step 6; crates/athena-core/src/reading.rs:1197-1211",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Step numbers cited in the demonstrations do not match the step list",
+      "evidence": "Criterion 1 says the test is 'added by plan step 6', but unit tests are step 7 and step 6 edits reading.rs. Criteria 2 and 3 say 'step 9 stubs it' and 'step 9 removes resume: None', but the stub-and-revert checks are in step 10. Criterion 3 says its tests are 'added by plan step 7'; they are in step 8. Fix: Renumber the references: unit tests are step 7, run-path tests are step 8, and the stub-and-revert checks are step 10.",
+      "location": "Demonstrations, criteria 1, 2 and 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's main claims against the code and found them correct; I ran no code or tests. In `dispatch` (run/mod.rs), the checks list is built at line 1153, the Job literal has `note: None` at 1250, `resume_from` branches at 1312, and the planner, critic and producer all run after the proposed hook. `pin.rs` is a child module of `run`, so it can see `Closing`, `RunContext` and `failure`, and `stop_planning` in planning.rs is the pattern to copy. Two more claims hold: close.rs:152-154 removes the earlier job's kept work only when `ctx.resume` is set, and settle_resume_marks keeps the job's own mark on an `environment:` reason. In the scope guard, a preflight stop counts as an Environment verdict, and `line_holds` does not count those, so a drain never holds a line because of preflight stops. The Job `note` field exists at records.rs:625, and no production code reads a Job's note. Check spawning matches the plan's PATH analysis: checks.rs:532-562 clears the environment, rebuilds it, runs in the job directory, and turns a start failure into 'could not start'. The test helpers the plan relies on all exist: `repo`, `athena_with`, `finished_job`, `counting`, `producer_ending`, `expired_login`, `kept_work_dir`, and `PASSES = [\"true\"]`. Existing check programs in tests are `sh`, `true` or the `/nonexistent/...` path, and no test changes PATH, so using the real probe in tests should not flake. Moving the retry link into `Athena::retry` is a sound fix: every reader goes through `retried_job`, and other retries are unchanged. The remaining findings are a minor edge case, where following the retry link can get past the interrupted-retry guard when J1 already has a newer retry, and wrong step numbers in the demonstrations. Athena's own findings about reading.rs and run/tests.rs being outside the deliverables are already justified in the plan, so I have not repeated them. Neither finding is major or a blocker, so the verdict is accept."
+}

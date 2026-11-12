@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013710-8gwp",
+  "round": 4,
+  "at": "2026-11-12T09:36:06.734388166Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The retry link is followed in one consumer only. Attribution readers that the dependents list omits still read the raw link, so a J1→J2(preflight stop)→J3 chain loses J1's link to J3.",
+      "evidence": "Read: gate_counts.rs:110-127 counts a gate that ended J1 as overruled only when a landed job's request `retried_job` is J1. J3's stored request is 'try again on J2', and J2 has no candidate, so J1's gate is never counted as overruled. evidence_labels.rs:158-175 (`retry_vote`) counts a later job as a retry of the introspected source only when `retried_job(records, &request.text) == Some(source)`, so J3's landing or failure no longer votes on J1's class. steward.rs:450-456 and status/throughput.rs:604 read the same raw link. The plan routes the follow through `dispatch` only and names just reading.rs/retry.rs as unchanged readers. These readers are absent from the dependents list, and no test covers them. Fix: Fix the link where it is made, not in one reader. In `Athena::retry` (reading.rs:1220), when the job being retried closed with the preflight reason and its own request is a retry, build `try again on <that job's retried job>` (follow up to N hops). Then every reader sees J1 as the retried job: dispatch seeds, the reader context, retries_by_job, gate_counts, evidence_labels, steward and status. `through_preflight_stops` in dispatch is then unnecessary. Rewrite test D to check the stored request. If you keep the dispatch-only follow, add these readers to dependents with tests, or state why each loss of attribution is acceptable.",
+      "location": "Decision 7; Dependents entries 'retry link followed through a preflight stop' and 'readers and status follow-ups'; crates/athena-core/src/gate_counts.rs:119, evidence_labels.rs:173, steward.rs:454, status/throughput.rs:604, status/planning.rs:325",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The agent binary is left out for the wrong reason. The real driver already checks it.",
+      "evidence": "crates/athena-agent/src/claude.rs:67-73 runs `<bin> --version` when the Claude Code driver is built, so a missing agent binary already fails before any job is dispatched. The plan's stated reason (tests replace the driver) is about test convenience, not the requirement. Fix: In the spec mechanism and the code comment, say that the agent binary is checked when the driver is built (claude.rs), so the preflight does not repeat that check.",
+      "location": "Decision 1 (\"The agent binary belongs to the driver trait object that tests replace\") and the spec mechanism text",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "SystemProbe resolves relative PATH entries against Athena's own working directory. The check spawn resolves them against the check's working directory.",
+      "evidence": "checks.rs:532-536 spawns with `.current_dir(ctx.dir)`. `Command::new` searches the child's PATH, and a relative entry such as `node_modules/.bin` resolves against the job directory, not Athena's working directory. Fix: Skip relative PATH entries in the scan. If no absolute entry has the tool but a relative entry exists, record the tool as 'not probed (relative PATH)', not missing, and list this limit in the doc comment next to the other two.",
+      "location": "Decision 2, SystemProbe",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An absolute check-program path is copied verbatim into the job record note.",
+      "evidence": "The note is committed in job.json on the records branch. An absolute path from athena.toml can contain a home directory. athena.toml is already tracked, so this is a copy, but it adds a new place that the redactor (`self.redactor`, run/mod.rs:1096) does not cover. Fix: Pass the note through the job's redactor before setting `Job.note`, or record only the path's last component plus '(path)'.",
+      "location": "Decision 4, the note line `<path>: not probed (path)`",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The preflight runs after the evidence snapshot and any study pin, so a blocked job still pays for both.",
+      "evidence": "run/mod.rs:1100 (`pin_repo`) and 1145 (`snapshot::write`) both run before `capability.checks(&jc)`. A blocked job then only cleans up. Fix: Optional: compute `capability.checks(&jc)` and the preflight result just after the budget preflight (line 1095), and record it at the Job literal as planned.",
+      "location": "Step 4(c), hook placement after run/mod.rs:1153",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code at the plan's anchors: dispatch and the Job literal (run/mod.rs:1015-1315), close_dispatched (close.rs:8-168), settle_resume_marks, the spawn path in checks.rs:516-562, lifecycle.rs:129-152, StopCause, resumable_stop and keeps_unfinished_work (disk.rs:445-545), the hestia spec functions, the iris spec test, the drain failure branch, and the readers of the retry link. Almost every anchor checks out. A blocked stop with `resume: None` and a fresh `Closing` leaves the earlier job's kept work and resume mark alone. The `environment:` prefix classifies as OtherEnvironment. The drain gives each item only two attempts, so a missing tool cannot loop forever. The spec test pattern exists, and the `capability_preflight_*` filter avoids the budget-preflight tests. One design problem remains. The retry link through a preflight stop is followed only inside `dispatch`. The plan lists the reading and status readers of that link as accepted display limits. It omits other readers that attribute work by the link: gate_counts.rs:119 (overruled gates), evidence_labels.rs:173 (retry votes for introspection classes), steward.rs:454 and status/throughput.rs:604. When retry J3 does J1's work but its stored request says \"try again on J2\", those readers lose the J1 to J3 link. Fixing the link where it is made (in the retry request) is simpler and would be right for every reader. The other findings are minor."
+}

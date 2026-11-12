@@ -1,0 +1,475 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-013710-8gwp",
+  "round": 5,
+  "at": "2026-11-12T09:39:57.883530689Z",
+  "invocation_seq": 10,
+  "approach": "Add crates/athena-core/src/preflight.rs. It lists the programs a capability's checks run, looks each bare name up in the absolute PATH entries through an injectable `ToolProbe` (the system probe scans PATH and runs nothing), and returns every program considered plus blockers, each with a non-empty workaround. Path programs and tools that only a relative PATH entry could supply are listed as \"not probed\", never dropped. `Athena::dispatch` (run/mod.rs) calls it right after `capability.checks(&jc)`, writes one redacted line per program into the existing `Job.note` (committed in the prediction commit before any agent runs), and on a blocker closes the job `failed` with an `environment: preflight blocked: ...` reason through a new `stop_preflight` in run/pin.rs. That is possible because pin.rs is a child module of `run` and sees the private `Closing`, `RunContext` and `failure`, as planning.rs does for `stop_planning`. A blocked retry leaves the earlier job's kept work alone. The retry link is fixed where it is made: `Athena::retry` (reading.rs) retries the job a preflight-stopped job had retried, so the stored request of the next job reads `try again on <J1>` and every reader of that link (dispatch seeds, reader context, gate counts, evidence labels, steward, status, scope guard) sees the real chain. The spec entry and one CHANGELOG line follow. A missing bare-name check program used to land with a recorded pre-existing failure (checks.rs:541-562; lifecycle.rs:150-152). It now stops the job as an environment blocker. The plan says so everywhere and limits the 0% estimate to this repository's checks.",
+  "decisions": [
+    {
+      "choice": "Needed programs are the first element of each check's `run`, each listed once with the names of its checks. A bare name (non-empty, no `/`) is probed. A name containing `/` is not probed and is recorded as `<last path component>: not probed (path)`. Git, gh and the agent binary are not needs of their own.",
+      "reason": "Today a check program that cannot start is not a failure of the job: checks.rs:541-562 turns the spawn error into a failed CheckRun ('could not start'), and lifecycle.rs:128-152 asserts the job still lands because the same failure is pre-existing on the base. The preflight is therefore a deliberate behavior change for bare-name programs. A path program resolves against the check's working directory (a relative path may name a file the producer creates) or an absolute place Athena does not control, so it cannot be judged a missing capability in advance; it is listed with the reason. Git: Athena runs git before the hook (`JobConfig::at` run/mod.rs:1029, `pin_repo` 1100, the prediction commit 1261), so a git blocker could never be recorded; a check that runs `git` is still probed as a check program. gh never changes a job's outcome (gh/early.rs:425-437 only warns) and landing is a later command. The agent binary is already checked: `ClaudeCodeDriver::new` (athena-agent/src/claude.rs:89) calls `check_pinned` (claude.rs:49-63), which runs `<bin> --version` and compares the pinned version, so a missing binary fails before any job is dispatched. The preflight does not repeat that, and the code comment and spec mechanism say so (finding 3).",
+      "rejected": [
+        {
+          "option": "Probe path programs too (execute bit) and rewrite baseline_failure_does_not_stop_the_job",
+          "why": "A relative path may name a file the producer creates; the rewrite would stop testing the 'could not start' baseline path and edit a test file outside the deliverables."
+        },
+        {
+          "option": "Silently skip path programs",
+          "why": "Leaves a program unrecorded, against 'checks and records each needed capability'."
+        },
+        {
+          "option": "Keep git as a need",
+          "why": "Unreachable: a missing git fails earlier with no record."
+        },
+        {
+          "option": "Say the agent binary is left out because tests replace the driver",
+          "why": "Wrong reason (finding 3); the real driver already checks the binary at construction."
+        },
+        {
+          "option": "A `required_tools()` method on the Capability trait",
+          "why": "Needs overrides in athena-cap-change and athena-cap-study, not deliverables; checks already name the programs (capability.rs:117)."
+        }
+      ]
+    },
+    {
+      "choice": "`ToolProbe::probe(&self, tool: &str) -> Probe` with `Probe::{Present, Missing, NotProbed(&'static str)}`. `SystemProbe { path: Option<OsString> }` (`from_env()`, `with_path(..)` for tests) splits PATH with `std::env::split_paths`. Only absolute entries are searched; a candidate counts when `std::fs::metadata` says it is a file with any execute bit (unix). If no absolute entry has the tool but PATH holds a relative or empty entry, the answer is `NotProbed(\"relative PATH\")`, not Missing. Nothing is run. Three limits are written in the doc comment and the spec mechanism: it reads Athena's own PATH; relative entries are not judged; 'any execute bit' is looser than the kernel's check.",
+      "reason": "Finding 4: checks spawn with `.current_dir(ctx.dir)` (checks.rs:532-536), so a relative PATH entry such as `node_modules/.bin` resolves against the job directory, not Athena's working directory; searching it from Athena's cwd could wrongly block or wrongly pass. Finding 3 of the earlier round still holds: checks run with `env_clear().envs(ctx.env)` (checks.rs:534-535), built from `env_pass` plus capability `env` templates (athena-agent/src/env.rs:70-74, 101-109); this repository passes PATH (athena.toml:52) and sets no PATH template, so the probe and the checks agree here. A PATH scan is what `Command::new` does and has no side effects. Running `<tool> --version` (the accepted reading's wording) would run whatever script athena.toml names, can hang, and a kill leaves grandchildren; the aim, a probe a test can inject, is kept.",
+      "rejected": [
+        {
+          "option": "Resolve relative entries against Athena's cwd",
+          "why": "Wrong directory (checks.rs:532-536)."
+        },
+        {
+          "option": "Build the probe's PATH from the capability env templates at the hook",
+          "why": "The env is built per side and job directory inside athena-agent; reaching it widens the change."
+        },
+        {
+          "option": "Run `<tool> --version` and kill after 5 s",
+          "why": "Side effects, up to 5 s per tool, grandchildren stay running."
+        },
+        {
+          "option": "Add libc `access(X_OK)`",
+          "why": "New dependency for a rare mismatch."
+        }
+      ]
+    },
+    {
+      "choice": "No new field on Athena and no test seam: pure `preflight(&[Need], &dyn ToolProbe) -> Preflight` takes the probe as an argument; `check_tools(&[CheckSpec]) -> Preflight` is the production entry and builds `SystemProbe::from_env()`. Dispatch tests use the real probe: bare name `athena-preflight-absent-tool` (on no PATH) for missing, `true` for present.",
+      "reason": "`Athena` is built by struct literal in about 67 places across 41 files; a new field would touch files far outside the deliverables.",
+      "rejected": [
+        {
+          "option": "A `tool_probe` field on Athena",
+          "why": "Breaks every struct literal in 41 files."
+        },
+        {
+          "option": "A per-thread cfg(test) seam like run::check_seam",
+          "why": "Extra moving parts for no extra evidence."
+        }
+      ]
+    },
+    {
+      "choice": "Record in the existing `Job.note` (Option<String>, athena-data/src/records.rs:625), set at the Job literal (run/mod.rs:1250, now `None`; the `note: None` at 1227 belongs to `Owner`), committed in the prediction commit (1261) before any agent runs. One line per program: `<tool>: present`, `<tool>: missing`, `<last component>: not probed (path)` or `<tool>: not probed (relative PATH)`, each followed by `needed by <checks>`; with no check programs the note is `no check programs to probe`. Path programs are recorded by last component only, and the whole note goes through `redactor.redact(..)?` (the `redactor` at run/mod.rs:1096) before it is set. The blocker and workaround are also in the closing reason.",
+      "reason": "Finding 5: an absolute path from athena.toml could carry a home directory into job.json on the records branch; last component plus the redactor closes that. A job stopped before the producer has no candidate or plan, so a Blocker Finding in a Verification or Critique record has nowhere to live (records.rs:896-913, plan.rs:159-173); the brief allows no new record or data file. Nothing reads or prints `Job.note` (status.rs and display.rs do not): the per-tool record is visible only in job.json, and the stop reason is the only part a command shows, only for a blocked job. The spec mechanism says this.",
+      "rejected": [
+        {
+          "option": "A new `athena.preflight/1` record type",
+          "why": "Needs AnyRecord variant, canonical path, `check_record_file` and round-trip coverage in athena-data."
+        },
+        {
+          "option": "A new Markdown file under the job directory",
+          "why": "`check_record_file` allows only three names (records.rs:1411)."
+        },
+        {
+          "option": "A Severity::Blocker Finding record",
+          "why": "Both finding-bearing records need a candidate or a plan."
+        },
+        {
+          "option": "Add a status line that prints the note",
+          "why": "Out of scope by the brief; the measure ends `status: not shown`."
+        }
+      ]
+    },
+    {
+      "choice": "Stop reason `environment: preflight blocked: <tool> (needed by <checks>) is not on PATH; workaround: <steps>`, plus `; the kept work of <earlier> was left alone; a retry of this job resumes it` when an earlier job's work was left alone. New `pub(super) fn stop_preflight(&self, ctx: &RunContext<'_>, closing: &mut Closing, reason: &str)` in run/pin.rs sets `closing.happened = self.failure(ctx, reason)` and `verification_passed = None`, like `stop_planning` (planning.rs:8-14). Dispatch then returns `self.close_dispatched(&ctx, closing)`.",
+      "reason": "This corrects the earlier plan, which wrongly said pin.rs could not name `Closing`/`RunContext`: they are private items of module `run` (mod.rs:121, 1369, `failure` at 2470), and pin.rs is its child module (`mod pin;` mod.rs:65, `use super::*` pin.rs:3), the same way planning.rs reaches them. pin.rs is a listed deliverable and now has a real change. `StopCause::of` (disk.rs:450-463) classifies any `environment:` reason as `OtherEnvironment` with no change to disk.rs, and the scope guard does not count it as a failure of the work (scope_guard.rs:565-568).",
+      "rejected": [
+        {
+          "option": "A plain `preflight blocked:` reason",
+          "why": "Counts as a failure of the work and could raise the retry signal."
+        },
+        {
+          "option": "A new StopCause variant",
+          "why": "Edits disk.rs, outside the deliverables."
+        },
+        {
+          "option": "Inline the stop in dispatch and leave pin.rs unchanged",
+          "why": "Works but ignores the listed deliverable; the helper belongs beside `stop_planning`'s sibling stops."
+        }
+      ]
+    },
+    {
+      "choice": "A blocked job keeps an earlier job's work. `dispatch` computes `earlier` (the job of `retry_seed`, `resume`, `resume_from` or `stale_conflict`) once the seeds are known; on a blocker the RunContext is built with `resume: None`, so `close_dispatched` does not call `remove_kept_work` (run/close.rs:152-154) and `settle_resume_marks` (run/mod.rs:860-874) leaves the mark alone.",
+      "reason": "A stop that did none of the work must not destroy the earlier job's kept work.",
+      "rejected": [
+        {
+          "option": "Copy the earlier resume mark and kept directory to the new job id",
+          "why": "Writes state files for a job that did no work; risks two marks for one candidate."
+        },
+        {
+          "option": "Run the preflight before the seeds are computed",
+          "why": "No Job exists yet to record on, and the reason cannot name the earlier job."
+        }
+      ]
+    },
+    {
+      "choice": "Fix the retry link where it is made, in `Athena::retry` (reading.rs:1185-1234). New pure `preflight::retry_target(records: &Records, id: &JobId) -> JobId`: while the job is closed `failed` with a reason for which `is_preflight_reason` holds and its own request names another job through `retried_job`, move to that job (at most 16 hops, stops on a cycle or an unknown job); otherwise return `id`. `retry` uses the target for `request = format!(\"{RETRY_PREFIX}{target}\")`, for `has_retry_introspection` (1212), for `resumable_job` and for `read_resume` (1221-1222), and prints one line saying job `<id>` stopped at the capability preflight without doing work and the retry is of `<target>`. The pause check (1191) and the interrupted-retry guard (1199-1211) keep using the id the user gave. `dispatch` needs no special follow; the `through_preflight_stops` of the earlier plan is dropped.",
+      "reason": "Finding 2. The stored request text is the link every reader reads through `retried_job`: gate_counts.rs:119 (a gate that ended J1 counts as overruled when a landed job's request retries J1), evidence_labels.rs:173 (`retry_vote`), steward.rs:454, status/throughput.rs:604, status/planning.rs:325, scope_guard.rs:667 and reading/retry.rs:229 (`job_history`). With J3 stored as `try again on J1`, all of them see J1→J3 with no change, and the dispatch seeds (`tree_seed`, `timeout_seed` 888, `resume_seed`, `stale_seed` 579, `retry_findings`, `planning_resume_seed` 530) and `earlier_attempt_with` (retry.rs:22-82, which already carries the original request of a chain) read J1 directly. Every caller of `Athena::retry` gets it, including the drain (drain.rs:4610 `ReadOf::Retry`) and `athena retry` (athena-cli/src/commands.rs:27). For a job that is not a preflight stop `retry_target` returns `id`, so every other retry is unchanged. J2 stays on the record as a failed attempt of J1's line (scope_guard.rs:667, an environment verdict as before). J2 is a sibling of J3 under J1, which is accurate: J2 did no work.",
+      "rejected": [
+        {
+          "option": "Follow the link only inside dispatch (earlier plan)",
+          "why": "Leaves gate_counts, evidence_labels, steward, throughput and planning reading the raw link, so J1's attribution to J3 is lost (finding 2)."
+        },
+        {
+          "option": "Also add each reader to dependents and accept the loss",
+          "why": "Seven readers would each lose attribution; fixing the one place that makes the link is smaller."
+        },
+        {
+          "option": "Edit timeout_seed and resume_seed separately",
+          "why": "Two edits and three other seed functions would still disagree."
+        }
+      ]
+    },
+    {
+      "choice": "scope_guard.rs `resumed_candidate` (621-627) is not changed.",
+      "reason": "A preflight-stopped retry may be recorded `resumed = true`; the flag is read only in `t3_basis` (296-315), which drops an Environment attempt's spend only when it is last or the next attempt resumed (301-302), true here because the earlier work was kept; `resumed_last` (306-308) excludes Environment verdicts, so no number changes.",
+      "rejected": [
+        {
+          "option": "Make `resumed_candidate` require a non-preflight reason",
+          "why": "Edits a file outside the deliverables and would make the flag false though the earlier work was kept."
+        }
+      ]
+    },
+    {
+      "choice": "The dispatch and retry tests live in crates/athena-core/src/run/tests.rs, which is not on the deliverable list (finding 1). All new tests are named `capability_preflight_*`.",
+      "reason": "The harness (`repo()` tests.rs:286, `athena_with` 190, `finished_job` 1833, `counting` 2509, `producer_ending` 5277, the Docs capability) is private to that file, the `mod tests;` of run/mod.rs:2565. Another test module cannot reach it, and copying it would add about 200 lines. Criterion 3 needs a test through the run path, and the existing retry tests (tests.rs:3707, 3770) are there too. The brief's Files line allows `crates/`; the edit is test-only. The plain filter `preflight` also matches the existing budget-preflight tests (run/planning.rs and run/mod.rs:1095), so the measure and demonstrations use `capability_preflight`.",
+      "rejected": [
+        {
+          "option": "Dispatch tests in preflight.rs or pin.rs",
+          "why": "Cannot see the private harness."
+        },
+        {
+          "option": "Test only the pure function",
+          "why": "Criterion 3 asks that the run path calls the preflight before the producer."
+        },
+        {
+          "option": "Keep the `preflight` filter",
+          "why": "Matches the existing budget tests, so the run reports more than the new tests."
+        }
+      ]
+    },
+    {
+      "choice": "Hook placement stays after `capability.checks(&jc)` (run/mod.rs:1153), after the evidence snapshot (1145) and any pin; finding 6 is declined.",
+      "reason": "The record has to be in the prediction commit with the brief, and the stored brief names the snapshot (`Some(&evidence_stored)`, 1210); committing a brief that names a directory never written would be wrong. The cost for a blocked job is one local snapshot copy and, for a study, the pin, both once per blocked dispatch. A study has no check programs unless configured, so the pin cost applies only to the rare combination. The check list is only known at 1153 for the same reason as the brief's check views (1155-1161).",
+      "rejected": [
+        {
+          "option": "Compute the preflight after the budget preflight (1095) and skip the snapshot when blocked",
+          "why": "Needs a second brief variant or a prediction commit without the snapshot; more branches in the main flow for a rare saving. A follow-up if blocked dispatches prove frequent."
+        }
+      ]
+    },
+    {
+      "choice": "Behavior change and estimate: today a missing bare-name check program lets the job land with a recorded pre-existing failure; with the preflight the job stops `failed` (environment). The 0% newly refused estimate is limited to this repository's configured checks: every check in athena.toml runs `cargo` (lines 85, 91, 99, 116, 120, 125; an estimate by reading), which is present wherever the checks can run at all. For another repository with an uninstalled bare-name check tool the share is not zero and is not estimated here; that is the intended stricter behavior.",
+      "reason": "The brief requires a missing capability to become a blocker with a workaround plan; that necessarily refuses jobs that land today.",
+      "rejected": [
+        {
+          "option": "Claim a missing program 'would already fail at its check'",
+          "why": "False (checks.rs:541-562, lifecycle.rs:150-152)."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal_corpus case is added.",
+      "reason": "No parser, stem list, stop list or reading check is added; no request or reading text is matched. `retry_target` reads a retry link through the existing, unchanged `retried_job` (retry.rs:201). crates/athena-core/tests/refusal_corpus.rs concerns readings and is unaffected.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/preflight.rs",
+      "action": "create",
+      "purpose": "The module: `ToolProbe` trait and `Probe` enum, `SystemProbe` (absolute-PATH scan, `from_env`/`with_path`, doc comment stating the three limits), `Need`, `Blocker`, `Checked`, `Preflight { checked, blockers }` with `note()` and `stop_reason(earlier)`, `needed_tools`, pure `preflight(&[Need], &dyn ToolProbe)`, production `check_tools`, `PREFLIGHT_BLOCKED`, `is_preflight_reason`, `retry_target(records, id)`. Unit tests named `capability_preflight_*` for criteria 1, 2 and 5.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod preflight;` (after `pr_check`, before `proposals`) and a doc bullet in the module list.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "In `dispatch`: compute `earlier`; call `crate::preflight::check_tools(&checks)` after `capability.checks(&jc)` (line 1153); set `note: Some(redacted note)` at the Job literal (line 1250); build the context with `resume: None` when blocked; before the `resume_from` branch (line 1312) call `stop_preflight` and `close_dispatched` when blocked.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/pin.rs",
+      "action": "modify",
+      "purpose": "Add `pub(super) fn stop_preflight(&self, ctx, closing, reason)` beside `pin_repo` (closes the job `failed`, `verification_passed = None`, like `stop_planning`), and widen the module doc line to name it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable; the retry link is made here (`Athena::retry`, 1185-1234). Call `preflight::retry_target` and use the target for the stored request, `has_retry_introspection`, `resumable_job` and `read_resume`, with one ui line when the target differs. Allowed by the brief's `crates/` Files line; needed for finding 2.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 1); the private harness lives here. Adds tests A to E, all named `capability_preflight_*`. Test-only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "OLY-B-RUN-01 only (lines 2292-2296): mechanism naming preflight.rs, the run/mod.rs hook, run/pin.rs `stop_preflight` and the reading.rs retry link, what is probed and what is not (path programs, relative PATH entries, git, gh, and the agent binary checked at driver build), and that the per-tool record is only in job.json `note`; `owner = \"Athena\"`; a measure naming `capability_preflight_missing_tool_becomes_a_blocker_with_a_workaround_plan` and ending `status: not shown`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One line under `## [Unreleased]` / `### Added`: OLY-B-RUN-01 now has a mechanism, the capability preflight; a missing bare-name check program now stops the job as an environment blocker instead of landing as a pre-existing failure.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Create crates/athena-core/src/preflight.rs. `needed_tools(&[CheckSpec])` returns one `Need` per `run[0]` (empty `run` skipped), each program once with the names of the checks that need it; a bare name (non-empty, no `/`) is probed, a name with `/` is kept as not probed (path) and displayed by its last component; git, gh and the agent binary are never added on their own (comment cites claude.rs:49-63, 89 for the agent binary and run/mod.rs:1029, 1100, 1261 for git). `SystemProbe::probe` searches absolute PATH entries only, using `std::fs::metadata` for a file with any execute bit, and answers `NotProbed(\"relative PATH\")` when the tool is absent but PATH holds a relative or empty entry; it runs nothing. The doc comment states the three limits. Workaround steps are always non-empty: install `<tool>` and put it on PATH, or change or remove the check that needs it in athena.toml, then run `athena retry <job>`; a cargo-specific first step for `cargo`.",
+    "In preflight.rs add `pub const PREFLIGHT_BLOCKED: &str = \"environment: preflight blocked:\"`, `is_preflight_reason(&str) -> bool`, `Preflight::stop_reason(&self, earlier: Option<&JobId>) -> Option<String>` (appends `; the kept work of <earlier> was left alone; a retry of this job resumes it` when given), `Preflight::note()` (one line per considered program, or `no check programs to probe`) and `retry_target(records: &Records, id: &JobId) -> JobId` (follows `crate::reading::retried_job` while the job is closed Failed with a preflight reason, at most 16 hops, stops on a cycle or unknown job).",
+    "Add `pub mod preflight;` and a doc bullet to crates/athena-core/src/lib.rs.",
+    "Add `stop_preflight` to crates/athena-core/src/run/pin.rs (`pub(super)`, like `stop_planning` at planning.rs:8-14) and update the module doc line.",
+    "Edit `dispatch` in crates/athena-core/src/run/mod.rs: (a) once the seeds are known, compute `earlier` from `retry_seed`, `resume`, `resume_from` and `stale_conflict`; (b) after `capability.checks(&jc)` (line 1153) call `crate::preflight::check_tools(&checks)`; (c) set `note: Some(redactor.redact(&tools.note())?)` at the Job literal (line 1250); (d) build the RunContext with `resume: if blocked { None } else { resume }`; (e) before `if let Some(seed) = resume_from` (line 1312), when a blocker exists, build `Closing::new()`, call `self.stop_preflight(&ctx, &mut closing, &reason)` and `return self.close_dispatched(&ctx, closing)`. Seed functions keep the request text unchanged.",
+    "Edit `Athena::retry` in crates/athena-core/src/reading.rs: `let target = crate::preflight::retry_target(&records, &id)`; use `target` for `has_retry_introspection`, the request `format!(\"{RETRY_PREFIX}{target}\")`, `resumable_job` and `read_resume`; keep `id` for the pause check and the interrupted guard; print one ui line when `target != id`.",
+    "Write the unit tests in preflight.rs: capability_preflight_missing_tool_becomes_a_blocker_with_a_workaround_plan, capability_preflight_all_tools_present_gives_no_blocker, capability_preflight_lists_path_programs_as_not_probed, capability_preflight_shared_tool_listed_once, capability_preflight_needs_come_from_the_capability_checks, capability_preflight_git_alone_and_gh_are_not_needs, capability_preflight_stop_reason_names_the_earlier_job, capability_preflight_relative_path_is_not_judged_missing, capability_preflight_system_probe_finds_only_executable_files_on_path, and capability_preflight_spec_entry_names_this_file_owner_and_test (shaped like iris.rs:227-243, plus the `spec_gaps` assertion).",
+    "Write the tests in crates/athena-core/src/run/tests.rs: A capability_preflight_blocks_a_missing_tool_before_the_producer_and_records_it, B capability_preflight_records_every_probed_tool_when_all_are_present (with a path-program variant under a fake home directory), C capability_preflight_stop_on_a_resumed_retry_keeps_the_earlier_work (create `kept_work_dir(&first)` by hand after the first job closes), D capability_preflight_retry_of_a_stopped_job_resumes_the_job_it_retried (stored request, `retried_job`, brief, kept directory), E capability_preflight_retry_of_a_plain_stop_is_unchanged.",
+    "Edit docs/spec.toml OLY-B-RUN-01 only (mechanism, `owner = \"Athena\"`, a measure naming `capability_preflight_missing_tool_becomes_a_blocker_with_a_workaround_plan` and ending with `status: not shown`). Then add the CHANGELOG line under `## [Unreleased]` / `### Added`.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` and `cargo test -p athena-core capability_preflight`. Check that stubbing the body of `preflight()` makes the missing-tool test fail, that removing `resume: None` on a blocked job makes Test C fail, and that dropping the `retry_target` call makes Test D fail; restore each. If an existing test fails because its bare-name check program is not on PATH, give that test a program that is."
+  ],
+  "risks": [
+    {
+      "risk": "Behavior change: a job whose bare-name check program is absent landed before, with a recorded pre-existing failure (checks.rs:541-562; lifecycle.rs:150-152); now it stops `failed` (environment). In a repository with an uninstalled check tool, drains replace landings with stops and keep retrying such items, because a preflight stop is OtherEnvironment and drain.rs:2706-2711 ends the run only for ProducerAuth and LowDisk (UsageLimit earlier).",
+      "mitigation": "This is the intended stricter behavior (criterion 5), stated in the spec mechanism and the CHANGELOG line. The reason names the tool and a workaround. The 0% newly-refused estimate holds only for this repository (all six configured checks run `cargo`, athena.toml:85-125; an estimate by reading). A follow-up outside these deliverables is to make a preflight stop end the drain like LowDisk."
+    },
+    {
+      "risk": "The accepted reading assumed the probe runs `<tool> --version`; the plan looks the name up on PATH.",
+      "mitigation": "The injectable probe the reading asked for is kept; a PATH scan is what `Command::new` does and runs nothing. Stated in decision 2 and the spec mechanism."
+    },
+    {
+      "risk": "The reading named git as a probed tool; the plan does not probe it on its own.",
+      "mitigation": "Athena runs git at run/mod.rs:1029, 1100 and 1261, before the hook and with no record, so a git blocker could never be recorded. The spec mechanism and a code comment say so; a check that runs `git` is probed as a check program."
+    },
+    {
+      "risk": "The probe's PATH can disagree with the PATH the checks run with: checks run with a cleared environment rebuilt from `env_pass` and capability `env` templates (checks.rs:534-535; env.rs:70-74, 101-109). 'Any execute bit' is also looser than the kernel's check.",
+      "mitigation": "Equal in this repository (PATH passed, no PATH template). Limits are in the SystemProbe doc comment and the spec mechanism; the worst effect is a wrong block or the same late failure as today. Relative PATH entries are reported as not probed."
+    },
+    {
+      "risk": "The per-tool record is only in job.json `note`; no command prints it.",
+      "mitigation": "Stated in the spec mechanism; tests read it at `finished.prediction_commit`. Only the stop reason is shown to a user, and only for a blocked job. A status line is out of scope."
+    },
+    {
+      "risk": "Changing `Athena::retry` touches reading.rs, which is not a listed deliverable, and changes which job a retry of a preflight stop retries.",
+      "mitigation": "`retry_target` returns the given id unless the job closed with the preflight reason and its request is a retry, so all other retries are unchanged (existing retry tests listed in dependents). The ui line says which job is retried. If J1 is no longer retryable (for example it landed since), `earlier_attempt_with` refuses with a message naming J1 (retry.rs:49-52); nothing is started."
+    },
+    {
+      "risk": "The filter `preflight` also matches existing budget-preflight tests.",
+      "mitigation": "Every new test is named `capability_preflight_*`; the measure and all demonstration commands use that prefix or the full test name."
+    },
+    {
+      "risk": "The new `Job.note` makes job.json differ from fixtures of tests that compare whole records.",
+      "mitigation": "Searched the crates for whole-record comparisons of `note: None` on Job and found none; `cargo test --locked` (athena-cli suites included) would show any."
+    },
+    {
+      "risk": "Some existing test elsewhere configures a bare-name check program that is not on PATH and expects the job to proceed.",
+      "mitigation": "Step 9 runs the whole `cargo test --locked`; known programs in lifecycle, run tests and pin tests are `sh`, `true`, `cargo`, `git`, `grep`. Any failure is fixed by using a present program in that test, not by weakening the preflight."
+    },
+    {
+      "risk": "Tests C and D build several Athena values over one repo and state directory.",
+      "mitigation": "`athena_with` derives the state path from the tempdir (tests.rs:198) and existing tests already retry through `athena.retry` then `go` (tests.rs:3707, 3770). If a second instance does not see the first's records, use one Athena whose check list changes through a shared cell."
+    },
+    {
+      "risk": "A blocked dispatch still pays for the evidence snapshot and any study pin (finding 6).",
+      "mitigation": "Kept: the prediction commit holds the brief that names the snapshot, so the record cannot be written before it. The cost is one local copy per blocked job; a follow-up if blocked dispatches prove frequent."
+    },
+    {
+      "risk": "A repository's check program path in athena.toml could carry a home directory into the committed note.",
+      "mitigation": "Path programs are recorded by last component only and the note goes through the job's redactor; test B checks that no directory part appears."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "dispatch flow: the new preflight hook, `Job.note` and the blocked-job stop",
+      "dependent": "crates/athena-core/src/run/mod.rs `Athena::dispatch` (1015) and its callers: `go_job` for a Proposed job (456-464), its recursion after a reread (1059), `athena drain` / `athena retry` via `go_with_stages` (cli drain.rs); run_pin_tests.rs drives a pinning capability through it",
+      "kind": "code",
+      "test": "New run/tests.rs tests capability_preflight_blocks_a_missing_tool_before_the_producer_and_records_it, capability_preflight_records_every_probed_tool_when_all_are_present, capability_preflight_stop_on_a_resumed_retry_keeps_the_earlier_work. Existing run/tests.rs, run_pin_tests.rs (a pinning study with no checks has nothing to probe) and the athena-cli lifecycle, drain, retry and trailer_stop suites run with the real probe under `cargo test --locked`.",
+      "reason": null
+    },
+    {
+      "name": "Job record `note` field, now set to the preflight note",
+      "dependent": "athena-data/src/records.rs:625 `Job.note` readers; athena-gate/src/jobs.rs:287, 490 job checks; status.rs and display.rs",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli --test lifecycle lands jobs through the in-process gate with the note set.",
+      "reason": "Searched crates for `job.note`, `record.note` and `.note` on a Job: no reader exists, and status.rs/display.rs print nothing from it, so the per-tool record is visible only in job.json (stated in the spec mechanism). It is free text with no gate rule (athena-gate/src/jobs.rs has no `note` reference). The record round-trips through AnyRecord; the landing-time job.json and brief-hash check is unchanged."
+    },
+    {
+      "name": "closing reason prefix `environment:` (classification of a failed job)",
+      "dependent": "crates/athena-core/src/disk.rs `StopCause::of`, `is_environment_reason`, `resumable_stop`, `keeps_unfinished_work` (450-545); run/mod.rs:871 `settle_resume_marks`; scope_guard.rs:565-568; cli drain.rs:2706-2711 (the drain ends its run only for ProducerAuth and LowDisk, UsageLimit earlier)",
+      "kind": "rule",
+      "test": "capability_preflight_blocks_a_missing_tool_before_the_producer_and_records_it asserts `is_environment_reason` and `StopCause::of == OtherEnvironment`; test C asserts the earlier job's work survives. A preflight stop does not end a drain: while a bare-name check tool is missing, a drain keeps reading, dispatching and retrying each item that needs it, where today those items land with a recorded pre-existing failure. This is a consequence of the intended stricter behavior; making a preflight stop end the drain like LowDisk is a follow-up outside these deliverables.",
+      "reason": null
+    },
+    {
+      "name": "kept work of a resumed retry",
+      "dependent": "crates/athena-core/src/run/close.rs:152-154 `close_dispatched` (`remove_kept_work` when `ctx.resume` is set); state.rs:103-111",
+      "kind": "code",
+      "test": "capability_preflight_stop_on_a_resumed_retry_keeps_the_earlier_work (the hand-made directory survives; context built with `resume: None` on a blocked job). A passing job (test D and the existing resume tests at tests.rs:5518 and 5634) still removes it as before.",
+      "reason": null
+    },
+    {
+      "name": "which job a retry of a preflight-stopped job retries",
+      "dependent": "crates/athena-core/src/reading.rs `Athena::retry` (1185-1234), now using `preflight::retry_target`; callers: athena-cli/src/commands.rs:27 (`athena retry`), athena-cli/src/drain.rs:4610 (`ReadOf::Retry`), run_pin_tests.rs:1821, run/tests.rs and scope_guard.rs tests",
+      "kind": "code",
+      "test": "capability_preflight_retry_of_a_stopped_job_resumes_the_job_it_retried and capability_preflight_retry_of_a_plain_stop_is_unchanged; the existing retry tests (tests.rs:1700, 3707, 3770, 4183, 4378, 4900, 5002, 5172, 5663; scope_guard.rs:1734-1963) retry jobs that are not preflight stops, for which `retry_target` returns the given id. The pause check and the interrupted-retry guard keep the given id: J2 did no work, so retrying through it to J1 cannot double work.",
+      "reason": null
+    },
+    {
+      "name": "retry link in a stored request (`try again on <job>`)",
+      "dependent": "Every reader of the retry link through `retried_job` (reading/retry.rs:201): gate_counts.rs:119 (overruled gates), evidence_labels.rs:173 (`retry_vote`), steward.rs:454, status/throughput.rs:604, status/planning.rs:325, scope_guard.rs:667 (`request_records_with`), reading/retry.rs:229 (`job_history`), 246-268 (`retries_by_job`), 272 (`retry_follow_up`), 299 (`resumable_job`); and the dispatch seeds `tree_seed`, `timeout_seed` (888), `resume_seed`, `stale_seed` (579), `retry_findings`, `planning_resume_seed` (530)",
+      "kind": "code",
+      "test": "capability_preflight_retry_of_a_stopped_job_resumes_the_job_it_retried asserts `retried_job(records, <J3 request>) == Some(first)`, the one function all these readers call; existing retry tests cover the unchanged path.",
+      "reason": "Unchanged. After the fix J3's stored request names J1, so these readers see the true chain J1→J3 (J2 stays a sibling failed attempt that did no work); J1's gate is counted as overruled when J3 lands, J3 votes on J1's class, and the seeds read J1's candidate, mark and findings. Nothing reads J2 as the origin of J3. For chains with no preflight stop the stored text is the same as before."
+    },
+    {
+      "name": "attempt `resumed` flag and line grouping for a preflight-stopped retry",
+      "dependent": "crates/athena-core/src/scope_guard.rs `resumed_candidate` (621-627), `t3_basis` (296-315), `request_records_with` (649-704)",
+      "kind": "code",
+      "test": "cargo test -p athena-core scope_guard (existing tests at scope_guard.rs:1941-1970, 2432).",
+      "reason": "Not changed. `t3_basis` drops an Environment attempt's spend only when it is last or the next attempt resumed (301-302), true here because the earlier work was kept; `resumed_last` (306-308) excludes Environment verdicts, so no number changes. J2 and J3 both retry J1, so `group_lines` keeps them on J1's line."
+    },
+    {
+      "name": "docs/spec.toml OLY-B-RUN-01 mechanism, owner and measure",
+      "dependent": "crates/athena-core/src/hestia.rs `spec_gaps`, `measure_problem`, `parse_spec` (1172-1308); status.rs spec-gap lines (status.rs:508); the steward queue that re-queues this request while mechanism or measure is missing",
+      "kind": "rule",
+      "test": "hestia.rs the_real_spec_records_every_field_and_classes_the_acceleration_requirements_as_speed (4286) still passes; capability_preflight_spec_entry_names_this_file_owner_and_test asserts `spec_gaps` no longer lists OLY-B-RUN-01.",
+      "reason": null
+    },
+    {
+      "name": "jobs whose check program cannot start landing as a pre-existing failure",
+      "dependent": "crates/athena-cli/tests/lifecycle.rs:129-152 `baseline_failure_does_not_stop_the_job`; crates/athena-core/src/checks.rs:532-562 (a spawn error becomes a failed CheckRun, 'could not start')",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli --test lifecycle baseline_failure_does_not_stop_the_job (unchanged, still lands); capability_preflight_lists_path_programs_as_not_probed.",
+      "reason": "Behavior changes for bare-name programs by design: they now stop at the preflight. Path-named programs are not probed, so the lifecycle test and the 'could not start' CheckRun path are unchanged and still reachable through paths."
+    },
+    {
+      "name": "test units listed in shard-timings.txt",
+      "dependent": "xtask/shard-timings.txt and the mirror rule in crates/athena-core/src/mirrors.rs:222-228",
+      "kind": "rule",
+      "test": null,
+      "reason": "The mirror lists test targets (a crate's lib or one tests/*.rs file), not modules. The new tests are unit tests in the existing athena-core lib target and no tests/*.rs file is added."
+    },
+    {
+      "name": "new public module `preflight`",
+      "dependent": "crates/athena-core/src/lib.rs module list and docs (lines 8-84)",
+      "kind": "code",
+      "test": "cargo clippy --all-targets and cargo test --locked compile the crate.",
+      "reason": "Nothing enumerates modules at runtime. The existing budget `preflight` method (run/planning.rs) is a different symbol; the new module is reached as `crate::preflight`, so there is no clash."
+    },
+    {
+      "name": "Capability::checks as the source of per-capability tool needs",
+      "dependent": "crates/athena-cap-change/src/lib.rs:88 and crates/athena-cap-study/src/lib.rs:93 (checks come from athena.toml `[[capabilities.*.checks]]`)",
+      "kind": "code",
+      "test": "capability_preflight_needs_come_from_the_capability_checks. The Capability trait is unchanged; the preflight only reads `checks(&jc)[i].run[0]`.",
+      "reason": null
+    },
+    {
+      "name": "gh, git and the agent binary as programs Athena runs itself",
+      "dependent": "crates/athena-core/src/gh/early.rs (`early_pr`, `push_ci_branch`, `delete_ci_branch`), gh/transport.rs:23 `GhCli`, gh/landing.rs; crates/athena-git/src/lib.rs (`Command::new(\"git\")`); crates/athena-agent/src/claude.rs:49-63, 89 (`check_pinned` at driver construction)",
+      "kind": "code",
+      "test": "capability_preflight_git_alone_and_gh_are_not_needs",
+      "reason": "Not changed and not probed as needs of their own. During a job a failing gh gives one warning (early.rs:425-437); landing is a separate later command; Athena's own git use fails earlier than the hook (run/mod.rs:1029, 1100, 1261) with no record; the agent binary is checked when the driver is built. The spec mechanism and a code comment state these limits."
+    },
+    {
+      "name": "PATH the checks run with versus the PATH the probe scans",
+      "dependent": "athena.toml:52 `env_pass = [\"HOME\", \"PATH\"]`, capability `env` templates, crates/athena-agent/src/env.rs:65-111, checks.rs:532-535",
+      "kind": "host_setting",
+      "test": "capability_preflight_system_probe_finds_only_executable_files_on_path and capability_preflight_relative_path_is_not_judged_missing cover the scan.",
+      "reason": "Athena's own PATH is what the probe scans and, in this repository, what the checks receive (PATH is passed, no capability env sets it). A repository whose capability env sets PATH, or omits PATH from env_pass, can disagree; relative entries are reported as not probed because they resolve against the job directory. The limits are stated in the SystemProbe doc comment and the spec mechanism; the effect is a wrong block or a late failure at the check as today."
+    },
+    {
+      "name": "prompt sets and system facts",
+      "dependent": "docs/system-facts.md and the prompt budgets (athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt, brief, system-facts line or context file changes; the producer brief is built from the same inputs, so its hash and the budgets are unchanged."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test `capability_preflight_spec_entry_names_this_file_owner_and_test` in preflight.rs, shaped like `iris_spec_entry_names_files_that_exist` (iris.rs:227-243). It parses the real spec with `crate::hestia::parse_spec(include_str!(\"../../../docs/spec.toml\"))`, finds OLY-B-RUN-01 and asserts: active, owner `Athena`, mechanism contains `crates/athena-core/src/preflight.rs`, measure contains `capability_preflight_missing_tool_becomes_a_blocker_with_a_workaround_plan` and ends with `status: not shown`, `hestia::measure_problem(&measure)` is None, `hestia::spec_gaps(..)` has no gap for OLY-B-RUN-01, and the preflight.rs file exists under `env!(\"CARGO_MANIFEST_DIR\")`.",
+      "command": "cargo test -p athena-core capability_preflight_spec_entry && cargo test -p athena-core the_real_spec_records_every_field && git diff -- docs/spec.toml",
+      "observes": "Both tests pass. The diff changes only OLY-B-RUN-01 (docs/spec.toml:2292-2296): mechanism from `none` to text naming preflight.rs, the run/mod.rs hook, run/pin.rs `stop_preflight` and the reading.rs retry link; saying bare-name check programs are probed on Athena's own PATH, path programs and relative PATH entries are recorded as not probed, git is checked earlier by Athena's own use, gh is not probed, the agent binary is checked when the driver is built (claude.rs:49-63, 89), and the per-tool record is only in job.json `note`; `owner = \"Athena\"`; a measure naming the specific test and ending `status: not shown`.",
+      "fails_without": "With the spec entry unchanged the mechanism is `none` and the measure ends `status: requirement`. The existing hestia test accepts that (hestia.rs:4293), but the new test fails on its own assertions: no preflight.rs in the mechanism, no test name in the measure, no `status: not shown` ending, and `spec_gaps` still lists OLY-B-RUN-01.",
+      "seam": "No double. Production `hestia::parse_spec` (hestia.rs:1172), `measure_problem` (1219) and `spec_gaps` (1291) read the real docs/spec.toml through include_str!. They exist today (read); the test is added by plan step 6."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in preflight.rs call production `preflight::preflight(&needs, &probe)` and `needed_tools(&checks)`. The fake `FakeProbe { missing: Vec<&str>, relative: Vec<&str> }` only answers Present, Missing or NotProbed per name and is passed as an argument. `capability_preflight_missing_tool_becomes_a_blocker_with_a_workaround_plan`: checks `[\"cargo\",\"fmt\"]` and `[\"cargo\",\"test\"]`, FakeProbe missing `cargo`; asserts exactly one blocker with tool `cargo`, `needed_by` listing both check names, a non-empty workaround, a note containing `cargo: missing`, and `stop_reason(None)` starting `environment: preflight blocked:` and naming `cargo` and `workaround`. `capability_preflight_all_tools_present_gives_no_blocker`: same needs, nothing missing; no blockers, `stop_reason(None) == None`, every tool in `checked` and in the note as `present`. Also `capability_preflight_lists_path_programs_as_not_probed` (a path program is in `checked` as not probed, the note holds only its last component, never a blocker even with a probe that reports everything missing; an empty `run` is no need), `capability_preflight_shared_tool_listed_once`, `capability_preflight_needs_come_from_the_capability_checks` (specs shaped like athena.toml's cargo fmt/clippy/test give exactly `cargo`; a check running `git` gives `git`), `capability_preflight_git_alone_and_gh_are_not_needs`, `capability_preflight_stop_reason_names_the_earlier_job`, `capability_preflight_relative_path_is_not_judged_missing` (a tool absent from absolute entries with a relative entry present is `not probed (relative PATH)`, no blocker, via the real `SystemProbe::with_path`), and `capability_preflight_system_probe_finds_only_executable_files_on_path` (temp dir with an executable and a non-executable file via `SystemProbe::with_path`).",
+      "command": "cargo test -p athena-core capability_preflight_missing_tool && cargo test -p athena-core capability_preflight_all_tools_present && cargo test -p athena-core capability_preflight",
+      "observes": "All pass. The missing-tool test shows one blocker naming `cargo` with a non-empty workaround; the all-present test shows none. The broad filter `capability_preflight` selects only the new tests.",
+      "fails_without": "If the body of `preflight()` is stubbed to return an empty `Preflight`, the missing-tool test fails (0 blockers not 1, no `cargo: missing` line, `stop_reason` None) and the all-present assertions on `checked` fail. Reviewed in the diff; step 9 stubs it and runs the test.",
+      "seam": "Entry points `preflight::preflight(&[Need], &dyn ToolProbe)` and `needed_tools`, added by plan step 1. `FakeProbe` is injected as a function argument and answers only the per-name status; blocker, workaround and note logic stay in production code. The real `SystemProbe` is exercised through `with_path` in two tests."
+    },
+    {
+      "criterion": 3,
+      "method": "Tests in run/tests.rs go through `Athena::go` into `dispatch` (run/mod.rs:402, 1015) and `Athena::retry` (reading.rs:1185) with the existing harness (`repo()`, `athena_with(&repo,&state,check,plenty_of_space,script)`, `finished_job`, `counting`, `producer_ending`, Docs capability). Guards before the hook: paused-line check (mod.rs:1026), configuration-hash match (1030), `disk_gate`/`start_hold` (tests use `plenty_of_space`), budget reserve (1095), `pin_repo` (Docs does not pin). TEST A `capability_preflight_blocks_a_missing_tool_before_the_producer_and_records_it`: check `&[\"athena-preflight-absent-tool\"]`, script `counting(counts, None)`; asserts Failed, a reason starting `environment: preflight blocked:` naming the tool and `workaround`, `is_environment_reason`, `StopCause::of == OtherEnvironment`, zero producer and verifier calls, and, loading `Records` at `finished.prediction_commit`, a Job `note` containing `athena-preflight-absent-tool: missing`, no candidate yet. TEST B `capability_preflight_records_every_probed_tool_when_all_are_present`: check `PASSES` (`true`); asserts the producer ran once, the reason does not start with `environment:`, and the Job record at `finished.prediction_commit` (before any candidate, showing the order) has a note containing `true: present`; a variant with a second check named by an absolute path under a fake home directory shows its `not probed (path)` line with only the last component and no directory. TEST C `capability_preflight_stop_on_a_resumed_retry_keeps_the_earlier_work`: a first Athena with `producer_ending(Error, &expired_login(), true, ..)` closes failed with a login-expiry stop and keeps a candidate commit but no kept directory (tests.rs:5368-5369), so after `finished_job` the test creates `athena.state.kept_work_dir(&first)` by hand with `create_dir_all` (as tests.rs:5249-5250). A second Athena over the same repo and state tempdirs (`athena_with`) has check `athena-preflight-absent-tool`; `retry(first)` then `go`. Asserts: Failed with the preflight reason naming `first`; `kept_work_dir(&first)` still exists; the first job's candidate commit is still in the repository. TEST D `capability_preflight_retry_of_a_stopped_job_resumes_the_job_it_retried`: a third Athena with check `PASSES` runs `retry(stopped)`; asserts the returned proposal's stored request text is `try again on <first>` and `retried_job(&records, text) == Some(first)` (the one function gate_counts, evidence_labels, steward, throughput, status/planning and scope_guard read the link through); then `go` finishes, the producer ran once, the dispatch commit's producer brief names `first` as the job retried and carries the first job's progress note, and `kept_work_dir(&first)` is gone. TEST E `capability_preflight_retry_of_a_plain_stop_is_unchanged`: a job that failed for another reason, and a preflight-stopped job whose own request is not a retry, both get `try again on <that job>` as before.",
+      "command": "cargo test -p athena-core capability_preflight_blocks_a_missing_tool && cargo test -p athena-core capability_preflight_records_every_probed_tool && cargo test -p athena-core capability_preflight_stop_on_a_resumed_retry && cargo test -p athena-core capability_preflight_retry_of_a_stopped_job && cargo test -p athena-core capability_preflight_retry_of_a_plain_stop && cargo test -p athena-core",
+      "observes": "A: Failed with the environment reason, no producer call, blocker in the note and the outcome. B: the producer ran and the note lists each probed program, recorded in the prediction commit. C: the stop names the earlier job; its kept directory and candidate survive. D: the retry of the stopped job is stored as a retry of the first job and resumes its work, consuming its kept directory. E: other retries are unchanged. The last command runs the whole crate.",
+      "fails_without": "If the hook is removed or runs after the producer, A fails (the producer runs, reason not environment). If `Job.note` is not set, A and B fail on the note assertions. If the context keeps `resume` on a blocked job, C fails because close.rs:152-154 removes `kept/<first>`. If `Athena::retry` does not use `retry_target`, D fails: the stored request is `try again on <stopped>`, `retried_job` returns the stopped job, the brief does not name `first` and the kept directory stays. Step 9 removes `resume: None` and the `retry_target` call in turn and runs C and D.",
+      "seam": "Entry points `Athena::go` (run/mod.rs:402) into `dispatch` (1015) and `Athena::retry` (reading.rs:1185). Fixtures: `FakeAgentDriver` with a script, the Docs capability and a temp repo, all existing in run/tests.rs (read). The preflight uses the real `SystemProbe` on the process PATH: `true` exists there, `athena-preflight-absent-tool` does not; no injection needed. C and D build further `Athena` values over the same tempdirs through `athena_with`, which derives the state path from the tempdir (tests.rs:198); existing tests already retry then `go` (tests.rs:3707, 3770). Tests are added by plan step 7."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the repository's own checks from the root. New code avoids `unwrap` outside tests; lib.rs module list and doc bullet are updated.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. Existing tests that dispatch jobs with the real probe still pass (run/tests.rs, run_pin_tests.rs, athena-cli lifecycle, drain, retry, trailer_stop). Their bare-name check programs (`sh`, `true`, `cargo`, `git`, `grep`) are on PATH; the path program `/nonexistent/athena-baseline-check` is not probed. Existing `athena.retry` callers (tests.rs:1700, 3707, 3770, 4183, 4378, 4900, 5002, 5172, 5663; scope_guard.rs:1734-1963; run_pin_tests.rs:1821) retry jobs that were not preflight-stopped, so `retry_target` returns their own id.",
+      "fails_without": "A failing test, rustfmt difference or clippy warning makes the matching command exit non-zero; without the hook the criterion 3 tests fail.",
+      "seam": "None: the repository's own entry points. New tests use the seams named for criteria 2 and 3."
+    },
+    {
+      "criterion": 5,
+      "method": "Show the stricter behavior is intended and bounded. (1) Test A: a job whose bare-name check program is absent is refused (the newly refused case; today it lands with a pre-existing failure, checks.rs:541-562). (2) Test B: with the program present the job proceeds and records it. (3) `capability_preflight_lists_path_programs_as_not_probed`, `capability_preflight_relative_path_is_not_judged_missing` and `capability_preflight_git_alone_and_gh_are_not_needs` show the need list holds only check programs, with paths and relative-PATH tools listed as not probed. (4) The unchanged lifecycle test `baseline_failure_does_not_stop_the_job` (lifecycle.rs:129-152) still lands a job whose check is a missing path; it pins that path programs are outside the preflight, not that only missing tools refuse. The 0% newly-refused figure is an estimate by reading, limited to this repository's checks: all six in athena.toml (lines 85, 91, 99, 116, 120, 125) run `cargo`.",
+      "command": "cargo test --locked -p athena-cli --test lifecycle baseline_failure_does_not_stop_the_job && cargo test -p athena-core capability_preflight_blocks_a_missing_tool && cargo test -p athena-core capability_preflight_records_every_probed_tool && cargo test -p athena-core capability_preflight_lists_path_programs && cargo test -p athena-core capability_preflight_git_alone_and_gh_are_not_needs",
+      "observes": "All pass: an absent bare-name program is refused with the environment reason; a present program proceeds; path programs are listed as not probed and never block; the lifecycle job still lands. For a repository with an uninstalled bare-name check tool the share is not zero and is intended.",
+      "fails_without": "If path programs were probed, the lifecycle test would end `failed` with the preflight reason instead of landing, and the path-listing test would fail. If gh or git alone were added to the needs, `capability_preflight_git_alone_and_gh_are_not_needs` fails. Without the hook, Test A fails.",
+      "seam": "`Athena::go` as in criterion 3 with the real probe; the lifecycle test exists today (read). `needed_tools` is called directly in the unit tests."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the change list: athena.toml, defaults.toml, .github/workflows and records/ untouched; CHANGELOG.md gains one entry under `## [Unreleased]` / `### Added`; docs/spec.toml changes only OLY-B-RUN-01.",
+      "command": "git status && git diff --stat",
+      "observes": "Changed paths: docs/spec.toml, CHANGELOG.md, crates/athena-core/src/preflight.rs (new), lib.rs, reading.rs, run/mod.rs, run/pin.rs, run/tests.rs. scope_guard.rs, athena-cli, athena-data and athena-gate are unchanged. No governance file or records/ path appears.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "4213be93d389194b575d6799f329d3606e43abea0386d51ab51341d454dcbdd6"
+}

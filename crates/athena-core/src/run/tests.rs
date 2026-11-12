@@ -7661,6 +7661,333 @@ mod produce_and_verify_order_tests {
             assert!(!job.verifier_prompt().contains("fails-without-"), "{text}");
         }
     }
+
+    /// A check program that is on no PATH.
+    const ABSENT_TOOL: &[&str] = &["athena-preflight-absent-tool"];
+
+    /// The job record committed at dispatch, before any agent ran: the closing record of a finished job names
+    /// that commit as its base.
+    fn dispatch_record(athena: &Athena, job: &JobId) -> (Records, Job) {
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let dispatch = records.jobs[job.as_str()]
+            .outcome
+            .as_ref()
+            .and_then(|o| o.base_commit.clone())
+            .expect("the outcome names the dispatch commit");
+        let at_dispatch = Records::load(&athena.git, &dispatch).unwrap();
+        let record = at_dispatch.jobs[job.as_str()]
+            .job
+            .clone()
+            .expect("the dispatch commit holds the job record");
+        // Nothing but the dispatch had happened at that commit: no candidate, no outcome.
+        assert!(at_dispatch.jobs[job.as_str()].candidate.is_none());
+        assert!(at_dispatch.jobs[job.as_str()].outcome.is_none());
+        (records, record)
+    }
+
+    #[test]
+    fn capability_preflight_blocks_a_missing_tool_before_the_producer_and_records_it() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            ABSENT_TOOL,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let job = proposal.job.clone();
+        let done = finished(athena.go(job.as_str(), AcceptedBy::User, &Quiet).unwrap());
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            done.reason
+                .starts_with("environment: preflight blocked: athena-preflight-absent-tool"),
+            "{}",
+            done.reason
+        );
+        assert!(done.reason.contains("needed by probe"), "{}", done.reason);
+        assert!(done.reason.contains("workaround:"), "{}", done.reason);
+        assert!(crate::disk::is_environment_reason(&done.reason));
+        assert_eq!(
+            crate::disk::StopCause::of(&done.reason),
+            crate::disk::StopCause::OtherEnvironment
+        );
+        // Once the job was dispatched no planner, producer or verifier ran.
+        let (planner, producer, _, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 0, 0));
+        // The blocker is in the job record committed at dispatch, before any agent ran.
+        let (records, record) = dispatch_record(&athena, &job);
+        let note = record.note.expect("the dispatch records the preflight");
+        assert_eq!(
+            note,
+            "athena-preflight-absent-tool: missing; needed by probe"
+        );
+        let closed = &records.jobs[job.as_str()];
+        assert!(closed.candidate.is_none());
+        assert_eq!(closed.outcome.as_ref().unwrap().reason, done.reason);
+    }
+
+    #[test]
+    fn capability_preflight_records_every_probed_tool_when_all_are_present() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let (job, done) = finished_job(&athena);
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert!(!done.reason.starts_with("environment:"), "{}", done.reason);
+        assert_eq!(counts.all().1, 1, "the producer ran");
+        // The probed program is recorded as present, in the record committed before any agent ran.
+        let (_, record) = dispatch_record(&athena, &job);
+        assert_eq!(
+            record.note.as_deref(),
+            Some("true: present; needed by probe")
+        );
+    }
+
+    #[test]
+    fn capability_preflight_path_program_is_recorded_by_its_last_component_only() {
+        // `env` runs `true`: the check passes. The program is named by a path, so it is not probed, never
+        // blocks, and the record holds its last component and no directory.
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            &["/usr/bin/env", "true"],
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let (job, done) = finished_job(&athena);
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(counts.all().1, 1, "the producer ran");
+        let (_, record) = dispatch_record(&athena, &job);
+        let note = record.note.expect("the dispatch records the preflight");
+        assert_eq!(note, "env: not probed (path); needed by probe");
+        assert!(!note.contains("/usr"), "{note}");
+    }
+
+    #[test]
+    fn capability_preflight_stop_on_a_resumed_retry_keeps_the_earlier_work() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        // The first job's producer login expires: it keeps its edits as a candidate commit.
+        let first_athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            producer_ending(
+                InvocationOutcome::Error,
+                &expired_login(),
+                true,
+                Arc::default(),
+            ),
+        );
+        let (first, done) = finished_job(&first_athena);
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        let records = Records::load(&first_athena.git, &first_athena.head().unwrap()).unwrap();
+        let candidate = records.jobs[first.as_str()]
+            .candidate
+            .as_ref()
+            .and_then(|c| c.candidate_commit.clone())
+            .expect("the login expiry kept a candidate commit");
+        let kept = first_athena.state.kept_work_dir(&first);
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(kept.join("marker"), "kept work").unwrap();
+
+        // The retry runs where the check program is missing.
+        let counts = Arc::new(Counts::default());
+        let second = athena_with(
+            &repo,
+            &state,
+            ABSENT_TOOL,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let (retry, _) = second.retry(first.as_str(), &Quiet).unwrap();
+        let (_, producer_before, _, _) = counts.all();
+        let stopped = finished(
+            second
+                .go(retry.job.as_str(), AcceptedBy::User, &Quiet)
+                .unwrap(),
+        );
+        assert_eq!(stopped.state, OutcomeState::Failed, "{}", stopped.reason);
+        assert!(
+            stopped.reason.contains(&format!(
+                "the kept work of {first} was left alone; a retry of this job resumes it"
+            )),
+            "{}",
+            stopped.reason
+        );
+        assert_eq!(counts.all().1, producer_before, "no producer ran");
+        // The earlier job's kept work survives the stop.
+        assert_eq!(
+            std::fs::read_to_string(kept.join("marker")).unwrap(),
+            "kept work"
+        );
+        assert!(
+            second
+                .git
+                .show_file(&candidate, "README.md")
+                .unwrap()
+                .is_some(),
+            "the candidate commit is still in the repository"
+        );
+    }
+
+    #[test]
+    fn capability_preflight_retry_of_a_stopped_job_resumes_the_job_it_retried() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let first_athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            producer_ending(
+                InvocationOutcome::Error,
+                &expired_login(),
+                true,
+                Arc::default(),
+            ),
+        );
+        let (first, done) = finished_job(&first_athena);
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        let kept = first_athena.state.kept_work_dir(&first);
+        std::fs::create_dir_all(&kept).unwrap();
+
+        // The retry of it is stopped at the preflight.
+        let second = athena_with(
+            &repo,
+            &state,
+            ABSENT_TOOL,
+            crate::test_support::plenty_of_space,
+            counting(Arc::new(Counts::default()), None),
+        );
+        let (retry, _) = second.retry(first.as_str(), &Quiet).unwrap();
+        let stopped = finished(
+            second
+                .go(retry.job.as_str(), AcceptedBy::User, &Quiet)
+                .unwrap(),
+        );
+        assert!(
+            crate::preflight::is_preflight_reason(&stopped.reason),
+            "{}",
+            stopped.reason
+        );
+        assert!(kept.exists());
+
+        // The tool is back. A retry of the stopped job retries the job it retried.
+        let counts = Arc::new(Counts::default());
+        let third = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let ui = Lines::default();
+        let (again, _) = third.retry(stopped.job.as_str(), &ui).unwrap();
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter()
+                .any(|l| l.contains("stopped at the capability preflight")
+                    && l.contains(first.as_str())),
+            "{said:#?}"
+        );
+        let records = Records::load(&third.git, &third.head().unwrap()).unwrap();
+        let text = records.jobs[again.job.as_str()]
+            .request
+            .as_ref()
+            .unwrap()
+            .text
+            .clone();
+        assert_eq!(text, format!("try again on {first}"));
+        // The one function every reader of the retry link calls sees the real chain.
+        assert_eq!(
+            crate::reading::retried_job(&records, &text),
+            Some(first.clone())
+        );
+        let done = finished(
+            third
+                .go(again.job.as_str(), AcceptedBy::User, &Quiet)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(counts.all().1, 1, "the producer ran once, on the kept work");
+        let records = Records::load(&third.git, &third.head().unwrap()).unwrap();
+        let brief = &records.jobs[again.job.as_str()].briefs["brief-producer"];
+        assert!(brief.contains(first.as_str()), "{brief}");
+        assert!(brief.contains("API Error: 401"), "{brief}");
+        assert!(!kept.exists(), "the resumed job consumed the kept work");
+    }
+
+    #[test]
+    fn capability_preflight_retry_of_a_plain_stop_is_unchanged() {
+        // A job that failed for another reason is retried as itself.
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            producer_ending(
+                InvocationOutcome::Error,
+                &expired_login(),
+                true,
+                Arc::default(),
+            ),
+        );
+        let (first, _) = finished_job(&athena);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        assert_eq!(crate::preflight::retry_target(&records, &first), first);
+        let (retry, _) = athena.retry(first.as_str(), &Quiet).unwrap();
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        assert_eq!(
+            records.jobs[retry.job.as_str()]
+                .request
+                .as_ref()
+                .unwrap()
+                .text,
+            format!("try again on {first}")
+        );
+
+        // A job the preflight stopped whose own request is not a retry is retried as itself.
+        let second_repo = repo_with_config("");
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_with(
+            &second_repo,
+            &state,
+            ABSENT_TOOL,
+            crate::test_support::plenty_of_space,
+            counting(Arc::new(Counts::default()), None),
+        );
+        let (stopped, done) = finished_job(&athena);
+        assert!(crate::preflight::is_preflight_reason(&done.reason));
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        assert_eq!(crate::preflight::retry_target(&records, &stopped), stopped);
+        let (retry, _) = athena.retry(stopped.as_str(), &Quiet).unwrap();
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        assert_eq!(
+            records.jobs[retry.job.as_str()]
+                .request
+                .as_ref()
+                .unwrap()
+                .text,
+            format!("try again on {stopped}")
+        );
+    }
 }
 
 #[cfg(test)]

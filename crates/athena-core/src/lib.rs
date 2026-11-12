@@ -77,6 +77,9 @@
 //! - [`iris`]: the Iris budget guard: the committed spend ledger and the check that refuses a generation
 //!   which would take lifetime spend over $15;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only;
+//! - [`preflight`]: the capability preflight (OLY-B-RUN-01): before the producer starts, the programs a job's
+//!   checks run are looked up on PATH and recorded in the job's note; a missing one stops the job with a
+//!   blocker and a workaround plan;
 //! - `test_support` (compiled for tests and the `test-support` feature only): the shared records-history
 //!   cutover fixture, a scratch repository with a bare remote and a history made through the real writers;
 //! - [`plan`]: planning, the first stage: every open request fleshed out and all of them planned together into
@@ -117,6 +120,7 @@ pub mod pin;
 pub mod plan;
 pub mod pr;
 pub mod pr_check;
+pub mod preflight;
 pub mod proposals;
 pub mod reading;
 pub mod reconcile;

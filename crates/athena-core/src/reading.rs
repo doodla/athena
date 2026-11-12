@@ -1209,7 +1209,17 @@ impl Athena {
                 retry_follow_up(&records, again, self.running(again))
             );
         }
-        let seeded = has_retry_introspection(&records, job);
+        // A job the capability preflight stopped did no work. When it was itself a retry, a retry of it retries
+        // the job it retried, so the stored request and every reader of that link see the real chain. The
+        // pause check and the interrupted-retry guard above keep the job the user named.
+        let target = crate::preflight::retry_target(&records, &id);
+        if target != id {
+            ui.line(&format!(
+                "retry      job {id} stopped at the capability preflight without doing work; this retries job {target}, the job it retried"
+            ));
+        }
+        let target_job = records.jobs.get(target.as_str()).unwrap_or(job);
+        let seeded = has_retry_introspection(&records, target_job);
         // A retry is a new job, judged on its own spend, which starts at 0. The check is made here too so a
         // retry that cannot be afforded prints no resume note; `ask` makes it again before the reader runs.
         let jc = JobConfig::at(&self.git, &head)?;
@@ -1217,12 +1227,12 @@ impl Athena {
         // `ask` refuses a job that is not rejected, failed, timed out, stale or interrupted before any model is called.
         // A job that stopped for the environment, or was interrupted, after its candidate was built resumes
         // from that candidate: `go` runs no planner or producer. The reader still runs below.
-        let request = format!("{RETRY_PREFIX}{id}");
+        let request = format!("{RETRY_PREFIX}{target}");
         if resumable_job(&records, &request, &|j| self.running(j)).is_some()
-            && let Some(mark) = self.state.read_resume(&id)
+            && let Some(mark) = self.state.read_resume(&target)
         {
             ui.line(&format!(
-                "resume     job {id} kept its candidate (stage: {}); `athena go` resumes from it with no new planner or producer run",
+                "resume     job {target} kept its candidate (stage: {}); `athena go` resumes from it with no new planner or producer run",
                 match mark.stage {
                     crate::state::ResumeStage::Checks => "checks",
                     crate::state::ResumeStage::Verifier => "verifier",
