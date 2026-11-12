@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013721-4gwn",
+  "round": 3,
+  "at": "2026-11-12T13:58:38.595143026Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-git/src/lib.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-git/src/lib.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "blocker",
+      "summary": "Leaving CHANGELOG.md untouched gets the candidate refused at admission, before the verifier",
+      "evidence": "Read in the snapshot: `changelog_required` returns true when the reading lists CHANGELOG.md and carries the changelog default (`reading::changelog_unproduced`), unless CHANGELOG.md is read-only or excluded. Grep finds no CHANGELOG entry in athena.toml. This reading lists CHANGELOG.md (modify) as a deliverable and states the changelog default. The producer loop sends the producer back for the file, and if it is still missing, 'the job ends at admission, before the verifier' (producer.rs:545-546). The admission test `the_changelog_is_demanded_even_when_the_reading_leaves_it_out_of_scope` (admission.rs:1890) shows that an out-of-scope statement does not excuse it. Criterion 7's 'CHANGELOG.md untouched' contradicts both the deliverables and code that is already enforced. Fix: Add one CHANGELOG.md line under Unreleased that names the OLY-B-BND-01 guard. Treat criterion 7's CHANGELOG clause as conflicting with the enforced changelog default and say so in the report and open question; keep the athena.toml, defaults.toml and workflow clauses. Change the criterion 7 demonstration to expect CHANGELOG.md in `git status`.",
+      "location": "Decision 7; step 9; criterion 7 demonstration; crates/athena-core/src/admission.rs:819-831, crates/athena-core/src/run/producer.rs:443-452 and 547-641",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "origin_url misses a second push URL, because `get-url --push` without `--all` prints only the first URL",
+      "evidence": "git-remote documents get-url as: 'By default, only the first URL is listed. With --push, push URLs are queried rather than fetch URLs. With --all, all URLs for the remote will be listed.' `git push origin` pushes to every `remote.origin.pushurl`, or to every `remote.origin.url` when no push URL is set. The planned check 'bail if the push output has more than one line' never fires, because the output is always one line. So origin with push URLs [own repo, upstream] passes, and GitRemote{origin}.push then also writes to upstream. The planned test of a doubled push URL (`git config --add`) would get Ok and fail, or the producer would weaken it. Fix: Run `git remote get-url --all origin` and `git remote get-url --push --all origin`. Refuse when either lists more than one URL (or require every listed URL to name the same repository), then compare as planned. Keep the doubled-push-URL test and add a doubled-fetch-URL case with no push URL. Name both in the mutation check.",
+      "location": "Decision 4; step 2 (`origin_url`); criterion 4 demonstration case (b) 'a push URL set twice'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No test shows that land_pr with no origin does no write; the claim rests on statement order",
+      "evidence": "Criterion 4 asks that 'no origin (landing/push errors, no write)' be shown. The plan tests origin_client and GitRemote on their own, and it argues the ordering in land_pr by reading the code. land_pr also runs `self.reconcile` (landing.rs:842) before the new check. Reconcile writes records to origin through its own sink, and it errors with no origin (reconcile.rs:404-407). That is safe, but no test pins it. Fix: Keep the unit tests. Also add a short check that the `origin_client(...)?` call comes before any `GitRemote`, `GitLandingRecords::for_remote` or `attempt` in land_pr (for example, one assertion in the spec pin test reading landing.rs as text). Or state in the report that this part of criterion 4 is shown by reading only, so the verifier can judge it.",
+      "location": "Decision 6; criterion 4 demonstration 'Landing order'; landing.rs:842-934",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The guard checks the remote's name, not its target; a GitRemote named origin is never checked against the push URL",
+      "evidence": "require_origin compares only the string \"origin\". The push-URL check runs only in origin_client and github_repository. land_through_pr in test_support.rs:632 and other callers can build GitRemote{name:\"origin\"} without it. The plan names this limit in the spec, so it is visible. Fix: Optional: also call `origin_url` inside GitRemote's three write methods, so every write rechecks origin's push URL. This costs two `git config` reads per push, and then the limit can be dropped from the spec text.",
+      "location": "Risks 2 and 4; step 9 mechanism text",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The reading contradicts itself: its expected deliverables list CHANGELOG.md (modify) and its defaults include the changelog default, but criterion 7 requires CHANGELOG.md to be untouched. Admission enforces the changelog default in code (admission.rs:819), so criterion 7's CHANGELOG clause cannot be met by an admitted candidate.",
+  "summary": "Verdict: revise. The core design is sound. It puts the guard where the pushes are made (GitRemote push/replace/delete_branch, and Git::push_branch/push_if_remote_at for every records-branch push) and builds the landing client from origin only. I checked the named files, line numbers, test doubles and seams in the snapshot: remote.rs, lib.rs:384/432, landing.rs:865-893, early.rs:363-462, ScriptRunner and UnreachedHost in gh/tests.rs, EarlyFake, early_seam::install, and hestia parse_spec, measure_problem and spec_gaps. Every existing production caller and test passes \"origin\". Every GitHub write in client.rs and pages.rs goes through `repos/{self.repository}`, so limiting the client's repository limits every PR, merge and rerun call. Two problems remain. (1) Blocker: the plan leaves CHANGELOG.md untouched. But the reading lists it as a deliverable and carries the changelog default, and `admission::changelog_required` (also called from producer.rs:446) sends the producer back and then refuses the candidate before the verifier. CHANGELOG.md is not marked read-only or excluded in athena.toml. So this plan cannot be admitted as written. (2) Major: `origin_url` relies on `git remote get-url --push origin` printing several lines when several push URLs exist. Without `--all`, git prints only the first URL, yet `git push origin` pushes to every push URL (or every `url` when no push URL is set). So a second push URL aimed at another repository passes the check. The planned multi-valued test would also fail against that code. Minor points: the landing-order claim rests on reading the code, and the guard checks the remote's name, not where it points; the spec text already states the second."
+}

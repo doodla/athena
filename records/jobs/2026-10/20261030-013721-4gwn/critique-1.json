@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013721-4gwn",
+  "round": 1,
+  "at": "2026-11-12T13:46:36.591318157Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan edits CHANGELOG.md by default, which breaks accepted criterion 7 and goes outside the request's file list.",
+      "evidence": "The request says 'Files: docs/spec.toml, crates/'. Accepted criterion 7 says 'Only docs/spec.toml and files under crates/ change; CHANGELOG.md, athena.toml and defaults.toml are untouched.' The changelog default is marked '(not in the defaults model)'. The plan adds a CHANGELOG line and only raises an open question, so verification of criterion 7 fails as written. Fix: Leave CHANGELOG.md untouched (drop step 8 and the file entry), and keep the open question for the user. Only add the line if the user changes criterion 7.",
+      "location": "Decision 6, Files (CHANGELOG.md), Step 8, Criterion 7 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Landing and reconcile can open pull requests on an upstream GitHub repository when origin is a local path containing `github.com`. The plan pins this as expected behaviour and the spec text would claim the opposite.",
+      "evidence": "client.rs:1199 `let Some(at) = url.find(HOST)` accepts any string containing github.com. landing.rs:866-867 and reconcile.rs:404-412 build a GhClient from it. A local mirror such as `/src/github.com/upstream-owner/project` therefore targets upstream-owner/project on GitHub. The accepted reading says that with a local-path origin 'GitHub PR/API writes are not attempted'. Criterion 4(b) says 'a local-path origin (no GitHub call made)'. The plan instead 'records today's behavior' for the lookalike path, and its mechanism text says 'PR calls use only the repository parsed from origin'. The strict check already exists: GhClient::origin_repository (client.rs:1026-1039) and https_github_repository (early.rs:329-338). Fix: Make `landing_target` (and reconcile's client lookup) use the strict host check (`GhClient::origin_repository` or equivalent) and assert Err with zero gh calls for the lookalike path. Move fixtures that rely on lookalike paths (athena-cli/tests/reconcile.rs:102, run_pin_tests.rs:584) to the test seam or to an https origin with the fake runner. If that cannot fit, state the gap explicitly in the spec mechanism and do not write a test that asserts the violation as passing.",
+      "location": "Decision 4 / Step 2 (landing_target), Risk 1, Criterion 4(b) demonstration, Step 7 mechanism text",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Athena's own records-branch pushes are left unguarded. Two production push paths are missing from the dependents list, and the reason for not guarding athena-git rests on a wrong fact.",
+      "evidence": "The accepted reading says 'Athena's own publishing (git push, ...) can reach only origin'. Pushes still outside the guard: the GitLandingRecords sink (landing.rs:893, reconcile.rs:408, via records.rs:156/365 append_to_remote); the attribution checkpoint write_checkpoint (athena-gate attribution.rs:784-794), whose remote comes from the public `Options::with_remote` (attribution.rs:524); and records_import.rs:206. The dependents list cites only test lines in attribution (1160, 1612) and omits :785 and records_import.rs:206. The request allows any file under crates/, so 'outside the deliverables' is not a request limit. The plan rejects guarding athena-git because its 'tests push to named remotes', but every push_branch, push_if_remote_at and append_to_remote test pushes to \"origin\" (athena-git lib.rs:1385-1457, records_branch.rs:846-1045). Fix: Guard the shared push path. Either add an origin check in athena-git's push_branch and push_if_remote_at, or in RecordsWriter::append_to_remote, which athena-core and athena-gate both reach; or at minimum call require_origin in GitLandingRecords::for_remote and refuse non-origin in attribution write_checkpoint/with_remote. Extend the refusal test to a records sink built for `upstream`, and list records_import.rs:206 and attribution.rs:785 in the dependents with their tests.",
+      "location": "Decision 1 (rejected athena-git guard), Decision 3, Dependents (records-branch entry), Step 7 mechanism text",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 4(c) test is circular: it builds a GhClient from the repository landing_target returns and checks the client targets that same repository, without showing that landing or reconcile build their client that way.",
+      "evidence": "'A GhClient::new(&runner, repo) built from it calls open_pr, and every recorded gh argument vector targets repos/example/project/'. land_pr builds its client at landing.rs:882-886 and reconcile at reconcile.rs:409-412, independently of any new helper. Fix: Put client construction in one shared function (for example `origin_client(git, runner)`) used by both land_pr and try_reconcile, and test that function. Alternatively drive land_pr through the existing land_through/Rig fixtures in gh/tests.rs with an `upstream` remote present, and assert all gh calls name the origin repository.",
+      "location": "Criterion 4(c) demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Pull requests are targeted from origin's fetch URL, but pushes go to origin's push URL, so the two can reach different repositories.",
+      "evidence": "landing.rs:866 and the planned landing_target use `git remote get-url origin`, which returns the fetch URL. `git push origin` uses `remote.origin.pushurl` or a `url.*.pushInsteadOf` rewrite when either is set. The guard checks only the remote name. Fix: Either compare `git remote get-url --push origin` with the fetch URL (and refuse when they differ), or name this in the risks and in the spec mechanism text.",
+      "location": "Decision 2, Step 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Checking only the remote name has no effect on any current call, and does nothing when origin itself is an upstream project.",
+      "evidence": "Every production GitRemote is built with a literal \"origin\" (early.rs:376, 460; landing.rs:865). The refusal test shows only that the function refuses names no current caller passes. A plain clone of a third-party project has origin pointing at that upstream project. Fix: State in the spec mechanism that the guard assumes origin is the project's own repository, as the accepted reading does, so Themis can see what the guard does not cover.",
+      "location": "Approach, Decision 2, Step 7 mechanism text",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No test pins the new spec entry, unlike similar requirements.",
+      "evidence": "iris.rs:235-241, preflight.rs:615-621 and hestia.rs:4376-4382 load docs/spec.toml and assert that their requirement's mechanism path exists, `measure_problem` is None and the requirement is not in spec_gaps. The plan relies only on the xtask presence check. Fix: Add a test in gh/tests.rs that loads OLY-B-BND-01 and asserts the mechanism contains crates/athena-core/src/gh/remote.rs, the measure contains the test name and ends `status: not shown`, and hestia::spec_gaps does not list it.",
+      "location": "Step 7, Criterion 1 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan names the wrong helper for the early path.",
+      "evidence": "The plan says `origin_repository` in the early path is stricter. early.rs:363-365 actually uses `https_github_repository` (early.rs:329), with the same rule. Fix: Cite `https_github_repository`, or make early.rs use `GhClient::origin_repository` so there is one rule.",
+      "location": "Risk 1, Criterion 4(b)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The origin success case asserts the new commit after the delete step, when the branch no longer exists.",
+      "evidence": "'with name origin assert push, replace and delete_branch succeed and remote_head shows the new commit on origin'. After delete_branch, remote_head returns None. Fix: Assert remote_head after push and after replace, and None after delete_branch.",
+      "location": "Criterion 3 demonstration",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The guard in the shared GitRemote write methods is the right place for branch pushes. Every production GitRemote passes the literal \"origin\" (early.rs:374-377, 458-461; landing.rs:865/887). The criterion 3 test drives the real methods against temp repos and first shows the push to `upstream` succeeds unguarded. `super::remote::ORIGIN` is reachable because `mod remote` is private (mod.rs:40). The spec entry and its checks (docs/spec.toml:2396-2402, xtask/tests/spec.rs:194-213, hestia measure_problem) accept a measure ending `status: not shown`. Four problems need revision. (1) The plan edits CHANGELOG.md by default, which breaks accepted criterion 7 and the request's file list. (2) The plan pins a real boundary hole as expected behaviour. `parse_remote` matches `github.com` anywhere in the URL, so a local origin path such as `.../github.com/owner/repo` makes landing and reconcile send pull-request calls to that GitHub repository. This contradicts the reading and criterion 4(b). (3) Athena's own records-branch pushes stay unguarded: the landing and reconcile records sinks, the attribution checkpoint (free remote via `with_remote`) and the records import. The last two are missing from the dependents list. The plan leaves these out because of the deliverables list, but the request allows any file under crates/. Its reason for not guarding athena-git is also wrong: every athena-git push test uses \"origin\". (4) Minor: the criterion 4(c) test only checks that a client built from a repository targets that same repository; it never goes through landing. No blockers: the plan is fixable within one producer run."
+}
