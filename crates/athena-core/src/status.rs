@@ -316,6 +316,7 @@ pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
     ("code health", "code_health"),
     ("audit", "audit"),
     ("audience", "audience"),
+    ("forecasts", "forecasts"),
     ("requirement", "spec_gaps"),
     ("readings", "reading_rules"),
 ];
@@ -1624,6 +1625,34 @@ mod mistake_tests {
     #[test]
     fn the_report_is_empty_with_no_mistakes() {
         assert_eq!(mistake_report(&Records::default()).total, 0);
+    }
+
+    #[test]
+    fn oly_b_goal_03_is_met_by_the_forecast_path_and_shown_by_the_forecasts_line() {
+        let requirements =
+            crate::hestia::parse_spec(include_str!("../../../docs/spec.toml")).unwrap();
+        let req = requirements
+            .iter()
+            .find(|r| r.id == "OLY-B-GOAL-03")
+            .expect("OLY-B-GOAL-03 is in the spec");
+        assert!(req.mechanism != "none", "{}", req.mechanism);
+        assert!(req.mechanism.contains("reading.rs"), "{}", req.mechanism);
+        assert!(req.mechanism.contains("status.rs"), "{}", req.mechanism);
+        assert_eq!(req.owner, "Athena");
+        assert!(
+            req.measure.ends_with("status: forecasts"),
+            "{}",
+            req.measure
+        );
+        assert_eq!(crate::hestia::measure_problem(&req.measure), None);
+        let gaps = crate::hestia::spec_gaps(&requirements);
+        assert!(gaps.iter().all(|g| g.id != "OLY-B-GOAL-03"));
+        assert!(STATUS_MEASURE_LABELS.contains(&("forecasts", "forecasts")));
+        // Without the mechanism the requirement is a gap again.
+        let mut without = req.clone();
+        without.mechanism = "none".into();
+        let gaps = crate::hestia::spec_gaps(&[without]);
+        assert!(gaps.len() == 1 && gaps[0].no_mechanism);
     }
 
     #[test]
