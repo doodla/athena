@@ -8,7 +8,9 @@ differs from that computation, so when a row's status changes in the map, update
 next steps for every goal are in the [roadmap](roadmap.md).
 
 Rows are cited by ID. Each ID appears under exactly one goal; the command reports an ID that is missing from
-the map or from every goal. Statuses are the map's: covered, partial, not covered.
+the map or from every goal. This view and command are the mechanism of OLY-B-A1-02 in `docs/spec.toml`; the test
+`strategy_view_is_the_mechanism_of_oly_b_a1_02` fails if that entry loses its mechanism or the command reports errors
+over the real files. Statuses are the map's: covered, partial, not covered.
 
 ## Coverage at a glance
 
