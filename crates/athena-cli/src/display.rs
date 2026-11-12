@@ -1229,6 +1229,7 @@ pub fn snapshot_status(v: &athena_core::snapshot::SnapshotView) -> String {
     if let Some(throughput) = &v.throughput {
         let _ = writeln!(out, "{}", throughput.text());
     }
+    out.push_str(&specialization_lines(&v.specialization));
     out
 }
 

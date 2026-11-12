@@ -245,6 +245,8 @@ pub struct SnapshotView {
     pub throughput: Option<Throughput>,
     /// Files under `records/` that are not acceptable records.
     pub invalid_records: Vec<String>,
+    /// Producer settings per class of work, as `athena status` prints them (requirement OLY-B-NOTE-01).
+    pub specialization: Vec<crate::status::ClassSpecialization>,
 }
 
 /// Reads the snapshot at `dir`. Needs no repository and no `records/` in the current directory.
@@ -275,6 +277,7 @@ pub fn status(dir: &Path) -> Result<SnapshotView> {
         landing_records: records.landings.len(),
         throughput: Throughput::compute(&records),
         invalid_records: records.invalid.clone(),
+        specialization: crate::status::specialization(&records),
     })
 }
 
