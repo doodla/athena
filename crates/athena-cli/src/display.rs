@@ -5,8 +5,9 @@ use athena_core::gate_counts::GateCount;
 use athena_core::reading::Proposal;
 use athena_core::run::Finished;
 use athena_core::status::{
-    ClassSpecialization, JobTrace, KeepRule, KeepVerdict, LaterHarm, PlanningCost, PlanningGroup,
-    ProducerSettingStats, SPECIALIZATION_MIN_JOBS, SpecializationVerdict, StatusView,
+    ClassSpecialization, EffortSplit, JobTrace, KeepRule, KeepVerdict, LaterHarm, PlanningCost,
+    PlanningGroup, ProducerSettingStats, SPECIALIZATION_MIN_JOBS, SpecializationVerdict,
+    StatusView,
 };
 use athena_data::records::{
     CriterionKind, DeliverableAction, Forecast, OutcomeState, Quantiles, Reading, Score,
@@ -182,6 +183,24 @@ fn producer_settings_lines(settings: &[ProducerSettingStats]) -> String {
 
 /// Per class of work, each producer setting with its jobs, first-pass rate and landed share, and whether a
 /// non-default setting beat the class's most-used one. Empty when there are no classes.
+/// The `effort` line (OLY-B-O4-02): the share of recorded job cost spent on study jobs and on Athena's own
+/// jobs. With no job recorded it says so; with jobs but no recorded cost it gives the counts and no share.
+fn effort_lines(e: Option<&EffortSplit>) -> String {
+    let Some(e) = e else {
+        return "effort      no jobs recorded\n".into();
+    };
+    let share = |s: Option<f64>| s.map_or("n/a".to_string(), |s| format!("{:.1}%", s * 100.0));
+    format!(
+        "effort      study {} of cost ({} jobs, ${:.2}) · Athena itself {} ({} jobs, ${:.2})\n",
+        share(e.study_share),
+        e.study_jobs,
+        e.study_usd,
+        share(e.self_share),
+        e.self_jobs,
+        e.self_usd
+    )
+}
+
 fn specialization_lines(classes: &[ClassSpecialization]) -> String {
     let mut out = String::new();
     if classes.is_empty() {
@@ -1226,6 +1245,7 @@ pub fn snapshot_status(v: &athena_core::snapshot::SnapshotView) -> String {
             v.invalid_records.join(", ")
         );
     }
+    out.push_str(&effort_lines(v.effort.as_ref()));
     if let Some(throughput) = &v.throughput {
         let _ = writeln!(out, "{}", throughput.text());
     }
@@ -1335,6 +1355,7 @@ pub fn status(v: &StatusView) -> String {
         out.push_str(&producer_settings_lines(&v.producer_settings));
     }
     out.push_str(&specialization_lines(&v.specialization));
+    out.push_str(&effort_lines(v.effort.as_ref()));
     if let Some(durations) = &v.check_durations {
         let _ = writeln!(out, "{}", durations.text());
     }
@@ -2466,6 +2487,35 @@ mod tests {
         unverified.first_pass_rate = None;
         let text = producer_settings_lines(&[unverified]);
         assert!(text.contains("first-pass n/a"), "{text}");
+    }
+
+    #[test]
+    fn effort_line_gives_the_shares_or_says_no_jobs_are_recorded() {
+        assert_eq!(effort_lines(None), "effort      no jobs recorded\n");
+        let split = EffortSplit {
+            study_jobs: 2,
+            self_jobs: 1,
+            study_usd: 3.0,
+            self_usd: 1.0,
+            study_share: Some(0.75),
+            self_share: Some(0.25),
+        };
+        let text = effort_lines(Some(&split));
+        assert!(text.starts_with("effort "), "{text}");
+        assert!(
+            text.contains("study 75.0% of cost (2 jobs, $3.00)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Athena itself 25.0% (1 jobs, $1.00)"),
+            "{text}"
+        );
+        let free = EffortSplit {
+            study_share: None,
+            self_share: None,
+            ..split
+        };
+        assert!(effort_lines(Some(&free)).contains("study n/a"));
     }
 
     #[test]

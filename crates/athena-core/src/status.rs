@@ -311,6 +311,7 @@ pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
     ("keep rule", "keep_rule"),
     ("producers", "producer_settings"),
     ("specialization", "specialization"),
+    ("effort", "effort"),
     ("mistakes", "mistakes"),
     ("repeated", "repeated_causes"),
     ("code health", "code_health"),
@@ -430,6 +431,9 @@ pub struct StatusView {
     /// dispatched job ran a producer.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub specialization: Vec<ClassSpecialization>,
+    /// How recorded job cost splits between study-capability jobs and Athena's own jobs; absent when no
+    /// dispatched job with a capability is recorded (`athena status` then says no jobs are recorded).
+    pub effort: Option<EffortSplit>,
     /// Median and slowest `test` check duration over the newest jobs, against the check time limit; absent
     /// when no job ran a measured test check or the configuration cannot be read.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1300,6 +1304,7 @@ impl Athena {
             keep_rule: keep_rule(&records),
             producer_settings: producer_settings(&records),
             specialization: specialization(&records),
+            effort: effort_split(&records),
             check_durations,
             gate_counts: crate::gate_counts::gate_counts(&records),
             reading_rules: ReadingRuleStats::compute(&records),
@@ -2779,6 +2784,55 @@ pub(crate) mod planning_cost_tests {
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].class, "unclassified");
         assert_eq!(r[0].verdict, SpecializationVerdict::NotEnoughJobs);
+    }
+
+    fn capability_job(text: &str, capability: &str, cost: f64) -> JobRecords {
+        let mut j = producer_job(
+            text,
+            "s",
+            Some("medium"),
+            OutcomeState::Landed,
+            athena_data::records::Verdict::Pass,
+            cost,
+        );
+        j.job.as_mut().unwrap().owner.capability = Some(capability.into());
+        j
+    }
+
+    #[test]
+    fn effort_split_divides_recorded_cost_between_study_and_change_jobs() {
+        let spent = |id: &str, cap: &str, cost: f64| capability_job(id, cap, cost).spent_usd();
+        let (s1, s2) = (
+            spent("20261026-100001-aa01", "study", 1.0),
+            spent("20261026-100002-aa02", "study", 2.0),
+        );
+        let c1 = spent("20261026-100003-aa03", "change", 3.0);
+        assert!(s1 > 0.0 && s2 > s1 && c1 > 0.0);
+        let split = effort_split(&records(vec![
+            capability_job("20261026-100001-aa01", "study", 1.0),
+            capability_job("20261026-100002-aa02", "study", 2.0),
+            capability_job("20261026-100003-aa03", "change", 3.0),
+        ]))
+        .expect("jobs recorded");
+        assert_eq!((split.study_jobs, split.self_jobs), (2, 1));
+        assert!(close(split.study_usd, s1 + s2), "{split:?}");
+        assert!(close(split.self_usd, c1), "{split:?}");
+        let (study, own) = (split.study_share.unwrap(), split.self_share.unwrap());
+        assert!(close(study, (s1 + s2) / (s1 + s2 + c1)), "{split:?}");
+        assert!(close(study + own, 1.0), "{split:?}");
+    }
+
+    #[test]
+    fn effort_split_is_absent_without_jobs_and_has_no_share_without_cost() {
+        assert_eq!(effort_split(&Records::default()), None);
+        let free = effort_split(&records(vec![capability_job(
+            "20261026-100001-aa01",
+            "study",
+            0.0,
+        )]))
+        .unwrap();
+        assert_eq!(free.study_jobs, 1);
+        assert_eq!((free.study_share, free.self_share), (None, None));
     }
 
     #[test]

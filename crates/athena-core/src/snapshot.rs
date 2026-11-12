@@ -243,6 +243,8 @@ pub struct SnapshotView {
     pub landing_records: usize,
     /// Throughput over the snapshot's records; none when no request job landed.
     pub throughput: Option<Throughput>,
+    /// How recorded job cost splits between study jobs and Athena's own jobs; none when no job is recorded.
+    pub effort: Option<crate::status::EffortSplit>,
     /// Files under `records/` that are not acceptable records.
     pub invalid_records: Vec<String>,
 }
@@ -274,6 +276,7 @@ pub fn status(dir: &Path) -> Result<SnapshotView> {
         jobs_by_state,
         landing_records: records.landings.len(),
         throughput: Throughput::compute(&records),
+        effort: crate::status::effort_split(&records),
         invalid_records: records.invalid.clone(),
     })
 }

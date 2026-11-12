@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- OLY-B-O4-02 now has a mechanism: `effort_split` in `crates/athena-core/src/status/planning.rs` splits recorded
+  job cost between study-capability jobs and Athena's own jobs, and `athena status` prints it as the `effort`
+  line (`no jobs recorded` when there are none). The measure ends `status: effort`; what is not done stays in the
+  `requirement` spec gap list. No refusal rule changes.
 - OLY-B-O1-01 now has a mechanism: `bootstrap_range` (rule M6) in `crates/athena-gate/src/invariant.rs`, which
   accepts `Athena-Job: bootstrap` commits only until `records/jobs/bootstrap/outcome.json` closes the range. The
   measure is `status: not shown` and names `cargo test -p athena-gate bootstrap` (the new
