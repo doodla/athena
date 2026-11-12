@@ -26,8 +26,11 @@ pub use planner::{
     CriticInputs, DeliverableFact, PlanRevision, PlannerInputs, critic_brief, planner_brief,
 };
 pub use reader::{
-    CODE_SURVEY_GUIDE, ENABLED_ROLES_HEADING, EarlierAttempt, EarlierCase, PRIOR_RESULT_HEADING,
-    READING_RULES, READING_RULES_HEADING, REFUSAL_HEADING, ReaderInputs, RetryCause, reader_brief,
+    CHANGELOG_DEFAULT_PHRASE, CHANGELOG_PATH, CODE_SURVEY_GUIDE, CRITERIA_RULES_HEADING,
+    DECISIONS_APPEND_ONLY_PHRASE, DEFAULT_WRITTEN_REASON, ENABLED_ROLES_HEADING, EarlierAttempt,
+    EarlierCase, PRIOR_RESULT_HEADING, READING_RULES, READING_RULES_HEADING,
+    RECORDS_APPEND_ONLY_PHRASE, REFUSAL_HEADING, ReaderInputs, RetryCause, VERDICT_RULE_LINES,
+    reader_brief,
 };
 
 use boundary::{banned_words_section, mirror_check_section};
@@ -3808,6 +3811,280 @@ mod tests {
             "{section}"
         );
         assert!(heading < brief.find("# What the verifier can run").unwrap());
+    }
+
+    /// The enforcing sources the criteria rules are pinned to. athena-context cannot depend on athena-core, so
+    /// the test reads their text.
+    const VERIFY_SRC: &str = include_str!("../../athena-core/src/verify.rs");
+    const MIRRORS_SRC: &str = include_str!("../../athena-core/src/mirrors.rs");
+    const ADMISSION_SRC: &str = include_str!("../../athena-core/src/admission.rs");
+    const CHECKS_SRC: &str = include_str!("../../athena-core/src/reading/checks.rs");
+    const GATE_SRC: &str = include_str!("../../athena-gate/src/lib.rs");
+
+    /// The text before the first test module: the production code only. A copy of a phrase in test code
+    /// cannot satisfy a pin that reads this.
+    fn production(src: &str) -> &str {
+        src.split("\n#[cfg(test)]").next().unwrap()
+    }
+
+    /// The text from the first `from` to the next `to` after it.
+    fn between<'a>(src: &'a str, from: &str, to: &str) -> &'a str {
+        let start = src
+            .find(from)
+            .unwrap_or_else(|| panic!("the enforcing source no longer has `{from}`; move the pin"));
+        let rest = &src[start..];
+        let end = rest
+            .find(to)
+            .unwrap_or_else(|| panic!("`{to}` no longer follows `{from}`; move the pin"));
+        &rest[..end]
+    }
+
+    /// Every (id, source) pair of a `VERDICT_RULES` table.
+    fn verdict_rows(table: &str) -> Vec<(String, String)> {
+        let quoted = |line: &str, key: &str| {
+            line.trim()
+                .strip_prefix(key)
+                .and_then(|rest| rest.strip_prefix('"'))
+                .and_then(|rest| rest.split('"').next())
+                .map(str::to_string)
+        };
+        let mut rows = Vec::new();
+        let mut id = None;
+        for line in table.lines() {
+            if let Some(found) = quoted(line, "id: ") {
+                id = Some(found);
+            } else if let (Some(source), Some(id)) = (quoted(line, "source: "), id.take()) {
+                rows.push((id, source));
+            }
+        }
+        rows
+    }
+
+    /// Every string literal in `src`, in order. The enforcing tables hold no escaped quotes.
+    fn string_literals(src: &str) -> Vec<String> {
+        src.split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// What the section lacks of the enforcing rows: the id of each verdict row with no line that begins
+    /// `- <id>` and quotes its source, and each default-written literal the section does not contain.
+    fn missing_from_section(
+        section: &str,
+        rows: &[(String, String)],
+        literals: &[String],
+    ) -> Vec<String> {
+        let mut missing = Vec::new();
+        for (id, source) in rows {
+            let lead = format!("- {id} ");
+            if !section
+                .lines()
+                .any(|line| line.starts_with(&lead) && line.contains(source.as_str()))
+            {
+                missing.push(id.clone());
+            }
+        }
+        for literal in literals {
+            if !section.contains(literal.as_str()) {
+                missing.push(literal.clone());
+            }
+        }
+        missing
+    }
+
+    /// The text of the `# Rules that judge criteria` section of the reader brief.
+    fn criteria_rules_section(brief: &str) -> String {
+        let (_, rest) = brief
+            .split_once(CRITERIA_RULES_HEADING)
+            .expect("the reader brief has a `# Rules that judge criteria` section");
+        rest.split("\n# ").next().unwrap().to_string()
+    }
+
+    #[test]
+    fn the_reader_brief_states_the_rules_that_judge_criteria() {
+        let brief = reader_brief(&reader_inputs(&reading()));
+        assert_eq!(brief.matches(CRITERIA_RULES_HEADING).count(), 1);
+        let heading = brief.find(CRITERIA_RULES_HEADING).unwrap();
+        assert!(brief.find("# Checkable criteria").unwrap() < heading);
+        assert!(heading < brief.find("# What the verifier can run").unwrap());
+        let section = criteria_rules_section(&brief);
+        let line = |lead: &str| -> String {
+            section
+                .lines()
+                .find(|line| line.starts_with(lead))
+                .unwrap_or_else(|| panic!("no line begins `{lead}`:\n{section}"))
+                .to_string()
+        };
+        // D43: the evidence a behavior criterion may use.
+        let d43 = line("- D43 ");
+        assert!(d43.contains("must cite commands that ran (D43)"), "{d43}");
+        assert!(d43.contains("recorded Athena check"), "{d43}");
+        assert!(
+            d43.contains("content criterion names a file or a diff line"),
+            "{d43}"
+        );
+        // D63: the verifier sees whole simple commands.
+        let d63 = line("- D63 ");
+        assert!(d63.contains("each whole simple command"), "{d63}");
+        assert!(d63.contains("chained or piped"), "{d63}");
+        // D115: a passing record of Athena's own check on the same tree counts.
+        let d115 = line("- D115 ");
+        assert!(
+            d115.contains("passing check that Athena recorded on the same final tree"),
+            "{d115}"
+        );
+        assert!(
+            d115.contains("fmt, clippy and test can be named as evidence"),
+            "{d115}"
+        );
+        assert!(
+            d115.contains("a failed record, or a record made on another tree, does not count"),
+            "{d115}"
+        );
+        // The append-only logs: a new decision, never an edit in place.
+        let log = line("- Append-only logs");
+        assert!(log.contains("docs/decisions.md is append-only"), "{log}");
+        assert!(log.contains("records are append-only"), "{log}");
+        assert!(
+            log.contains(
+                "never write a criterion that edits, annotates or removes an existing entry"
+            ),
+            "{log}"
+        );
+        assert!(
+            log.contains("new appended decision with a Provenance bullet"),
+            "{log}"
+        );
+        assert!(
+            log.contains("only when the new entry supersedes or amends an earlier one"),
+            "{log}"
+        );
+        assert!(log.contains("[[governs]]"), "{log}");
+        assert!(
+            !section.contains("always add a docs/decision-links.toml link"),
+            "{section}"
+        );
+        // The changelog is written by default, so a criterion must not forbid it.
+        let changelog = line("- Changelog");
+        assert!(changelog.contains("CHANGELOG.md"), "{changelog}");
+        assert!(
+            changelog.contains("default-written deliverable"),
+            "{changelog}"
+        );
+        assert!(changelog.contains(DEFAULT_WRITTEN_REASON), "{changelog}");
+        assert!(
+            changelog.contains("must not forbid changing it"),
+            "{changelog}"
+        );
+        assert!(changelog.contains("Scope limit rule above"), "{changelog}");
+        // No new reading-rule line: the rule list and its size stay as they were.
+        assert_eq!(READING_RULES.len(), 12);
+        assert!(
+            section.lines().all(|line| !line.starts_with("# ")),
+            "{section}"
+        );
+    }
+
+    #[test]
+    fn the_criteria_rules_quote_the_wording_the_enforcing_code_uses() {
+        let brief = reader_brief(&reader_inputs(&reading()));
+        let section = criteria_rules_section(&brief);
+
+        // Verdict rules: every row of the enforcing table has a line in the section that quotes its source.
+        let table = between(VERIFY_SRC, "const VERDICT_RULES", "const REQUIRED_FIELDS");
+        let rows = verdict_rows(table);
+        for id in ["D43", "D63", "D115"] {
+            assert!(
+                rows.iter().any(|(row, _)| row == id),
+                "the parse of VERDICT_RULES in verify.rs lost {id}; move the pin with the table: {rows:?}"
+            );
+        }
+        // The shared table agrees with the enforcing one, row by row.
+        assert_eq!(
+            VERDICT_RULE_LINES
+                .iter()
+                .map(|(id, source, _)| (id.to_string(), source.to_string()))
+                .collect::<Vec<_>>(),
+            rows,
+            "VERDICT_RULE_LINES in athena-context reader.rs must hold the rows of VERDICT_RULES in athena-core verify.rs"
+        );
+
+        // Default-written files: every literal of the enforcing const is in the section.
+        let written = between(CHECKS_SRC, "const DEFAULT_WRITTEN_FILES", ")];");
+        let literals = string_literals(written);
+        assert!(
+            literals.iter().any(|l| l == DEFAULT_WRITTEN_REASON),
+            "DEFAULT_WRITTEN_FILES in reading/checks.rs no longer says `{DEFAULT_WRITTEN_REASON}`; update DEFAULT_WRITTEN_REASON in reader.rs: {literals:?}"
+        );
+        assert!(
+            written.contains("CHANGELOG_PATH"),
+            "DEFAULT_WRITTEN_FILES names a path other than CHANGELOG_PATH; the brief must name it: {written}"
+        );
+        assert!(section.contains(CHANGELOG_PATH));
+
+        let missing = missing_from_section(&section, &rows, &literals);
+        assert!(
+            missing.is_empty(),
+            "the Rules that judge criteria section lacks {missing:?}; add them to reader.rs with the enforcing change"
+        );
+
+        // The phrases the enforcing messages open with, read from production code only.
+        for (phrase, file, source) in [
+            (DECISIONS_APPEND_ONLY_PHRASE, "mirrors.rs", MIRRORS_SRC),
+            (CHANGELOG_DEFAULT_PHRASE, "admission.rs", ADMISSION_SRC),
+            (RECORDS_APPEND_ONLY_PHRASE, "athena-gate lib.rs", GATE_SRC),
+        ] {
+            assert!(
+                production(source).contains(phrase),
+                "production code in {file} no longer says `{phrase}`; update the constant in reader.rs"
+            );
+            assert!(section.contains(phrase), "the section lacks `{phrase}`");
+        }
+    }
+
+    #[test]
+    fn the_drift_helpers_report_a_new_or_reworded_enforcing_row() {
+        let section = "- D43 (verifier rule, `must cite commands that ran (D43)`): x.\n\
+                       - Changelog (CHANGELOG.md): Athena always adds it.";
+        let table = r#"
+            VerdictRule {
+                id: "D43",
+                source: "must cite commands that ran (D43)",
+                summary: "s",
+            },
+            VerdictRule {
+                id: "D44",
+                source: "a source the brief never quoted",
+                summary: "s",
+            },
+            VerdictRule {
+                id: "D45",
+                source: "must cite commands that ran (D43)",
+            },
+        "#;
+        let rows = verdict_rows(table);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let literals = string_literals(
+            r#"[(CHANGELOG_PATH, "Athena always adds it"), ("NOTES.md", "a new reason")]"#,
+        );
+        assert_eq!(
+            literals,
+            ["Athena always adds it", "NOTES.md", "a new reason"]
+        );
+        // D44 has no line, D45 has no line (its source sits on the D43 line), and two literals are absent.
+        assert_eq!(
+            missing_from_section(section, &rows, &literals),
+            ["D44", "D45", "NOTES.md", "a new reason"]
+        );
+        // A reworded source of an existing id is reported too.
+        let reworded =
+            verdict_rows("id: \"D43\",\nsource: \"must cite commands that ran (D43), reworded\",");
+        assert_eq!(missing_from_section(section, &reworded, &[]), ["D43"]);
+        // The pinned production slice leaves out a copy of the phrase held in test code.
+        let source = "fn f() { \"old\" }\n#[cfg(test)]\nmod tests { \"new phrase\" }";
+        assert!(!production(source).contains("new phrase"));
     }
 
     #[test]

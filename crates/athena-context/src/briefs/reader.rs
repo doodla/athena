@@ -299,6 +299,54 @@ pub const READING_RULES: [&str; 12] = [
     "Enabled roles: brief content targets only roles under Enabled roles (prose only).",
 ];
 
+/// The heading of the section that states the rules that judge a criterion once it is written.
+pub const CRITERIA_RULES_HEADING: &str = "# Rules that judge criteria";
+
+/// The verdict rules the verifier applies to a criterion, as (id, source, meaning). `source` is the phrase
+/// the row of `VERDICT_RULES` in athena-core `verify.rs` quotes for the same id, and the brief quotes it
+/// unchanged. athena-context cannot depend on athena-core, so the test
+/// `the_criteria_rules_quote_the_wording_the_enforcing_code_uses` reads that table and fails when a row is
+/// added or reworded and this table does not follow. Move the row and this entry together.
+pub const VERDICT_RULE_LINES: [(&str, &str, &str); 3] = [
+    (
+        "D43",
+        "must cite commands that ran (D43)",
+        "a behavior criterion is met only by commands that ran; its evidence must cite them. Name the \
+         command the verifier runs or a recorded Athena check. A content criterion names a file or a diff line",
+    ),
+    (
+        "D63",
+        "as one whole simple command inside a chained or piped one",
+        "the verifier sees a chained or piped command only as each whole simple command in it, so name \
+         each command as its own simple command; part of a command does not count",
+    ),
+    (
+        "D115",
+        "Athena ran and recorded it on the same candidate tree and it passed",
+        "a passing check that Athena recorded on the same final tree counts as a command run, so fmt, \
+         clippy and test can be named as evidence; a failed record, or a record made on another tree, does not count",
+    ),
+];
+
+/// The phrase `append_only_problem` in athena-core `mirrors.rs` opens its finding with when an existing line of
+/// docs/decisions.md is changed or removed.
+pub const DECISIONS_APPEND_ONLY_PHRASE: &str = "docs/decisions.md is append-only";
+
+/// The phrase the records gate in athena-gate `lib.rs` opens its finding with when a record is modified.
+pub const RECORDS_APPEND_ONLY_PHRASE: &str = "records are append-only";
+
+/// The path of the changelog. athena-core uses this value for the changelog default, so the brief and the
+/// check that adds the entry cannot name different files.
+pub const CHANGELOG_PATH: &str = "CHANGELOG.md";
+
+/// The phrase `admission.rs` in athena-core uses when a candidate leaves out the changelog entry.
+pub const CHANGELOG_DEFAULT_PHRASE: &str = "the changelog default applies";
+
+/// Why Athena writes `CHANGELOG.md` in every change reading, as `DEFAULT_WRITTEN_FILES` in athena-core
+/// `reading/checks.rs` words it.
+pub const DEFAULT_WRITTEN_REASON: &str =
+    "Athena always adds it to a change reading, and the job must record itself there";
+
 /// What the reader writes before it gives behavior criteria for a code or tests change, and when a request
 /// adds or tightens a refusal rule. Printed after the rule list in the reader brief.
 ///
@@ -526,6 +574,39 @@ fn reference_and_rules_section(out: &mut String, inputs: &ReaderInputs) {
         out,
         "# Checkable criteria\n\n{CHECKABLE_CRITERIA_RULE} Write each criterion so its check names a file, a diff line or a command \
          the verifier can run (listed under What the verifier can run when given).\n"
+    );
+    criteria_judging_section(out);
+}
+
+/// The rules that judge a criterion once it is written: the verdict rules, the append-only logs and the
+/// default-written changelog. They are Athena's rules, not preferences, and a criterion that contradicts one
+/// cannot be met. Each line is built from the constants above, so the brief and the enforcing code share
+/// their wording (the test `the_criteria_rules_quote_the_wording_the_enforcing_code_uses` pins both).
+///
+/// Root cause this section removes: the reader brief named the reading checks but never the rules that judge
+/// a criterion, so readings wrote criteria that contradict them (jobs 20261023-183245-dd7r,
+/// 20261024-045548-7qht, 20261102-005332-8gkv, 20261106-041052-wzy7, 20261030-013721-4gwn). No refusal rule
+/// stands behind it: the brief gives the information instead.
+fn criteria_judging_section(out: &mut String) {
+    let _ = writeln!(
+        out,
+        "{CRITERIA_RULES_HEADING}\n\nAthena applies these rules when it judges the criteria you write. They are not preferences: a criterion \
+         that contradicts one cannot be met.\n"
+    );
+    for (id, source, meaning) in VERDICT_RULE_LINES {
+        let _ = writeln!(out, "- {id} (verifier rule, `{source}`): {meaning}.");
+    }
+    let _ = writeln!(
+        out,
+        "- Append-only logs ({DECISIONS_APPEND_ONLY_PHRASE}; {RECORDS_APPEND_ONLY_PHRASE}): never write a criterion that edits, annotates \
+         or removes an existing entry of docs/decisions.md or anything under records/. Write `record it in a new appended decision with a \
+         Provenance bullet` instead. Add a docs/decision-links.toml link only when the new entry supersedes or amends an earlier one, or the \
+         change touches a path listed under [[governs]] there."
+    );
+    let _ = writeln!(
+        out,
+        "- Changelog ({CHANGELOG_PATH}; {CHANGELOG_DEFAULT_PHRASE}): it is a default-written deliverable ({DEFAULT_WRITTEN_REASON}), so a \
+         criterion must not forbid changing it. The Scope limit rule above says how to write a limit that allows it.\n"
     );
 }
 

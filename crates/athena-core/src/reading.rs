@@ -34,7 +34,8 @@ use athena_agent::AgentInvocation;
 use athena_agent::env::{EnvSpec, Side};
 use athena_agent::policy::Policy;
 use athena_context::briefs::{
-    EarlierAttempt, EarlierCase, ReaderInputs, RetryCause, reader_brief, render_catalog,
+    CHANGELOG_PATH, EarlierAttempt, EarlierCase, ReaderInputs, RetryCause, reader_brief,
+    render_catalog,
 };
 use athena_context::outputs::{
     CriterionKindOutput, DeliverableActionOutput, ReaderChoices, ReadingOutput, reading_schema,
@@ -306,9 +307,6 @@ fn normalize_path(path: &str) -> Option<String> {
     }
     Some(trimmed.to_string())
 }
-
-/// The path every change reading must list, so that the deliverables list is the one statement of scope.
-const CHANGELOG_PATH: &str = "CHANGELOG.md";
 
 /// Adds `CHANGELOG.md` to a change reading's deliverables, with a `changelog` default that cites BRIEF.md.
 /// Nothing is added when the file is already listed, or when the reading is not a change.

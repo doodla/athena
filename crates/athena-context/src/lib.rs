@@ -7,7 +7,8 @@
 //!   contract, the role frame, the capability's section), so prompt caching can reuse it;
 //! - each role's whole always-loaded set has a fixed token budget, checked by a byte estimator as a
 //!   tripwire, with live measurement as the authority;
-//! - briefs carry the job-specific part, built deterministically from records ([`briefs`]);
+//! - briefs carry the job-specific part, built deterministically from records ([`briefs`]); the reader's brief
+//!   also states the rules that judge the criteria it writes (`# Rules that judge criteria`);
 //! - a study's producer and verifier briefs also carry the pin Athena resolved (url, ref, full SHA) in a
 //!   "Pinned source" section, shown only when the job pinned a repository;
 //! - the three roles' structured outputs are typed, and their JSON Schemas are generated from the types
