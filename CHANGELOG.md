@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- OLY-A-07 now has a mechanism: `requirements_engineer_gaps` in the Hestia spec review reports active
+  requirements with no owner, mechanism or valid measure, and ontology terms with no source, in
+  `SpecReport::engineer_gaps`. It queues nothing and refuses no readings, so 0% of past readings are newly refused.
 - The producer brief now tells the producer to find and run the existing tests that read the output it changes.
   Root cause of the repeated failure (jobs 20261111-105048-n7bm and 20261111-213010-8jgz, a new status line that
   broke an existing test, caught only at the final verdict): nothing in the brief asked the producer to find the
