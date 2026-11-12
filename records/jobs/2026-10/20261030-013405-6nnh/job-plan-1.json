@@ -1,0 +1,234 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-013405-6nnh",
+  "round": 1,
+  "at": "2026-11-12T04:51:47.037077716Z",
+  "invocation_seq": 3,
+  "approach": "Reuse the existing forecast path and add no new mechanism. build_reading (reading.rs:767-934) turns the reader's forecast into Reading.forecasts.reader plus a reference forecast. The reading is committed before go_job dispatches it (run/mod.rs:456-464), and the gate invariant requires the reading to precede dispatch (athena-gate/src/invariant.rs:10-14). class_forecasts (status.rs:981) scores the forecasts per class. In docs/spec.toml, replace OLY-B-GOAL-03's mechanism \"none\" (line 2090) with those paths and set the measure (line 2092) to end `status: forecasts`. Add (\"forecasts\", \"forecasts\") to STATUS_MEASURE_LABELS (status.rs:305). Move the forecasts printing in display.rs into a small helper whose first-row label is the literal \"forecasts   \", so every_measure_label_names_a_status_view_field_and_a_printed_line (status.rs:1630, which searches the status.rs, display.rs and hestia.rs sources for `\"forecasts `) finds it. Add three tests (spec test in status.rs, pre-dispatch forecast test in reading.rs, helper test in display.rs) and a CHANGELOG entry. Scoring, the reference logic and the refusal rules do not change. This revision only completes the criterion 4 demonstration with its seam; the rest of the plan is unchanged.",
+  "decisions": [
+    {
+      "choice": "Name reading.rs, status.rs, run/mod.rs go_job and the gate invariant as the mechanism, with measure label `forecasts`.",
+      "reason": "The reader's forecasts are committed in the reading before dispatch (reading.rs:915; run/mod.rs:456). status.rs:981 already scores them per class and display.rs:1390 already prints them. Naming this path is the smallest honest change; the label needs one table entry.",
+      "rejected": [
+        {
+          "option": "Build a new forecast role or check.",
+          "why": "The path exists. A second one would duplicate it and break the 'small' default."
+        },
+        {
+          "option": "Write `status: not shown` and name a test.",
+          "why": "A status line prints the forecasts, so a label is stronger evidence, and the reading asked for `status: forecasts`."
+        }
+      ]
+    },
+    {
+      "choice": "Extract the forecasts printing from status() into a helper `forecast_headline_lines(&[ClassHeadline]) -> String`, with the literal \"forecasts   \" for the first row.",
+      "reason": "The label test needs the source to contain `\"forecasts ` (status.rs:1640). Today display.rs:1391 has `\"forecasts\"` followed by a quote, so it does not match. The output stays byte-identical: {label:<11} plus a space is 12 characters, the same as \"forecasts   \". A helper is testable without a whole StatusView.",
+      "rejected": [
+        {
+          "option": "Weaken the label test.",
+          "why": "It would loosen a guard for all labels."
+        },
+        {
+          "option": "Test through status(&StatusView) with a full fixture.",
+          "why": "It needs a large StatusView literal; the helper covers the same line with less."
+        }
+      ]
+    },
+    {
+      "choice": "Put the spec test in status.rs's existing test module, using crate::hestia::parse_spec and measure_problem. The test body must not contain the text `\"forecasts ` (a quote, the word, a space), so the label test is not satisfied by the test's own source.",
+      "reason": "status.rs is a listed deliverable. The test mirrors hestia.rs:4315 (OLY-B-SET-04 is not a gap). The label test also searches status.rs's own source, so a stray `\"forecasts ` there would hide a missing display literal; only display.rs may hold it.",
+      "rejected": [
+        {
+          "option": "Add the test to hestia.rs.",
+          "why": "hestia.rs is not a listed deliverable, and the label table lives in status.rs."
+        }
+      ]
+    },
+    {
+      "choice": "The reading.rs test runs the real build_reading through the existing build_sized/sized_reading helpers (reading.rs:1666-1726) and asserts the committed Reading carries the reader's forecast and a valid reference, and that output without `forecast` is refused.",
+      "reason": "Criterion 3 asks for a test that fails when the forecast is removed. build_reading parses ReadingOutput, in which `forecast` is required, so removal errors with 'parsing the reading'.",
+      "rejected": [
+        {
+          "option": "Only assert a Forecasts field exists.",
+          "why": "That checks wiring, not behavior; the behavior-evidence default forbids it."
+        }
+      ]
+    },
+    {
+      "choice": "Criterion 4 is shown by running the three checks Athena runs over the whole workspace, with named seams: the real docs/spec.toml, the real source files read by include_str!, and the real tests.",
+      "reason": "The checks are the acceptance criterion; the interesting guards are the existing tests that read the changed files (label test status.rs:1630, xtask spec test xtask/tests/spec.rs:194, hestia real-spec tests). No fake is used; each reads the file the plan edits.",
+      "rejected": [
+        {
+          "option": "Run only the new tests for criterion 4.",
+          "why": "Criterion 4 says fmt, clippy and the whole test suite pass; the other tests that read the edited spec and sources must be run too."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "OLY-B-GOAL-03 (lines 2090 and 2092): replace mechanism \"none\" with the forecast path (reading.rs, run/mod.rs go_job, gate invariant.rs, status.rs class_forecasts and the printed forecasts line); keep owner Athena; set measure ending `status: forecasts`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add (\"forecasts\", \"forecasts\") to STATUS_MEASURE_LABELS (line 305); add the test oly_b_goal_03_is_met_by_the_forecast_path_and_shown_by_the_forecasts_line in the first test module.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Replace the forecasts loop in status() (lines 1390-1401) with a call to new forecast_headline_lines whose first-row label is the literal \"forecasts   \"; add its test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add test a_reading_commits_the_reader_forecast_and_a_reference_before_dispatch to the tests module (near line 1779); no production change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased/Added entry in the style of the OLY-B-SET-04 entry.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "docs/spec.toml: edit the OLY-B-GOAL-03 entry. Set mechanism to a sentence naming crates/athena-core/src/reading.rs (build_reading commits the reader and reference forecasts in the reading before any work), crates/athena-core/src/run/mod.rs (go_job dispatches only a committed reading), crates/athena-gate/src/invariant.rs (prediction before work) and crates/athena-core/src/status.rs (class_forecasts scores them per class; athena status prints the forecasts line). Leave owner = \"Athena\", statement and sources alone. Set measure to \"Mean event Brier score of the reader's forecasts against the reference's, per class of work with scored jobs; status: forecasts\".",
+    "crates/athena-core/src/status.rs: add (\"forecasts\", \"forecasts\") to STATUS_MEASURE_LABELS after (\"audience\", \"audience\") (order is free).",
+    "crates/athena-cli/src/display.rs: add `fn forecast_headline_lines(forecasts: &[athena_core::status::ClassHeadline]) -> String`. For each (i, h), set `let label = if i == 0 { \"forecasts   \" } else { \"            \" };` and writeln! `\"{label}{}: {} scored · mean event Brier reader {} · reference {}\"` with the same `fmt` closure (`{:.3}` or `-`). In status(), replace the loop at 1390-1401 with `out.push_str(&forecast_headline_lines(&v.forecasts));`. Add the display test forecast_headline_lines_start_with_the_forecasts_label_and_show_each_class: row one starts with `forecasts `, row two starts with 12 spaces, a None Brier prints `-`, an empty list gives an empty string.",
+    "crates/athena-core/src/reading.rs: in the tests module after a_reading_within_both_timeouts_is_accepted (line ~1779), add a_reading_commits_the_reader_forecast_and_a_reference_before_dispatch. (a) build_sized(sized_reading(30.0, Some(\"study\")), 3000, 2400) is Ok; assert reader p_reading_accepted == 0.8, p_verification_passes == 0.7, p_user_intervenes == 0.1, cost p50 == 0.2, wall p50 == 30.0, and reference.validate() is Ok. (b) Remove the `forecast` key from sized_reading's JSON and assert build_sized returns Err containing 'parsing the reading'.",
+    "crates/athena-core/src/status.rs: in the first test module add oly_b_goal_03_is_met_by_the_forecast_path_and_shown_by_the_forecasts_line. Parse include_str!(\"../../../docs/spec.toml\") with crate::hestia::parse_spec; find OLY-B-GOAL-03; assert the mechanism is not \"none\" and contains \"reading.rs\" and \"status.rs\"; owner is \"Athena\"; the measure ends with \"status: forecasts\" and crate::hestia::measure_problem is None; the id is absent from crate::hestia::spec_gaps; STATUS_MEASURE_LABELS holds (\"forecasts\", \"forecasts\"); and a clone with mechanism \"none\" is a gap with no_mechanism true. Do not write a quote, the word forecasts and a space together in this test's source.",
+    "CHANGELOG.md: add an entry at the top of [Unreleased] / Added, in the style of the OLY-B-SET-04 entry. Name the paths, the new `forecasts` label in STATUS_MEASURE_LABELS, the helper and the three tests. State that scoring is unchanged and no reading is newly refused.",
+    "Run cargo fmt --all, then cargo clippy --all-targets --locked -- -D warnings, then cargo test --locked (including cargo test -p xtask --test spec). Fix any failure; do not weaken any existing test."
+  ],
+  "risks": [
+    {
+      "risk": "The first forecasts row changes by a byte, which would break a test or a reader of the status text.",
+      "mitigation": "{label:<11} plus one space equals \"forecasts   \" (9 letters plus 3 spaces = 12). No other test or doc asserts the text. The new display test pins the format."
+    },
+    {
+      "risk": "clippy flags the new helper (for example needless_range_loop or format_push_string).",
+      "mitigation": "Follow neighbouring helpers (code_health_section, duties_lines): iterate with enumerate and write with writeln! into a String. Run clippy with -D warnings."
+    },
+    {
+      "risk": "The producer edits the 201 KB spec file or the 390 KB reading.rs with a broad replace.",
+      "mitigation": "Edit only the OLY-B-GOAL-03 mechanism and measure lines (2090 and 2092). Add the reading.rs test in the tests module only. The spec tests (xtask and hestia) parse the file."
+    },
+    {
+      "risk": "The spec text names a path or function that does not exist (criterion 1 says 'exists in the code').",
+      "mitigation": "Use only names read in this plan: crates/athena-core/src/reading.rs (build_reading), crates/athena-core/src/run/mod.rs (go_job), crates/athena-gate/src/invariant.rs, crates/athena-core/src/status.rs (class_forecasts). The status.rs test asserts the mechanism contains reading.rs and status.rs."
+    },
+    {
+      "risk": "The new status.rs test text contains `\"forecasts ` and so satisfies the label test without a display.rs literal.",
+      "mitigation": "Step 5 forbids that text in the test; the display test and the label test then depend on display.rs alone."
+    },
+    {
+      "risk": "The measure's outcome is only partly measured: the Brier headline exists only for classes with scored jobs.",
+      "mitigation": "The measure says 'per class of work with scored jobs'. With no scored jobs the line is absent, as today; the claim does not exceed what status prints."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "STATUS_MEASURE_LABELS gains (\"forecasts\", \"forecasts\")",
+      "dependent": "crates/athena-core/src/status.rs:1630 every_measure_label_names_a_status_view_field_and_a_printed_line (include_str! of display.rs, status.rs, hestia.rs)",
+      "kind": "code",
+      "test": "The test itself: needs `    pub forecasts:` in status.rs (exists, line 475) and `\"forecasts ` in display.rs (added by step 3).",
+      "reason": null
+    },
+    {
+      "name": "measure label `forecasts` and OLY-B-GOAL-03 mechanism",
+      "dependent": "crates/athena-core/src/hestia.rs:1219 measure_problem, spec_gaps and spec_review (queues the 'Give requirement ... a mechanism' request)",
+      "kind": "code",
+      "test": "The new status.rs test asserts measure_problem is None and OLY-B-GOAL-03 is absent from spec_gaps; hestia.rs:4286 checks every active requirement's mechanism, owner and measure.",
+      "reason": null
+    },
+    {
+      "name": "docs/spec.toml OLY-B-GOAL-03 entry",
+      "dependent": "xtask/tests/spec.rs check_how_it_is_met (line 194): mechanism not empty, owner not none, measure has a `status:` label",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test spec. The entry keeps owner Athena, a non-empty mechanism and the `status: forecasts` suffix; sources and statement are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "docs/spec.toml (only the OLY-B-GOAL-03 lines change)",
+      "dependent": "crates/athena-core/src/hestia.rs:4286 and :4315, crates/athena-core/src/iris.rs:229, crates/athena-core/tests/model_roster.rs:52 (read other entries of docs/spec.toml by id)",
+      "kind": "code",
+      "test": null,
+      "reason": "They look up other ids (OLY-A-22, OLY-7-04, OLY-B-SET-04, OLY-B-SET-02) or iterate all active requirements; no other entry changes. hestia.rs:4289 requires at least 264 active requirements; the count is unchanged."
+    },
+    {
+      "name": "The `athena status` forecasts rows when moved into a helper",
+      "dependent": "crates/athena-cli/src/display.rs status() and its callers (the status command)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli forecast_headline",
+      "reason": "The helper writes the same bytes: the first row `forecasts` padded to 12 characters, then the class text; later rows 12 spaces. A search found no other test or doc asserting the old text. The StatusView JSON (ClassHeadline, status.rs:137) is unchanged."
+    },
+    {
+      "name": "reading.rs forecast construction (only a test is added; production code unchanged)",
+      "dependent": "crates/athena-core/src/reading.rs build_reading callers (read_once; the ask, correct and re-read paths), scope_guard.rs:712 (reads forecasts.reader.cost_usd.p90()), athena-score/src/lib.rs:403 (scores the reader and reference forecasts), briefs.rs:3546",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading",
+      "reason": "No production behavior in reading.rs changes, so none of these callers see a difference. The new test calls the existing build_sized helper only."
+    },
+    {
+      "name": "CHANGELOG entry",
+      "dependent": "CHANGELOG.md Unreleased/Added section, read by humans only",
+      "kind": "rule",
+      "test": null,
+      "reason": "No test parses the entry's text; the changelog default asks for a record there."
+    },
+    {
+      "name": "Reading refusal rules (check_reading_size, named refusals)",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and every refusal rule",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan adds or changes no refusal or matching rule, so no refusal_corpus case is needed. The only refusal the new test touches is the existing serde failure for a missing `forecast`, which no rule or corpus case reads. Expected newly refused readings: 0%."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Run the new status.rs test, which parses the real docs/spec.toml, and read the entry with Grep.",
+      "command": "cargo test -p athena-core oly_b_goal_03",
+      "observes": "The test passes. Grep of docs/spec.toml for `id = \"OLY-B-GOAL-03\"` with -A 4 shows a mechanism naming crates/athena-core/src/reading.rs and crates/athena-core/src/status.rs instead of \"none\", owner Athena, and a measure ending `status: forecasts`.",
+      "fails_without": "Reverting the mechanism to \"none\" or dropping the `status: forecasts` suffix fails the test (asserts on mechanism text, owner, measure_problem None, absence from spec_gaps; a clone with mechanism \"none\" is a gap).",
+      "seam": "Production entry points: crate::hestia::parse_spec (hestia.rs) over include_str!(\"../../../docs/spec.toml\"), crate::hestia::measure_problem (hestia.rs:1219) and crate::hestia::spec_gaps; fixture is the real spec file (compiled in by include_str!) and a clone of the entry with mechanism set to \"none\". Exists (the functions are read in hestia.rs); the test is added by plan step 5."
+    },
+    {
+      "criterion": 2,
+      "method": "Run the existing label test and the new display test; diff status.rs and display.rs to see the table entry and the \"forecasts   \" literal.",
+      "command": "cargo test -p athena-core every_measure_label_names_a_status_view_field_and_a_printed_line",
+      "observes": "The label test passes with ('forecasts','forecasts'): StatusView has `    pub forecasts:` (status.rs:475) and display.rs holds `\"forecasts `. Then `cargo test -p athena-cli forecast_headline` shows the rendered first row starts with `forecasts `.",
+      "fails_without": "Without the display.rs literal the label test fails with \"`athena status` prints no line starting \\\"forecasts\\\"\"; without the table entry the display test still passes but the Grep/diff check fails.",
+      "seam": "Production entry points: the label test (status.rs:1630) reads include_str! of status.rs, display.rs and hestia.rs; forecast_headline_lines in display.rs, which status() calls. Fixture: ClassHeadline literals passed straight to the helper; no double. The label test exists; the helper and its test are added by plan step 3."
+    },
+    {
+      "criterion": 3,
+      "method": "Three unit tests over real code paths. Reading test: build_sized returns Ok with the full forecast and Err without the `forecast` key. Spec test as in criterion 1. Display test: the rendered rows.",
+      "command": "cargo test -p athena-core a_reading_commits_the_reader_forecast_and_a_reference_before_dispatch",
+      "observes": "Passes with the change: Reading.forecasts.reader.p_reading_accepted == 0.8, p_verification_passes == 0.7, p_user_intervenes == 0.1, cost p50 == 0.2, wall p50 == the input, the reference forecast validates, and the output without `forecast` is refused with 'parsing the reading'. Also run `cargo test -p athena-core oly_b_goal_03` and `cargo test -p athena-cli forecast_headline`; the display test shows row one `forecasts   docs: 3 scored · mean event Brier reader 0.120 · reference 0.250`, row two starting with 12 spaces, a None Brier printed as `-`.",
+      "fails_without": "Reading test: without the `forecast` object build_reading returns 'parsing the reading'; if build_reading stopped carrying the forecast into Reading.forecasts, the equality assertions on the reader values fail. Spec test: mechanism reverted to \"none\" or label dropped fails it. Display test: dropping the label or the per-class scores fails it.",
+      "seam": "Production entry points: Athena::build_reading (reading.rs:767) through the existing build_sized helper (reading.rs:1692; make_athena with a script that panics if an agent runs; Records::default(); shipped athena.toml and defaults.toml), injected as plain JSON from sized_reading; forecast_headline_lines (display.rs, step 3); hestia::parse_spec/measure_problem. build_sized and sized_reading exist (read at reading.rs:1666-1726); the helper is added by step 3 and the tests by steps 3-5. No double holds logic under test; fixtures are plain data."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three checks Athena runs, in full, over the whole workspace, plus the two suites that read the edited spec entry and sources: the xtask spec test and the athena-core label test.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. Format of the edited files is clean, clippy has no warnings, and every test passes, including every_measure_label_names_a_status_view_field_and_a_printed_line (status.rs:1630), xtask/tests/spec.rs (check_how_it_is_met at line 194: non-empty mechanism, owner not none, measure ending `status: <label>`), the hestia real-spec tests (hestia.rs:4286 and :4315) and the three new tests. Run `cargo test -p xtask --test spec` separately to see the spec test alone.",
+      "fails_without": "Without the display.rs literal the label test fails for 'forecasts'. If the spec measure lost its `status:` label, check_how_it_is_met fails (xtask/tests/spec.rs:204-212). Without the spec edit the existing real-spec tests still pass (mechanism \"none\" is allowed there); the new status.rs test is what fails.",
+      "seam": "Production entry points: cargo's fmt, clippy and test over the workspace (the checks Athena runs), including xtask/tests/spec.rs check (reads the real docs/spec.toml and the brief) and the label test (status.rs:1630). Fixtures: the real repository files (docs/spec.toml, display.rs, status.rs, hestia.rs via include_str! or fs read); no fake or double and nothing injected. Exists today (read at xtask/tests/spec.rs:194-213 and status.rs:1630-1649); the new tests and the display literal are added by plan steps 3-5."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "1432058bdcfdd35c66a0b70295b8e31f42e1d677df76bd82ccb88ec759c75a39"
+}

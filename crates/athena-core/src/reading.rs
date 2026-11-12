@@ -1779,6 +1779,23 @@ mod tests {
     }
 
     #[test]
+    fn a_reading_commits_the_reader_forecast_and_a_reference_before_dispatch() {
+        let reading = build_sized(sized_reading(30.0, Some("study")), 3000, 2400).unwrap();
+        let reader = &reading.forecasts.reader;
+        assert_eq!(reader.p_reading_accepted, 0.8);
+        assert_eq!(reader.p_verification_passes, 0.7);
+        assert_eq!(reader.p_user_intervenes, 0.1);
+        assert_eq!(reader.cost_usd.p50(), 0.2);
+        assert_eq!(reader.wall_time_s.p50(), 30.0);
+        assert!(reading.forecasts.reference.validate().is_ok());
+        // A reading without a forecast is refused: no work is dispatched unpredicted.
+        let mut bare = sized_reading(30.0, Some("study"));
+        bare.as_object_mut().unwrap().remove("forecast");
+        let error = format!("{:#}", build_sized(bare, 3000, 2400).unwrap_err());
+        assert!(error.contains("parsing the reading"), "{error}");
+    }
+
+    #[test]
     fn a_decline_is_not_held_to_the_deadlines() {
         // A decline starts no run, so an oversize forecast does not refuse it.
         let reading = build_sized(sized_reading(5000.0, None), 3000, 2400).unwrap();
