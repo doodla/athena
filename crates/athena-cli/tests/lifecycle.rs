@@ -2963,6 +2963,29 @@ fn hand_work_is_declared_with_staged_changes_and_rescores_the_job() {
     );
 }
 
+#[test]
+fn a_restart_raises_the_restarts_count_athena_status_prints() {
+    // OLY-B-O5-01: the state of the work after a restart comes from Athena's records.
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let before = athena.status().unwrap();
+    assert_eq!(before.restarts, 0);
+    assert!(athena_cli::display::status(&before).contains("restarts    0"));
+    athena
+        .restart(
+            &athena_core::manage::RestartArgs {
+                cost: "re-read the status".into(),
+                via: vec!["athena status".into()],
+                ..Default::default()
+            },
+            &Lines::default(),
+        )
+        .unwrap();
+    let after = athena.status().unwrap();
+    assert_eq!(after.restarts, 1);
+    assert!(athena_cli::display::status(&after).contains("restarts    1"));
+}
+
 /// What a producer that was resumed from kept work saw: whether the earlier edit was in its working directory
 /// before it did anything, and its brief.
 type Seen = Arc<Mutex<Vec<(bool, String)>>>;
