@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- OLY-B-SET-04 now has a mechanism: `check_generation` in `crates/athena-core/src/iris.rs` reads the committed
+  Iris spend ledger `docs/iris-ledger.toml` (whole cents, no entries yet) and refuses a generation that would
+  take lifetime spend over the 1500-cent ($15) cap; exactly the cap is allowed. The cap is a constant in code,
+  not a ledger field, and the ledger parser accepts only `date`, `cents` and `note`, so it cannot carry a
+  credential. No generation path calls the guard yet, because no Iris client exists, so no reading is newly
+  refused. The harness-engineering reference stays prose (`README.md` Attribution). The measure is
+  `status: not shown` and names `cargo test -p athena-core iris` and `cargo test -p athena-core hestia`.
 - OLY-B-SET-02 now has a mechanism: `Config::validate` in `crates/athena-data/src/config.rs` refuses any
   `athena.toml` Athena loads (this repository's or a user's) whose `[models]` roles (reader, producer_default,
   producer_allowed, verifier, hard_producer_model) name no Opus, no Sonnet or no Haiku model, with the new
