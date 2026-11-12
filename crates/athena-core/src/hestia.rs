@@ -4363,6 +4363,34 @@ mod tests {
         assert!(gaps[0].no_mechanism);
     }
 
+    #[test]
+    fn oly_b_run_02_no_longer_appears_in_the_spec_gap_list() {
+        let requirements = parse_spec(include_str!("../../../docs/spec.toml")).unwrap();
+        let r = requirements
+            .iter()
+            .find(|r| r.id == "OLY-B-RUN-02")
+            .expect("OLY-B-RUN-02 is in the spec")
+            .clone();
+        assert_ne!(r.mechanism, "none");
+        assert!(r.mechanism.contains("setup.sh"), "{}", r.mechanism);
+        assert!(r.mechanism.contains("xtask/src/main.rs"), "{}", r.mechanism);
+        assert_eq!(r.owner, "Athena");
+        assert_eq!(measure_problem(&r.measure), None, "{}", r.measure);
+        assert!(r.measure.ends_with("status: not shown"), "{}", r.measure);
+        assert!(r.measure.contains("setup_repeatable"), "{}", r.measure);
+        assert!(
+            !spec_gaps(&requirements).iter().any(|g| g.id == r.id),
+            "OLY-B-RUN-02 is still a spec gap"
+        );
+
+        // The same entry without its mechanism is a gap.
+        let mut without = r;
+        without.mechanism = "none".into();
+        let gaps = spec_gaps(&[without]);
+        assert_eq!(gaps.len(), 1);
+        assert!(gaps[0].no_mechanism);
+    }
+
     // -----------------------------------------------------------------------------------------------------
     // Gate review
 
