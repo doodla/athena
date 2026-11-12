@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013717-3r2v",
+  "round": 2,
+  "at": "2026-11-12T12:32:48.886795368Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "xtask/shard-timings.txt is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, xtask/shard-timings.txt",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "`status: requirement` is a valid label, so measure_problem accepts it and the negative test cannot show the refusal it claims",
+      "evidence": "crates/athena-core/src/status.rs line 321 lists (\"requirement\", \"spec_gaps\") in STATUS_MEASURE_LABELS. In hestia.rs lines 1229-1234, measure_problem returns None for any label in that list. The current OLY-B-STD-03 measure 'The spec gap list; status: requirement' passes measure_problem today. The plan says the test 'asserts `measure_problem` is Some or the end-label assertion fails'. The first half fails as an assertion. The second half is not a seam: a test cannot check that an assertion fails. Criterion 3 says a measure not ending in `status: not shown` must be refused, and no production function enforces that. The criterion 1 demonstration is also wrong to say the old entry fails the measure_problem assertion. Only the ends_with check catches it. Fix: Add a pure `measure_label_problem(&SpecRequirement) -> Option<String>` to buy_first.rs next to owner_problem. It returns Some unless the measure ends with `status: not shown` and names `cargo test -p athena-core --test buy_first`. Use it in spec_entry_has_a_real_mechanism and in the wrong-label negative, and assert it returns Some for `status: requirement`. Keep a separate negative for an invalid label such as `status: bogus`, where measure_problem is Some. Correct the criterion 1 'fails without' text.",
+      "location": "Plan decision 3 / Demonstration for criterion 3 (spec_check_refuses_a_wrong_status_label)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The backtest and decision-view parsers of docs/decisions.md are left out of the dependents list. The new entry's wording can fail the real-log test.",
+      "evidence": "crates/athena-cli/src/backtest.rs lines 78-82 parse 'superseded by', 'supersedes' and 'amends' in the log. crates/athena-cli/tests/backtest.rs line 115, `the_real_log_has_no_condition_a_finding_against_the_confirmed_list`, fails on any parsed hit that has no [[link]] in docs/decision-links.toml. crates/athena-cli/src/decisions.rs lines 1-22 build each entry's active, superseded or amended status from the same pair. The planned entry adds adopted crates to D36's record, which is an amendment in substance. A producer that writes 'Amends D36' breaks `cargo test`, and the plan's dependents list names only mirrors.rs, checks.rs and refusal_corpus.rs. Fix: Add crates/athena-cli/src/backtest.rs, crates/athena-cli/src/decisions.rs and tests/backtest.rs to the dependents, with the test `cargo test -p athena-cli --test backtest`. Pick one option. Option A: the entry states 'Amends D36', and the plan adds a `[[link]]` to docs/decision-links.toml with older D36, newer the new id, status amended, and the line number, then lists that file as a deliverable. Option B: the entry avoids the three phrases. Option A is the more honest record.",
+      "location": "Dependents (docs/decisions.md appended entry) / Plan step 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The check is one-way and keyed on heading text, so a later decision that drops or reverses an adoption is not seen",
+      "evidence": "adopted_record joins the Decision bullets of every entry whose heading contains 'Buy before build'. If a later entry supersedes D36 to drop a crate, D36's bullet still counts it as adopted. Any future heading containing the phrase also counts, even if it rejects a crate. Record entries for crates no longer in Cargo.toml are never flagged. Fix: Disclose the limit in the new decision's Tradeoff. Optionally skip entries that decisions.rs reports as superseded. At minimum, add a test that a crate named in no adopting bullet is refused even when the heading matches.",
+      "location": "Plan decision 1 / adopted_record",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Touching xtask/ marks the landing as outcome-changing for drain's target-met logic",
+      "evidence": "crates/athena-cli/src/drain.rs line 473: OUTCOME_PATHS includes \"xtask/\", and changes_outcome matches by prefix. A one-line timings edit counts as a change to the explainer page's generator. The drain rule is already broader than it needs to be, and the timings line is required by ci_shards. Still, this side effect is missing from the dependents list. Fix: List drain::changes_outcome as a dependent and note the false positive in Risks. No code change is needed in this job.",
+      "location": "Files: xtask/shard-timings.txt",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The D36-only test pins the current crate set and will break on any future dependency change",
+      "evidence": "It asserts the result is exactly proc-macro2, syn and toml_edit. If someone adds a new crate and records it in a new entry, this test fails for a reason unrelated to the rule. Fix: Use a fixed in-memory Cargo.toml for this case, not the real one. Or assert that those three are included and that `toml` is absent, not exact equality.",
+      "location": "Demonstration for criterion 2 (d36_alone_leaves_the_three_known_gaps)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly. Its main design holds up against the code. The new test reads the root Cargo.toml with toml_edit, which is already a dependency of athena-core (Cargo.toml line 26). It counts only backticked names inside the Decision bullet of \"Buy before build\" entries, which correctly leaves out the alternatives D36 rejects (decisions.md lines 824-828). It appends a new decision instead of editing D36, and uses the production functions parse_spec, spec_gaps and measure_problem (hestia.rs lines 1172, 1219, 1291). I confirmed that proc-macro2, syn and toml_edit are the only external crates missing from D36. I found two major problems. First, the \"wrong status label\" negative test sets the measure to end `status: requirement`. But `requirement` is a valid label in STATUS_MEASURE_LABELS (status.rs line 321), so measure_problem returns None and that part of criterion 3 is not shown. Second, the dependents list leaves out the backtest and decision-view readers of docs/decisions.md. The real-log test fails if the new entry uses \"amends\" or \"supersedes\" without a matching [[link]] in docs/decision-links.toml, and the planned entry is in substance an amendment of D36. Both can be fixed by revising the plan. The rest are minor."
+}
