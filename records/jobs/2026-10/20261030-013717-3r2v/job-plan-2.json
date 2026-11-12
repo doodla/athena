@@ -1,0 +1,298 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-013717-3r2v",
+  "round": 2,
+  "at": "2026-11-12T12:31:15.297249683Z",
+  "invocation_seq": 4,
+  "approach": "Add one integration test, crates/athena-core/tests/buy_first.rs. It reads the root Cargo.toml with toml_edit (already an athena-core dependency, so crates/athena-core/Cargo.toml stays unchanged). It takes each `[workspace.dependencies]` entry with no `path` key as an external crate. It then reads docs/decisions.md, takes only the `- **Decision:**` bullet of each entry headed \"Buy before build\" (D36 and a new appended entry), and requires each external crate to appear there as an exact backticked name. Names under `- **Alternatives:**` do not count. docs/decisions.md is append-only, so D36 is not edited. A new entry records the call for proc-macro2, syn and toml_edit, which D36 lacks (workspace Cargo.toml lines 49, 51, 56). It names those crates in its Decision bullet and the options it turned down in its Alternatives bullet. Negative tests: a stray crate, a crate named only under D36's Alternatives (`proptest`), and D36 alone. The spec test uses the production parser `athena_core::hestia::parse_spec` with `spec_gaps` and `measure_problem`, the same code that stops the requeue. Then fill the spec entry, add the shard-timings line that ci_shards requires, and add a CHANGELOG line.",
+  "decisions": [
+    {
+      "choice": "Count a crate as recorded only when it is a backticked exact name inside the `- **Decision:**` bullet of an entry headed 'Buy before build'. The bullet runs from the line starting `- **Decision:**` up to the next line that starts `- **` at column 0.",
+      "reason": "Answers finding 2. docs/decisions.md lines 824-828 name chrono, time, reqwest, ureq, tiktoken-rs and proptest as backticked turned-down alternatives. A whole-entry search would let someone adopt one of those and still pass. Limiting the search to the Decision bullet keeps the check true to 'adopted'. The new entry puts adopted crates in Decision and turned-down options in Alternatives.",
+      "rejected": [
+        {
+          "option": "Search the whole text of every Buy-before-build entry",
+          "why": "Passes an adopted crate that the record rejects (finding 2)."
+        },
+        {
+          "option": "Plain substring search",
+          "why": "toml_edit would pass because `toml` is named."
+        }
+      ]
+    },
+    {
+      "choice": "Append a new decision (next id after the last one, D172 at docs/decisions.md line 4968, so D173 unless another job lands first). The producer re-reads the last id at write time and uses the next one. The test keys on the heading text 'Buy before build', not the number.",
+      "reason": "Answers finding 5. mirrors.rs refuses any change to a base line and requires each new entry's id to exceed the highest before it, so D36 cannot be edited. Keying on the heading text means a renumber does not break the test.",
+      "rejected": [
+        {
+          "option": "Edit D36's Decision bullet in place",
+          "why": "Refused by the append-only rule in mirrors.rs."
+        },
+        {
+          "option": "A separate table or file outside the decision log",
+          "why": "A second record would drift from D36."
+        }
+      ]
+    },
+    {
+      "choice": "The spec test calls `athena_core::hestia::parse_spec` on the real docs/spec.toml, finds OLY-B-STD-03, and asserts: `spec_gaps` does not list it, `measure_problem(&measure)` is None, the mechanism is not `none` and contains `buy_first` and `D36`, the owner is `Athena`, and the measure ends `status: not shown` and contains `cargo test -p athena-core --test buy_first`. The negatives edit the parsed `SpecRequirement` (mechanism `none`; measure ending `status: requirement`; blank measure) and assert `spec_gaps` or `measure_problem` refuses it. A wrong owner is asserted by a pure `owner_problem` check, since `spec_gaps` ignores the owner.",
+      "reason": "Answers finding 3. hestia.rs parse_spec (line 1172), measure_problem (line 1219) and spec_gaps (line 1291) are the code that decides whether the request is requeued. Using them avoids a hand-written parse that can disagree with it. The OLY-B-RUN-02 test at hestia.rs lines 4367-4392 does the same.",
+      "rejected": [
+        {
+          "option": "Hand-written string search for the entry",
+          "why": "Can disagree with the toml_edit parse on multi-line or single-quoted values (finding 3)."
+        }
+      ]
+    },
+    {
+      "choice": "The spec mechanism text and the new decision's Tradeoff both state the limit: only the root `[workspace.dependencies]` is checked. A member crate that adds `foo = \"1\"` directly in its own Cargo.toml bypasses it. Whether a maintained option exists also stays the verifier's judgement.",
+      "reason": "Answers finding 4. Every member manifest uses `.workspace = true` today, but nothing enforces it. Auditing member crates is out of scope, so this is disclosed and not fixed.",
+      "rejected": [
+        {
+          "option": "Also scan crates/*/Cargo.toml",
+          "why": "Out of scope in the brief and a larger design."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the line `athena-core --test buy_first 5.00` in xtask/shard-timings.txt, placed after `athena-core --lib 15.00`.",
+      "reason": "Answers finding 1. xtask/tests/ci_shards.rs `checked_in_timings_cover_every_workspace_test_unit` (about line 411) fails for any new test target without a timings line. The file is data, not a governance file, and the one-line change is forced by the requested test file.",
+      "rejected": [
+        {
+          "option": "Omit the line",
+          "why": "cargo test fails in ci_shards, which breaks criterion 5."
+        }
+      ]
+    },
+    {
+      "choice": "Do not create xtask/tests/buy_first.rs and leave crates/athena-core/Cargo.toml unchanged, though the brief lists both.",
+      "reason": "toml_edit is already an athena-core dependency (crates/athena-core/Cargo.toml line 26), so no manifest change is needed. A second copy of the test in xtask would duplicate the first and need its own timings line. This is raised as an open question.",
+      "rejected": [
+        {
+          "option": "Duplicate the test in xtask",
+          "why": "Two copies of one assertion drift apart."
+        },
+        {
+          "option": "Add the toml crate as a dev-dependency",
+          "why": "Adds a dependency edge that toml_edit already covers."
+        }
+      ]
+    },
+    {
+      "choice": "Write the check as pure functions over texts: `external_crates(cargo_toml)`, `adopted_record(decisions)` and `unrecorded(cargo_toml, decisions)`. Negative cases pass mutated copies of the real files.",
+      "reason": "The real-file test and the negative tests run the same function. This follows model_roster.rs, where a mutated copy is refused, and no logic sits in a double.",
+      "rejected": [
+        {
+          "option": "A mock crate list",
+          "why": "Puts the logic under test in the double."
+        }
+      ]
+    },
+    {
+      "choice": "The measure ends `status: not shown` and names `cargo test -p athena-core --test buy_first`.",
+      "reason": "No `athena status` line prints dependency calls. The OLY-B-STD-04 and OLY-B-STD-05 entries use the same form, and measure_problem accepts labels starting `not shown` (hestia.rs line 1229).",
+      "rejected": [
+        {
+          "option": "Add a new STATUS_MEASURE_LABELS entry and status line",
+          "why": "Larger than the request and out of scope."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/tests/buy_first.rs",
+      "action": "create",
+      "purpose": "The mechanism: `repo_file`, `external_crates`, `adopted_record`, `unrecorded` and `owner_problem`. Tests: the real-file check, the stray-crate, rejected-alternative and D36-alone negatives, the path-crate exemption, and the spec tests using parse_spec, spec_gaps and measure_problem.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "OLY-B-STD-03: replace `mechanism = \"none\"` with the buy-first check. The mechanism text names the test file, the Buy-before-build decisions (D36 and the new entry), and the limit that only [workspace.dependencies] is checked and a maintained option is a verifier judgement. Keep owner Athena. Replace the measure with a clause plus `cargo test -p athena-core --test buy_first; status: not shown`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append a new 'Buy before build' decision after D172. The Decision bullet adopts proc-macro2, syn and toml_edit with the unmet need for each. The Alternatives bullet holds the options turned down. The Tradeoff states the root-manifest limit. Add a Provenance bullet. D36 is unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One line under Unreleased > Added in the style of the OLY-B-RUN-02 line: the mechanism, the test name, the new decision, measure `status: not shown`, and that Cargo.toml is unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "purpose": "Add `athena-core --test buy_first 5.00` after `athena-core --lib 15.00`. Required by the ci_shards test. It is data, not a governance file, and is outside the brief's list only because the new test target forces it.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/tests/model_roster.rs lines 11-16 and 50-68, and hestia.rs lines 1157-1310 and 4367-4392. Confirm the last decision id in docs/decisions.md (D172 at line 4968 in the base).",
+    "Create crates/athena-core/tests/buy_first.rs with a module comment naming OLY-B-STD-03 and the Buy-before-build decisions. Copy `repo_file`. Add `external_crates(cargo_toml) -> Vec<String>`, which parses with `toml_edit::DocumentMut` and returns the `[workspace.dependencies]` keys whose value has no `path` key.",
+    "Add `adopted_record(decisions) -> String`. It splits the log at lines starting `## D`, keeps the entries whose heading contains 'Buy before build', and from each keeps only the `- **Decision:**` bullet, up to the next line starting `- **`. Add `unrecorded(cargo_toml, decisions) -> Vec<String>`, which returns the external crates with no exact backticked name in that record. Add `owner_problem(&SpecRequirement) -> Option<String>`.",
+    "Add the tests: every_external_workspace_crate_is_recorded_in_the_buy_first_decisions; a_stray_dependency_is_refused; a_crate_named_only_as_a_rejected_alternative_is_refused (proptest); d36_alone_leaves_the_three_known_gaps (proc-macro2, syn and toml_edit, with `toml` recorded); path_crates_are_not_external; spec_entry_has_a_real_mechanism (parse_spec, spec_gaps, measure_problem, owner, test name); spec_check_refuses_a_none_mechanism, spec_check_refuses_a_wrong_status_label and spec_check_refuses_a_wrong_owner, which change the parsed SpecRequirement. Import no new crate.",
+    "Append the new entry to docs/decisions.md after D172, headed `## D<next> · Buy before build: syn, proc-macro2 and toml_edit are adopted, and a test ties the dependency list to the record`, in the D172 format. The Decision bullet names `proc-macro2`, `syn` and `toml_edit` with their unmet needs. The Alternatives bullet names the turned-down options. The Tradeoff states that only the root [workspace.dependencies] is checked and that a direct member-crate dependency bypasses it. The Reversal cost bullet follows the format. State that D36 is unchanged because the log is append-only, and that the test reads D36 and this entry together. Add a Provenance bullet listing what was read and measured.",
+    "Edit docs/spec.toml for OLY-B-STD-03: set mechanism to the buy-first check text (test file, D36 plus the new decision, the root-only limit, and the maintained-option judgement left to the verifier). Keep `owner = \"Athena\"`. Set the measure to a short clause plus `cargo test -p athena-core --test buy_first; status: not shown`. Leave statement, kind and sources unchanged.",
+    "Add `athena-core --test buy_first 5.00` to xtask/shard-timings.txt after `athena-core --lib 15.00`, keeping the file sorted.",
+    "Add one line under Unreleased > Added in CHANGELOG.md.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, `cargo test -p xtask --test spec`, `cargo test -p xtask --test ci_shards` and `cargo test -p xtask --test policy`. Confirm with `git diff --stat` that Cargo.toml and crates/*/src are unchanged."
+  ],
+  "risks": [
+    {
+      "risk": "The check shows only that a call was recorded. It cannot judge whether a maintained option exists.",
+      "mitigation": "The measure and mechanism text say so, the brief puts it out of scope, and status stays `not shown`."
+    },
+    {
+      "risk": "A member crate adds an external dependency directly, outside [workspace.dependencies], and the check does not see it (finding 4).",
+      "mitigation": "The spec mechanism text and the new decision's Tradeoff state the limit. Auditing member crates is out of scope."
+    },
+    {
+      "risk": "Someone names an adopted crate only under Alternatives, or adopts a crate the record rejects.",
+      "mitigation": "Only the Decision bullet counts. The proptest negative test shows a crate named only under D36's Alternatives is refused."
+    },
+    {
+      "risk": "The decision id D173 is taken by another job before this one lands.",
+      "mitigation": "The producer re-reads the last id at write time. The test keys on the heading text, not the number."
+    },
+    {
+      "risk": "Appending to docs/decisions.md trips the mirror structure checks (heading form, Provenance bullet, trailing newline).",
+      "mitigation": "The entry copies the D172 shape and ends with a single newline. The mirror tests run in `cargo test`."
+    },
+    {
+      "risk": "The Decision-bullet extraction depends on the layout `- **Decision:**` ... `- **Alternatives:**`. A future decision with a different layout would be misread.",
+      "mitigation": "D36 and the new entry use that layout. A missing Decision bullet yields no crates, so a crate is reported unrecorded rather than silently accepted."
+    },
+    {
+      "risk": "The shard-timings line is forgotten and ci_shards fails.",
+      "mitigation": "A plan step adds it, and the criterion 5 demonstration runs `cargo test -p xtask --test ci_shards`."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "OLY-B-STD-03 mechanism and measure in docs/spec.toml",
+      "dependent": "crates/athena-core/src/hestia.rs spec review: parse_spec line 1172, measure_problem line 1219, spec_gaps line 1291 (requeues a request for mechanism `none` and checks the measure label)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test buy_first spec_ (calls parse_spec, spec_gaps and measure_problem on the real file); hestia's own tests, including the OLY-B-RUN-02 test at hestia.rs lines 4367-4392, run in cargo test -p athena-core",
+      "reason": null
+    },
+    {
+      "name": "docs/spec.toml entry format",
+      "dependent": "xtask/tests/spec.rs (parses docs/spec.toml; every active requirement needs mechanism, owner and measure)",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test spec. Only two string values on an existing entry change and no key is added.",
+      "reason": null
+    },
+    {
+      "name": "docs/decisions.md appended entry",
+      "dependent": "crates/athena-core/src/mirrors.rs (append-only rule, `## D<n> · ` heading, Provenance bullet, ids increasing) and DECISION_LOG in crates/athena-core/src/run/checks.rs line 7",
+      "kind": "rule",
+      "test": "The mirror tests in cargo test -p athena-core. The new entry copies the D172 shape, ends with a single newline, and changes no existing line.",
+      "reason": null
+    },
+    {
+      "name": "docs/decisions.md headings",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (include_str of docs/decisions.md; finds the D164 and D165 headings)",
+      "kind": "code",
+      "test": null,
+      "reason": "They search for the D164 and D165 headings by text. Appending at the end moves neither."
+    },
+    {
+      "name": "workspace test units (new test target buy_first)",
+      "dependent": "xtask/tests/ci_shards.rs checked_in_timings_cover_every_workspace_test_unit and xtask/shard-timings.txt",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test ci_shards, after the plan adds `athena-core --test buy_first 5.00`",
+      "reason": null
+    },
+    {
+      "name": "new tracked text: test file, decision entry, CHANGELOG line, timings line",
+      "dependent": "xtask/tests/policy.rs boundary scan (boundary_words) over every tracked file",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test policy. The new text names no person, machine or email.",
+      "reason": null
+    },
+    {
+      "name": "workspace dependency list",
+      "dependent": "Root Cargo.toml [workspace.dependencies], crates/*/Cargo.toml and Cargo.lock",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The plan changes no manifest. The test only reads the root Cargo.toml, so the build graph and Cargo.lock are unchanged."
+    },
+    {
+      "name": "athena-core integration-test directory",
+      "dependent": "crates/athena-core/tests/model_roster.rs and the other tests/*.rs files in athena-core",
+      "kind": "code",
+      "test": null,
+      "reason": "The new file is an independent test target. It copies the repo_file helper and shares no state."
+    },
+    {
+      "name": "public API used by the new test",
+      "dependent": "crates/athena-core/src/hestia.rs `pub mod hestia` in lib.rs line 106 (the test imports hestia::parse_spec, spec_gaps, measure_problem and SpecRequirement)",
+      "kind": "code",
+      "test": null,
+      "reason": "The test only calls these functions and changes no signature, so no caller is affected."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Run the spec tests. `spec_entry_has_a_real_mechanism` parses the real docs/spec.toml with `athena_core::hestia::parse_spec`, finds OLY-B-STD-03, and asserts: mechanism is not `none` and contains `buy_first` and `D36`; owner is `Athena`; `measure_problem` is None; the measure ends `status: not shown` and contains `cargo test -p athena-core --test buy_first`; `spec_gaps` does not list the id. The verifier can also open the entry in docs/spec.toml.",
+      "command": "cargo test -p athena-core --test buy_first spec_entry",
+      "observes": "The entry no longer says none. It names the test file and the decision log, keeps owner Athena, and its measure ends with `status: not shown`. The test passes.",
+      "fails_without": "With the old entry (`mechanism = \"none\"`, measure `The spec gap list; status: requirement`), the mechanism, measure and spec_gaps assertions fail.",
+      "seam": "Production entry points: `athena_core::hestia::parse_spec`, `spec_gaps` and `measure_problem` (hestia.rs lines 1172, 1291, 1219; they exist). Fixture: the real docs/spec.toml, read by a `repo_file` helper copied from model_roster.rs lines 11-16 (exists). Nothing is injected. The test function itself is added by the step that creates buy_first.rs."
+    },
+    {
+      "criterion": 2,
+      "method": "Run the whole file. `every_external_workspace_crate_is_recorded_in_the_buy_first_decisions` reads the real Cargo.toml and docs/decisions.md and asserts `unrecorded` is empty. `a_stray_dependency_is_refused` appends `left-pad-rs = \"1\"` under `[workspace.dependencies]` in a copy of Cargo.toml and asserts `unrecorded` returns exactly that crate. `a_crate_named_only_as_a_rejected_alternative_is_refused` appends `proptest = \"1\"`, which appears only under D36's Alternatives, and asserts it is returned. `d36_alone_leaves_the_three_known_gaps` passes only the D36 section and asserts the result is exactly proc-macro2, syn and toml_edit, while `toml` is recorded. `path_crates_are_not_external` asserts the athena-* path entries are not returned.",
+      "command": "cargo test -p athena-core --test buy_first",
+      "observes": "The real-file test passes. The stray crate, the rejected-alternative crate and D36 alone are each refused.",
+      "fails_without": "Without the check, `unrecorded` does not exist and the file does not compile. Without the new decision, the real-file test fails naming proc-macro2, syn and toml_edit. With whole-entry or substring matching, the proptest test and the D36-only test fail.",
+      "seam": "Production entry point: `unrecorded(cargo_toml, decisions)` in crates/athena-core/tests/buy_first.rs, added by the step that creates the file. It parses with `toml_edit::DocumentMut`, an existing athena-core dependency. Fixture: the real Cargo.toml and docs/decisions.md read through `repo_file`, plus in-memory mutated copies for the negatives, passed as function arguments. The logic under test is the function, not the fixture."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the spec tests. After `spec_entry_has_a_real_mechanism` passes on the real entry, `spec_check_refuses_a_none_mechanism` copies the parsed `SpecRequirement`, sets `mechanism = \"none\"`, and asserts `spec_gaps` reports `no_mechanism`. `spec_check_refuses_a_wrong_status_label` sets the measure to end `status: requirement` and asserts `measure_problem` is Some or the end-label assertion fails. `spec_check_refuses_a_wrong_owner` sets the owner to another role and asserts `owner_problem` returns Some.",
+      "command": "cargo test -p athena-core --test buy_first spec_",
+      "observes": "The real entry passes. Each of the three mutated copies is refused: mechanism none, owner not Athena, and measure label other than `status: not shown`.",
+      "fails_without": "Without the mechanism text, the real entry is flagged. Without the checks, a `none` mechanism or a wrong owner passes silently.",
+      "seam": "Production entry points: `parse_spec`, `spec_gaps`, `measure_problem` (exist), and the new `owner_problem` in buy_first.rs (added by the test-writing step). Pattern: spec_entry_has_a_real_mechanism in model_roster.rs lines 50-68, and the OLY-B-RUN-02 test at hestia.rs lines 4367-4392 (both exist). Fixture: the real docs/spec.toml parsed, with fields changed on a cloned `SpecRequirement` in the test."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the real-file test. Then run `git diff --stat` and `git diff Cargo.toml`. The new decision names proc-macro2 and syn in its Decision bullet. The unmet need is function-length and design-surface scans in code_health.rs and design_surface.rs, where brace counting breaks on strings and macros (the D132 note near decisions.md line 3356). It names toml_edit in the same bullet. The unmet need is rewriting configuration and proposals while keeping comments and layout, which the `toml` crate does not do. The options turned down (brace counting, a lint tool, the `toml` crate) sit under Alternatives. The Tradeoff states the root-manifest-only limit.",
+      "command": "cargo test -p athena-core --test buy_first every_external_workspace_crate",
+      "observes": "The real-file test passes. `git diff` shows no change to Cargo.toml, and docs/decisions.md changes only by appended lines. The mirror tests in `cargo test -p athena-core` pass.",
+      "fails_without": "If the new decision is missing, or names a crate only under Alternatives, the real-file test fails naming that crate.",
+      "seam": "Production entry point: `unrecorded` (added in the file-creating step). The append-only and Provenance rules are enforced by crates/athena-core/src/mirrors.rs and its existing tests, which run in `cargo test` (exist)."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks at the workspace root. Then run `cargo test -p xtask --test spec`, `cargo test -p xtask --test ci_shards` and `cargo test -p xtask --test policy`. The new test uses only std, `toml_edit` and `athena_core`. The timings line `athena-core --test buy_first 5.00` is added to xtask/shard-timings.txt.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three checks and the three xtask tests pass.",
+      "fails_without": "Without the timings line, `checked_in_timings_cover_every_workspace_test_unit` fails. Without the spec edit, the spec tests in buy_first.rs fail.",
+      "seam": "The existing check commands and the existing xtask tests (exist). The timings line is added by the plan step for that file."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff. It touches only crates/athena-core/tests/buy_first.rs, docs/spec.toml, docs/decisions.md, CHANGELOG.md and xtask/shard-timings.txt. Nothing under crates/*/src changes, and no parser, stem list or reading check is added.",
+      "command": "git diff --stat",
+      "observes": "No change under crates/*/src. The test does not run against readings, so no reading is newly refused. The refusal corpus is unaffected.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: crates/athena-core/Cargo.toml and xtask/tests/buy_first.rs are in the expected deliverables, but this plan leaves both untouched, because toml_edit is already an athena-core dependency (crates/athena-core/Cargo.toml line 26) and a second copy of the test would duplicate the first. Do you want a copy in xtask anyway?"
+  ],
+  "producer_section_sha256": "896339dccbeeff154b5a6b3fbec950cf0881b01e85ae71268c894295f5cc8bab"
+}

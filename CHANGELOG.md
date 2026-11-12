@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- OLY-B-STD-03 now has a mechanism: `crates/athena-core/tests/buy_first.rs` checks that every external crate in the root `[workspace.dependencies]` is named in the Decision bullet of a Buy before build entry (D36 and a new entry that records `proc-macro2`, `syn` and `toml_edit` with their unmet needs), and refuses a stray crate. Its measure ends `status: not shown` and names the test; the test file is registered in `xtask/shard-timings.txt`. `Cargo.toml` is unchanged.
 - OLY-B-RUN-02 now has a mechanism: `setup.sh` (pinned, checksum-verified rustup-init only when cargo is missing) followed by `cargo run --locked -p xtask -- setup`. Its measure ends `status: not shown` and names `cargo test -p xtask --test setup_repeatable`; the new test file is registered in `xtask/shard-timings.txt` with a 5.00 s estimate. Setup behavior is unchanged.
 - OLY-B-RUN-01 now has a mechanism: the capability preflight in `crates/athena-core/src/preflight.rs` looks up each program a job's checks run, records the result in the job's `note` before any agent runs, and stops the job with an `environment:` blocker and a workaround plan when a bare-name program is missing; a missing bare-name check program used to land as a recorded pre-existing failure. Its measure ends `status: not shown` and names the test.
 - OLY-B-O5-01 now has a mechanism: `Manager::restart` in `crates/athena-core/src/manage.rs` (the
