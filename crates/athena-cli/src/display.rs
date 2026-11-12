@@ -1232,6 +1232,28 @@ pub fn snapshot_status(v: &athena_core::snapshot::SnapshotView) -> String {
     out
 }
 
+/// The `forecasts` rows of `athena status`: the reader's and the reference's mean event Brier score per class.
+fn forecast_headline_lines(forecasts: &[athena_core::status::ClassHeadline]) -> String {
+    let mut out = String::new();
+    let fmt = |x: Option<f64>| x.map_or("-".into(), |v| format!("{v:.3}"));
+    for (i, h) in forecasts.iter().enumerate() {
+        let label = if i == 0 {
+            "forecasts   "
+        } else {
+            "            "
+        };
+        let _ = writeln!(
+            out,
+            "{label}{}: {} scored · mean event Brier reader {} · reference {}",
+            h.class,
+            h.scored_jobs,
+            fmt(h.reader_mean_brier),
+            fmt(h.reference_mean_brier)
+        );
+    }
+    out
+}
+
 /// `athena status`.
 pub fn status(v: &StatusView) -> String {
     let mut out = String::new();
@@ -1387,18 +1409,7 @@ pub fn status(v: &StatusView) -> String {
         out.push_str(&mistakes(&v.mistakes));
     }
     let _ = writeln!(out, "restarts    {}", v.restarts);
-    for (i, h) in v.forecasts.iter().enumerate() {
-        let label = if i == 0 { "forecasts" } else { "" };
-        let fmt = |x: Option<f64>| x.map_or("-".into(), |v| format!("{v:.3}"));
-        let _ = writeln!(
-            out,
-            "{label:<11} {}: {} scored · mean event Brier reader {} · reference {}",
-            h.class,
-            h.scored_jobs,
-            fmt(h.reader_mean_brier),
-            fmt(h.reference_mean_brier)
-        );
-    }
+    out.push_str(&forecast_headline_lines(&v.forecasts));
     for (i, p) in v.pending.iter().enumerate() {
         let label = if i == 0 { "pending" } else { "" };
         let state = match &p.resolved_by {
@@ -2035,6 +2046,28 @@ pub fn drain_restart(outcome: &crate::drain::RestartOutcome) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forecast_headline_lines_start_with_the_forecasts_label_and_show_each_class() {
+        let head = |class: &str, reader: Option<f64>| athena_core::status::ClassHeadline {
+            class: class.into(),
+            scored_jobs: 3,
+            reader_mean_brier: reader,
+            reference_mean_brier: Some(0.25),
+        };
+        let text = forecast_headline_lines(&[head("docs", Some(0.12)), head("code", None)]);
+        let rows: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            rows[0],
+            "forecasts   docs: 3 scored · mean event Brier reader 0.120 · reference 0.250"
+        );
+        assert_eq!(
+            rows[1],
+            "            code: 3 scored · mean event Brier reader - · reference 0.250"
+        );
+        assert_eq!(forecast_headline_lines(&[]), "");
+    }
+
     use athena_core::gh::{Checks, PrReport};
     use athena_core::pr::{LinkState, PrLink};
 

@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- OLY-B-GOAL-03 now has a mechanism: `build_reading` in `crates/athena-core/src/reading.rs` commits the reader's
+  forecast and a reference forecast in the reading before any work, `go_job` dispatches only a committed reading,
+  and `class_forecasts` in `crates/athena-core/src/status.rs` scores them per class. Its measure ends
+  `status: forecasts`, a new entry in `STATUS_MEASURE_LABELS`; `athena status` prints that line through the
+  new `forecast_headline_lines` helper in `crates/athena-cli/src/display.rs` (same text as before). Three tests
+  cover it: the spec entry, a reading that carries the forecast (and is refused without one), and the printed
+  rows. Scoring is unchanged and no reading is newly refused.
 - OLY-B-SET-04 now has a mechanism: `check_generation` in `crates/athena-core/src/iris.rs` reads the committed
   Iris spend ledger `docs/iris-ledger.toml` (whole cents, no entries yet) and refuses a generation that would
   take lifetime spend over the 1500-cent ($15) cap; exactly the cap is allowed. The cap is a constant in code,
