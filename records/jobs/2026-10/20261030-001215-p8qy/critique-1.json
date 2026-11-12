@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-001215-p8qy",
+  "round": 1,
+  "at": "2026-11-12T03:56:36.175550813Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The plan does not say an entry with no `cents` key is an error, so a spend could be silently counted as 0.",
+      "evidence": "Step 2 says `cents` must be a non-negative integer and `date` a string, but never says either key is required. Criterion 3's negative cases are api_key, token, negative cents and string cents. None covers an `[[entry]]` without `cents`. A parser that reads a missing key as 0 would hide spend from spent_cents and still pass every listed test. Fix: Make date and cents required in every entry. Also refuse an `entry` that is not an array of tables, such as `entry = 5`. Add both cases to a_credential_field_is_refused or to a sibling test.",
+      "location": "Plan step 2 (parse_ledger) and Criterion 3 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A future caller can skip the ledger, because the guard takes already-parsed entries.",
+      "evidence": "check_generation(entries, proposed_cents) receives whatever slice the caller passes. A future Iris path could pass `&[]` and every generation would be allowed. No function ties the check to the committed docs/iris-ledger.toml text. A related gap: two jobs working from the same base snapshot could each pass the check, and their combined spend could exceed 1500 cents. Neither gap is mentioned in the mechanism text or the module doc. Fix: Add a small `check_ledger_text(text, proposed_cents)` (or similar) that parses and checks in one call, and name it in the mechanism text as the entry point. In the module doc, say that spend from concurrent jobs is not serialised by this guard.",
+      "location": "Plan step 2 (check_generation signature) and Risks bullet 1",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Step numbers in the demonstrations do not match the Steps list.",
+      "evidence": "Criterion 1 says 'Step 4 adds the test', but the iris tests are added in step 3 and step 4 creates the ledger. Criterion 4 says 'Step 5 adds the test', but the hestia test is step 7. Fix: Correct the step references to 3 and 7.",
+      "location": "Demonstrations, criteria 1 and 4 (Test seam lines)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot using Read and Grep only. The plan fits the request and the accepted reading. OLY-B-SET-04 is at docs/spec.toml:2050-2056 with mechanism = \"none\". parse_spec, measure_problem and spec_gaps are at hestia.rs:1172, 1219 and 1291, and measure_problem accepts `not shown`. The real-spec include_str! test is at hestia.rs:4287, and anyhow, thiserror and toml_edit are already dependencies of athena-core. No existing test or path under crates/ contains \"iris\", so `cargo test -p athena-core iris` selects only the new tests. Every demonstration calls production functions (parse_ledger, check_generation/check_against, parse_spec/spec_gaps) and would fail without the behavior. Criterion 2 shows the same input allowed with a larger cap and refused with the real one, which meets the behavior-evidence default. Integer cents with saturating addition and an allow-list parser are sound choices. The plan's dependents list holds up. xtask/tests/spec.rs:627-655 only prints the list of `none` mechanisms and does not assert a count. model_roster.rs cuts only the OLY-B-SET-02 entry. CI shards are split by test target, and the plan adds no new target. Changelog entries for earlier requirements also say when a guard is not yet called by anything. The remaining findings are minor robustness gaps in the parser and guard API, plus wrong step numbers."
+}
