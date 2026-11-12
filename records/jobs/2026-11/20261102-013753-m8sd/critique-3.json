@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261102-013753-m8sd",
+  "round": 3,
+  "at": "2026-11-12T16:10:37.028198326Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The decision-id rule contradicts itself: the new-id skip exempts the plan's own main refuse case, and because marks apply across criteria, any in-place edit can be exempted.",
+      "evidence": "Rule (ii) refuses 'append a note to D87'. The skip says: 'SKIP an id marked new: 'new', add*, append*, record*, creat*, introduc* within 4 words before it anywhere in the reading's criteria'. In 'append a note to D87', 'append' is the 4th word before D87, so D87 counts as new and is skipped. The plan gives no order between REFUSE and SKIP. Because the marking applies 'anywhere in the reading's criteria', a second criterion such as 'CHANGELOG.md records the D87 fix' marks D87 as new for the whole reading. 'Edit the existing D87 entry in docs/decisions.md in place' would then be accepted. These are the two instances the job exists to prevent. Fix: State the order explicitly. Rules (i)-(iii) refuse before any new-id skip. The new marker counts only when it directly governs the id: 'new' or 'decision' immediately before it, 'adds/appends decision Dnn', or 'recorded/added as Dnn'. It never counts when to/onto/into/in sits directly before the id. Apply the marker within the same clause, not across the reading. Add a test where one criterion says 'CHANGELOG.md records the D87 fix' and another edits D87 in place; the reading must be refused.",
+      "location": "Plan decision 4 (rule (ii) and the 'SKIP an id marked new' clause); criterion 1 demonstration; corpus case modelled-on-620c657-append-note-to-d87-with-refusals-wording",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The rule for clauses with no id can be read as an OR. Read that way, it refuses ordinary append wording such as 'Update docs/decisions.md and CHANGELOG.md'.",
+      "evidence": "Read literally as (decisions.md OR 'in place' OR 'existing entries') AND an edit verb, any clause starting 'Update docs/decisions.md ...' is refused, because 'Update' starts the clause. Phrasings such as 'Update docs/decisions.md with a new decision' or 'Update docs/decisions.md and docs/decision-links.toml' are common ways to describe an append. None of the planned accept cases covers a decisions.md clause without an id that starts with an edit verb. The only planned case, 'Update docs/decisions.md to add D174', has an id. Fix: Require a decision-log word AND ('in place' OR 'existing entry/entries') AND an edit verb in verb position. Add accept tests for 'Update docs/decisions.md with a new decision' and 'Update docs/decisions.md and CHANGELOG.md'.",
+      "location": "Plan decision 4, sentence 'A clause with no id is refused when it has `decisions.md`, 'in place' or 'existing entry/entries', and an edit verb in verb position'",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out the readers of check_reading_text: the steward queue listing, drain and the `athena check-reading` CLI.",
+      "evidence": "replay.rs:54-55 is `check_reading_text`, the text-only gate. It is also called by steward.rs:424, which marks a stored proposed reading as read only if it is accepted (doc at steward.rs:396-400). Drain relies on that (drain.rs:116), and main.rs:687 is the `check-reading` subcommand. The replay builds run that subcommand (run/mod.rs:2478). Tests that depend on it: steward.rs:2763 and crates/athena-cli/tests/drain.rs:4406-4453, whose 'good' reading must stay Accept. After this change, a queued request whose stored reading now fails will be read again by drain instead of run. That costs a reader run, and the plan does not name it. Fix: Add steward.rs:424 (queue listing), drain.rs:116 and main.rs:687 to the dependents list, with the effect that stored proposed readings newly refused are read again. Add the tests `cargo test -p athena-core steward` and `cargo test -p athena-cli --test drain a_proposed_request_whose_latest_reading_fails_a_reading_check_is_not_run_by_the_batch`.",
+      "location": "Plan Dependents, entry 'refusing_check' (lists replay.rs:55 only as 'the replay of accepted readings')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The corpus case for a records/ deliverable is first refused by check_boundary_and_repo_files when its action is Modify or Delete.",
+      "evidence": "Corpus cases default to `repo_files: Some(repo_files())` (refusal_corpus.rs:258). check_boundary_and_repo_files (checks.rs:256-268), which runs before the new last step, refuses a Modify or Delete of a path that is not in repo_files. After the cutover, records/ is not on main, so in production too only a Create reaches check_judging_rules. The unit tests pass `None` through gate_refuser (reading.rs:7207) and would not show this. Fix: Make the corpus case a Create, or add the path to that case's repo_files. Say in the doc comment that in production a Modify under records/ is already refused by check_boundary_and_repo_files, and that the new rule matters for Create, and for replays where repo_files is None.",
+      "location": "Plan step 6, corpus case deliverable-under-records-directory; criterion 1 'any action on records/jobs/x/outcome.json'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The grant table is copied by hand, so it wrongly refuses commands on targets whose grant is wider. A grant-independent subset would avoid that.",
+      "evidence": "The production gate already computes the live grant (reading.rs:620-628, `c.verifier_grant(jc).commands`). Each capability reads its grant from config (cap-change/src/lib.rs:72-81). The plan accepts that a target whose grant allows `cargo doc` will be refused wrongly. Some of the rules hold for every verifier whatever its grant: an environment assignment (policy.rs:584-589), `cargo fmt` without --check (athena.toml:75), and write programs or git write subcommands (the verifier never writes). Those rules alone cover both observed instances. Fix: Enforce only the grant-independent rules now. Leave the check of subcommands against the grant to the named follow-up, when the grant is passed in. If the table is kept, also have the drift test fail when a capability's verifier grant is not read from config.",
+      "location": "Plan decision 3 (VERIFIER_COMMANDS mirrored from athena.toml)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Taking the second word as the cargo subcommand misreads global flags.",
+      "evidence": "policy.rs:504-524 has `cargo_lead`/`cargo_subcommand`, which skip allowed global flags. `cargo --locked test` has subcommand `test`, which the verifier policy allows. A naive second-word parse sees `--locked`, finds it missing from the table, and refuses. athena-core depends on athena-agent (system facts), so the function is reachable. Fix: Use `athena_agent::policy::cargo_subcommand` to find the cargo subcommand. Treat None (an unknown flag) as unread, not as refused, and add `Run `cargo --locked test`: passes` as an accept test.",
+      "location": "Plan decision 3 / step 1 command rules",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the fix in the right place. It adds one deterministic `step!` as the last line of `refusing_check` (checks.rs:534-549, which I read). The fixtures it names exist: `gate_refuser` at reading.rs:7206, `replay_declaration` at replay.rs:263, `INPUT_FORMS` with 63 entries, and `READING_RULES` with 12 at reader.rs:287. D173 is the last entry in the decision log. The `git push` / Environment interaction at reading.rs:5094 is handled. Three things need revising before code is written. First, the rule for decision ids contradicts itself on its main refuse case. The new-id skip counts `append*` within 4 words before the id, across all criteria, so it exempts 'append a note to D87', which rule (ii) is meant to refuse. Because the marking applies across criteria, one unrelated criterion can also exempt a real in-place edit. Second, the rule for a clause with no id is ambiguous. Read as an OR, it refuses the common legitimate wording 'Update docs/decisions.md and CHANGELOG.md'. Third, the dependents list leaves out readers of `check_reading_text`: the steward's queue listing (steward.rs:424), drain (drain.rs:116) and the `athena check-reading` CLI (main.rs:687). Smaller issues: the corpus case for a `records/` deliverable collides with `check_boundary_and_repo_files` when `repo_files` is Some. The mirrored grant table wrongly refuses some commands for target repositories, and the subcommand parse misreads `cargo --locked test`."
+}
