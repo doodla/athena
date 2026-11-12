@@ -6,6 +6,7 @@ pub mod decisions;
 pub mod display;
 pub mod drain;
 pub mod hooks;
+pub mod pushback;
 pub mod slot_exec;
 pub mod strategy;
 pub mod wiring;
