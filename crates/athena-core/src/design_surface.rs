@@ -16,6 +16,9 @@
 //!
 //! A section that is added or removed counts once: the keys under it are folded into its item (its detail
 //! says how many), so removing one `athena.toml` section is one removed item and not one per key.
+//!
+//! [`undecided_surface_changes`] is the check behind OLY-A-12 (the API surface is not treated as settled): a
+//! change to the surface is reported unless the same change touches the design-decision log.
 
 use crate::Athena;
 use crate::commits::{NewFile, message};
@@ -38,6 +41,8 @@ pub const RECORDS_SOURCE: &str = "crates/athena-data/src/records.rs";
 pub const ROLES_SOURCE: &str = "crates/athena-data/src/roles.rs";
 /// The workspace manifest.
 pub const WORKSPACE_MANIFEST: &str = "Cargo.toml";
+/// The design-decision log. The decision gate in `run/checks.rs` (line 7) holds a private twin of this value.
+const DECISION_LOG: &str = "docs/decisions.md";
 
 /// The deepest nesting of commands or config sections that is followed.
 const MAX_DEPTH: usize = 8;
@@ -733,6 +738,43 @@ pub fn diff(old: &SurfaceInventory, new: &SurfaceInventory) -> SurfaceDiff {
     }
 }
 
+/// The surface changes that carry no design decision: one line per kind (commands, flags, config keys,
+/// record schemas, roles, crates) with added, removed or changed items, unless the log of design decisions,
+/// `docs/decisions.md`, is among `changed_paths`. An empty `changes` gives no findings.
+///
+/// Paths are repository-relative with `/` separators, as a git diff lists them; a leading `./` is ignored.
+///
+/// The limit: this tests whether the log is among the changed paths, not whether it gained a new `## D<n>`
+/// heading. The log is append-only, so any change to it is an append, and text appended without a new heading
+/// still silences the check. It is a library check and is not yet called when a change lands.
+pub fn undecided_surface_changes<S: AsRef<str>>(
+    changes: &SurfaceDiff,
+    changed_paths: &[S],
+) -> Vec<String> {
+    if changes.is_empty() {
+        return Vec::new();
+    }
+    let decided = changed_paths
+        .iter()
+        .any(|path| path.as_ref().trim_start_matches("./") == DECISION_LOG);
+    if decided {
+        return Vec::new();
+    }
+    changes
+        .kinds()
+        .into_iter()
+        .filter(|(_, kind)| kind.total() > 0)
+        .map(|(name, kind)| {
+            format!(
+                "{name}: {} added, {} removed, {} changed, with no entry in {DECISION_LOG}",
+                kind.added.len(),
+                kind.removed.len(),
+                kind.changed.len()
+            )
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The record
 
@@ -1072,5 +1114,36 @@ pub fn audience(at: Timestamp) -> RoleDefinition {
         );
         assert_eq!(changes.totals().total, 1);
         assert_eq!(changes.commands.added[0].name, "status");
+    }
+
+    #[test]
+    fn a_surface_change_without_a_decision_is_reported_and_one_with_it_is_not() {
+        let entry = |name: &str, detail: &str| (name.to_string(), detail.to_string());
+        let mut old = SurfaceInventory::default();
+        old.crates.extend([entry("gone", "crates/gone")]);
+        old.roles.extend([entry("producer", "1")]);
+        let mut new = SurfaceInventory::default();
+        new.commands.extend([entry("status", "visible")]);
+        new.roles.extend([entry("producer", "2")]);
+        let changes = diff(&old, &new);
+        assert_eq!(changes.totals().total, 3);
+
+        let findings = undecided_surface_changes(&changes, &["crates/a/src/lib.rs"]);
+        assert_eq!(
+            findings,
+            [
+                "commands: 1 added, 0 removed, 0 changed, with no entry in docs/decisions.md",
+                "roles: 0 added, 0 removed, 1 changed, with no entry in docs/decisions.md",
+                "crates: 0 added, 1 removed, 0 changed, with no entry in docs/decisions.md",
+            ]
+        );
+        assert_eq!(undecided_surface_changes::<&str>(&changes, &[]).len(), 3);
+
+        let with_log = ["crates/a/src/lib.rs", "docs/decisions.md"];
+        assert!(undecided_surface_changes(&changes, &with_log).is_empty());
+        assert!(undecided_surface_changes(&changes, &["./docs/decisions.md"]).is_empty());
+
+        let same = diff(&old, &old);
+        assert!(undecided_surface_changes(&same, &["crates/a/src/lib.rs"]).is_empty());
     }
 }
