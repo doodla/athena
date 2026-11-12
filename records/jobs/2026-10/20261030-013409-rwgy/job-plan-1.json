@@ -1,0 +1,197 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-013409-rwgy",
+  "round": 1,
+  "at": "2026-11-12T05:54:27.065239419Z",
+  "invocation_seq": 2,
+  "approach": "Add a gate integration test file, crates/athena-gate/tests/bootstrap_requirement.rs, with two tests. (1) It reads docs/spec.toml (same slicing approach as crates/athena-core/tests/model_roster.rs:51-68) and requires the OLY-B-O1-01 entry to have a mechanism other than \"none\" that names `athena_gate::invariant::bootstrap_range`, owner = \"Athena\", and a measure ending `status: not shown`, naming the test. (2) It builds a throwaway git repository with `athena_git::Git::isolated` and `tempfile` (both already normal dependencies of athena-gate, so Cargo.toml stays unchanged), then calls the real `athena_gate::invariant::bootstrap_range`. It expects `Open` while records/jobs/bootstrap/outcome.json is absent and `ClosedThrough(<commit>)` once a commit adds that outcome. Then edit the OLY-B-O1-01 entry in docs/spec.toml to name the mechanism and a measure, and add a CHANGELOG.md entry under [Unreleased] / Added in the style of the OLY-B-SET-02 entry. The doc comment on `bootstrap_range` in invariant.rs gets one line naming OLY-B-O1-01. No behavior changes. The existing in-source test `bootstrap_commits_pass_while_the_range_is_open_and_not_after` (invariant.rs:1102-1122) already shows the full gate accepting a bootstrap commit while the range is open and refusing one after it closes; the new range test is named with `bootstrap` so `cargo test -p athena-gate bootstrap` runs both.",
+  "decisions": [
+    {
+      "choice": "Point the mechanism at the existing `athena_gate::invariant::bootstrap_range` (rule M6) and state in the measure that 'v0 stays small' is not mechanically enforced.",
+      "reason": "The code is already there: invariant.rs:60-79 defines the range and invariant.rs:175-197 refuses `Athena-Job: bootstrap` after it closes. This is exactly what the request's 'recorded as such, the only work outside Athena' part needs. The user accepted this reading.",
+      "rejected": [
+        {
+          "option": "Add a size limit for v0",
+          "why": "Out of scope. It would be a new rule with no defined threshold."
+        },
+        {
+          "option": "Add a new `athena status` label such as `status: bootstrap`",
+          "why": "Out of scope. STATUS_MEASURE_LABELS would change, and the spec convention allows `status: not shown` plus a test."
+        }
+      ]
+    },
+    {
+      "choice": "The new integration test calls only `bootstrap_range` through `athena_git::Git::isolated` and `tempfile`. It does not call `check` or `Judged`.",
+      "reason": "The crate's test helpers (`repo`, `write`, `commit`, lib.rs:396-418) are under `#[cfg(test)]`, so an integration test cannot use them. The test needs only `git init`, one file write and one commit. This leaves Cargo.toml untouched. The full accept/refuse behavior stays covered by the existing in-source test, which `cargo test -p athena-gate bootstrap` also runs.",
+      "rejected": [
+        {
+          "option": "Add a testkit dev-dependency to athena-gate/Cargo.toml",
+          "why": "Not needed. The crate-reach facts list gate's dev crates as none, and Git::isolated is enough."
+        },
+        {
+          "option": "Move the new test into invariant.rs",
+          "why": "The brief asks for a file under crates/athena-gate/tests/. Spec parsing there matches the model_roster.rs precedent."
+        }
+      ]
+    },
+    {
+      "choice": "The measure reads like `... cargo test -p athena-gate bootstrap (spec entry in crates/athena-gate/tests/bootstrap_requirement.rs); 'v0 stays small' is not enforced; status: not shown`.",
+      "reason": "The xtask spec test (xtask/tests/spec.rs:194-213) requires only that the measure ends with `status: <label>`. `rsplit_once(\"status:\")` takes the text after the last `status:`, so the text before the ending may not contain a second `status:`. `not shown` is the label the request allows when no `athena status` line shows the requirement.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "At the OLY-B-O1-01 entry (line 2163), replace mechanism = \"none\" with a mechanism naming `athena_gate::invariant::bootstrap_range` (rule M6, accepts `Athena-Job: bootstrap` commits only until records/jobs/bootstrap/outcome.json closes the range), keep owner = \"Athena\", and write a measure that ends `status: not shown` and names `cargo test -p athena-gate bootstrap` and the test file.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/tests/bootstrap_requirement.rs",
+      "action": "create",
+      "purpose": "Two tests: the spec entry names a real mechanism, the Athena owner and a `status: not shown` measure; and `bootstrap_range` returns Open and then ClosedThrough in a throwaway repo (names contain `bootstrap`).",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "action": "modify",
+      "purpose": "Add one doc-comment line on `bootstrap_range` (line 67) naming OLY-B-O1-01. No code change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a first bullet under [Unreleased] / Added: OLY-B-O1-01 now has a mechanism, with the test names and the note that 'v0 stays small' stays prose and no commit is newly refused.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Edit docs/spec.toml at OLY-B-O1-01 (line 2163): replace the mechanism line with text naming `athena_gate::invariant::bootstrap_range` (rule M6, Athena-Job: bootstrap accepted only until records/jobs/bootstrap/outcome.json closes the range); keep owner = \"Athena\"; set a single-line measure that names `cargo test -p athena-gate bootstrap`, says that 'v0 stays small' is not mechanically enforced, and ends with `status: not shown`. Do not touch the statement or source lines.",
+    "Create crates/athena-gate/tests/bootstrap_requirement.rs. Write `repo_file` as in model_roster.rs:11-16. Test 1 (`spec_entry_names_the_bootstrap_range_gate`): find `id = \"OLY-B-O1-01\"`, slice to the next `[[requirement]]`, assert no `mechanism = \"none\"`, assert it contains `athena_gate::invariant::bootstrap_range` and `owner = \"Athena\"`, take the `measure = ` line and assert it ends with `status: not shown` and names `bootstrap`. Test 2 (`bootstrap_range_is_open_then_closed_by_the_outcome_record`): make a tempdir, `Git::isolated(dir.path())`, `git init -q -b main`, write a file, `git add -A`, commit and take the head id; assert `bootstrap_range(&git, \"HEAD\")` is `BootstrapRange::Open`; write records/jobs/bootstrap/outcome.json (JSON copied from invariant.rs:1109, with `through_commit` set to that id), commit, and assert it is `BootstrapRange::ClosedThrough(id)`.",
+    "Add a one-line doc comment on `bootstrap_range` in crates/athena-gate/src/invariant.rs (line 67) naming OLY-B-O1-01 as the requirement it meets. Make no other code change.",
+    "Add a bullet at the top of CHANGELOG.md under [Unreleased] / Added, in the style of the OLY-B-SET-02 entry (CHANGELOG.md:26): OLY-B-O1-01 now has a mechanism, `bootstrap_range` in crates/athena-gate/src/invariant.rs (rule M6); the measure is `status: not shown` and names the test; 'v0 stays small' stays prose; the gate itself and the records are unchanged.",
+    "Run `cargo fmt --all`, then `cargo test -p athena-gate`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` to check the xtask spec test and the boundary scan over the new text."
+  ],
+  "risks": [
+    {
+      "risk": "The measure parse breaks if the text contains `status:` twice or spans lines (xtask uses `rsplit_once(\"status:\")`).",
+      "mitigation": "The spec-entry test slices the entry with the same `[[requirement]]` search model_roster.rs:57 uses and reads the `measure = ` line. The producer keeps the measure on one line and avoids a second `status:` inside it."
+    },
+    {
+      "risk": "The temp-repo test depends on a git binary and identity settings in the checks' environment.",
+      "mitigation": "The test runs `git init -q -b main` and commits with `Git::isolated`, which sets author, committer and gpgsign=false, the same setup as the in-source helpers (gate/src/lib.rs:396-418)."
+    },
+    {
+      "risk": "The outcome JSON in the new test drifts from the `athena.outcome/1` schema, so `AnyRecord::parse` fails and the code silently reports `ClosedThrough(\"\")`.",
+      "mitigation": "The outcome JSON is copied from the string in invariant.rs:1109, which the existing test already parses, and the test asserts `ClosedThrough` carries the commit id."
+    },
+    {
+      "risk": "'v0 stays small' is not enforced, so the requirement is only partly mechanised.",
+      "mitigation": "The measure says so in plain words and ends `status: not shown`; the changelog bullet repeats it. This matches the request's own allowed label."
+    },
+    {
+      "risk": "The brief lists crates/athena-gate/Cargo.toml and invariant.rs as deliverables but the plan changes only a doc line and no Cargo.toml.",
+      "mitigation": "I only edit a doc comment and do not touch Cargo.toml; if the producer finds Cargo.toml must change, it keeps the change to one dependency line and reports why."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "OLY-B-O1-01 entry in docs/spec.toml (mechanism, measure)",
+      "dependent": "xtask/tests/spec.rs (every_active_requirement_has_a_mechanism_an_owner_and_a_measure, spec.rs:627; check_how_it_is_met, spec.rs:194)",
+      "kind": "rule",
+      "test": "cargo test --locked (xtask spec tests)",
+      "reason": "The edited entry keeps a non-empty mechanism, owner = \"Athena\", and a measure ending `status: not shown`, which satisfies the checks. The same test runs in cargo test."
+    },
+    {
+      "name": "Spec gap list / re-queued 'give a mechanism' request",
+      "dependent": "Hestia sweep `Athena::spec_review` (crates/athena-core, referred to in xtask/tests/spec.rs:192)",
+      "kind": "code",
+      "test": null,
+      "reason": "It queues a request only when the mechanism is `none` or the measure label is missing; after the edit neither holds. `status: not shown` is the accepted label (the same convention as docs/spec.toml:177, 189, 249). Nothing else reads the entry."
+    },
+    {
+      "name": "Measure label `not shown`",
+      "dependent": "crates/athena-core/src/status.rs STATUS_MEASURE_LABELS and `athena status`",
+      "kind": "code",
+      "test": null,
+      "reason": "No new label is added. The label is not a status-printed line, so `athena status` output does not change."
+    },
+    {
+      "name": "bootstrap_range (doc-comment line only)",
+      "dependent": "athena_gate::invariant::bootstrap_range callers (invariant.rs:179 in `check`; history walk in crates/athena-gate/src/history.rs)",
+      "kind": "code",
+      "test": "cargo test -p athena-gate bootstrap",
+      "reason": "Only a doc comment changes, so the compiled behavior of every caller is the same. The existing test covers rule M6."
+    },
+    {
+      "name": "athena-gate dependencies",
+      "dependent": "crates/athena-gate/Cargo.toml dependencies (tempfile, athena-git)",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged. `tempfile` and `athena-git` are already normal dependencies (Cargo.toml:11-19), so the integration test reaches them without edits and Cargo.lock does not change."
+    },
+    {
+      "name": "CHANGELOG.md [Unreleased] / Added entry",
+      "dependent": "CHANGELOG.md consumers (release/tag tooling, any changelog test)",
+      "kind": "code",
+      "test": null,
+      "reason": "The entry is one more bullet in the same prose style as the neighbouring OLY-B-* bullets (CHANGELOG.md:12-30). The format is unchanged; the producer's final check reads the file once, so a malformed heading would fail only the usual changelog-aware tests, which this edit does not touch."
+    },
+    {
+      "name": "New text in the spec, changelog and test file",
+      "dependent": "Boundary scan and personal-data allow-list (xtask/tests/policy.rs, athena.toml [personal_data])",
+      "kind": "rule",
+      "test": "cargo test --locked (xtask policy tests)",
+      "reason": "The new text names no person, machine or email address, so these scans are unaffected."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read-only check of the spec text by the new spec-entry test, plus `git diff docs/spec.toml` to see the edited entry.",
+      "command": "cargo test -p athena-gate --test bootstrap_requirement",
+      "observes": "The OLY-B-O1-01 entry has no `mechanism = \"none\"`, contains `athena_gate::invariant::bootstrap_range`, keeps owner = \"Athena\", and its measure ends `status: not shown` and names the test.",
+      "fails_without": "On the base tree the entry has mechanism = \"none\" (docs/spec.toml:2164). The spec test fails on the `!entry.contains(\"mechanism = \\\"none\\\"\")` assertion and on the missing `bootstrap_range` name.",
+      "seam": "Production entry point: none (a content check). The fixture is the repository's real docs/spec.toml, read via env!(\"CARGO_MANIFEST_DIR\")/../.. as in model_roster.rs:11-16. The seam is added by plan step 1."
+    },
+    {
+      "criterion": 2,
+      "method": "Run the new integration test file; both tests must pass with the change. To show the failure without the change, the verifier may run `git stash`-free reasoning from the base spec text (mechanism = \"none\" at docs/spec.toml:2164), since the test asserts against that exact text.",
+      "command": "cargo test -p athena-gate --test bootstrap_requirement",
+      "observes": "The spec-entry test and the range test pass; the spec-entry test would fail on the base text.",
+      "fails_without": "On the base tree the spec-entry test fails (mechanism is \"none\"). The test file does not exist at base. The range test also fails if `bootstrap_range` stops returning `Open` without the outcome file or `ClosedThrough(<commit>)` with it.",
+      "seam": "Production entry point: `athena_gate::invariant::bootstrap_range(&Git, treeish)` (invariant.rs:68). Precondition: a git repository with one commit. Fixture: a `tempfile::tempdir` plus `athena_git::Git::isolated` (git/src/lib.rs:179); the test runs `git init`, writes records/jobs/bootstrap/outcome.json and commits. The outcome JSON has the same fields as the string at invariant.rs:1109, with `through_commit` set to the first commit. The fixture is created inside the test, so no injection is needed. The seam is added by plan step 2; `bootstrap_range` and `Git::isolated` exist (read)."
+    },
+    {
+      "criterion": 3,
+      "method": "The filter `bootstrap` runs the existing in-source test `bootstrap_commits_pass_while_the_range_is_open_and_not_after` and the new range test (its name contains `bootstrap`).",
+      "command": "cargo test -p athena-gate bootstrap",
+      "observes": "The first bootstrap commit and the closing commit pass the gate while the range is open. A late `Athena-Job: bootstrap` commit after the outcome names `through_commit` is refused with one violation. The new test sees `Open` then `ClosedThrough`.",
+      "fails_without": "If rule M6 let `Athena-Job: bootstrap` through after the range closes (the `ClosedThrough` arm at invariant.rs:181-196), the existing test's final `assert_eq!(judge(&git, \"HEAD\").len(), 1)` at invariant.rs:1121 fails. If `bootstrap_range` ignored the outcome file, the new range test fails.",
+      "seam": "Production entry points: `invariant::check` (invariant.rs:102) via the in-source `judge` helper (invariant.rs:885), and `bootstrap_range`. Fixture: `owner_repo()` (invariant.rs:892) and `Git::isolated` temp repositories. Both exist today (read); no new seam is needed."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three repository checks (the verifier runs each as its own simple command).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "fmt reports nothing; clippy has no warnings; every test passes, including the xtask spec test over docs/spec.toml.",
+      "fails_without": "Not a behavior of the change itself. A malformed spec entry (no trailing `status: <label>`) fails xtask/tests/spec.rs `every_active_requirement_has_a_mechanism_an_owner_and_a_measure` (spec.rs:627).",
+      "seam": "Production entry points: cargo fmt, cargo clippy and cargo test across the workspace; the spec parse in xtask/tests/spec.rs. The fixtures exist today (read)."
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the diff stat and read the new CHANGELOG.md bullet.",
+      "command": "git diff --stat",
+      "observes": "Only docs/spec.toml, crates/athena-gate/tests/bootstrap_requirement.rs, crates/athena-gate/src/invariant.rs (doc comment only) and CHANGELOG.md changed. athena.toml, defaults.toml, workflows and records/ did not. The new bullet sits first under [Unreleased] / Added.",
+      "fails_without": "Not a behavior criterion. The changelog convention is to record each spec mechanism under [Unreleased] / Added (CHANGELOG.md:8-30).",
+      "seam": "None; this is a content check."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "da838801e17f9fee6790edcae400c3ac07391e7ef8f78620905501f65c1ac04e"
+}
