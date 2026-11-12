@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- OLY-A-12 now has a mechanism: `undecided_surface_changes` in `crates/athena-core/src/design_surface.rs` takes the
+  difference between two design-surface inventories and the changed paths, and reports one finding per surface
+  kind with changes unless `docs/decisions.md` is among the paths. An empty difference gives no findings. It tests
+  the path, not whether the log gained a new `## D<n>` heading, and it is not yet called when a change lands, so
+  no reading is newly refused. The measure stays `status: not shown` and names
+  `cargo test -p athena-core design_surface`.
 - OLY-A-09 now has a mechanism: the re-triage function in `crates/athena-core/src/retriage.rs` keeps each open
   proposal queued before Olympus (2026-10-17) whose finding key is still raised and closes the rest with a
   recorded rejection reason. It is idempotent and an empty queue yields no decisions. The measure stays
