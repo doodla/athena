@@ -245,8 +245,14 @@ impl Athena {
                     )));
                     break;
                 }
+                // The verifier's cargo commands build in a slot's warm target directory, as the checks did.
+                let build = self.link_verifier_build(ctx, &job_dir, vsnap.dir(), &capability_env);
                 let invoked = self.invoke_and_record(&vfacts, ctx.redactor);
+                // Unlocked first: `cargo clean` opens the lock file for writing, which a locked snapshot refuses.
                 vsnap.unlock()?;
+                if let Some(build) = build {
+                    self.release_verifier_build(build, vsnap.dir(), ctx.ui);
+                }
                 match invoked? {
                     Err(error) => {
                         verifier_failure = Some(VerifierFailure::Incomplete(format!(

@@ -4633,6 +4633,70 @@ mod produce_and_verify_order_tests {
         assert!(slot_dir.ends_with("build-slots/0/target"));
     }
 
+    /// The verifier's build path while its agent ran: where it linked to and what the directory held.
+    type SeenByVerifier = Arc<std::sync::Mutex<Vec<(Option<PathBuf>, Vec<String>)>>>;
+
+    /// `inner`, noting for each verifier call where `CARGO_TARGET_DIR` linked to and the names directly in its
+    /// `debug/deps`.
+    fn noting_verifier_build(
+        inner: athena_agent::fake::Script,
+        seen: SeenByVerifier,
+    ) -> athena_agent::fake::Script {
+        Box::new(move |spec: &AgentInvocation| {
+            if spec.role == Role::Verifier {
+                let path = PathBuf::from(&spec.env["CARGO_TARGET_DIR"]);
+                let mut deps: Vec<String> = std::fs::read_dir(path.join("debug/deps"))
+                    .map(|rd| {
+                        rd.flatten()
+                            .map(|e| e.file_name().to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                deps.sort();
+                seen.lock()
+                    .unwrap()
+                    .push((std::fs::read_link(&path).ok(), deps));
+            }
+            inner(spec)
+        })
+    }
+
+    /// The verifier stage was longer because its cargo commands started on an empty build directory: the
+    /// checks' slot link goes after each command, and nothing linked the verifier's path again. It must find
+    /// the slot's warm third-party output, and the link must be gone again when it ends.
+    #[test]
+    fn the_verifier_builds_in_the_slots_warm_target_directory() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let seen: SeenByVerifier = Default::default();
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            noting_verifier_build(
+                each_job_its_own_edit(counting(counts.clone(), None)),
+                seen.clone(),
+            ),
+        );
+        let slot_dir = athena.state.slot_target(0);
+        let job = athena.ask("describe the demo", &Quiet).unwrap().job;
+        // The check builds a third-party crate into the slot; the verifier must start on it.
+        run_job_through_slot(&athena, &job, &Quiet, |link| {
+            write_third_party(link, "libserde-0123abcd.rlib", 10);
+        });
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].0.as_ref(), Some(&slot_dir), "linked to the slot");
+        assert_eq!(seen[0].1, ["libserde-0123abcd.rlib"], "starts warm");
+        assert!(!athena.state.job_dir(&job).join("target/verify").exists());
+        assert!(
+            take_slot_soon(&slot_queue(&athena)).queued() < std::time::Duration::from_secs(10),
+            "the verifier freed its slot"
+        );
+    }
+
     #[test]
     fn a_slot_directory_over_slot_max_gb_is_deleted_before_the_next_use_and_one_under_it_is_kept() {
         let repo = repo_with_config("\n[drain.pipeline]\nslot_max_gb = 2\n");
@@ -4650,23 +4714,14 @@ mod produce_and_verify_order_tests {
         let _gb = checks::gb_seam::install(50_000);
         let slot_dir = athena.state.slot_target(0);
 
-        // Job one leaves 300 KB behind: over the limit, but it is only deleted before the next use.
-        let first = run_job_through_slot(&athena, &ask("describe the demo"), &Quiet, |link| {
+        // Job one leaves 300 KB behind: over the limit, but it is only deleted before the next use. The
+        // next use is its own verifier, which finds the slot deleted and made again, empty, and says so.
+        let ui = Lines::default();
+        let first = run_job_through_slot(&athena, &ask("describe the demo"), &ui, |link| {
             write_third_party(link, "libbig-1.rlib", 300_000);
         });
         assert!(first.deps.is_empty());
-        assert!(slot_dir.join("debug/deps/libbig-1.rlib").is_file());
-
-        // Job two finds the slot deleted and made again, empty, and says so. It leaves 20 KB, under the limit.
-        let ui = Lines::default();
-        let second = run_job_through_slot(&athena, &ask("describe it again"), &ui, |link| {
-            write_third_party(link, "libsmall-2.rlib", 20_000);
-        });
-        assert_eq!(second.linked_to, slot_dir);
-        assert!(
-            second.deps.is_empty(),
-            "{second:?}: deleted and rebuilt cold"
-        );
+        assert!(!slot_dir.join("debug/deps/libbig-1.rlib").exists());
         let said = ui.0.lock().unwrap().clone();
         assert!(
             said.iter().any(
@@ -4675,6 +4730,16 @@ mod produce_and_verify_order_tests {
             ),
             "{said:#?}"
         );
+
+        // Job two finds it empty. It leaves 20 KB, under the limit.
+        let ui = Lines::default();
+        let second = run_job_through_slot(&athena, &ask("describe it again"), &ui, |link| {
+            write_third_party(link, "libsmall-2.rlib", 20_000);
+        });
+        assert_eq!(second.linked_to, slot_dir);
+        assert!(second.deps.is_empty(), "{second:?}: rebuilt cold");
+        let said = ui.0.lock().unwrap().clone();
+        assert!(!said.iter().any(|l| l.contains("over its")), "{said:#?}");
 
         // Job three finds the 20 KB kept.
         let ui = Lines::default();

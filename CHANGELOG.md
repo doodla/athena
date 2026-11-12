@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- The verifier stage grew from 3.1 to 3.5 minutes per landed job (`docs/design/verifier-stage-slowdown.md`).
+  When build slots took over the checks' target directories, the link was dropped after every check, so the
+  verifier's own `cargo` commands started on an empty build directory. The verifier's run is now wrapped in a
+  slot and its `CARGO_TARGET_DIR` is linked to the slot's warm directory, then cleaned as after a check. A slot
+  that cannot be had is a warning and a cold build, not a hold. The next throughput review should show the
+  verifier median below 3.5.
+
 ### Added
 
 - OLY-A-12 now has a mechanism: `undecided_surface_changes` in `crates/athena-core/src/design_surface.rs` takes the
