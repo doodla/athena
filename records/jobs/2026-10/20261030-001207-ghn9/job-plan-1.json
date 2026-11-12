@@ -1,0 +1,200 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-001207-ghn9",
+  "round": 1,
+  "at": "2026-11-12T01:10:54.848948791Z",
+  "invocation_seq": 4,
+  "approach": "Add one pure function, `undecided_surface_changes(&SurfaceDiff, &[S]) -> Vec<String>`, and a constant `DECISION_LOG` to crates/athena-core/src/design_surface.rs. It returns one finding line per surface kind with changes, unless the changed paths include docs/decisions.md or the diff is empty. A unit test builds two `SurfaceInventory` values directly, runs the existing `diff`, and checks the flagged and unflagged outcomes. Then fill OLY-A-12 in docs/spec.toml (mechanism naming the function, owner Athena, measure ending `status: not shown` and naming the test), add an Unreleased/Added line to CHANGELOG.md, and append D172 to docs/decisions.md. Nothing is wired into landing, admission or `athena status`. This revision adds the missing seam for criterion 3: the demonstration names the three workspace checks as its entry points, the repository's real files as the fixture, and says the seam exists today.",
+  "decisions": [
+    {
+      "choice": "The check is a pure function over a SurfaceDiff and a list of changed paths; it does not call git.",
+      "reason": "`diff` (design_surface.rs:722) already yields added, removed and changed items per kind, and `SurfaceInventory` derives Default with public BTreeMap fields (crates/athena-data/src/records/design_surface.rs:12-26), so a test can build inventories without a repository. The caller supplies the paths, so later wiring is one call.",
+      "rejected": [
+        {
+          "option": "A function taking a Git and two commits that computes the inventories and changed paths itself",
+          "why": "It repeats `inventory_at` and `diff` and needs a git fixture for each case. The pure form covers the same rule and is smaller."
+        },
+        {
+          "option": "Wire it into landing or `athena status` now",
+          "why": "Out of scope. Wiring adds a refusal and a status label, and no existing status line fits."
+        }
+      ]
+    },
+    {
+      "choice": "A design decision means the change touches docs/decisions.md. The findings are one line per kind with changes, built from `SurfaceDiff::kinds()` (design_surface.rs:635) and `KindDiff::total()` (608).",
+      "reason": "This is the reading the user accepted. It judges structure, not intent, as D162 does for the mirrors.",
+      "rejected": [
+        {
+          "option": "Parse the new D-entries and require one to name the changed item",
+          "why": "That judges intent, which the accepted reading did not ask for."
+        }
+      ]
+    },
+    {
+      "choice": "The measure is `status: not shown` and names `cargo test -p athena-core design_surface`.",
+      "reason": "xtask/tests/spec.rs:190-207 requires the measure to end with `status: <label>`, and hestia accepts `not shown`. The check is not wired into anything `athena status` prints, so no label fits. This is the OLY-A-09 precedent.",
+      "rejected": [
+        {
+          "option": "Add a new status label",
+          "why": "It needs wiring and a status.rs change, both out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Append D172 to docs/decisions.md with no `[[link]]` or `[[governs]]` entry.",
+      "reason": "The brief lists decisions.md as a deliverable. The DecisionEntries and AppendOnly mirror rules require the next id, a well-formed heading, a Provenance bullet and an unchanged prefix. design_surface.rs is not governed in docs/decision-links.toml.",
+      "rejected": [
+        {
+          "option": "Leave decisions.md unchanged",
+          "why": "It is an expected deliverable, and the change records a design choice."
+        }
+      ]
+    },
+    {
+      "choice": "Criterion 3 is demonstrated through the three workspace checks, with the repository's real docs/spec.toml, docs/decisions.md and sources as the fixture.",
+      "reason": "xtask/tests/spec.rs and the mirrors tests read those files from disk, so they are the seam. The logic under test is the production parsing and rule code, not a double.",
+      "rejected": [
+        {
+          "option": "Add a separate fixture or double for the workspace checks",
+          "why": "Not needed, since the real files are the input, and it would put logic into the double."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/design_surface.rs",
+      "action": "modify",
+      "purpose": "Add `pub const DECISION_LOG`, `pub fn undecided_surface_changes`, a module-doc bullet and the new unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "OLY-A-12 (lines 1760-1766): set the mechanism, keep owner Athena, and write a measure ending `status: not shown` that names the test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased/Added entry for the OLY-A-12 mechanism.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append entry D172 recording the design choice (append-only).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-core/src/design_surface.rs, add `pub const DECISION_LOG: &str = \"docs/decisions.md\";` beside the path constants (lines 31-40). Add a module-doc bullet. After `diff` (after line 734) add `pub fn undecided_surface_changes<S: AsRef<str>>(changes: &SurfaceDiff, changed_paths: &[S]) -> Vec<String>`. It returns an empty Vec when `changes.is_empty()` or when any path, after trimming a leading `./`, equals DECISION_LOG. Otherwise it returns one line per entry of `changes.kinds()` with a non-zero `total()`, formatted like `commands: 1 added, 0 removed, 0 changed, with no entry in docs/decisions.md`.",
+    "In the `tests` module (line 773), add `a_surface_change_without_a_decision_is_reported_and_one_with_it_is_not`. Build `old` and `new` `SurfaceInventory` values by inserting into the BTreeMaps: a new command, a removed crate, a changed role version. Assert (a) three findings naming commands, roles and crates when the paths are `crates/a/src/lib.rs` only, (b) an empty list when `docs/decisions.md` is added to the paths, (c) an empty list for `diff(&old, &old)` with paths that exclude the log.",
+    "Run `cargo test -p athena-core design_surface`. Temporarily make the function body return `Vec::new()`, confirm assertion (a) fails, then restore the body.",
+    "In docs/spec.toml, replace the OLY-A-12 `mechanism = \"none\"` line with a mechanism naming `undecided_surface_changes` in crates/athena-core/src/design_surface.rs. Say it returns a finding per surface kind (commands, flags, config keys, record schemas, roles, crates) changed between two inventories when the changed paths exclude docs/decisions.md, and that it is a library check not wired into landing. Keep owner = \"Athena\". Replace the measure with one ending `status: not shown`, e.g. `Shown by the tests of cargo test -p athena-core design_surface: a surface change without docs/decisions.md among the changed paths is reported, and one with it, or none, is not; status: not shown`.",
+    "Append entry `## D172 · ...` after the last line of docs/decisions.md, in the D171 layout (lines 4944-4966): Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance. Provenance says what was read (design_surface.rs, the OLY-A-09 precedent, the hestia label check) and what was measured (the new test), that no reading rule changed so no share of newly refused readings applies, and that wiring is a follow-up. Do not edit earlier lines.",
+    "Add a bullet at the top of `### Added` under `## [Unreleased]` in CHANGELOG.md, in the OLY-A-09 style (lines 12-16), naming the function, the test command and that the measure stays `status: not shown`.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix any finding."
+  ],
+  "risks": [
+    {
+      "risk": "The brief's acceptance 4 lists three changed files, but the expected deliverables also list docs/decisions.md.",
+      "mitigation": "The plan follows the deliverables list. The four files are none of them governance files."
+    },
+    {
+      "risk": "The D172 entry fails the DecisionEntries or AppendOnly mirror rule (wrong id, missing Provenance bullet, edited earlier text).",
+      "mitigation": "Step 5 appends after the last line with the D171 layout. The mirrors unit tests run in `cargo test --locked`."
+    },
+    {
+      "risk": "The check is not wired in, so OLY-A-12 is not enforced in practice.",
+      "mitigation": "The measure says `status: not shown` and names the test. The wiring is out of scope and recorded as a follow-up in D172."
+    },
+    {
+      "risk": "Path matching is exact, so `./docs/decisions.md` would not count as the log.",
+      "mitigation": "The function trims a leading `./` before comparing. The doc comment says paths are repository-relative with `/` separators, the form a git diff lists."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "OLY-A-12 mechanism, owner and measure in docs/spec.toml",
+      "dependent": "xtask/tests/spec.rs `check_how_it_is_met` (190-207) and `every_active_requirement_has_a_mechanism_an_owner_and_a_measure` (627)",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test spec: the new text has a non-empty mechanism, owner Athena and a measure ending `status: not shown`.",
+      "reason": null
+    },
+    {
+      "name": "measure label `status: not shown`",
+      "dependent": "crates/athena-core/src/hestia.rs spec_review (about 1449) and the label check (about 1218-1231)",
+      "kind": "code",
+      "test": null,
+      "reason": "The label check accepts a measure starting `not shown`. The sweep queues a request only when the mechanism is `none` (xtask/tests/spec.rs:17, 645-648), so once filled, the OLY-A-12 request stops being queued. A grep for OLY-A-12 in crates and xtask found no test that reads it."
+    },
+    {
+      "name": "docs/decisions.md gains entry D172",
+      "dependent": "crates/athena-core/src/mirrors.rs rules AppendOnly and DecisionEntries over docs/decisions.md (122-144)",
+      "kind": "rule",
+      "test": "cargo test --locked: the mirrors unit tests. D172 is appended after the last line (D171 ends at line 4966) with a `## D172 · ...` heading and its own Provenance bullet.",
+      "reason": null
+    },
+    {
+      "name": "change to crates/athena-core/src/design_surface.rs",
+      "dependent": "docs/decision-links.toml `[[governs]]` and the check in `check_and_verify` (D156)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The only governs entry is D08, with paths snapshot.rs and run/candidate.rs (decision-links.toml:219-224). design_surface.rs is not governed, so no link is required."
+    },
+    {
+      "name": "module athena_core::design_surface (additive: one constant, one function, one test)",
+      "dependent": "Callers of design_surface items: crates/athena-core/src/store.rs:267 (a comment only), crates/athena-cli/tests/design_surface.rs:3 (`inventory_at`), crates/athena-core/src/lib.rs:94 (`pub mod`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core design_surface and cargo test -p athena-cli --test design_surface",
+      "reason": "Nothing existing is renamed or edited: `inventory_at`, `diff`, `SurfaceDiff` and `record_design_surface` are unchanged, so these callers see the same behavior."
+    },
+    {
+      "name": "changelog entry",
+      "dependent": "CHANGELOG.md Unreleased/Added",
+      "kind": "rule",
+      "test": null,
+      "reason": "Prose only, added at the top of Unreleased/Added in the OLY-A-09 style (CHANGELOG.md:12-16). No test parses an individual entry's content."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the OLY-A-12 table in docs/spec.toml, Grep for the function name in design_surface.rs, then run the xtask spec test over docs/spec.toml.",
+      "command": "cargo test -p xtask --test spec",
+      "observes": "The mechanism text names `undecided_surface_changes` in crates/athena-core/src/design_surface.rs, the owner is Athena, and the measure ends `status: not shown` and names `cargo test -p athena-core design_surface`. Grep finds `pub fn undecided_surface_changes` in design_surface.rs. `every_active_requirement_has_a_mechanism_an_owner_and_a_measure` (xtask/tests/spec.rs:627) passes.",
+      "fails_without": "Without the spec.toml edit the mechanism stays `none`. A measure missing its `status:` marker is rejected by `check_how_it_is_met` (xtask/tests/spec.rs:190-207).",
+      "seam": "Entry point: the xtask spec tests (xtask/tests/spec.rs), which parse the real docs/spec.toml from disk. Fixture: docs/spec.toml itself, edited in plan step 4. No double. The seam exists (read at xtask/tests/spec.rs:184-207 and 627-648)."
+    },
+    {
+      "criterion": 2,
+      "method": "Run the new unit test `a_surface_change_without_a_decision_is_reported_and_one_with_it_is_not`. It calls the production `undecided_surface_changes` on diffs from the production `diff` over two hand-built `SurfaceInventory` values. The first adds the command `status`, removes a crate and changes a role version. Three calls: paths `[\"crates/a/src/lib.rs\"]`, paths `[\"crates/a/src/lib.rs\", \"docs/decisions.md\"]`, and an empty diff (`diff(&old,&old)`) with paths that exclude the log.",
+      "command": "cargo test -p athena-core design_surface",
+      "observes": "The first call returns three findings, for commands, roles and crates, each naming its counts. The second returns an empty list. The empty diff returns an empty list even without the log. The existing design_surface tests still pass.",
+      "fails_without": "Replacing the function body with `Vec::new()` fails the first assertion, which expects three findings. Ignoring the log fails the second assertion. Always flagging fails the empty-diff assertion.",
+      "seam": "Entry point: `undecided_surface_changes`, added by plan step 1. Fixture: `SurfaceInventory` values (Default, public BTreeMaps) filled directly in the test and passed to the existing `diff` (design_surface.rs:722). The test is added by plan step 2 in the existing `tests` module (design_surface.rs:773). No double, and the logic under test is not in the fixture. The inventories and `diff` exist today; the function and test are added by steps 1 and 2."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the three checks Athena runs on the result at the workspace root: fmt, clippy and the whole test suite. The suite includes the xtask spec test, which reads docs/spec.toml, the mirrors rules AppendOnly and DecisionEntries over docs/decisions.md, and the new design_surface test.",
+      "command": "cargo test --locked",
+      "observes": "`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` all exit 0. The xtask spec test accepts the new OLY-A-12 measure marker. The mirror rules accept D172 (next id, `## D172 · ...` heading, Provenance bullet, earlier text unchanged). The new unit test passes.",
+      "fails_without": "Without the D172 entry's required shape, or if earlier lines of decisions.md were edited, the mirrors rules fail. A measure without the `status:` marker fails the xtask spec test. Unformatted code fails fmt, and an unused or lint-triggering function fails clippy with `-D warnings`. The function is pub, so there is no dead-code warning.",
+      "seam": "Entry points: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fixture: the real tracked files, docs/spec.toml, docs/decisions.md and the crate sources, read from disk by xtask/tests/spec.rs and the mirrors tests in crates/athena-core/src/mirrors.rs. They are injected as the working tree and nothing is faked. This seam exists today (read at xtask/tests/spec.rs:627 and mirrors.rs:122-144). The only new inputs are the edits made in plan steps 1 to 6."
+    },
+    {
+      "criterion": 4,
+      "method": "List the changed paths in the producer's tree and compare them with the expected deliverables.",
+      "command": "git status",
+      "observes": "Only docs/spec.toml, crates/athena-core/src/design_surface.rs, CHANGELOG.md and docs/decisions.md are modified. athena.toml, defaults.toml and .github/workflows are untouched, and no record schema is added, so `AnyRecord` and `check_record_file` are untouched. No caller of the new function exists outside its test, so no reading or job is newly refused (0 newly refused).",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "b47de891ecba8904e5a48a634c724d43072a242946eb3f3c588e6a05aea7dfe8"
+}

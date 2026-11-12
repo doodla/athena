@@ -4964,3 +4964,30 @@ should replace those estimates with its figures.
   the two jobs' introspections. Measured: the retry tests for each kind and for no outcome, and the unit tests for
   `no_change_reason`. Not measured: how often producers report each kind; no reading rule changed, so no share
   of newly refused readings applies.
+
+## D172 · A surface change is checked against the decision log by path, in a library function not yet wired in
+
+- **Case:** OLY-A-12 (the API surface is not treated as settled) was active with no mechanism. The design-surface
+  inventory and `diff` in `crates/athena-core/src/design_surface.rs` already list what changed in commands, flags,
+  config keys, record schemas, roles and crates, but nothing asked whether a design decision went with the change.
+- **Decision:** `undecided_surface_changes` takes a `SurfaceDiff` and the changed paths. It returns one finding per
+  kind with changes unless `docs/decisions.md` is among the paths, and none for an empty difference. A design
+  decision means the log is touched in the same change. The check is a pure function: the caller supplies the
+  paths. It is not wired into landing, admission or `athena status`, so the OLY-A-12 measure is `status: not
+  shown` and names the test, as OLY-A-09 does.
+- **Alternatives:** Computing the inventories and paths from two commits inside the function repeats `inventory_at`
+  and `diff` and needs a git fixture per case. Parsing the new entries to require one that names the changed item
+  judges intent, which this change does not ask for. Wiring now would add a refusal and a status label, both
+  out of scope.
+- **Tradeoff:** The check tests the path, not a new heading. The log is append-only, so any change to it is an
+  append, and text appended with no new `## D<n>` heading still silences the check. A private `DECISION_LOG`
+  constant now sits in `design_surface.rs` beside the one in `crates/athena-core/src/run/checks.rs`; the two can
+  drift until they are merged.
+- **Reversal cost:** Low; remove the function, its test and the spec text. No record schema or config key was
+  added.
+- **Provenance:** Read: `crates/athena-core/src/design_surface.rs`, `crates/athena-core/src/run/checks.rs`,
+  `crates/athena-data/src/decision_links.rs`, the OLY-A-09 entry in the changelog, the measure-label check in
+  `crates/athena-core/src/hestia.rs`. Measured: the unit test for flagged, unflagged and empty-difference cases.
+  Follow-ups, not done: call the check where a change lands; require a new heading through
+  `athena_data::decision_links::headings`, which needs both log texts as inputs; merge the two constants. Not
+  measured: the share of newly refused readings; no reading rule changed.
