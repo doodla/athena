@@ -5090,3 +5090,24 @@ should replace those estimates with its figures.
   across two classes, the thin-class case and the mistake scoping, and the display test over seeded records. Not
   measured: any real records, because the producer's copy holds none; whether the figures fall once roles load less
   context. No reading rule changed, so no readings are newly refused.
+
+## D176 · Mechanism explanations are checked by a pure function over typed evidence, not yet wired to a study
+
+- **Case:** Requirement OLY-B-S4-01 asks that each mechanism be explained through prompts, code and observed runs,
+  with Athena's own records as primary evidence for Athena. It had mechanism `none`. No study of Athena exists; only
+  `studies/firstmate-work-handling` does.
+- **Decision:** `check` in `crates/athena-core/src/mechanism_explanation.rs` takes explanation records, each with an
+  instance, a mechanism and typed sources (prompt, code, run, record). It returns one gap for each absent prompt,
+  code or run source, and, for the Athena instance, a gap when no record source is present. A blank source does not
+  count. The spec measure ends `status: not shown`. No record type, data file or study capability code changes.
+- **Alternatives:** Validate claim files under `studies/` in the study capability: out of scope, and no Athena
+  instance exists to check. A new record type for explanations: it would touch the record checks for no gain.
+  Requiring records for every instance: records belong to Athena only.
+- **Tradeoff:** One record source stands in for "primary"; the share of record evidence is not weighed. A mechanism
+  with no explanation is not detected, because the input lists explanations only. Nothing feeds the function a real
+  study yet.
+- **Reversal cost:** Low; remove the module, its test file and its timings line, and put the spec entry back to
+  mechanism `none`.
+- **Provenance:** Read: `crates/athena-core/src/divergence.rs`, `crates/athena-core/tests/study_instance_split.rs`,
+  `crates/athena-core/src/hestia.rs` (`parse_spec`, `spec_gaps`, `measure_problem`). Measured: the new test file on
+  complete and defective explanations and on the spec entry. Not measured: any real study of Athena.
