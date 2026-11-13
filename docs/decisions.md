@@ -5111,3 +5111,37 @@ should replace those estimates with its figures.
 - **Provenance:** Read: `crates/athena-core/src/divergence.rs`, `crates/athena-core/tests/study_instance_split.rs`,
   `crates/athena-core/src/hestia.rs` (`parse_spec`, `spec_gaps`, `measure_problem`). Measured: the new test file on
   complete and defective explanations and on the spec entry. Not measured: any real study of Athena.
+
+## D177 · An introspection is deferred while the kill switch is on, and `athena start` runs the queue
+
+- **Case:** With the kill switch on, `Athena::introspect` still called the model. The driver refused with "the kill
+  switch is on", a failed introspection was committed, and nothing reran it. Two jobs, 20261029-142858-5c0p and
+  20261017-155259-7mjc, have no diagnosis for that reason.
+- **Decision:** `run_or_defer` in `crates/athena-core/src/introspect.rs` reads `Registry::stopped` before
+  `introspect` can reach `driver.invoke`. With the switch on, the event is written to
+  `<state>/introspect-pending/<key>.json` (one file per job or intervention) and no record is made.
+  `Athena::start_with` turns the switch off and then calls `run_pending_introspections`. That first queues each event
+  whose introspections all failed with "the kill switch is on" and which is not already pending, then runs each
+  pending event through `introspect` and deletes its file once the record is committed. It runs on every
+  `athena start`, not only when the switch was on, so records written before this change are rerun too. It does
+  nothing in a nested run and stops if the switch is on again. A run that fails stays a failed record and is not
+  queued again. `Athena::start` keeps its signature and calls `start_with` with a quiet Ui. No record type, status or
+  schema changes.
+- **Alternatives:** A pending status on the introspection record: a schema change that every reader of the status
+  would have to handle. A placeholder record followed by a second one: two records for one event. Draining only when
+  the switch was on: it would not rerun the two old failures when the switch is already off. Naming the two job ids
+  in code: ids in product code, and the rule covers them.
+- **Tradeoff:** The first `athena start` after this change spends one model call for each event that matches the
+  rule, not only for the two named jobs; the records could not be counted in the producer's copy. Two
+  `athena start` commands at the same moment could run one event twice. The queue is local machine state, not
+  history, so a lost state directory loses pending events; the requeue rule finds the ones that had failed.
+- **Reversal cost:** Low; remove `run_or_defer`, the queue functions, `start_with` and the tests, and delete
+  `introspect-pending/`. Failed records already written stay as they are.
+- **Provenance:** Read: `crates/athena-core/src/introspect.rs` (`introspect`, `introspect_job`,
+  `introspect_intervention`), `crates/athena-core/src/manage.rs` (`start`), `crates/athena-core/src/steward.rs`
+  (`steward-pending`, the model for a queue in the state directory), `crates/athena-agent/src/lib.rs` (the kill
+  switch error text). Measured: `cargo test -p athena-cli --test introspection` with a scripted model: an
+  introspection triggered while the switch is on is left pending with no model call and no failed record; `start`
+  records it once and empties the queue; an intervention is deferred, run on start and not run by a second start; a
+  failed record with the kill switch text is rerun once and one with another failure is not. Not measured: a real
+  model call, the number of old records the rule matches, and two simultaneous starts.
