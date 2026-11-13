@@ -1,0 +1,43 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261113-132810-w407",
+  "at": "2026-11-13T13:28:10.371964206Z",
+  "trigger": "intervention",
+  "job": null,
+  "intervention": "20261113-132803-knm6",
+  "class_of_work": "other",
+  "category": "other",
+  "what_happened": "The person running Athena read the drain log on 13 Nov at about 13:25 UTC. A writer on the retry of job 20261030-060839-1njk ran 5406 seconds (90 minutes, up to $10) before it failed with \"deadline of 616s reached\". The 616-second deadline was not enforced for about 80 minutes. The writer's edits were kept as a candidate. No unmet criteria or failed checks are listed, and nothing was changed by hand.",
+  "failure_class": "20261113-132824-ze7x",
+  "new_class": true,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "The deadline is a configured number that nothing enforces as a hard stop on the running agent process. The failure was only reported after the run had ended, apparently when the agent next returned control. Athena also has no independent watchdog that compares elapsed time with the deadline during the run. It has no cost-per-time check on a stage either. A stuck or slow writer therefore runs until it stops on its own.",
+  "other_causes": [
+    "The per-stage USD cap (up to $10) was large enough that it did not stop the run before the time overrun.",
+    "The drain log shows the overrun only after the fact, and nothing alerts the person running Athena during the run."
+  ],
+  "open_hypotheses": [
+    "The given fields cannot show why the deadline was not enforced. It could be that the agent was blocked in a tool call or network wait that the timer does not interrupt.",
+    "The deadline timer may have been paused or reset by agent activity, or may only be checked between agent turns.",
+    "The container may have been suspended or reclaimed for part of the 90 minutes, which would distort wall-clock time.",
+    "The fields do not say whether other writers have overrun their deadlines, so this may not be a single occurrence."
+  ],
+  "contradictions": [
+    "The event says the deadline was not enforced, but the writer did eventually fail with 'deadline of 616s reached'. So some deadline check exists and fired late."
+  ],
+  "prevention_kind": "code-check",
+  "prevention": "Enforce each stage deadline from outside the agent. A supervisor should measure wall-clock time from stage start and kill the agent process when the configured deadline plus a short grace period passes. This must hold even if the agent is blocked in a tool call. The kill should keep the edits as a candidate, record the actual elapsed time and spend, and flag any stage whose elapsed time exceeds 1.5 times its deadline. A test should start a stand-in agent that ignores signals and sleeps past the deadline, and assert that the stage ends within the grace period.",
+  "proposed_request": "Make the per-stage time deadline a hard limit that Athena enforces from outside the agent. Outcome: a producer, writer or verifier stage never runs more than a short grace period past its configured deadline, even when the agent is stuck in a tool call or a wait. Requirements: (1) A supervisor measures wall-clock time from stage start and terminates the agent process tree when the deadline plus the grace period (default 30 s) is reached. (2) On termination, the job records that the stage was killed for the deadline, the actual elapsed seconds and the spend, and keeps any edits already made as a candidate. (3) `athena status` or the drain log shows any stage whose elapsed time exceeded its deadline. Acceptance: a test uses a stand-in agent that ignores termination requests and sleeps past a 2 s deadline, and the stage ends within the deadline plus the grace period, with the kill recorded. A second test shows a stage that finishes before its deadline is not affected. Add a CHANGELOG.md entry.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.130222,
+    "input_tokens": 2,
+    "output_tokens": 1499
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}
