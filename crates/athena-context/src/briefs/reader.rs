@@ -354,13 +354,22 @@ pub const DEFAULT_WRITTEN_REASON: &str =
 /// the feature, without surveying the records validation or where resolution and probing happen in the code
 /// (jobs 20261028-055601-hg0n and 20261028-082151-67fa). `check_code_survey` in athena-core enforces it.
 pub const CODE_SURVEY_GUIDE: &str = "Before you give behavior criteria for a code or tests change, read the code and write one assumption that starts \
-with `Code survey:` and names the crates/ paths you read. Cover: the entry point, and the order in which resolution and probing run; \
-what the records validation allow-list accepts, and, if the change adds a record or data file under crates/, name `check_record_file`, \
-`AnyRecord` or the round-trip test that covers it; and how the property is measured directly, not through a stand-in. \
-When the request adds or tightens a refusal rule, also write a criterion that says the change refuses more readings and the higher refusal rate is intended. \
-Say how many: write `expected N% of newly refused readings` (a whole percent). A replay of past readings holds the job when more than N plus 5 points \
-of them are newly refused, and when you give no number it holds the job above 10%. For N above 25, also write, in a criterion or in out_of_scope, \
+with `Code survey:` and names the crates/ paths you read, with `Entry point:`, `Gate order:`, `Stop gate:`, `Reuses:`, `Output:` (no new output, \
+`AnyRecord::<Variant>` or a round-trip test) and `Direct check: criterion N` per behavior criterion (an entry point, gate or model call, \
+not a skip switch or an internal helper; fmt, clippy and test pass needs none): `check_behavior_test_design`. \
+When the request adds or tightens a refusal rule, write a criterion that says the change refuses more readings and the higher refusal rate is intended, \
+and `expected N% of newly refused readings` (a whole percent). A replay holds the job when more than N plus 5 points of past readings \
+are newly refused, and above 10% when you give no number. For N above 25, also write, in a criterion or in out_of_scope, \
 one sentence with `because`, `now asks` or `new required` that says why past readings should be refused; the verifier is shown it.";
+
+/// A filled-in `Code survey:` assumption that `check_code_survey` and `check_behavior_test_design` in
+/// athena-core accept. The refusal errors of both checks end with it. It is not part of the reader brief,
+/// which has no room for it. It measures a property of its own survey: it shows the form and is not text to
+/// paste under an unrelated criterion.
+pub const CODE_SURVEY_EXAMPLE: &str = "Code survey: crates/foo/src/run.rs. Entry point: `run_job`. \
+Gate order: `resolve`, `probe`, `report`. Stop gate: `probe`. \
+Reuses: `shared_helper`; no existing function checks gate order. Output: no new output. \
+Direct check: criterion 1 counts the calls `run_job` makes to `probe` and asserts the count is 1, not a skip switch or a read of an internal helper.";
 
 /// The reader brief: the request, earlier readings and corrections, the reference forecast, the closed
 /// lists, the reading rules, what the verifier can run, and the repository's top level.

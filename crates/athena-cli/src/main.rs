@@ -208,6 +208,24 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Put an open request on hold: `athena drain` does not dispatch it, whatever its priority, until
+    /// `athena release`. Appends a hold record; the request is not changed. The request may be queued, read
+    /// or interrupted, but not running. A request that depends on a held one waits with it, and `athena plan`
+    /// lists the held request with the reason "on hold".
+    Hold {
+        /// The open request (a job id, or a unique prefix or suffix of it).
+        job: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Lift a hold put by `athena hold`, so drain works the request in its priority order again. Appends a
+    /// later hold record; a request that is not on hold is refused.
+    Release {
+        /// The request on hold (a job id, or a unique prefix or suffix of it).
+        job: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Set what to work on now, or print the current focus. With text, appends a focus record (the latest one
     /// is the current focus) and prints it; with no text, prints the current focus. `athena status` shows it.
     Focus {
@@ -293,6 +311,10 @@ the job or from evidence in the request. The planning pass is deterministic code
 request whose own words leave the plan incomplete is read first (within the budget) and planned again from its \
 reading. An item whose plan still lacks a goal, a rung or acceptance is not worked and is reported with the \
 reason. `athena plan` prints this plan without working anything.
+
+A request put on hold with `athena hold <job>` is never dispatched, at any priority, and is not read; whatever \
+depends on it waits with it. `athena plan` lists it as held, with the reason \"on hold\". `athena release <job>` \
+lifts the hold. A lower priority alone never holds a request back.
 
 Improvement turn: requests of Athena's own (the steward's, and Hestia's: the error review's request for a repeated \
 cause, the throughput design request and the spec review's request) are guaranteed a turn. While one is ready, \
@@ -1063,6 +1085,8 @@ fn run(cli: Cli) -> Result<u8> {
         Command::CheckProposal { id, candidate } => commands::check_proposal(id, candidate),
         Command::Correct { job, line, json } => commands::correct(job, line, json),
         Command::Priority { job, level, json } => commands::priority(job, level, json),
+        Command::Hold { job, json } => commands::hold(job, json),
+        Command::Release { job, json } => commands::release(job, json),
         Command::Focus { text, json } => commands::focus(text, json),
         Command::Go { job, json } => commands::go(job, json),
         Command::Land { job, pr: _, json } => commands::land(job, json),
@@ -1185,6 +1209,11 @@ mod tests {
 
     /// A stored reading with this one acceptance criterion, as `reading-1.json`'s content.
     fn reading_json(criterion: &str) -> String {
+        reading_json_with(criterion, "feature", &[])
+    }
+
+    /// A stored reading with this criterion, class of work and assumptions.
+    fn reading_json_with(criterion: &str, class: &str, assumptions: &[&str]) -> String {
         use athena_data::records::{
             AnyRecord, Criterion, CriterionKind, Deliverable, DeliverableAction, Forecast,
             Forecasts, Quantiles, Reading,
@@ -1207,13 +1236,13 @@ mod tests {
             defaults_version: 1,
             title: "Add a greeting".into(),
             summary: "Add a greeting.".into(),
-            class_of_work: "feature".into(),
+            class_of_work: class.into(),
             capability: Some("change".into()),
             decline_reason: None,
             producer_model: "producer".into(),
             verifier_model: "verifier".into(),
             defaults_applied: vec![],
-            assumptions: vec![],
+            assumptions: assumptions.iter().map(|a| a.to_string()).collect(),
             question: None,
             acceptance_criteria: vec![Criterion {
                 text: criterion.into(),
@@ -1253,6 +1282,43 @@ mod tests {
     fn check_reading_prints_accept_for_a_reading_the_rules_accept() {
         let dir = tempfile::tempdir().unwrap();
         let (request, reading) = check_reading_fixture(dir.path(), "cargo test --locked passes");
+        assert_eq!(
+            check_reading_command(&request, &reading).unwrap(),
+            ("accept".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn check_reading_refuses_a_code_reading_with_a_short_survey_and_accepts_the_example() {
+        let dir = tempfile::tempdir().unwrap();
+        let (request, reading) = check_reading_fixture(dir.path(), "cargo test --locked passes");
+        let criterion = "Run `cargo test -p athena-cli`: the greeting prints hello";
+        // A survey that names a crates/ path and nothing else passes the survey check, not the design check.
+        std::fs::write(
+            &reading,
+            reading_json_with(
+                criterion,
+                "code",
+                &["Code survey: read crates/athena-cli/src/main.rs"],
+            ),
+        )
+        .unwrap();
+        let (line, code) = check_reading_command(&request, &reading).unwrap();
+        assert_eq!(code, 2, "{line}");
+        assert!(line.starts_with("refuse: "), "{line}");
+        assert!(line.contains("check_behavior_test_design"), "{line}");
+        assert!(line.contains("`Gate order:`"), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+        // The filled-in example from the refusal text is accepted for the criterion it numbers.
+        std::fs::write(
+            &reading,
+            reading_json_with(
+                criterion,
+                "code",
+                &[athena_context::briefs::CODE_SURVEY_EXAMPLE],
+            ),
+        )
+        .unwrap();
         assert_eq!(
             check_reading_command(&request, &reading).unwrap(),
             ("accept".to_string(), 0)

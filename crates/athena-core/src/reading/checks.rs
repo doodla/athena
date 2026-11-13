@@ -475,7 +475,8 @@ pub fn check_reading_references(
 /// Every check a built reading must pass before it is accepted: the previous result and change scope of a
 /// retried or followed-up job ([`check_prior_result_and_scope`]), then the evidence each criterion rests on
 /// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
-/// rests on ([`check_code_survey`]), then the realistic-branch fixture a commit classification, history or
+/// rests on ([`check_code_survey`]), then the entry point, gate order, reuse, record kind and direct check of
+/// that survey ([`check_behavior_test_design`]), then the realistic-branch fixture a commit classification, history or
 /// attribution rule is tested on ([`check_history_fixture`]), then the real-records criterion a change to a
 /// measure computed from the records rests on ([`check_records_measure`]), then the governance files the
 /// outcome needs
@@ -537,6 +538,7 @@ pub fn refusing_check(
     ));
     step!(check_criteria_evidence(reading));
     step!(check_code_survey(reading));
+    step!(check_behavior_test_design(reading));
     step!(check_history_fixture(reading));
     step!(check_records_measure(reading));
     step!(check_design_existing_code(reading));

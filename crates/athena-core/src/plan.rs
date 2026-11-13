@@ -171,6 +171,11 @@ pub struct PlanEntry {
     /// accept the edit, in a sentence; None otherwise. Set by `reading::plan_entry`; see
     /// [`schema_reference_problem`].
     pub schema_problem: Option<String>,
+    /// True when the user put the request on hold (`athena hold`) and has not released it. [`Plan::build_with`]
+    /// never orders such an item, whatever its priority, and holds back whatever depends on it. Set from
+    /// `JobRecords::on_hold` where the entry is made.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub on_hold: bool,
 }
 
 /// What `PlanEntry::missing` reports when a configuration edit has no schema change beside it.
@@ -280,6 +285,7 @@ impl PlanEntry {
             priority: Priority::Normal,
             code_problem: None,
             schema_problem: None,
+            on_hold: false,
         }
     }
 
@@ -345,6 +351,11 @@ impl Refusal {
             reason,
         }
     }
+}
+
+/// Why an item the user put on hold is not planned: it names the command that lifts the hold.
+pub fn on_hold_reason(id: &str) -> String {
+    format!("on hold; `athena release {id}` lifts it")
 }
 
 impl Refusal {
@@ -667,6 +678,11 @@ impl Plan {
     /// and so is everything that depends on a held item. An item that is itself the retry of that dependency
     /// (the history links it to it) is not held by it.
     ///
+    /// An item with [`PlanEntry::on_hold`] set (the user ran `athena hold`) is held back the same way at any
+    /// priority, with the reason [`on_hold_reason`] and an empty `missing`, even when its plan is incomplete;
+    /// whatever depends on it is held back with it. Priority plays no part in it: only the hold keeps such an
+    /// item out of the order, and a low-priority item without one is ordered like any other.
+    ///
     /// Waves fix the order only (best effective priority among the ready items, then rung, then age). The
     /// groups are then built from that order alone (see `groups_in_order`): an item joins the last group when
     /// it is path-disjoint with its members and independent of them, else it opens a new group. A lower-priority
@@ -678,7 +694,9 @@ impl Plan {
         let mut pending: Vec<(usize, &PlanEntry)> = Vec::new();
         for (age, entry) in entries.iter().enumerate() {
             let missing = entry.missing();
-            if missing.is_empty() {
+            // An item on hold is kept even when its plan is incomplete, so it is reported as on hold (the
+            // reason the user can act on) and not as lacking a plan.
+            if missing.is_empty() || entry.on_hold {
                 pending.push((age, entry));
             } else {
                 let detail = [
@@ -699,7 +717,11 @@ impl Plan {
         }
         // Hold items with an unmet dependency, and then whatever depends on a held item, until nothing changes.
         let open: Vec<&str> = pending.iter().map(|(_, e)| e.id.as_str()).collect();
-        let mut held: Vec<(&str, String)> = Vec::new();
+        let mut held: Vec<(&str, String)> = pending
+            .iter()
+            .filter(|(_, e)| e.on_hold)
+            .map(|(_, e)| (e.id.as_str(), on_hold_reason(&e.id)))
+            .collect();
         loop {
             let mut changed = false;
             for (_, entry) in &pending {
@@ -1160,6 +1182,103 @@ mod tests {
             },
             retry_of: retry_of.map(String::from),
         }
+    }
+
+    const LEVELS: [Priority; 4] = [
+        Priority::Urgent,
+        Priority::High,
+        Priority::Normal,
+        Priority::Low,
+    ];
+
+    #[test]
+    fn an_on_hold_item_is_not_planned_at_any_priority() {
+        let (_, low) = rungs();
+        for level in LEVELS {
+            let mut held = entry("h", low, &["a/"], &[]);
+            held.priority = level;
+            held.on_hold = true;
+            let plan = Plan::build(std::slice::from_ref(&held));
+            assert!(
+                plan.order.is_empty() && plan.groups.is_empty(),
+                "{level:?}: {plan:?}"
+            );
+            assert_eq!(plan.refused.len(), 1, "{level:?}");
+            assert_eq!(plan.refused[0].id, "h");
+            assert!(plan.refused[0].missing.is_empty());
+            assert!(
+                plan.refused[0].reason.contains("on hold"),
+                "{}",
+                plan.refused[0].reason
+            );
+            // Released, the same item is planned.
+            held.on_hold = false;
+            let plan = Plan::build(&[held]);
+            assert_eq!(plan.order, ["h"], "{level:?}");
+            assert!(plan.refused.is_empty(), "{level:?}");
+        }
+    }
+
+    #[test]
+    fn an_on_hold_item_with_an_incomplete_plan_is_reported_as_on_hold() {
+        let mut held = PlanEntry::bare("h", "h");
+        held.on_hold = true;
+        let plan = Plan::build(&[held]);
+        assert_eq!(plan.refused.len(), 1);
+        assert!(plan.refused[0].missing.is_empty(), "{:?}", plan.refused[0]);
+        assert!(plan.refused[0].reason.contains("on hold"));
+    }
+
+    #[test]
+    fn a_low_priority_item_alone_is_still_planned() {
+        let (_, low) = rungs();
+        let mut only = entry("l", low, &["a/"], &[]);
+        only.priority = Priority::Low;
+        let plan = Plan::build(&[only.clone()]);
+        assert_eq!(plan.order, ["l"]);
+        assert!(plan.refused.is_empty(), "{plan:?}");
+        // Beside an urgent item on hold, the low one is still ordered: only the hold keeps an item out.
+        let mut urgent = entry("u", low, &["b/"], &[]);
+        urgent.priority = Priority::Urgent;
+        urgent.on_hold = true;
+        let plan = Plan::build(&[urgent, only]);
+        assert_eq!(plan.order, ["l"]);
+        assert_eq!(plan.refused.len(), 1);
+        assert_eq!(plan.refused[0].id, "u");
+    }
+
+    #[test]
+    fn an_item_depending_on_an_on_hold_item_is_held_with_it() {
+        let (_, low) = rungs();
+        let mut h = entry("h", low, &["a/"], &[]);
+        h.priority = Priority::Urgent;
+        h.on_hold = true;
+        let d = entry("d", low, &["b/"], &["h"]);
+        let plan = Plan::build(&[h.clone(), d.clone()]);
+        assert!(plan.order.is_empty(), "{plan:?}");
+        assert_eq!(plan.refused.len(), 2);
+        let reason = &plan.refused.iter().find(|r| r.id == "d").unwrap().reason;
+        assert!(
+            reason.contains("depends on h, which is held back"),
+            "{reason}"
+        );
+        assert!(plan.refused.iter().all(|r| r.missing.is_empty()));
+        h.on_hold = false;
+        let plan = Plan::build(&[h, d]);
+        assert_eq!(plan.order, ["h", "d"]);
+        assert!(plan.refused.is_empty());
+    }
+
+    #[test]
+    fn an_on_hold_flag_is_left_out_of_the_json_unless_set() {
+        let mut e = PlanEntry::bare("h", "h");
+        assert!(!serde_json::to_string(&e).unwrap().contains("on_hold"));
+        e.on_hold = true;
+        assert!(
+            serde_json::to_string(&e)
+                .unwrap()
+                .contains("\"on_hold\":true")
+        );
     }
 
     #[test]
