@@ -40,6 +40,8 @@
 //!   how often a later try landed the same change; shown by `athena status` and given to the introspection;
 //! - [`proposals`]: proposed defaults from repeated introspections, their validation, and the apply-as-a-job
 //!   check; `defaults.toml` is never written by Athena;
+//! - [`lab`]: the recorded lab run configuration (OLY-B-S3-01): task, pinned commit and a positive spend cap
+//!   per system, the refusal of a run at its cap, and a fingerprint of the configuration;
 //! - [`labeled`]: the labeled set of reviewed introspections and the scoring of Jev's recorded shadow answers
 //!   against it, read-only;
 //! - [`evidence_labels`]: class labels derived from what happened after an introspection (the retry that
@@ -115,6 +117,7 @@ pub mod introspect;
 pub mod invocation;
 pub mod iris;
 pub mod jev;
+pub mod lab;
 pub mod labeled;
 pub mod land;
 pub mod learning;
