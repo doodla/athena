@@ -136,6 +136,64 @@ source = "s"
     }
 
     #[test]
+    fn pin_and_ambient_tool_stances_are_written_defaults_the_reader_sees() {
+        let model = DefaultsModel::parse(REPO_DEFAULTS).unwrap();
+        let rendered = model.render();
+        let table: [(&str, &[&str], &[&str]); 2] = [
+            (
+                "version-pins",
+                &["code", "config", "build"],
+                &[
+                    "Tool version pins in athena.toml",
+                    "stay exact",
+                    "never auto-floated",
+                    "the person running Athena",
+                    "one explicit command",
+                    "installed version",
+                ],
+            ),
+            (
+                "hermetic-checks",
+                &["code", "config", "build"],
+                &[
+                    "check runner",
+                    "never depends on inherited environment or ambient tools",
+                    "every path a check needs explicitly",
+                    "preferred-versus-fallback tool choice is recorded in the check output",
+                ],
+            ),
+        ];
+        for (id, classes, phrases) in table {
+            let entry = model.get(id).unwrap_or_else(|| panic!("{id} is missing"));
+            assert_eq!(entry.applies_to, classes);
+            let prefix = format!("- {id} [");
+            let line = rendered
+                .lines()
+                .find(|l| l.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("{id} is not rendered"));
+            assert!(!line.trim_end_matches('.').contains(". "), "{line}");
+            for phrase in phrases {
+                assert!(entry.statement.contains(phrase), "{id}: {phrase}");
+                assert!(line.contains(phrase), "{id} line lacks {phrase}: {line}");
+            }
+        }
+        assert!(
+            model
+                .get("version-pins")
+                .unwrap()
+                .statement
+                .contains("Cargo.lock")
+        );
+        assert!(
+            model
+                .get("hermetic-checks")
+                .unwrap()
+                .statement
+                .contains("Unit tests")
+        );
+    }
+
+    #[test]
     fn root_cause_default_leads_with_the_core_rule() {
         let model = DefaultsModel::parse(REPO_DEFAULTS).unwrap();
         assert!(model.get("root-cause").unwrap().statement.contains(". "));
