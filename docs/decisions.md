@@ -5145,3 +5145,23 @@ should replace those estimates with its figures.
   records it once and empties the queue; an intervention is deferred, run on start and not run by a second start; a
   failed record with the kill switch text is rerun once and one with another failure is not. Not measured: a real
   model call, the number of old records the rule matches, and two simultaneous starts.
+
+## D178 · Landing is designed as one commit on fetched main, built by a three-way merge from the recorded base
+
+- **Case:** Throughput review 20261113-190159-mapn measured landing and rebuild at 2310.0 of the 2342.1 median
+  minutes per landed job. The cause is the one long-lived local landing branch: every pull request carries all
+  earlier unlanded jobs' commits and each writes a landing record listing them again.
+- **Decision:** `docs/design/direct-main-single-commit-landing.md` designs the change: fetch host main, build the
+  job's single commit with `Git::merge_tree(base, ours, theirs)` and `Git::commit_tree`, push it as its own pull
+  request branch, and keep the local branch a follower of main. The note predicts 5.0 minutes saved per landed job
+  (an estimate) and says the next throughput review measures the median in `THROUGHPUT.md` for jobs landed after the
+  change. A change that implements it must cite the review id in its request text. Nothing is built.
+- **Alternatives:** Dedupe landing records; change only the metric; reset the local branch after each merge; rebase in
+  a working copy; batch jobs in one pull request. Each is rejected in the note.
+- **Tradeoff:** The earlier notes with the same mechanism were never built, so this adds a note and no speed until
+  someone implements it. The real wait was about 4.6 minutes in an earlier sample, so the 5.0 prediction is at that
+  bound, and most of the headline fall is removed repeat listings.
+- **Reversal cost:** Low; delete the note. No code or record changes.
+- **Provenance:** Read: `docs/design/direct-main-merge-tree-landing.md`, `crates/athena-git/src/lib.rs` (function
+  names), `crates/athena-core/src/land.rs` (function names). The figures are quoted from the request text; they
+  were not re-read from `THROUGHPUT.md`, which is not in the working copy. Not measured: any saving.
