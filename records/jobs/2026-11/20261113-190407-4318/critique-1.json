@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-190407-4318",
+  "round": 1,
+  "at": "2026-11-13T19:13:33.11345479Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Part (b) adds a new `Reuses:` label even though the codebase already has an `Existing code:` label for exactly this. A reading that states the reused function the usual way would be refused for missing (b).",
+      "evidence": "`existing_code_assumptions` already parses `Existing code:` assumptions, and `check_design_existing_code` (surveys.rs:1409) uses that label for reuse. The reading under review states part (b) in that form: \"Existing code: crates/athena-core/src/reading/surveys.rs ...; the new check extends check_code_survey's helpers\". Under Decision 2 this reading would be refused for (b). Each extra label also adds to the newly refused share, which the plan already expects to go above 35% (Risks). Fix: Accept part (b) from an `Existing code:` assumption (via `existing_code_assumptions`) that names a crates/ path the job does not create and an identifier. If `Reuses:` is kept at all, treat it as an alias. Refactor `code_surveys`, `environment_assumptions` and `existing_code_assumptions` to call the new `assumptions_labeled` helper instead of adding a fourth copy of the same function.",
+      "location": "Decision 1 and 2, part (b) `Reuses:` label; crates/athena-core/src/reading/surveys.rs:1328-1336 (`existing_code_assumptions`)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Matching any token that contains `skip_` or `_skip` is too broad. Legitimate function names are refused as skip switches.",
+      "evidence": "A Grep finds 208 identifiers with `skip_`/`_skip` across 43 files under crates/, including the pub production function `skip_note` (crates/athena-core/src/checks.rs:271). A direct check such as \"call `skip_note` on a docs-only change and assert the note\" would be refused as a skip switch, as would any test of skip logic in routing.rs or checks.rs. Neither `skip_probe` nor `ATHENA_NO_PROBE` exists anywhere in the snapshot, so the rule's examples come only from the request. Fix: Match a closed, documented list: the exact names `skip_probe` and `ATHENA_NO_PROBE`, plus the env-var shapes `ATHENA_NO_*` and `ATHENA_SKIP_*` (upper case, starting with `ATHENA_`). Do not match arbitrary lowercase identifiers that contain `skip_`. Add a corpus Accept case with a direct check that names `skip_note`, and state the closed list in the Limits text and the CHANGELOG.",
+      "location": "Decision 3, skip-switch matching (tokens containing `skip_` or `_skip`)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan says the real share is measured only at verification. In fact the producer's loop runs the real replay on accepted records and sends back the share and the list. The plan does not say what the producer does with that send-back, and its fixture replay test has a share the test author chooses.",
+      "evidence": "`loop_replay` runs the same replay (same cases, checkers and limit) after each parsed report whenever the change touches crates/, and \"the loop sends the list and the share back to the producer\" (run/mod.rs:2278-2283). The plan's `behavior_test_replay_stays_within_the_declared_share` uses ten hand-picked fixtures, so `!replay_is_held(total, newly, Some(30))` holds because of which fixtures were picked, not because of anything about recent accepted readings. AC4 says that when the share is above the bound, the markers are not loosened and the measured share and newly refused job ids are reported. Fix: Name `loop_replay` (and `replay_stage` / replay.json at verification) as the seam that measures AC4 on real readings. Add a step: when the loop replay reports a share above 35%, do not loosen any marker or label, and write the measured share and the newly refused job ids into the producer report. Keep the fixture test, but describe it as covering only the mechanics: that docs, feature and content-only readings are never newly refused and that the declaration parses. Do not present it as evidence of the bound.",
+      "location": "Criterion 4 demonstration; Risks bullet 1; crates/athena-core/src/run/mod.rs:2275-2334 (`loop_replay`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stop list misses the common ways a routine criterion is worded, so such criteria would wrongly be required to carry a direct check.",
+      "evidence": "`cargo clippy --all-targets -- -D warnings` tokenizes to `targets`, `d` and `warnings`, none of which are in the list. `cargo test -p athena-core` adds `p` and the crate name. The steward's default acceptance \"No unrelated behavior changes; the existing tests pass\" (steward.rs:622) and this reading's criterion 8 add `no`, `unrelated`, `behavior`, `changes` and `existing`. Each would be treated as non-routine and refused without a `Direct check:`. Fix: Extend the stop list with the flag tokens (`d`, `warnings`, `targets`, `workspace`, `p`, `locked`, `check`), crate names matching `athena-*`, and `existing`. Either treat a leading `No unrelated behavior changes` clause as routine or state explicitly that it is not. Pin the canonical strings from code_health.rs:529, steward.rs:622-623 and this reading's criterion 8 in corpus cases.",
+      "location": "Decision 4, routine-criterion stop list",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Part (a) requires two identifiers that contain `_` or `::`, so an entry point or gate with a single-word name never counts.",
+      "evidence": "Many real entry points are single words, such as `replay` (replay.rs:365), `land` and `main`. \"Gate order: replay then check_reading_text; stops at replay\" holds only one identifier under this rule and is refused. Fix: Also count backticked tokens as identifiers, or a word followed by `()`. Add a fixture that uses a single-word entry point.",
+      "location": "Decision 2, part (a) identifier rule",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two listed deliverables are deliberately left unchanged, but the plan never says how the producer reports that.",
+      "evidence": "The producer report has an `unchanged_planned_files` field for excused deliverables (crates/athena-core/src/run/send_back.rs:252; run/producer.rs). The plan gives the reason only in its own Decisions. Fix: Add a step: the producer lists crates/athena-core/src/status.rs and crates/athena-core/src/verify.rs in `unchanged_planned_files`, with the reason from Decision 8.",
+      "location": "Decision 8 (status.rs and verify.rs left unchanged)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The negators `no` and `than` in a four-token window can accept a mention that is not actually negated.",
+      "evidence": "In \"no probe runs when skip_probe is set\", `no` falls within four tokens before `skip_probe`, so the mention is accepted even though the reading describes using the switch. Fix: Count a negator only when it is directly before the switch, or within the same clause with no verb in between. Pin one such false case in the Limits text.",
+      "location": "Decision 3, negation window",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot with Read and Grep only. The plan fits the request and the accepted reading. The functions, tests and line numbers it names exist: surveys.rs:117-245 and 1341, the checks.rs:539-541 step list, `history_fixture_has_one_step_line` at reading.rs:8224, `INPUT_FORMS: [&str; 63]`, the corpus guard tests, `replay`/`replay_is_held`/`replay_declaration_of`, `reading_json` at main.rs:1211, and the briefs.rs bounds at 3591 and 3710. Its dependents list covers the real callers of `check_reading_text` (steward.rs, drain.rs, run/tests.rs, cli main.rs, replay.rs). Three soundness problems need a revision. First, part (b) adds a new `Reuses:` label that duplicates the existing `Existing code:` label, so even this job's own reading would be refused for (b). Second, matching any `skip_`/`_skip` substring flags real functions such as `skip_note` (checks.rs:271) as skip switches. Third, the AC4 evidence is a fixture replay whose share the test author picks; the plan misses that `loop_replay` (run/mod.rs:2294) measures the real share while the producer works, and it does not say what the producer reports when that replay sends back. Smaller issues: the routine-criterion stop list misses common wordings, the part (a) identifier rule rejects single-word entry points, and the two deliverables left unchanged must be listed in `unchanged_planned_files`."
+}

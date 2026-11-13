@@ -1,0 +1,471 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261113-190407-4318",
+  "round": 3,
+  "at": "2026-11-13T19:21:33.435091633Z",
+  "invocation_seq": 6,
+  "approach": "Add `check_behavior_test_reading` to crates/athena-core/src/reading/surveys.rs, gated by the existing `changes_code_with_behavior_criterion`, and wire it as one `step!` line directly after `step!(check_code_survey(reading))` in checks.rs. The four parts are matched on labelled assumptions: `Gate order:` (a), `Existing code:` (b, the label the codebase already uses), `Record kind:` (c) and `Direct check:` (d). One generic `assumptions_labeled` helper replaces the three copies of the label filter. Revision 3 changes the following. (1) Part (c) no longer repeats `check_code_survey`. `check_code_survey` runs first and already refuses a record or data deliverable whose survey names no record evidence (surveys.rs:217-230), so the new check's (c) only compares the `Record kind:` clause with the deliverable list. The dead deliverable-path branch is removed. (2) A negation carries across a coordinated list of matches joined by `or`, `nor`, `and` or a comma. (3) The criterion collector defines its accepted forms: `criterion N`, `criteria N-M`, and lists. (4) A (d) identifier must be function-like (`_`, `::` or `name()`), and a run command never counts. (5) The negator list is moved into one shared constant that `requires_existing_code_section` also uses. The bare `than` is dropped, and only `rather than` counts. All problems are gathered into one error that names the parts and the check, so the `refuse:` line of `athena check-reading` shows it. AC4 on real readings is measured by `loop_replay` (run/mod.rs:2294) and the verification replay. The fixture replay test covers mechanics only. status.rs, verify.rs and replay.rs are listed in `unchanged_planned_files`. No prompt file, record, athena.toml, defaults.toml or workflow is touched.",
+  "decisions": [
+    {
+      "choice": "Part (b) is satisfied by an `Existing code:` assumption (found with `existing_code_assumptions`) that names a `crates/` path the job does not create (`names_existing_path` over the created paths) and holds one code identifier (broad definition: function-like token, or a single-token backticked word). A new generic `assumptions_labeled(reading, label)` helper is added, and `code_surveys`, `environment_assumptions` and `existing_code_assumptions` are rewritten to call it. Parts (a), (c) and (d) use the new labels `Gate order:`, `Record kind:` and `Direct check:`.",
+      "reason": "Round 2 finding 1. `existing_code_assumptions` (surveys.rs:1329-1336) already parses `Existing code:` and `check_design_existing_code` uses it for reuse, so a reading that states reuse the usual way is not refused for (b), and fewer new labels means a smaller newly refused share. Three copies of one filter (surveys.rs:117-124, 605-612, 1329-1336) become one function.",
+      "rejected": [
+        {
+          "option": "Add a new `Reuses:` label",
+          "why": "A reading that already states reuse under `Existing code:` would be refused for a label no past reading used."
+        },
+        {
+          "option": "Free prose in the `Code survey:` text",
+          "why": "Prose cannot tell the error which part is missing, and AC2 needs the missing part named."
+        }
+      ]
+    },
+    {
+      "choice": "Part (a) needs a `Gate order:` body with at least two code identifiers and a stop-gate phrase (`stop gate`, `stops at`, `stops after`, `stop at`, `stops before`). For (a) and (b) an identifier is a token with `_` or `::`, a word directly followed by `()`, or a backticked single token without whitespace. Tokens with `/` or a file extension never count. Part (c), revised for finding 1: the reading needs a `Record kind:` assumption. Its body either satisfies `names_record_evidence` (so it names `check_record_file`, `AnyRecord`, or a round-trip test by name or path, and the round-trip test is thereby the deliverable evidence), or is `none` and then no deliverable satisfies `is_record_or_data_deliverable`. `Record kind: none` beside a record or data deliverable is refused as a contradiction that names (c) and the file. The new check does not decide whether the survey names record evidence; `check_code_survey` runs first and does. The contradiction fixtures therefore carry a `Code survey:` that names `check_record_file`, so `check_code_survey` passes and the new check is the refuser. The round-trip-deliverable-path branch of the earlier plan is removed.",
+      "reason": "Finding 1. check_code_survey (surveys.rs:217-230) reads only the survey text and refuses any record deliverable whose survey lacks record evidence, and it runs before the new step in checks.rs. So whenever a record deliverable reaches the new check, the survey already names evidence, and a branch that accepted a round-trip deliverable path could never be the one that satisfies (c). The only contradiction left for (c) is the clause saying `none` against a record deliverable. AC3's 'no accepted record kind and no round-trip test deliverable' is refused in two places by design: with no survey evidence by `check_code_survey` (a new corpus case pins this and expects Refuse(\"check_code_survey\")), and with survey evidence but `Record kind: none` by the new check. Single-word entry points such as `replay` (replay.rs:365) stay valid for (a) when backticked.",
+      "rejected": [
+        {
+          "option": "Keep the round-trip-deliverable-path alternative in (c)",
+          "why": "Dead branch: a record deliverable never reaches the new check without survey evidence, so the alternative can never decide the outcome."
+        },
+        {
+          "option": "Re-check record evidence from the survey inside the new check",
+          "why": "It duplicates check_code_survey and would make the new check the refuser for fixtures that the earlier check already refuses."
+        },
+        {
+          "option": "Accept `Record kind: none` always",
+          "why": "A new record file with `none` is the contradiction AC3 requires the check to refuse."
+        },
+        {
+          "option": "Count only tokens with `_` or `::` in (a)",
+          "why": "A single-word entry point or gate never counts, so correct readings would be refused."
+        }
+      ]
+    },
+    {
+      "choice": "Part (d): each non-routine behavior criterion must be named in a `Direct check:` body, and that body must hold at least one function-like identifier: a token with `_` or `::`, or a word directly followed by `()`. A plain backticked word does not count for (d). Before scanning, the check deletes every backtick span that starts `cargo ` or `athena `, and in unbackticked text deletes the word `cargo` through the end of its clause (next `;`, or `.` followed by a space). Tokens with `/`, a leading `-`, or a file extension never count. So `Direct check: criterion 2: `cargo test -p athena-core`` is refused for (d), as is the same text unbackticked. Criterion naming forms recognised by `criterion_numbers(body)`, on lowercase text: `criterion N`; `criteria N-M` (a hyphen or `to` between two numbers, an inclusive range); and lists after `criterion` or `criteria`: `criteria N, M and K`, `criteria N, M`, `criteria N and M`, `criteria N or M`. The list continues while the next token after a separator is a number; the first non-number ends it. A `criterion` word may appear several times in the body and the numbers are united. `CLAUSES` in the test helper uses `criteria 1-4`, and one unit test per form pins each of the three forms. A skip switch is matched by a closed list: the exact names `skip_probe` and `ATHENA_NO_PROBE`, plus upper-case tokens that start `ATHENA_NO_` or `ATHENA_SKIP_` (case-sensitive). Lower-case identifiers that merely contain `skip_` or `_skip` never match. An internal-helper read is matched by the phrases `internal helper`, `private helper`, `stand-in`, `through a helper` and `via a helper`. A match is refused unless negated.",
+      "reason": "Findings 3 and 4 and round-2 findings 2 and 7. A critic Grep found 208 `skip_`/`_skip` identifiers in 43 files, including production `skip_note` (crates/athena-core/src/checks.rs:271), so a direct check calling `skip_note` is legitimate; `skip_probe` and `ATHENA_NO_PROBE` come from the request. A closed list is testable and its limit can be stated; the reading checks read the Reading only (surveys.rs:310-311), so the list cannot be checked against code. A `cargo test` command, or a test name passed to it, measures nothing about the property and is the indirect check the request wants refused, so commands are removed before the identifier scan. The accepted criterion forms are defined so the fixture and the real readings use the same text.",
+      "rejected": [
+        {
+          "option": "Count any backticked span as a (d) identifier",
+          "why": "A command-only `Direct check:` would pass, though it names no function that measures the property."
+        },
+        {
+          "option": "Match any token containing `skip_` or `_skip`",
+          "why": "It refuses real function names such as `skip_note`."
+        },
+        {
+          "option": "Leave the criterion forms undefined",
+          "why": "A fixture written `criteria 1-4` would not match a collector for `criterion N`."
+        },
+        {
+          "option": "Detect switches by reading the repository",
+          "why": "The reading checks have no repository access."
+        }
+      ]
+    },
+    {
+      "choice": "Negation (revised for findings 2 and 5). One shared `pub(super) const NEGATORS: [&str; 7] = [\"no\",\"not\",\"never\",\"without\",\"nothing\",\"nor\",\"cannot\"]` is defined in surveys.rs, with the existing `n't` and `n\\u{2019}t` normalisation. `requires_existing_code_section` (surveys.rs:1359-1394) is changed to use that constant; its members and behavior are unchanged and its tests run unchanged. The new check uses the same constant. `than` counts as a negator only directly after `rather` (the pair `rather than`). `instead` and `avoid` are not negators. Tokens split on whitespace, with `,` as its own token and `.`, `;`, `(`, `)`, quotes and backticks trimmed. For a match at token i, `negated(i)` walks back: skip determiners and modifiers (`a`, `an`, `the`, `any`, `internal`, `private`, `helper`), then at most one connective (`through`, `via`, `using`, `with`, `by`, `of`), then skip determiners again, and read token j. If j is a negator, the match is negated. If j is a joiner (`or`, `nor`, `and`, `,`) and the token before it (skipping determiners) is itself a match, return `negated` of that earlier match, so the negation carries across a coordinated list. In every other case the match is not negated. A joiner not preceded by a match breaks the chain, so `not through skip_probe, and ATHENA_NO_PROBE is set` is refused. Accepted by test: `without skip_probe or ATHENA_NO_PROBE`, `not through skip_probe nor ATHENA_NO_PROBE`, `no skip_probe, no helper stand-in`, `not through a helper`, `without ATHENA_NO_PROBE`. Refused by test and pinned under Limits: `no probe runs when skip_probe is set`, `faster than skip_probe`, `not through skip_probe, and ATHENA_NO_PROBE is set` (the second switch is the refused one). The Limits text and the CHANGELOG state the closed switch list, that another name or a switch described in prose is not caught, and these false cases.",
+      "reason": "Finding 2: ordinary negated lists such as `without skip_probe or ATHENA_NO_PROBE` must be accepted, as AC3 requires for a negated mention, while a negator that only appears earlier in the sentence must not excuse a later switch. Finding 5: requires_existing_code_section (surveys.rs:1370) already has a NEGATORS list, so one shared list serves both reading checks and the new check adds no third list with different members. verify.rs:1261-1380 holds a clause-level negator for verifier claims; it works on different text (claims against diffs), so it is not shared and verify.rs stays unchanged. A bare `than` would accept `faster than skip_probe`, so it is dropped in favor of `rather than`.",
+      "rejected": [
+        {
+          "option": "A third, separate negator list including `than`, `instead`, `avoid`",
+          "why": "Duplicates the list at surveys.rs:1370 and accepts `faster than skip_probe`."
+        },
+        {
+          "option": "A fixed four-token negation window",
+          "why": "It accepted `no probe runs when skip_probe is set`."
+        },
+        {
+          "option": "Strictly 'negator directly before the match' with no list carry",
+          "why": "It refuses `without skip_probe or ATHENA_NO_PROBE`, the natural way to write a negated mention."
+        },
+        {
+          "option": "Move or reuse the verify.rs `is_negator`",
+          "why": "It is clause-level logic for another input and would change verify.rs behavior; AC8 forbids unrelated changes."
+        }
+      ]
+    },
+    {
+      "choice": "A criterion is routine, and needs no direct check, when after stripping every whitespace token that starts with `-` (flags) and every token that starts `athena-` (crate names), the remaining words, split on non-alphanumerics and lower-cased, are all in a stop list: cargo, fmt, clippy, test, tests, check, pass, passes, passing, and, the, on, final, tree, still, all, locked, same, as, a, recorded, athena, workspace, warnings, targets, no, unrelated, behavior, changes, change, existing, run. The criterion must also hold a pass word and at least one of fmt, clippy or test(s). A `No unrelated behavior changes; the existing tests pass` clause is routine; the doc comment says so. Parts (a)-(c) are still required for such a reading. The producer copies the code_health.rs:529 and steward.rs:622-623 strings verbatim into corpus cases, with this reading's criterion 8.",
+      "reason": "Round-2 finding 4. Tokenizing `cargo clippy --all-targets -- -D warnings` yields `d`, `targets` and `p`; stripping flags and crate names fixes that without single-letter stop words. AC3 says a routine criterion needs no direct-check clause.",
+      "rejected": [
+        {
+          "option": "Add `d`, `p` and every crate name to the stop list",
+          "why": "Single letters in a stop list let unrelated criteria through."
+        },
+        {
+          "option": "Skip the whole check when every behavior criterion is routine",
+          "why": "AC2 still requires parts (a)-(c) for every code or tests reading with a behavior criterion."
+        }
+      ]
+    },
+    {
+      "choice": "`check_behavior_test_reading` is a new `pub fn` in surveys.rs. Its error names the parts as `(a) gate order and stop gate`, `(b) reused existing function`, `(c) record kind or round-trip deliverable` and `(d) direct check`, gives one example clause for each, and ends by naming `check_behavior_test_reading`. Its doc comment carries the root cause, the gate, the four parts, `Limits:`, `This check refuses more readings; the higher refusal rate is intended`, `expected 30% of newly refused readings` (an estimate, not measured), and the reason with `because`, `now asks` and `new required`. The doc comment also states that `check_code_survey` runs first and decides whether the survey names record evidence.",
+      "reason": "`check_reading_text` returns only the error text (checks.rs:492-503, replay.rs:54-65), so the name must be in the message for the `refuse:` line to show it (AC5). The doc sentences are what the `*_refusal_is_declared_intended` corpus tests read (refusal_corpus.rs:3090-3207).",
+      "rejected": [
+        {
+          "option": "Change `check_reading_text` to return the check name",
+          "why": "It changes `ReadingCheck`, `BinaryChecker::parse` and the `refuse:` line format the replay parses (replay.rs:35-47)."
+        }
+      ]
+    },
+    {
+      "choice": "AC4 on real readings is measured by `loop_replay` (run/mod.rs:2294), which `touches_reading_rules` triggers for a change under crates/, and by the verification replay (`replay_stage`). The producer reads the send-back. If the share is above 35% (30% plus 5 points) it loosens no marker, label or stop list, and writes the measured share and newly refused job ids into its report summary. The fixture replay test `behavior_test_replay_stays_within_the_declared_share` is kept and commented in the code as a mechanics test only: it shows docs, feature and content-only readings are never newly refused, that the declaration parses to 30%, and that the hold rule applies. It is not evidence of the bound.",
+      "reason": "The ten fixtures are chosen by the author, so they cannot speak for recent accepted readings. The producer snapshot has no `records/` (system facts), so only `loop_replay` and the verification replay can measure the share. AC4 says markers are not loosened and the share and ids are reported.",
+      "rejected": [
+        {
+          "option": "Present the fixture replay as proof of the 30% bound",
+          "why": "Its result depends on which fixtures were picked."
+        },
+        {
+          "option": "Read accepted readings from `records/` inside a test",
+          "why": "`records/` is absent from the producer snapshot."
+        },
+        {
+          "option": "Loosen labels or markers if the loop replay is above 35%",
+          "why": "AC4 forbids it."
+        }
+      ]
+    },
+    {
+      "choice": "Extend `CODE_SURVEY_GUIDE` (reader.rs:356) by one sentence that names the four labels and `check_behavior_test_reading`. Raise `READING_RULES_BASELINE_BYTES` (briefs.rs:3591) and the `3150` cap (briefs.rs:3710) by the measured growth only. Add no rule line, so `READING_RULES.len()` stays 12 (briefs.rs:3653).",
+      "reason": "Without the labels in the brief the reader meets the refusal only on its last read. The section is brief text outside the budget sets (briefs.rs:3704-3710 comment), and no prompt file is edited, so the reader budget of 1998 of 2000 does not move.",
+      "rejected": [
+        {
+          "option": "Add a 13th rule line",
+          "why": "It breaks the count assertion and the 220-byte line cap."
+        },
+        {
+          "option": "Edit the reader prompt under crates/athena-context/prompts/",
+          "why": "Out of scope, and the reader budget is nearly full."
+        }
+      ]
+    },
+    {
+      "choice": "status.rs, verify.rs and replay.rs are left unchanged although listed as deliverables. The producer lists all three in `unchanged_planned_files` with the reason for each.",
+      "reason": "The report field excuses a planned file (run/send_back.rs:252, run/mod.rs:1616-1633, run/producer.rs:456). status.rs groups refusals by the recorded rule string (status.rs:226). verify.rs reads the generic replay hold (verify.rs:500-526), and its `NEGATORS` (verify.rs:1261) stays because it serves a different check. replay.rs already parses the declared share (replay.rs:263-285). Changing them would be an unrelated change, which AC8 forbids.",
+      "rejected": [
+        {
+          "option": "Edit them for form's sake",
+          "why": "It would be an unrelated behavior change."
+        },
+        {
+          "option": "Leave them unexplained",
+          "why": "The producer would see an unexcused planned file."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/surveys.rs",
+      "action": "modify",
+      "purpose": "Add `assumptions_labeled` and rewrite `code_surveys`, `environment_assumptions` and `existing_code_assumptions` to use it. Add the shared `NEGATORS` constant and use it in `requires_existing_code_section`. Add `check_behavior_test_reading` with its helpers (identifier scanners for (a)/(b) and (d), command removal, closed skip-switch list, list-carrying negation, routine-criterion test, `criterion_numbers`) and the doc comment with cause, the 30% declaration and the limits.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "purpose": "One `step!(check_behavior_test_reading(reading));` line directly after the `check_code_survey` step, and the doc link in `check_reading_acceptance`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Test helpers (`CLAUSES`, `code_reading` appends them, `code_reading_without_clauses`); unit tests per omitted part, the record contradiction, negation forms, `skip_note`, command-only direct check, criterion forms, routine criteria, single-word entry point, label forms, step position; the doc-and-changelog test; the mechanics-only replay test; update `history_fixture_has_one_step_line` and the tests that overwrite `.assumptions`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "New corpus cases and input-form tags, a clause helper for the existing survey fixtures, the `INPUT_FORMS` length, and `behavior_test_refusal_is_declared_intended`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Generalize the `reading_json` test fixture to `reading_json_for` and add the short-survey and complete-reading `check-reading` cases.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs/reader.rs",
+      "action": "modify",
+      "purpose": "One sentence in `CODE_SURVEY_GUIDE` naming the four labels and `check_behavior_test_reading`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Raise the two section bounds by the measured growth and add the four labels to the needles of the guide test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry: the check, the four parts, the label forms, the declared 30% with its reason, the replay rule, the closed skip-switch list with its limits and pinned false cases, the shared negator list, and the effect on stored queued readings.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Listed deliverable, left unchanged; the producer names it in `unchanged_planned_files` (it reads the generic replay hold, verify.rs:500-526).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/replay.rs",
+      "action": "modify",
+      "purpose": "Listed deliverable, left unchanged; the producer names it in `unchanged_planned_files` (`replay_declaration` already parses the declared share, replay.rs:263-285).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Listed deliverable, left unchanged; the producer names it in `unchanged_planned_files` (it counts refusals by the free rule string, status.rs:226).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read surveys.rs around `check_code_survey` (:177-232), `code_surveys` (:117), `environment_assumptions` (:605), `existing_code_assumptions` (:1329), `names_existing_path` (:1341) and `requires_existing_code_section` (:1359-1394). Add `assumptions_labeled(reading, label) -> Vec<&str>` (trim, case-insensitive prefix) and rewrite the three functions to call it, with the same outputs. Add `pub(super) const NEGATORS: [&str; 7]` with the existing seven members and make `requires_existing_code_section` use it, keeping its window logic and `n't` normalisation unchanged.",
+    "In surveys.rs, after `changes_code_with_behavior_criterion` (:237), add the helpers. `tokens(text)`: split on whitespace, `,` as its own token, trim `.`, `;`, `(`, `)`, quotes and backticks, keep the backtick flag. `identifiers_broad(text)` for (a) and (b): a token with `_` or `::`, a word directly followed by `()`, or a backticked single token; tokens with `/` or a file extension skipped. `identifiers_function_like(text)` for (d): only `_`, `::` or `name()`, after `strip_commands(text)` removes backtick spans starting `cargo ` or `athena ` and the word `cargo` through the end of its clause (next `;`, or `.` plus space); tokens with `/`, a leading `-` or a file extension skipped. `is_skip_switch(token)`: exact `skip_probe`, exact `ATHENA_NO_PROBE`, and upper-case tokens starting `ATHENA_NO_` or `ATHENA_SKIP_`, case-sensitive. `INDIRECT_PHRASES`: `internal helper`, `private helper`, `stand-in`, `through a helper`, `via a helper`. `negated(tokens, i)`: skip determiners and modifiers (`a`, `an`, `the`, `any`, `internal`, `private`, `helper`), then at most one connective (`through`, `via`, `using`, `with`, `by`, `of`), then determiners again, then read token j. A token in `NEGATORS`, or `than` directly after `rather`, negates. A joiner (`or`, `nor`, `and`, `,`) whose previous token is itself a match returns `negated` of that earlier match. Everything else is not negated. `is_routine_criterion(text)`: strip tokens starting `-` or `athena-`, then the stop list, a pass word, and one of fmt, clippy or test(s). `criterion_numbers(body)`: on lowercase text, after `criterion` or `criteria` read a number; a `-` or `to` and a second number makes an inclusive range; a separator (`,`, `and`, `or`, `&`) followed by a number continues the list; the first non-number ends it; numbers of repeated `criterion` words are united.",
+    "In surveys.rs write `pub fn check_behavior_test_reading(reading: &Reading) -> Result<()>`. Return Ok if `!changes_code_with_behavior_criterion(reading)`. Collect problems for: (a) a `Gate order:` body with two broad identifiers and a stop-gate phrase (`stop gate`, `stops at`, `stops after`, `stop at`, `stops before`); (b) an `Existing code:` assumption with a broad identifier and a crates/ path the job does not create (`names_existing_path` over the created paths); (c) a `Record kind:` body that satisfies `names_record_evidence`, or is `none` while no deliverable satisfies `is_record_or_data_deliverable`, with a contradiction message naming (c) and the file when `none` meets a record or data deliverable; the survey is not re-tested (`check_code_survey` runs first); (d) every non-routine behavior criterion number found by `criterion_numbers` in a `Direct check:` body that holds a function-like identifier, with a contradiction message for a non-negated skip switch or internal-helper phrase. Bail once with all problems, naming the four parts as `(a) gate order and stop gate`, `(b) reused existing function`, `(c) record kind or round-trip deliverable` and `(d) direct check`, give one example clause for each, and end by naming `check_behavior_test_reading`.",
+    "Write the doc comment of the new function: the root cause (readings fixed seams and tests without the entry point, gate order, a reused function, an accepted record kind or a direct check; cite jobs 20261113-174533-pem8 and this retry); the gate; the four parts; that `check_code_survey` runs first and owns the survey-evidence refusal; `Limits:` (lexical only; the closed switch list; the list-carrying negation and the pinned false cases `no probe runs when skip_probe is set`, `faster than skip_probe`, `not through skip_probe, and ATHENA_NO_PROBE is set`; the command removal; the routine stop list, including that a leading `No unrelated behavior changes` clause counts as routine; no repository read); `This check refuses more readings; the higher refusal rate is intended.`; `expected 30% of newly refused readings` as an estimate, not measured; and the reason using `because`, `now asks` and `new required`.",
+    "In checks.rs add `step!(check_behavior_test_reading(reading));` directly after `step!(check_code_survey(reading));` and link `[`check_behavior_test_reading`]` in the doc of `check_reading_acceptance`. In reading.rs tests, rename the current `code_reading` to `code_reading_without_clauses`, add `const CLAUSES` (`Gate order:` with two identifiers and `stops at`, `Existing code:` with a crates/ path and an identifier, `Record kind: none`, `Direct check:` using `criteria 1-4` and a function-like identifier) and make `code_reading` append it. Fix the tests that assign `.assumptions` directly (reading.rs:7093, 8187) and the lines at 7081-7085 and 7159-7166 so the clauses stay appended. Record-deliverable fixtures use a `Code survey:` naming `check_record_file` and `Record kind: check_record_file accepts the new kind`.",
+    "In reading.rs tests add: four single-omission tests, each asserting only the omitted part is named; the complete reading; record contradiction (fixture R: survey names `check_record_file`, `Record kind: none` refused with `gate_refuser` = `check_behavior_test_reading`, naming (c)); the accepted `Record kind:` forms (`check_record_file ...` and a `round_trip.rs` path); the same record deliverable with a survey lacking evidence refused by `check_code_survey`; `skip_probe` and `ATHENA_NO_PROBE` (refused); each negated form (accepted); the three refused false cases; `skip_note` (accepted); internal-helper read (refused); command-only `Direct check:` backticked and unbackticked (refused); one test per criterion form (`criterion 2`, `criteria 1-4`, `criteria 1, 3 and 4`); the routine criteria, including the steward default and criterion 8 (accepted); a single-word backticked entry point (accepted); an `Existing code:` assumption (accepted for (b)); label forms; the outside-gate shapes (docs, decline, question, content only); `behavior_test_reading_has_one_step_line`; the doc-and-changelog test. Update `history_fixture_has_one_step_line` to expect the new line at `survey + 1` and the history line at `survey + 2`.",
+    "In reading.rs add `behavior_test_replay_stays_within_the_declared_share` next to `replay_hold_is_over_ten_percent_without_a_declared_share` (reading.rs:6625). Comment it as a mechanics test only, not evidence of the bound. Ten past-shaped `ReplayCase`s; base closure = real `check_reading_text` on the reading with `CLAUSES` appended (asserted accepted first); candidate = real `check_reading_text`; `declared` from `replay_declaration_of` on a Reading holding the AC4 text. Assert the newly refused ids are exactly the code behavior readings, that docs, feature and content-only readings are never newly refused, that the share parses as 30, and the hold rule with and without a declaration.",
+    "In refusal_corpus.rs add a helper that adds the clauses to the survey fixtures (`records_measure_cases` at :352-370, `history_case` at :2042-2056, `code-reading-with-a-survey` at :2025). Add the corpus cases listed under criteria 2 and 3 (sources: job 20261113-174533-pem8 and this retry, rebuilt from the job brief; the steward and code_health strings copied verbatim). Add the tags `behavior-clauses-complete`, `behavior-clause-missing`, `record-kind-none-with-record-file`, `record-evidence-missing-refused-by-survey-check`, `direct-check-skip-switch`, `direct-check-negated-switch`, `direct-check-negated-list`, `direct-check-command-only`, `direct-check-lowercase-skip-name-accepted`, `criteria-range-form`, `routine-criterion-only` and `single-word-entry-point` to `INPUT_FORMS` and change the array length from 63. Add `behavior_test_refusal_is_declared_intended`, modelled on `history_fixture_refusal_is_declared_intended` (:3090).",
+    "In crates/athena-cli/src/main.rs tests generalize `reading_json` into `reading_json_for(criterion, class, assumptions)`, keeping `reading_json` as the class `feature` wrapper. Add `check_reading_refuses_a_code_reading_with_a_short_survey` (exit 2, `refuse: ` prefix, names `check_behavior_test_reading` and `(a) gate order and stop gate`, one line) and the accept case with the four clauses.",
+    "In reader.rs extend `CODE_SURVEY_GUIDE` (:356) with one sentence naming the four labels and `check_behavior_test_reading`, keeping the existing needles. Measure the section growth in briefs.rs and raise `READING_RULES_BASELINE_BYTES` (:3591) and the `3150` cap (:3710) by that growth only. Add the four labels to the needles of `the_reader_brief_tells_the_reader_to_write_a_code_survey`.",
+    "Add the CHANGELOG.md Unreleased entry: the check and its place after `check_code_survey`; the four parts and the label forms (`Existing code:` for (b)); that (c) compares the `Record kind:` clause with the deliverables while `check_code_survey` owns survey evidence; the accepted criterion forms; the shared negator list; the declared 30% as an estimate with the reason; the replay rule; the closed skip-switch list and its limits (another name or a prose description is not caught, the pinned false cases); and the effect on stored queued readings.",
+    "Run `cargo fmt --all`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-core`, `cargo test -p athena-cli`, `cargo test -p athena-context`, then `cargo clippy --all-targets --locked -- -D warnings`. Confirm `git status` shows no change under athena.toml, defaults.toml, .github/workflows/, records/ or crates/athena-context/prompts/.",
+    "Read the loop replay output (`loop_replay`, run/mod.rs:2294, printed as `replay     in the loop`) that Athena sends back after the report is parsed. If it reports a share above 35%, loosen no marker, label or stop list. Write the measured share and the newly refused job ids into the producer report summary. If it prints `no replay: <reason>`, say so in the report. The verification replay will then measure it.",
+    "In the producer report, list crates/athena-core/src/status.rs, crates/athena-core/src/verify.rs and crates/athena-core/src/reading/replay.rs in `unchanged_planned_files`, each with its reason. status.rs counts refusals by the free rule string (status.rs:226). verify.rs reads the generic replay hold (verify.rs:500-526) and keeps its own `NEGATORS` (verify.rs:1261). replay.rs already parses the declared share (replay.rs:263-285)."
+  ],
+  "risks": [
+    {
+      "risk": "The real newly refused share may be above 35%. Most past code readings used a one-line survey, so every code or tests reading with a behavior criterion is newly refused.",
+      "mitigation": "`loop_replay` measures it on real accepted readings during the producer's work. If it is above 35%, no marker, label or stop list is loosened, and the share and the newly refused job ids go into the producer report. The 30% is declared with the reason sentence the replay rules require above 25%. Reusing `Existing code:` for (b) lowers the share a little."
+    },
+    {
+      "risk": "Lexical skip-switch matching misses other names and prose descriptions, refuses some honest phrasings (`no probe runs when skip_probe is set`, `faster than skip_probe`), and can accept a phrase that is only superficially negated by a coordinated list.",
+      "mitigation": "The closed list, the list-carrying negation rule and the pinned false cases are stated in the doc comment and the CHANGELOG. Corpus cases pin accepted forms (single and coordinated negation, `skip_note`) and refused forms."
+    },
+    {
+      "risk": "The command removal for (d) is lexical: an unbackticked sentence that mixes a command and a function name after the word `cargo` in the same clause loses the function name and is refused.",
+      "mitigation": "The error names (d) and gives an example clause, and the clause removal ends at `;` or a sentence end, so a function named in a later clause counts. The limit is stated under Limits."
+    },
+    {
+      "risk": "The routine-criterion stop list may miss other wordings of a routine criterion, which would then need a `Direct check:` clause.",
+      "mitigation": "Flags and `athena-*` crate names are stripped before the list is applied. The producer pins the strings from code_health.rs:529, steward.rs:622-623 and criterion 8 in corpus cases. A refused routine criterion gets an error that names it."
+    },
+    {
+      "risk": "Many reading.rs and corpus fixtures use the short survey and would be newly refused. A missed site fails the test suite.",
+      "mitigation": "The change is in two places: `code_reading` and the corpus survey helper. The producer runs `cargo test -p athena-core` and `-p athena-cli`, and the dependents list names the call sites."
+    },
+    {
+      "risk": "Refactoring the label filters and moving the negator list could change a check that already uses them.",
+      "mitigation": "The helper keeps the same rule (trim, case-insensitive prefix) and the shared constant keeps the same seven members and normalisation. The existing tests for those checks run unchanged."
+    },
+    {
+      "risk": "The reader brief section is capped by existing tests, so adding the sentence could break them if the bounds are not raised by the right amount.",
+      "mitigation": "The producer measures the guide growth and raises both bounds by that amount only. No prompt file is edited, so the reader budget of 1998 of 2000 does not move."
+    },
+    {
+      "risk": "The producer report may lack an entry for status.rs, verify.rs or replay.rs, so they would count as unexcused planned files.",
+      "mitigation": "Plan step 14 makes the producer list all three in `unchanged_planned_files` with reasons."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "gate order of the reading checks (new step after check_code_survey)",
+      "dependent": "crates/athena-core/src/reading/checks.rs `refusing_check` step list and `check_reading_acceptance`; crates/athena-core/tests/refusal_corpus.rs `every_acceptance_check_has_a_refusing_corpus_case` (:2905) and `no_check_bypasses_refusing_check` (:3210)",
+      "kind": "rule",
+      "test": "`behavior_test_reading_has_one_step_line` (new, reading.rs), `every_acceptance_check_has_a_refusing_corpus_case` and `no_check_bypasses_refusing_check`; run by `cargo test -p athena-core`.",
+      "reason": null
+    },
+    {
+      "name": "position of check_history_fixture directly after check_code_survey",
+      "dependent": "crates/athena-core/src/reading.rs test `history_fixture_has_one_step_line` (reading.rs:8206-8230), which asserts `steps[survey + 1]` is the history step",
+      "kind": "code",
+      "test": "Updated to expect the new line at `survey + 1` and the history line at `survey + 2`; run by `cargo test -p athena-core`.",
+      "reason": null
+    },
+    {
+      "name": "readings of class code or tests with a behavior criterion (same gate set as check_code_survey)",
+      "dependent": "crates/athena-core/src/reading.rs tests that build code readings: `code_reading`, `history_reading` and the SURVEY users (reading.rs:5266, 7042-7277, 8036-8187, 8344, 8596-8615, 9062, 9164), plus tests that overwrite `.assumptions` directly (reading.rs:7093, 8187)",
+      "kind": "code",
+      "test": "`code_reading` appends `CLAUSES`, so each existing accept test stays accepted; the two tests that overwrite assumptions append `CLAUSES` too. `cargo test -p athena-core`.",
+      "reason": null
+    },
+    {
+      "name": "corpus cases that reach the gate as code readings",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs: `records_measure_cases` (survey at :352, set at :370), `history_case` (:2042-2056), `code-reading-with-a-survey` (:2025), `code-reading-without-a-survey` (:2014, stays Refuse(\"check_code_survey\")), `INPUT_FORMS: [&str; 63]` (:90) and `corpus_covers_the_listed_input_forms` (:2826)",
+      "kind": "code",
+      "test": "A corpus helper adds the clauses to the survey fixtures (a Refuse(\"check_records_measure\") case still fails at that earlier check or accepts, as before). Each new `INPUT_FORMS` tag is held by a new case and the array length is changed from 63. `cargo test -p athena-core --test refusal_corpus`.",
+      "reason": null
+    },
+    {
+      "name": "label filtering of assumptions (refactored to one `assumptions_labeled` helper)",
+      "dependent": "crates/athena-core/src/reading/surveys.rs `code_surveys` (:117), `environment_assumptions` (:605), `existing_code_assumptions` (:1329) and every check that calls them (`check_code_survey`, the environment check, `check_design_existing_code` at :1409)",
+      "kind": "code",
+      "test": "The existing unit and corpus tests for those checks run unchanged and keep their outcomes, because the helper keeps the same rule: trim, then a case-insensitive prefix match. `cargo test -p athena-core`.",
+      "reason": null
+    },
+    {
+      "name": "the negator list moved to one shared constant",
+      "dependent": "crates/athena-core/src/reading/surveys.rs `requires_existing_code_section` (:1359-1394, local `NEGATORS` at :1370), used by `check_design_existing_code`",
+      "kind": "code",
+      "test": "The constant has the same seven members and the same `n't` normalisation, so `requires_existing_code_section` and the design-reading corpus cases keep their outcomes; the existing tests for `check_design_existing_code` run unchanged under `cargo test -p athena-core`. verify.rs:1261 `NEGATORS` is a separate list for verifier claims and is not touched.",
+      "reason": null
+    },
+    {
+      "name": "record evidence refusal for record or data deliverables",
+      "dependent": "crates/athena-core/src/reading/surveys.rs `check_code_survey` (:199-232) runs before the new step and owns the survey-evidence refusal for a record or data deliverable",
+      "kind": "rule",
+      "test": "New corpus case record-deliverable-without-survey-evidence-refused-by-check-code-survey expects Refuse(\"check_code_survey\"); the new check reads the `Record kind:` clause only and does not repeat the survey test. `cargo test -p athena-core --test refusal_corpus`.",
+      "reason": null
+    },
+    {
+      "name": "`athena check-reading` accept and refuse line",
+      "dependent": "crates/athena-cli/src/main.rs `check_reading_command` (:687-715) and its tests (:1277-1333)",
+      "kind": "code",
+      "test": "`check_reading_prints_accept_for_a_reading_the_rules_accept` (class feature, unchanged) and the new `check_reading_refuses_a_code_reading_with_a_short_survey`; `cargo test -p athena-cli`.",
+      "reason": null
+    },
+    {
+      "name": "check-reading output line `refuse: <reason>` and its exit codes",
+      "dependent": "crates/athena-core/src/reading/replay.rs `BinaryChecker` and `replay`; crates/athena-core/src/run/mod.rs:2275-2334 (`loop_replay`) and `replay_stage`",
+      "kind": "code",
+      "test": null,
+      "reason": "The line format and exit codes do not change; only the text of one more refusal differs. `ReadingCheck::parse` (replay.rs:36) reads the first line only. `loop_replay` and `replay_stage` read the compiled gate through that line, so both measure the new check with no code change."
+    },
+    {
+      "name": "stored readings of queued code requests",
+      "dependent": "crates/athena-core/src/steward.rs:424 and crates/athena-cli/src/drain.rs:121 (stored readings re-checked by `check_reading_text` before they run); fixtures in crates/athena-cli/tests/drain.rs and steward.rs tests",
+      "kind": "code",
+      "test": null,
+      "reason": "A stored code reading with a behavior criterion that lacks the labels leaves the drain queue until `athena go` or a new read, as for any failing check; the CHANGELOG entry says so. The fixtures there are class feature or docs, or are refused by an earlier check, and none holds a `Code survey:` assumption, so they are unaffected."
+    },
+    {
+      "name": "rule name string recorded in a reading refusal",
+      "dependent": "crates/athena-core/src/status.rs:226 (per-rule refusal counts) and its test constants (status.rs:3907-3908); crates/athena-data/src/records.rs:730 `ReadingRefusal`",
+      "kind": "code",
+      "test": null,
+      "reason": "The rule is a free string taken from the `stringify!` name in `refusing_check` (reading.rs:742-760). status.rs counts by that string with no allow-list, so a new name is grouped like any other. The tests use fixed names and do not enumerate checks. status.rs is listed in `unchanged_planned_files`."
+    },
+    {
+      "name": "size and content bounds of the reader's reading-rules section",
+      "dependent": "crates/athena-context/src/briefs.rs tests `the_reader_brief_names_each_reading_rule_in_one_short_line` (:3628-3716) and `the_reader_brief_tells_the_reader_to_write_a_code_survey` (:3719-3750); `READING_RULES_BASELINE_BYTES` (:3591)",
+      "kind": "rule",
+      "test": "The two bounds are raised by the measured growth of the guide sentence, the guide test gets the four labels as needles, and `READING_RULES.len()` stays 12; `cargo test -p athena-context`.",
+      "reason": null
+    },
+    {
+      "name": "prompt set budgets",
+      "dependent": "docs/system-facts.md budget lines and the `system_facts_budgets_match_computed` test",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No file under crates/athena-context/prompts/ and no budget-set component is edited. `CODE_SURVEY_GUIDE` is brief text outside `BudgetSet` (briefs.rs:3704-3710 comment), so the computed sizes do not move."
+    },
+    {
+      "name": "replay hold on newly refused readings",
+      "dependent": "crates/athena-core/src/verify.rs:500-526 (replay hold in the verdict); crates/athena-core/src/reading/replay.rs (`replay_declaration_of`, `replay_is_held`); `loop_replay` in run/mod.rs:2294",
+      "kind": "rule",
+      "test": "`behavior_test_replay_stays_within_the_declared_share` (new, mechanics only). Criterion 4's text, 'expected 30% of newly refused readings' with the reason sentence, is parsed by `replay_declaration` (replay.rs:263-285). The real share comes from `loop_replay` and the verification replay.",
+      "reason": null
+    },
+    {
+      "name": "the check's own doc and error text",
+      "dependent": "crates/athena-core/src/reading/surveys.rs `check_records_measure` (`records_measure_trigger`), which reads the summary and criteria text",
+      "kind": "rule",
+      "test": null,
+      "reason": "The error text and doc comment are strings and comments, not reading criteria, so they do not trigger `check_records_measure`. A criterion that declares newly refused readings is already skipped there (surveys.rs:458)."
+    },
+    {
+      "name": "unchanged deliverables (status.rs, verify.rs, replay.rs)",
+      "dependent": "crates/athena-core/src/run/mod.rs:1616-1633 `unchanged_planned_files` and run/send_back.rs:252, which compare the diff with the planned deliverables",
+      "kind": "rule",
+      "test": null,
+      "reason": "A reason in the producer report's `unchanged_planned_files` excuses a planned file left unchanged (run/send_back.rs:252). Plan step 14 makes the producer list the three files with a reason."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff; one unit test asserts the step position on the real source.",
+      "command": "git diff -- crates/athena-core/src/reading/surveys.rs crates/athena-core/src/reading/checks.rs",
+      "observes": "surveys.rs holds a `pub fn check_behavior_test_reading` that begins `if !changes_code_with_behavior_criterion(reading)` and calls `names_record_evidence` on the `Record kind:` body. Its `bail!` text holds the four part names. checks.rs holds one new `step!(check_behavior_test_reading(reading));` line directly after `step!(check_code_survey(reading));`. The unit test `behavior_test_reading_has_one_step_line` asserts exactly one such line and that `steps[position(check_code_survey) + 1]` is it.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Entry points: `refusing_check` through the corpus (checks.rs:520) and `check_behavior_test_reading` directly through the `accept` and `gate_refuser` helpers in the reading.rs tests. Fixtures are `Reading` values built by `code_reading` in reading.rs (exists, reading.rs:7042) and by `case()` in refusal_corpus.rs (exists), passed as arguments, no double. Step 5 renames the current `code_reading` to `code_reading_without_clauses` and makes `code_reading` append `CLAUSES` (`Gate order:`, `Existing code:`, `Record kind: none`, `Direct check:` using `criteria 1-4`; the record deliverable fixtures use a survey naming `check_record_file` and `Record kind: check_record_file accepts the new kind`). Four unit tests each remove exactly one clause, assert the error holds that part's name and no other part's name, and that `gate_refuser` is `check_behavior_test_reading`. A complete reading is asserted accepted. Corpus cases from step 8: behavior-clauses-missing-gate-order, behavior-clauses-missing-existing-code, behavior-clauses-missing-record-kind, behavior-clauses-missing-direct-check (each Refuse(\"check_behavior_test_reading\")), behavior-clauses-complete (Accept), code-reading-with-a-short-survey (Refuse(\"check_behavior_test_reading\")). The existing code-reading-with-a-survey (refusal_corpus.rs:2025) gains the clauses and stays Accept; code-reading-without-a-survey (:2014) stays Refuse(\"check_code_survey\"). `every_acceptance_check_has_a_refusing_corpus_case` (refusal_corpus.rs:2905) fails for a step with no refusing case. Guards: capability set, no question, class code or tests, a behavior criterion.",
+      "command": "cargo test -p athena-core",
+      "observes": "Four refusals each name only the omitted part, the complete reading is accepted, and the corpus run reports no mismatch.",
+      "fails_without": "If the check or its step line were missing, the four omission cases would be Accept where Refuse is expected, and the refusing-case test would not find the new name. If the check ignored a label, the complete reading would be refused or an omission accepted.",
+      "seam": "Production entry points `refusing_check`, `check_reading_acceptance` and `check_behavior_test_reading`. Fixtures: `Reading` values from `code_reading` and `case()` (both exist). The clause constant and new cases are added by plan steps 5, 6 and 8."
+    },
+    {
+      "criterion": 3,
+      "method": "Same entry points and fixtures as criterion 2. Unit tests and corpus cases: (1) Record contradiction, finding 1. Fixture R: Create `crates/athena-data/src/example.json`, a `Code survey:` naming `check_record_file`, complete (a), (b), (d) clauses. With `Record kind: none` it is refused by `check_behavior_test_reading`, naming (c) and the file (the new check is the refuser because `check_code_survey` passes). With `Record kind: check_record_file accepts the new kind`, and with `Record kind: crates/athena-data/tests/round_trip.rs round-trips the new kind` (survey also naming round_trip), it is accepted. Separately, the same record deliverable with a survey that does not name record evidence is refused by `check_code_survey`, and the test asserts `gate_refuser` is `check_code_survey`: this is how AC3's 'no accepted record kind and no round-trip test deliverable' is refused when the survey has no evidence. (2) `Direct check:` naming `skip_probe`, and one naming `ATHENA_NO_PROBE`, are refused naming (d) and the switch. (3) Negated forms accepted: `call check_reading_text on fixture text; not through skip_probe`, `without ATHENA_NO_PROBE`, `without skip_probe or ATHENA_NO_PROBE`, `not through skip_probe nor ATHENA_NO_PROBE`, `no skip_probe, no helper stand-in`. (4) Refused: `no probe runs when skip_probe is set`, `faster than skip_probe`, `not through skip_probe, and ATHENA_NO_PROBE is set`. (5) A body naming `skip_note` is accepted. (6) An internal-helper read is refused; `not through a helper` is accepted. (7) Command-only `Direct check: criterion 2: `cargo test -p athena-core``, and the unbackticked form, are refused naming (d); a body that also calls `check_reading_text()` is accepted. (8) Criterion forms: one test each for `criterion 2`, `criteria 1-4`, `criteria 1, 3 and 4`. (9) A reading whose only behavior criterion is `cargo fmt --check, cargo clippy --all-targets --locked -- -D warnings and cargo test -p athena-core pass`, and one with the steward text `No unrelated behavior changes; the existing tests pass` (steward.rs:622-623), are accepted with (a)-(c) and no `Direct check:`. (10) A single-word entry point, `Gate order: `replay` then `check_reading_text`; stops at `replay``, is accepted. (11) An `Existing code:` assumption with a crates/ path and an identifier satisfies (b). (12) Label forms: leading blanks and any case match; a label not at the start does not. (13) `requires_existing_code_section` tests run unchanged after the shared NEGATORS move. Corpus cases: record-kind-none-with-new-record-file, record-deliverable-without-survey-evidence-refused-by-check-code-survey (Refuse(\"check_code_survey\")), record-kind-evidence-is-accepted, direct-check-is-a-skip-switch-skip-probe, direct-check-is-a-skip-switch-athena-no-probe, direct-check-reads-an-internal-helper, direct-check-skip-switch-not-negated-in-prose, direct-check-command-only (Refuse(\"check_behavior_test_reading\")); direct-check-negated-skip-switch-is-accepted, direct-check-negated-list-is-accepted, direct-check-names-skip-note-is-accepted, routine-criterion-needs-no-direct-check, steward-default-criterion-is-routine, single-word-entry-point-is-accepted, criteria-range-form-is-accepted (Accept).",
+      "command": "cargo test -p athena-core",
+      "observes": "Each contradicting reading is refused with the contradicting part named, by the check stated. The negated mentions (single and coordinated), `skip_note`, the routine criteria, the range and list criterion forms and the single-word entry point are accepted.",
+      "fails_without": "Without the contradiction rules the skip-switch and `none`-with-record cases are accepted. Without the list carry the coordinated negation is refused. Without the joiner guard the `and ATHENA_NO_PROBE is set` case is accepted. Without the command removal the command-only case is accepted. Without the closed list `skip_note` is refused. Without the routine exemption the routine cases are refused for a missing direct check.",
+      "seam": "Same as criterion 2: `refusing_check` and `check_behavior_test_reading` with `Reading` fixtures injected as arguments; both exist. New tests and cases are added by plan steps 6 and 8."
+    },
+    {
+      "criterion": 4,
+      "method": "Two layers. Layer 1 measures the share on real readings: the producer loop runs `loop_replay` (run/mod.rs:2294) after each parsed report, because the change touches crates/; it replays the newest accepted records with the real `check_reading_text` on both builds and sends the share and the newly refused list back; the verification replay (`replay_stage`, replay.json) reuses it. If the share is above 35% the producer loosens nothing and writes the measured share and the newly refused job ids into its report summary. Layer 2 is mechanics only: `behavior_test_replay_stays_within_the_declared_share` in reading.rs, next to `replay_hold_is_over_ten_percent_without_a_declared_share` (reading.rs:6625). It calls `replay(&cases, &base, &candidate, declared)` from replay.rs. `declared` comes from `replay_declaration_of` on a Reading whose criterion 4 holds the AC4 text, so the real code parses the 30% and the reason sentence. The candidate is the real `check_reading_text`; the base is a closure that runs the same real gate on the reading with `CLAUSES` appended, and the test first asserts every fixture is accepted by it. Fixtures: docs, feature and content-only readings and code readings with a one-line `Code survey:` and a behavior criterion. It asserts the newly refused ids are exactly the code behavior readings, that docs, feature and content-only readings are never newly refused, that the declaration parses to 30, and that the hold rule is true with no declared share and false with 30.",
+      "command": "cargo test -p athena-core",
+      "observes": "The mechanics test passes in the producer's loop and in `cargo test -p athena-core`. The loop replay line shows the measured share on real accepted readings. The share and ids come from the send-back, not from the fixture test.",
+      "fails_without": "Without the new check the candidate equals the base, so the newly refused list is empty and the id assertion fails. If the check also refused docs or content-only readings, the id assertion fails.",
+      "seam": "`replay` and `replay_declaration_of` (exist, replay.rs:263-290, 365) and `loop_replay` (exists, run/mod.rs:2294). The candidate is the production gate; the base closure runs the same production gate on a reading with clauses added, so the logic under test is not in the double. The fixture test is added by plan step 7."
+    },
+    {
+      "criterion": 5,
+      "method": "Production entry point `check_reading_command(request, reading)` in crates/athena-cli/src/main.rs:687, which calls `check_reading_text`. The seam is the test fixture function `reading_json` (main.rs:1211), which writes the reading file in a tempdir (exists). Step 9 generalizes it to `reading_json_for(criterion, class, assumptions)` and keeps `reading_json` as the class `feature` wrapper. The existing `check_reading_prints_accept_for_a_reading_the_rules_accept` (main.rs:1277) keeps the class `feature` fixture and must still print `accept`. The new `check_reading_refuses_a_code_reading_with_a_short_survey` uses class `code`, the assumption `Code survey: crates/athena-core/src/reading.rs was read` and the criterion `Run `cargo test -p athena-core`: the greeting is printed`; it asserts exit code 2, a one-line `refuse: ` prefix, and that the line holds `check_behavior_test_reading` and `(a) gate order and stop gate`. A second assertion shows the same reading with the four clauses prints `accept`.",
+      "command": "cargo test -p athena-cli",
+      "observes": "The class `feature` reading prints `accept`. The code reading with a short survey prints a `refuse:` line naming the new check, and the same reading with the clauses prints `accept`.",
+      "fails_without": "Without the check the short-survey reading prints `accept` with exit code 0, so the exit code and `refuse:` assertions fail.",
+      "seam": "`check_reading_command` and the tempdir reading fixture exist today. The generalized `reading_json_for` and the new tests are added by plan step 9."
+    },
+    {
+      "criterion": 6,
+      "method": "The existing tests run on the edited brief: `the_reader_brief_names_each_reading_rule_in_one_short_line` (briefs.rs:3628), `the_reader_brief_tells_the_reader_to_write_a_code_survey` (briefs.rs:3719), `system_facts_budgets_match_computed` and the banned-word boundary scan. Step 10 edits only the Rust const `CODE_SURVEY_GUIDE`, the two bounds and the needles of the guide test. `git diff --stat` shows no path under crates/athena-context/prompts/.",
+      "command": "cargo test -p athena-context",
+      "observes": "All athena-context tests pass, the budget lines stay as listed (reader 1998 of 2000), and the diff lists no prompt file.",
+      "fails_without": "If a prompt file were edited, the budget-line test would fail with the new computed size. If the section grew past an unchanged bound, the `section.len() <= READING_RULES_BASELINE_BYTES` assertion would fail.",
+      "seam": "`reader_brief` and `CODE_SURVEY_GUIDE` exist; the budget test reads the real prompt files (exists). The edit is added by plan step 10."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the CHANGELOG.md diff. The corpus test `behavior_test_refusal_is_declared_intended` (added in refusal_corpus.rs, modelled on `history_fixture_refusal_is_declared_intended` at refusal_corpus.rs:3090) asserts that the changelog and the doc comment hold `check_behavior_test_reading`, `higher refusal rate is intended`, `expected 30% of newly refused readings`, `estimate`, and the closed skip-switch list with its limit sentence (`skip_probe`, `ATHENA_NO_`, `ATHENA_SKIP_`, that another name or a prose description is not caught, and the pinned false cases). `git diff --stat` must list none of athena.toml, defaults.toml, .github/workflows/ or records/.",
+      "command": "git diff --stat",
+      "observes": "CHANGELOG.md has one new Unreleased entry naming the check, the declared 30% and the limit of skip-switch matching. The stat shows none of the four protected paths.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Athena's recorded checks on the same final tree. Fixture updates keep every existing accept case accepted, and the full workspace run covers the other callers of `check_reading_text` (crates/athena-cli/src/drain.rs:121, crates/athena-core/src/steward.rs:424 and the run tests).",
+      "command": "cargo fmt --all --check",
+      "observes": "fmt, clippy (`cargo clippy --all-targets --locked -- -D warnings`) and `cargo test --locked` all exit 0 on one tree, recorded by Athena.",
+      "fails_without": "A missed fixture (a code reading with a short survey that is expected to be accepted) fails `cargo test`.",
+      "seam": "Athena's recorded checks (exist)."
+    }
+  ],
+  "open_questions": [
+    "User: The real share of newly refused past readings is unknown until `loop_replay` reports it; it about equals the share of past code or tests readings with a behavior criterion, since no past reading used the new labels. If the loop replay measures above 35%, should a higher share be declared (a reason sentence is required above 25%), or should the labels be made optional for readings that add no record file? Until you decide, the plan loosens nothing and reports the share and the newly refused ids."
+  ],
+  "producer_section_sha256": "d76a66551cc364da5882dc42a3e4a565c63c9c60d36fb5b0598cedde8c1b15c7"
+}
