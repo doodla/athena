@@ -314,6 +314,9 @@ pub struct AthenaSection {
 pub struct Models {
     pub reader: String,
     pub producer_default: String,
+    /// The models a job may produce with, ordered weakest first. The planner revision setting ranks models
+    /// by position in this list: a `planner_revision_model` that sits earlier than the planner's current
+    /// model is ignored.
     pub producer_allowed: Vec<String>,
     pub verifier: String,
     /// The effort level each role runs at (`--effort`), one of [`EFFORT_LEVELS`].
@@ -329,6 +332,15 @@ pub struct Models {
     /// The producer effort for a hard job. Absent means the producer effort stays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hard_producer_effort: Option<String>,
+    /// The planner model on a revision call (a call after a critic revise or a mechanical plan-rule
+    /// revision). Used only when set, a member of `producer_allowed`, and not earlier in that list (weakest
+    /// first) than the planner's current model. Independent of `hard_producer_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_revision_model: Option<String>,
+    /// The planner effort on a revision call. Used only when set and not weaker than the planner's current
+    /// effort, by position in [`EFFORT_LEVELS`]. Independent of `hard_producer_effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_revision_effort: Option<String>,
     #[serde(default)]
     pub names: BTreeMap<String, String>,
 }
@@ -355,6 +367,29 @@ impl Models {
                 .clone()
                 .unwrap_or_else(|| self.producer_effort.clone()),
         )
+    }
+
+    /// The planner model and effort for a revision call, given the planner's current setting. Each part
+    /// uses its `planner_revision_*` key only when the key is set and not weaker than the current value:
+    /// effort by position in [`EFFORT_LEVELS`], model by position in `producer_allowed` (weakest first). A
+    /// part that would lower the value, or that cannot be ranked, keeps the current value on its own. It
+    /// reads neither `hard_producer_*` nor [`Self::producer_setting`].
+    pub fn planner_revision_setting(&self, model: &str, effort: &str) -> (String, String) {
+        let effort_rank = |e: &str| EFFORT_LEVELS.iter().position(|l| *l == e);
+        let model_rank = |m: &str| self.producer_allowed.iter().position(|a| a == m);
+        let new_model = match (&self.planner_revision_model, model_rank(model)) {
+            (Some(key), Some(current)) if model_rank(key).is_some_and(|r| r >= current) => {
+                key.clone()
+            }
+            _ => model.to_string(),
+        };
+        let new_effort = match (&self.planner_revision_effort, effort_rank(effort)) {
+            (Some(key), Some(current)) if effort_rank(key).is_some_and(|r| r >= current) => {
+                key.clone()
+            }
+            _ => effort.to_string(),
+        };
+        (new_model, new_effort)
     }
 }
 
@@ -597,6 +632,8 @@ pub enum ConfigError {
     Effort(&'static str, String),
     #[error("[models] hard_producer_model {0} is not in producer_allowed")]
     HardProducerNotAllowed(String),
+    #[error("[models] planner_revision_model {0} is not in producer_allowed")]
+    PlannerRevisionNotAllowed(String),
     #[error(
         "[models] roles name no {0} model; every athena.toml Athena loads must name at least one Opus, one Sonnet and one Haiku model among reader, producer_default, producer_allowed, verifier and hard_producer_model (OLY-B-SET-02)"
     )]
@@ -628,7 +665,9 @@ impl Config {
 
     /// The configuration that bears on a reading, as canonical text: every setting except `[parallel]`
     /// (how many jobs a drain runs at once), `[landing]` (how a pull request is merged) and `[job_plan]`
-    /// (not yet read by any stage, and absent from the text so old digests hold). None changes
+    /// (not yet read by any stage, and absent from the text so old digests hold). The planner revision
+    /// keys (`planner_revision_model`, `planner_revision_effort`) are cleared too: they change only a
+    /// planner call, never what the reader sees or what a job may do. None changes
     /// what the reader sees or what a job may do, so a change to them leaves a reading valid (D38). The text
     /// does not depend on how the file is laid out, only on the parsed values, so comments, spacing and key
     /// order do not count either.
@@ -640,6 +679,8 @@ impl Config {
         relevant.disk = None;
         relevant.drain = None;
         relevant.priority_caps = None;
+        relevant.models.planner_revision_model = None;
+        relevant.models.planner_revision_effort = None;
         serde_json::to_string(&relevant).expect("a parsed configuration serializes")
     }
 
@@ -667,6 +708,10 @@ impl Config {
             ("producer_effort", Some(&m.producer_effort)),
             ("verifier_effort", Some(&m.verifier_effort)),
             ("hard_producer_effort", m.hard_producer_effort.as_ref()),
+            (
+                "planner_revision_effort",
+                m.planner_revision_effort.as_ref(),
+            ),
         ] {
             if let Some(v) = value
                 && !EFFORT_LEVELS.contains(&v.as_str())
@@ -692,6 +737,12 @@ impl Config {
             if !roles.iter().any(|name| name.contains(family)) {
                 return Err(ConfigError::ModelFamily(family));
             }
+        }
+        // Checked after the family rule so a config with a family problem still reports it first.
+        if let Some(model) = &m.planner_revision_model
+            && !m.producer_allowed.contains(model)
+        {
+            return Err(ConfigError::PlannerRevisionNotAllowed(model.clone()));
         }
         if !self.classes.list.iter().any(|c| c == "other") {
             return Err(ConfigError::NoOtherClass);
@@ -1049,6 +1100,7 @@ pub(crate) mod tests {
             "producer_effort",
             "verifier_effort",
             "hard_producer_effort",
+            "planner_revision_effort",
         ] {
             let line = format!("{key} = ");
             let start = REPO_CONFIG.find(&line).expect("athena.toml sets the key");
@@ -1091,6 +1143,126 @@ pub(crate) mod tests {
         assert_eq!(Some(&model), m.hard_producer_model.as_ref());
         assert_eq!(Some(&effort), m.hard_producer_effort.as_ref());
         assert_ne!(effort, m.producer_effort);
+    }
+
+    /// The repository config without the planner revision key lines.
+    fn without_revision_keys(text: &str) -> String {
+        text.split_inclusive('\n')
+            .filter(|l| !l.starts_with("planner_revision_"))
+            .collect()
+    }
+
+    #[test]
+    fn planner_revision_keys_are_optional_and_load_from_the_repository_config() {
+        let set = Config::parse(REPO_CONFIG).unwrap().models;
+        assert!(set.planner_revision_model.is_some());
+        assert!(set.planner_revision_effort.is_some());
+        let stripped = without_revision_keys(REPO_CONFIG);
+        assert_ne!(stripped, REPO_CONFIG);
+        let bare = Config::parse(&stripped).unwrap().models;
+        assert_eq!(bare.planner_revision_model, None);
+        assert_eq!(bare.planner_revision_effort, None);
+        // With the keys unset a revision call keeps the current setting.
+        assert_eq!(
+            bare.planner_revision_setting("claude-haiku-5-5", "high"),
+            ("claude-haiku-5-5".to_string(), "high".to_string())
+        );
+    }
+
+    #[test]
+    fn planner_revision_model_outside_producer_allowed_is_refused() {
+        let stripped = without_revision_keys(REPO_CONFIG);
+        let with = |model: &str| {
+            stripped.replacen(
+                "[models]\n",
+                &format!("[models]\nplanner_revision_model = \"{model}\"\n"),
+                1,
+            )
+        };
+        let verifier = Config::parse(REPO_CONFIG).unwrap().models.verifier;
+        for bad in [verifier.as_str(), "claude-unknown-9"] {
+            assert_eq!(
+                Config::parse(&with(bad)).unwrap_err(),
+                ConfigError::PlannerRevisionNotAllowed(bad.to_string())
+            );
+        }
+        assert!(Config::parse(&with("claude-haiku-5-5")).is_ok());
+    }
+
+    #[test]
+    fn planner_revision_setting_uses_a_key_only_when_it_is_not_weaker() {
+        let mut m = Config::parse(REPO_CONFIG).unwrap().models;
+        let (haiku, sonnet) = ("claude-haiku-5-5", "claude-sonnet-5-5");
+        let pair =
+            |m: &Models, model: &str, effort: &str| m.planner_revision_setting(model, effort);
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        m.planner_revision_model = Some(sonnet.into());
+        m.planner_revision_effort = Some("xhigh".into());
+        // Stronger on both parts.
+        assert_eq!(pair(&m, haiku, "high"), s(sonnet, "xhigh"));
+        // Equal on the model, stronger on the effort.
+        assert_eq!(pair(&m, sonnet, "high"), s(sonnet, "xhigh"));
+        // Equal on both.
+        assert_eq!(pair(&m, sonnet, "xhigh"), s(sonnet, "xhigh"));
+        // Weaker effort key: only the effort part falls back.
+        assert_eq!(pair(&m, haiku, "max"), s(sonnet, "max"));
+        // Weaker model key: only the model part falls back.
+        m.planner_revision_model = Some(haiku.into());
+        assert_eq!(pair(&m, sonnet, "high"), s(sonnet, "xhigh"));
+        assert_eq!(pair(&m, haiku, "high"), s(haiku, "xhigh"));
+        // Unset keys leave the setting alone.
+        m.planner_revision_model = None;
+        m.planner_revision_effort = None;
+        assert_eq!(pair(&m, sonnet, "medium"), s(sonnet, "medium"));
+        // An effort key weaker than the current effort is ignored.
+        m.planner_revision_effort = Some("medium".into());
+        assert_eq!(pair(&m, sonnet, "high"), s(sonnet, "high"));
+        // A model or effort that cannot be ranked keeps the current value.
+        m.planner_revision_model = Some(sonnet.into());
+        assert_eq!(
+            pair(&m, "claude-opus-5-5", "turbo"),
+            s("claude-opus-5-5", "turbo")
+        );
+        // The ranking is the list order: reversed, haiku counts as the stronger model.
+        m.producer_allowed = vec![sonnet.into(), haiku.into()];
+        assert_eq!(pair(&m, haiku, "high").0, haiku);
+        assert_eq!(pair(&m, sonnet, "high").0, sonnet);
+        m.planner_revision_model = Some(haiku.into());
+        assert_eq!(pair(&m, sonnet, "high").0, haiku);
+    }
+
+    #[test]
+    fn planner_revision_setting_ignores_the_hard_producer_setting() {
+        let mut m = Config::parse(REPO_CONFIG).unwrap().models;
+        let before = m.planner_revision_setting("claude-haiku-5-5", "high");
+        m.hard_producer_model = Some("claude-haiku-5-5".into());
+        m.hard_producer_effort = Some("low".into());
+        assert_eq!(
+            m.planner_revision_setting("claude-haiku-5-5", "high"),
+            before
+        );
+        m.hard_producer_model = None;
+        m.hard_producer_effort = None;
+        assert_eq!(
+            m.planner_revision_setting("claude-haiku-5-5", "high"),
+            before
+        );
+    }
+
+    #[test]
+    fn planner_revision_keys_leave_the_reading_digest_alone() {
+        let with = Config::parse(REPO_CONFIG).unwrap();
+        let without = Config::parse(&without_revision_keys(REPO_CONFIG)).unwrap();
+        assert_ne!(with.models, without.models);
+        assert_eq!(with.reading_inputs(), without.reading_inputs());
+        assert_eq!(digest(&with), digest(&without));
+    }
+
+    #[test]
+    fn planner_revision_ranking_relies_on_haiku_listed_before_sonnet() {
+        let allowed = Config::parse(REPO_CONFIG).unwrap().models.producer_allowed;
+        let at = |fragment: &str| allowed.iter().position(|m| m.contains(fragment)).unwrap();
+        assert!(at("haiku") < at("sonnet"));
     }
 
     #[test]
