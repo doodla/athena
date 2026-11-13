@@ -1,0 +1,170 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-060410-mavp",
+  "n": 1,
+  "at": "2026-11-13T07:09:33.808781819Z",
+  "invocation_seq": 1,
+  "base_commit": "c88c5ce115984c7ec2a5142a08bea863e87e66c3",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Defer introspections while the kill switch is on; run on start",
+  "summary": "When the kill switch is on, `Athena::introspect` queues the event in the state directory instead of invoking the model and committing a failed record. `athena start` then runs the queued introspections. This also reruns the two kill-switch failures, for jobs 20261029-142858-5c0p and 20261017-155259-7mjc, through that queue.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Criteria require new passing tests plus cargo test and clippy"
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The criteria check pending-then-run behavior through the real start path"
+    },
+    {
+      "id": "small",
+      "how": "One focused change, with no new record type"
+    },
+    {
+      "id": "mechanism",
+      "how": "The deferral is enforced in code and tested, not left as prose"
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-core/src/introspect.rs. `introspect_job` and `introspect_intervention` go through `introspect`, which builds a Failed record and commits it even when `driver.invoke` errors. I read crates/athena-core/src/manage.rs, where `start()` calls `state.registry().start()`, and crates/athena-cli/src/commands.rs, where `start()` is the `athena start` entry point. I read crates/athena-data/src/records/introspection.rs, where `IntrospectionStatus` has only Recorded and Failed. `registry().stopped()` is already used in status.rs. The existing test file is crates/athena-cli/tests/introspection.rs. Measurement is direct: a test with the kill switch on and a fake driver counts model calls and committed records.",
+    "Design: no new record status. A deferred event is a pending file under the state root (`introspect-pending/`), not a record, so the records allow-list, `AnyRecord`, `check_record_file` and the round-trip test are untouched. `athena start`, only when the switch was on, drains the queue by calling `introspect` per event and deletes each entry after it is committed. An entry whose run fails stays recorded as failed, as today, and is not requeued, so a failing item cannot loop.",
+    "Interpretation: the 'kill switch is on' check is read from `state.registry().stopped()` before the model is invoked. The same deferral applies to job and intervention events. A trigger that is already queued is not queued twice.",
+    "Term pending: an introspection event that was triggered, has no introspection record yet, and is waiting in the state-directory queue.",
+    "Retry of 20261029-142858-5c0p: its planning stopped because the kill switch was turned on, so it produced no candidate and has no files to keep. It is addressed by queueing its introspection for rerun, not by redoing its build work. Retry of 20261017-155259-7mjc: it was rejected because `cargo test --locked` failed with no exit code. Its introspection is rerun the same way. Its seven changed CI-routing files are dropped and excluded in out_of_scope.",
+    "The rerun of the two failed introspections needs the model, which the producer cannot call. It is done by the owner running `athena start` after the change lands, and the change provides a way to enqueue those two events. The producer does not edit records/ (records/introspections/2026-10/20261030-013540-p86y.json is read only), and the old failed records stay as history.",
+    "Environment: a local state directory, read and write for the producer. No network, push, PR or CI workflow is used. The tests use the fake driver in crates/athena-agent, and git commits are made inside the test repository only.",
+    "Consumers: none. No config file changes."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/tests/introspection.rs triggers `introspect_job` (a rejected or failed job) while the kill switch is on. It asserts that the fake driver was not invoked, no introspection record was committed with status failed, and one event is pending. Evidence: `cargo test` shows it passing.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The same test, or a second one, turns the switch off through the real `start` path (`Athena::start` or the `athena start` command). It asserts that the pending event now yields exactly one committed introspection record with status recorded, and that the queue is then empty. Evidence: `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test covers an intervention-triggered introspection while the switch is on. It is deferred and then run on start, and a second `athena start` does not run it again. Evidence: `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The diff to crates/athena-core/src/introspect.rs (and the `start` path in crates/athena-core/src/manage.rs or crates/athena-cli/src/commands.rs) shows the stopped check happening before `driver.invoke`, with a queue of pending events and a drain run when the switch is turned off.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry saying that introspections are deferred while the kill switch is on and run after `athena start`.",
+      "kind": "content"
+    },
+    {
+      "text": "No unrelated behavior changes. The existing tests in crates/athena-cli/tests/introspection.rs and the other crates pass unchanged, and `the_kill_switch_blocks_new_work` still passes. Evidence: `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy` (with -D warnings as configured) and `cargo test` pass, as recorded by Athena on the final tree.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The change does not edit anything under records/, docs/decisions.md or athena.toml. If a decision is recorded, it is a new appended decision with a Provenance bullet.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "p": 0.75
+    },
+    {
+      "path": "crates/athena-cli/src/commands.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Any edit to records/, including records/introspections/2026-10/20261030-013540-p86y.json. The old failed records stay.",
+    "The seven files the rejected job 20261017-155259-7mjc changed (ci_result.rs, gh.rs, routing.rs, run.rs, run_ci_tests.rs, docs/design/ci-routing.md, CHANGELOG.md CI entry) are dropped, not kept.",
+    "The build work of job 20261029-142858-5c0p (per-job worktree start, disk bound). It produced no candidate and is not redone here.",
+    "Changing how the kill switch blocks agents and checks, or deferring anything other than introspections.",
+    "A new IntrospectionStatus variant or any change to the record schema.",
+    "Changes to athena.toml, defaults.toml or .github/workflows."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 6.0
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2400.0,
+        "p90": 5400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.675392670157068,
+      "p_user_intervenes": 0.06476190476190476,
+      "cost_usd": {
+        "p10": 0.5456690356351617,
+        "p50": 1.4729476067643412,
+        "p90": 5.2020091047595045
+      },
+      "wall_time_s": {
+        "p10": 604.9010394791464,
+        "p50": 2153.684957172999,
+        "p90": 4384.9222885789695
+      }
+    }
+  },
+  "departures": "The change touches the introspection path, `start`, and a new state queue, so I forecast a higher cost and lower pass rate than the reference. The reruns also depend on the model running after merge.",
+  "hard_reason": "It changes a rule that holds work (the kill switch's effect on introspections) and the `athena start` pipeline, so a mistake could silently drop or double-run introspections.",
+  "producer_effort": "high"
+}
