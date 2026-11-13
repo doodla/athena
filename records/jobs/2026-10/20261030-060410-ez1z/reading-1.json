@@ -1,0 +1,202 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-060410-ez1z",
+  "n": 1,
+  "at": "2026-11-13T08:24:14.865416941Z",
+  "invocation_seq": 1,
+  "base_commit": "2663e1994e22bb44274ce6a7af4be3e8c0b9221f",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add hold and release for queued items, skipped by drain",
+  "summary": "Add an explicit hold state for queued jobs, set by a new `athena hold <job>` command and cleared by `athena release <job>`, both appending records the way `athena priority` does. Plan and drain treat a held item as not dispatchable at any priority, and `athena plan` lists it under held-back items with the reason \"on hold\". Goal: the operator can park dependent jobs without lowering priority; the audience is the operator running `athena drain` and `athena plan`. Job 20261030-013323-nmnv (dependencies on rejected jobs) is excluded and stays as landed.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Unit tests in plan.rs and drain.rs plus a CLI integration test; cargo test and clippy -D warnings pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria require tests that run drain and plan, not just types existing."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and CHANGELOG.md entry written for an outside reader."
+    },
+    {
+      "id": "small",
+      "how": "One focused change: the hold state, two commands and the plan display."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/reading.rs (queue at ~962 and set_priority at ~997 append a PriorityRecord via commit_records), crates/athena-core/src/store.rs (Records.priorities, AnyRecord::Priority at ~182, sorted by n at ~203), crates/athena-data/src/records.rs (PriorityRecord at ~525, AnyRecord enum at ~1097), crates/athena-core/src/plan.rs (Plan::build_with, Plan::refused and Refusal::lacking_because at ~666-730), crates/athena-cli/src/main.rs (Command::Priority at ~203, dispatch at ~1065), crates/athena-cli/src/commands.rs (priority at ~254), crates/athena-cli/src/drain.rs (Steps trait, RealSteps, Drain::prepare, queue entry building at ~4367 and ~4568) and crates/athena-cli/src/display.rs (plan printing). Entry point: `athena drain` runs Drain::prepare, which builds the entries and Plan; drain dispatches the plan order, so a held item must be excluded in Plan, not only in display. Records validation: a new record type needs a variant in AnyRecord and the records validation allow-list in athena-data; the round-trip test and check_record_file must cover the new type. Held state is measured directly by building a Plan from entries and by running drain against a test world, not via a stand-in.",
+    "Existing code: extend crates/athena-core/src/plan.rs (Plan::refused, the held-back listing used by the dependency hold), crates/athena-data/src/records.rs (PriorityRecord pattern, AnyRecord), crates/athena-core/src/store.rs (per-job record vectors), crates/athena-core/src/reading.rs (set_priority pattern) and crates/athena-cli/src/display.rs (held-back printing).",
+    "Design: a hold is an append-only record per job with a sequence number n and a state (held or released); the highest n wins; the request record is untouched. Only a queued job can be held; releasing a job that is not held errors with a clear message. A held item and anything depending on it is not dispatched; it appears in Plan::refused with reason naming the hold and an empty `missing`, as the dependency hold does.",
+    "Job 20261030-013323-nmnv is landed, final verdict pass, and is not retried. Its work (rejected-dependency hold in plan.rs, reading.rs job_history, drain.rs, display.rs, CHANGELOG.md, tests/drain.rs) is kept as landed and not reworked. Its three findings do not apply to this request: the same-text re-ask link not releasing dependents, the silent history fallback in RealSteps::job_history, and the tests/drain.rs placement are all about dependency semantics that this request excludes. Files that job changed are touched here only to add hold behavior, without changing the dependency rule.",
+    "Term ladder: not used. Priority means the four levels urgent, high, normal and low from athena_core::plan::Priority; hold is independent of priority.",
+    "No refusal gate is tightened for readings: a hold affects only queue dispatch, so the replay refusal-rate rule does not apply. Newly refused readings: expected 0% of newly refused readings.",
+    "Environment: none; no CI workflow, push, PR or history read. athena.toml, defaults.toml and .github/workflows are not changed.",
+    "Records: the introspection file named in the request, records/introspections/2026-10/20261030-013644-m6x8.json, is the source of the motivation and is not changed (records are append-only)."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test run by `cargo test` builds a queue with a held item at each priority (urgent, high, normal, low) and shows drain never dispatches it, then releases it and shows the same item is dispatched. The test lives in crates/athena-cli/src/drain.rs unit tests or crates/athena-cli/tests/drain.rs.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run by `cargo test` shows an eligible item at low priority is still dispatched when it is the only eligible item: lower priority alone does not stop it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run by `cargo test` shows `athena plan` output lists a held item under the held-back items with a reason that says it is on hold, and that the item no longer appears there once released. Check with `cargo test` on the plan/display tests.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A CLI test through `cargo test` runs `athena hold <job>` and `athena release <job>` against a temporary repository with a queued job. Hold appends a record and release appends a later one. Holding a non-queued job and releasing a job that is not held are refused with a message, and the request record is unchanged.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run by `cargo test` shows an item that depends on a held item is not dispatched while the dependency is held.",
+      "kind": "behavior"
+    },
+    {
+      "text": "crates/athena-data/src/records.rs has a new hold record type added to AnyRecord, with a round-trip test and coverage in the records validation allow-list; crates/athena-core/src/store.rs loads it per job in order of n.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-cli/src/main.rs defines `hold` and `release` subcommands with doc comments, dispatched through crates/athena-cli/src/commands.rs to new methods in crates/athena-core/src/reading.rs modeled on set_priority.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the hold state, the two commands and the plan display.",
+      "kind": "content"
+    },
+    {
+      "text": "The diff does not change the dependency-on-rejected-jobs rule from job 20261030-013323-nmnv (job_history and its tests in crates/athena-core/src/reading.rs and plan.rs) and does not change athena.toml, defaults.toml or .github/workflows.",
+      "kind": "content"
+    },
+    {
+      "text": "No unrelated behavior changes. The recorded Athena checks for `cargo fmt --check`, `cargo clippy` with -D warnings and `cargo test` pass on the final tree, and the existing tests still pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/src/commands.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Dependencies on rejected, failed or retried job ids: job 20261030-013323-nmnv, already landed, stays as landed and is not reworked",
+    "Changes to athena.toml, defaults.toml, .github/workflows or any governance file",
+    "Editing or removing existing records under records/ or docs/decisions.md entries",
+    "Changing how priority levels order the queue or how the Priority: line is read",
+    "Automatic holds, hold reasons beyond a short optional text, or expiry of holds"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.9,
+        "p50": 2.4,
+        "p90": 6.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2600.0,
+        "p90": 5600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6753472222222222,
+      "p_user_intervenes": 0.06445497630331753,
+      "cost_usd": {
+        "p10": 0.5459628,
+        "p50": 1.4678668,
+        "p90": 5.193669199999999
+      },
+      "wall_time_s": {
+        "p10": 605.1234663778718,
+        "p50": 2155.226456717016,
+        "p90": 4383.516332504703
+      }
+    }
+  },
+  "departures": "Higher than the reference: the change adds a new record type and touches seven or more files across athena-data, athena-core and athena-cli, plus tests for drain and plan.",
+  "hard_reason": "It adds a rule that holds work (a held item is never dispatched) and changes how drain selects work and how plan orders it, so a mistake would dispatch or starve jobs.",
+  "producer_effort": "high"
+}
