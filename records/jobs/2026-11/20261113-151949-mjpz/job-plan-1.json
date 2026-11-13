@@ -1,0 +1,259 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261113-151949-mjpz",
+  "round": 1,
+  "at": "2026-11-13T15:46:49.005064912Z",
+  "invocation_seq": 2,
+  "approach": "Add an optional `[job_plan] thrash_effort` key (default xhigh) as a small Copy enum so `JobPlanConfig` stays `Copy`. In `planning_round` (`crates/athena-core/src/run/planning.rs:140-155`), after `agent_spec` builds the planner spec, set `spec.effort` to the thrash effort when `round > 1 || mechanical_passes > 0`. That is the same override-after-`agent_spec` pattern as `producer.rs:339-341`. The first attempt of round 1 is untouched, and so is the critic spec built in `critic_round`. `invoke_and_record` writes `spec.effort` into the invocation record (`invocation.rs:202`), so the tests read the recorded effort back through `Records::load`. The config tests, `athena.toml`, the design doc, a new D178 and the changelog follow. `reading.rs` stays unchanged: `agent_spec` (`reading.rs:443`) already supplies the base effort and the override lives at the call site. The reading lists it as a deliverable, but no edit is needed.",
+  "decisions": [
+    {
+      "choice": "Store `thrash_effort` as a Copy enum `EffortLevel` (low, medium, high, xhigh, max; serde lowercase) in config.rs, with `as_str()`. `JobPlanConfig::default()` and the serde default both give `Xhigh`.",
+      "reason": "`JobPlanConfig` derives `Copy` (config.rs:210) and callers move it out of `Option` with `.expect(...)`, for example `planning.rs:34-38` and `planning.rs:95-98`. A `String` field would break `Copy` and every such caller. An enum keeps them untouched and refuses an unknown value when the config is parsed.",
+      "rejected": [
+        {
+          "option": "A `String` field checked against `EFFORT_LEVELS` in `validate()`, like `[models]` efforts",
+          "why": "It removes `Copy` from `JobPlanConfig`. That forces edits at about 50 uses across athena-core, athena-cli tests and hestia."
+        },
+        {
+          "option": "A `&'static str` field",
+          "why": "serde cannot deserialize into a `&'static str` from config text."
+        }
+      ]
+    },
+    {
+      "choice": "Escalate in `planning_round` after `agent_spec`, by overriding `spec.effort` when `round > 1 || mechanical_passes > 0`.",
+      "reason": "Both triggers are already in `Attempt` (planning.rs:89-93). The producer already overrides effort this way (producer.rs:339). One condition covers both the critic-revise and the mechanical re-plan cases, and `effort_for` stays untouched for the critic and the first call.",
+      "rejected": [
+        {
+          "option": "Change `agent_spec` or `Config::effort_for` to take a thrash flag",
+          "why": "They are shared by every role and caller. The flag would reach roles it must not touch, such as the critic."
+        },
+        {
+          "option": "Escalate the model as well",
+          "why": "The verifier's model may not produce, so there is no stronger allowed model (out of scope)."
+        }
+      ]
+    },
+    {
+      "choice": "A kept plan seeded from an earlier job (`resumed_from`, planning.rs:48) is not treated as thrash. Its first attempt runs at the configured effort.",
+      "reason": "Thrash is planner repeats within this job. The seeded first call is the first call of this job, and the reading says the first call is unchanged.",
+      "rejected": [
+        {
+          "option": "Treat any seeded revision as thrash",
+          "why": "It widens the trigger beyond the accepted reading and costs jobs that have not thrashed."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add the `EffortLevel` enum and `JobPlanConfig::thrash_effort` (serde default Xhigh, also in `Default`), plus unit tests for the default, an explicit value, the refusal of an unknown value, and the repository config.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Make the planner spec mutable and set `spec.effort` to the thrash effort when `round > 1 || mechanical_passes > 0`; document it on `plan_round`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the helper `run_planned_efforts` and three tests: a critic revise, a mechanical re-plan, and a one-pass accept.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "Governance file listed in the reading. Add `thrash_effort = \"xhigh\"` under `[job_plan]` with a comment saying which events trigger it.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "purpose": "Describe the escalation under the planning loop (section 3, Rounds and cost).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D178 with a Provenance bullet; edit no existing entry.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased / Added bullet for the escalation and its key.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "config.rs: add `#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = \"lowercase\")] pub enum EffortLevel { Low, Medium, High, Xhigh, Max }` with `as_str()` returning the five `EFFORT_LEVELS` strings. Add `thrash_effort: EffortLevel` to `JobPlanConfig` with `#[serde(default = \"JobPlanConfig::default_thrash_effort\")]` (returns `Xhigh`), and set it in `Default` (config.rs:253-264).",
+    "config.rs tests: add the default (no key gives Xhigh), an explicit `max`, and an unknown `extreme` (error names the value). Add a row to `bad_job_plan_settings_are_refused_naming_the_field` (config.rs:1326) and assert the repository config has `thrash_effort == Xhigh`.",
+    "planning.rs: in `planning_round`, change `let spec` to `let mut spec` at line 140. After the `agent_spec(...)?` call add `if round > 1 || mechanical_passes > 0 { spec.effort = cfg.thrash_effort.as_str().to_string(); }` with a comment saying that thrash is a critic revise or a mechanical re-plan and that the first attempt keeps the configured effort. Update the `plan_round` doc comment. Leave the critic spec in `critic_round` and `reading.rs` alone.",
+    "athena.toml: add `thrash_effort = \"xhigh\"` under `[job_plan]` (after line 216) with a comment: the planner effort for any call after a critic revise or a mechanical re-plan in the same job; the first call keeps `verifier_effort`.",
+    "tests.rs: add `run_planned_efforts` (build `athena_with(repo, &state, PASSES, crate::test_support::plenty_of_space, planning_script(..))`, call `finished_job`, then `Records::load(&athena.git, &athena.head().unwrap())` and return `(Role, effort)` for the job's invocations sorted by `seq`). Add the three tests, named with `planner_effort` so the filter runs them. Assert the job state is `Landed`, so the records are loaded.",
+    "docs/design/job-planning.md: add a short paragraph after the Rounds and cost paragraph (line ~122) on the escalation: trigger, config key and default, what stays unchanged (model, critic, first call, caps), and a pointer to D178.",
+    "docs/decisions.md: append `## D178 · Planner effort rises after a critic revise or a mechanical re-plan` with Case (job 20261113-151949-mjpz request), Decision, Alternatives, Tradeoff, Reversal cost and Provenance bullets (read: planning.rs, config.rs, producer.rs:339; measured: the three tests; not measured: whether planning stops fall). Do not edit earlier entries.",
+    "CHANGELOG.md: add one bullet under `[Unreleased]` / `### Added`, naming the key, the default and the tests.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-data`, `cargo test -p athena-core` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "A planner call at xhigh costs more and may reach `planner_usd` ($3.00 in athena.toml:212) or the 600 s timeout, which would stop planning and make thrash worse.",
+      "mitigation": "The caps and timeouts are unchanged and per call (out of scope), and the preflight reserve check still runs before each call (planning.rs:113). D178 names this as the tradeoff. Whether xhigh calls hit the cap is not measured here."
+    },
+    {
+      "risk": "An unknown `thrash_effort` fails as a TOML parse error, not as `ConfigError::Effort`, because the enum rejects it while the config is deserialized.",
+      "mitigation": "The message names the bad value and the allowed names. The test asserts the value appears in the error. The behavior is still a config error."
+    },
+    {
+      "risk": "The producer finds the next decision number differently than D178 if another job appends first.",
+      "mitigation": "The producer reads the last heading in decisions.md in its snapshot (D177 at line 5115 in the base) and appends the next number."
+    },
+    {
+      "risk": "Config files that already set `[job_plan]` and are copied between repositories keep working, but the default xhigh applies silently to them.",
+      "mitigation": "Intended by the reading (default xhigh). athena.toml sets it explicitly, and an operator can set `high` to turn escalation off."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "planner spec effort in `planning_round`",
+      "dependent": "crates/athena-core/src/run/planning.rs `plan_round` and `planning_round` (every planner call; the callers are `plan_round` only, reached from the dispatch path that `Athena::go` runs)",
+      "kind": "code",
+      "test": "New tests `a_critic_revise_raises_the_next_planner_call_to_the_thrash_effort`, `a_mechanical_replan_raises_the_planner_effort` and `a_plan_accepted_in_one_pass_records_the_configured_planner_effort`. Existing tests after_a_mechanical_revision_the_critic_still_reviews_in_three_rounds (tests.rs:1392) and a_plan_with_an_unaddressed_open_question_is_revised_before_the_critic (tests.rs:1349) assert roles and prompts only, not effort, so they are unaffected.",
+      "reason": null
+    },
+    {
+      "name": "recorded planner invocation effort",
+      "dependent": "crates/athena-core/src/invocation.rs:202,244,290 (the record copies `spec.effort`)",
+      "kind": "code",
+      "test": null,
+      "reason": "It only copies `spec.effort`, whatever its value, and the field is an optional string, so a different value needs no schema or record change."
+    },
+    {
+      "name": "effort values in invocation records",
+      "dependent": "crates/athena-core/src/status/planning.rs:391-420 (producer model and effort buckets) and crates/athena-core/src/learning.rs (specialization verdicts)",
+      "kind": "code",
+      "test": null,
+      "reason": "The buckets group only a job's first producer invocation (planning.rs:392-413). Planner records are not read, so planner effort never enters them."
+    },
+    {
+      "name": "base effort for roles",
+      "dependent": "crates/athena-core/src/reading.rs:443 `agent_spec` and `crates/athena-data/src/config.rs:830 effort_for`",
+      "kind": "code",
+      "test": null,
+      "reason": "Neither is changed. The planner and critic still get `verifier_effort` from `effort_for`, and the override is applied after the call."
+    },
+    {
+      "name": "`[job_plan]` and the reading digest",
+      "dependent": "crates/athena-data/src/config.rs `reading_inputs` (config.rs:635-644)",
+      "kind": "rule",
+      "test": "The existing config test that compares `reading_inputs` with and without `[job_plan]` (config.rs:1280-1282) stays true.",
+      "reason": "`reading_inputs` sets `job_plan = None`, so adding a `[job_plan]` key leaves the config digest and every accepted reading valid (D38)."
+    },
+    {
+      "name": "JobPlanConfig shape (new Copy field)",
+      "dependent": "JobPlanConfig struct literal and Default (config.rs:253-264); users of `job_plan` in crates/athena-core/src/hestia.rs, scope_guard.rs, admission.rs, run_pin_tests.rs and crates/athena-cli/tests/job_plan.rs, lifecycle.rs, introspection.rs and common/mod.rs",
+      "kind": "code",
+      "test": "`cargo test --locked` over the workspace, including `cargo test -p athena-cli --test job_plan`.",
+      "reason": "The only struct literal of `JobPlanConfig` is `Default` (config.rs:255), which the plan updates. Other users read fields or build it from config text, and the new key is optional with a default. `Copy` is kept, so `.expect()` moves still compile. `deny_unknown_fields` (config.rs:211) accepts the key, since it is now a declared field."
+    },
+    {
+      "name": "athena.toml `[job_plan]` key",
+      "dependent": "crates/athena-core/src/run/tests.rs repo_with_planning (tests.rs:291) and repo_with_config (tests.rs:299), which copy athena.toml minus `[job_plan]`",
+      "kind": "code",
+      "test": "The new criterion 3 to 5 tests, which assert the default.",
+      "reason": "The helper strips the repository `[job_plan]` section and appends its own, so the test repos exercise the default `xhigh`. The `include_str!` read of athena.toml still parses."
+    },
+    {
+      "name": "athena.toml `[job_plan]` section",
+      "dependent": "athena.toml parse by `Config::parse` in the `the_repository_config_*` tests (config.rs:926 and following), `docs/spec.toml` mechanism lines 1098, 1629, 1749 (prose mentions of `[job_plan]`)",
+      "kind": "rule",
+      "test": "`cargo test -p athena-data the_repository_config`.",
+      "reason": "The spec lines only name the section and the `mode` key. The new key does not change what they say."
+    },
+    {
+      "name": "decision log structure",
+      "dependent": "docs/decisions.md D110/D143 and the mirror and decision-log structure checks (D158, D162) read by xtask tests",
+      "kind": "rule",
+      "test": "`cargo test --locked` (xtask tests over decisions.md).",
+      "reason": "A new D178 section is appended in the format of D169-D177 and no earlier entry is edited. The structure checks look at the whole log, and appended entries follow the form they already accept."
+    },
+    {
+      "name": "cost of a planner call at higher effort",
+      "dependent": "Spend caps: `planner_usd` (config.rs:224), `preflight` with `ReserveStage::Planner` (planning.rs:113) and `Config::budget_required` (config.rs:981)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The caps are per call and unchanged. A call that runs at xhigh still stops at `planner_usd`, and the reserve check uses the cap, not the effort, so `budget_required` does not change."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in config.rs, next to `job_plan_defaults_are_off_and_bounded` (config.rs:1285). One parses `[job_plan]` with no key and asserts `thrash_effort == EffortLevel::Xhigh`. One parses `thrash_effort = \"max\"` and asserts `Max`. One parses `thrash_effort = \"extreme\"` and asserts `Config::parse` errs with a message naming the value. The existing `bad_job_plan_settings_are_refused_naming_the_field` table (config.rs:1326) also gets a `thrash_effort = \"extreme\"` row.",
+      "command": "cargo test -p athena-data job_plan",
+      "observes": "The default is xhigh, an explicit value is read, and an unknown value makes `Config::parse` return an error naming it.",
+      "fails_without": "Without the field, the default test fails to compile or assert. Without the enum, `extreme` would be an unknown-field parse error that does not name the value, or would be accepted.",
+      "seam": "Production entry point `Config::parse` (config.rs:623) over text built with `unplanned(REPO_CONFIG)`. Both exist today (config.rs:1286). Step 1 adds the field and step 2 the tests."
+    },
+    {
+      "criterion": 2,
+      "method": "Code inspection plus the behavior tests of criteria 3 to 5. In planning.rs, the planner spec in `planning_round` is made `mut`. After the `agent_spec` call, `if round > 1 || mechanical_passes > 0 { spec.effort = cfg.thrash_effort.as_str().to_string(); }`. The critic spec in `critic_round` is not changed, and a test asserts the critic record effort stays `high`.",
+      "command": "cargo test -p athena-core planner_effort",
+      "observes": "The diff of planning.rs shows the condition at the planner spec only. The tests show first-attempt planner records at `high`, later ones at `xhigh`, and critic records at `high`.",
+      "fails_without": "With no condition the second planner record stays `high`, and the criterion 3 and 4 tests fail. With the condition on all attempts, the first-call record would be `xhigh` and the criterion 5 test fails.",
+      "seam": "Production entry point `Athena::plan_round` called through `Athena::go` in tests. The seam exists today (`run_planned` and `planning_script`, tests.rs:1193-1244)."
+    },
+    {
+      "criterion": 3,
+      "method": "New test `a_critic_revise_raises_the_next_planner_call_to_the_thrash_effort` in run/tests.rs. It uses `repo_with_planning(3)` (tests.rs:291) and drives `athena.go` through `finished_job`, with `planning_script(vec![good_plan()], vec![revising_critique(), accepting_critique()], calls)`. Afterwards it calls `Records::load(&athena.git, &athena.head().unwrap())`, as at tests.rs:1116, takes `jobs[job].invocations` for `Role::Planner` sorted by `seq`, and asserts the efforts are `[\"high\", \"xhigh\"]`, plus `Role::Critic` records at `high`. A new helper `run_planned_efforts(repo, planner, critic) -> Vec<(Role, String)>` in tests.rs wraps `athena_with`, `finished_job` and the `Records::load` read.",
+      "command": "cargo test -p athena-core planner_effort && cargo test -p athena-data",
+      "observes": "The first planner invocation record has effort `high` (the configured `verifier_effort` in athena.toml:21). The second has `xhigh`. The job lands, so the records are loaded. The `[job_plan]` text in the test repo sets no `thrash_effort`, so the default is exercised.",
+      "fails_without": "Without the escalation the second record is `high` and the assertion `[\"high\",\"xhigh\"]` fails.",
+      "seam": "Production entry point `Athena::go` into `plan_round`, with the fake driver and a scripted planner and critic queue injected through `athena_with(..., planning_script(...))` (tests.rs:190, 1193). The records are read back with `Records::load`. The script supplies only the plan and critique answers, not the effort. The effort is set by production code and recorded by `invoke_and_record`. Script and fixtures exist; the helper `run_planned_efforts` is added in step 5."
+    },
+    {
+      "criterion": 4,
+      "method": "New test `a_mechanical_replan_raises_the_planner_effort`. It uses `repo_with_planning(3)` and `planning_script(vec![bad_plan(), good_plan()], vec![accepting_critique()], ..)` through `run_planned_efforts`. `bad_plan()` (tests.rs:1135) creates README.md, which exists, so Athena's plan rules give a major finding and a `RoundEnd::Mechanical` re-plan in round 1 with no critic call. It asserts the planner efforts are `[\"high\", \"xhigh\"]`, and that the one critic record is at `high`.",
+      "command": "cargo test -p athena-core planner_effort",
+      "observes": "Round 1, `mechanical_passes` 0 gives `high`. Round 1, `mechanical_passes` 1 gives `xhigh`, and the job lands after the critic accepts.",
+      "fails_without": "Without the `mechanical_passes > 0` arm the re-planned call stays `high`. A condition on `round > 1` alone would also fail here, since the re-plan is still round 1.",
+      "seam": "Same as criterion 3. `bad_plan` and `good_plan` exist today (tests.rs:1135-1142), and the mechanical path is already driven by `a_plan_that_still_breaks_a_rule_after_two_mechanical_passes_stops_without_the_critic` (tests.rs:1450). The helper is added in step 5."
+    },
+    {
+      "criterion": 5,
+      "method": "New test `a_plan_accepted_in_one_pass_records_the_configured_planner_effort`. It uses `repo_with_planning(3)` and `planning_script(vec![good_plan()], vec![accepting_critique()], ..)` through `run_planned_efforts`. It asserts exactly one planner record, with effort `high`. It also asserts the planner efforts equal the configured `verifier_effort`, read from `Config` in the same repo.",
+      "command": "cargo test -p athena-core planner_effort",
+      "observes": "A job with no thrash has every planner record at the unchanged `high`.",
+      "fails_without": "If the escalation fired on the first attempt (for example an unconditional override), the single planner record would read `xhigh` and the assertion would fail.",
+      "seam": "Same as criterion 3. It exists, and the helper `run_planned_efforts` is added in step 5."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the edited files. The athena.toml `[job_plan]` section gets `thrash_effort = \"xhigh\"` with a comment naming the triggers (a critic revise, or a mechanical re-plan, in the same job). CHANGELOG.md gets an `[Unreleased]` / `Added` bullet. job-planning.md gets a paragraph under 'Rounds and cost' in section 3 (line ~117-122) describing the escalation. decisions.md gets D178 appended after D177, with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance, and no earlier entry edited. The existing test `the_repository_config_names_an_effort_per_role...` (config.rs:1036) pattern gets a sibling asserting the repository `thrash_effort` is `Xhigh`.",
+      "command": "cargo test -p athena-data the_repository_config && git diff --stat",
+      "observes": "The repository config parses with the key. The diff touches only the listed files, and decisions.md has only appended lines.",
+      "fails_without": "Without the athena.toml key the repository-config assertion that it is set explicitly fails. If an existing decision entry were edited, the diff would show removed lines in decisions.md."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the recorded checks on the final tree.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three pass.",
+      "fails_without": "A formatting slip, a clippy warning (for example an unused import), or a broken test elsewhere fails it.",
+      "seam": "Athena's own check runs. They exist today."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "71d4783e10d9f1af9990e6a34188946e3cc43eff08e9f434f46a03a0f5d61701"
+}

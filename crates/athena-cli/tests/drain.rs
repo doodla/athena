@@ -7424,6 +7424,428 @@ fn setting_a_priority_rejects_an_unknown_level_an_unknown_job_and_a_job_that_is_
     assert_eq!(fx.head(), head);
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// `athena hold` and `athena release`
+
+const ALL_LEVELS: [Priority; 4] = [
+    Priority::Urgent,
+    Priority::High,
+    Priority::Normal,
+    Priority::Low,
+];
+
+/// True when the stub's log shows any call for `item` (a read, a run or a landing).
+fn touched(stub: &Stub, item: &str) -> bool {
+    let suffix = format!(" {item}");
+    stub.log().iter().any(|l| l.ends_with(&suffix))
+}
+
+#[test]
+fn a_low_priority_item_alone_is_still_dispatched() {
+    let stub = Stub {
+        items: vec!["l"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1, 1, 1]),
+        plan: vec![PlanEntry {
+            priority: Priority::Low,
+            ..planned("l", Ladder::Implementation, &["src/l.rs"], &[])
+        }],
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    assert!(
+        stub.log().contains(&"run l".to_string()),
+        "{:?}",
+        stub.log()
+    );
+    assert_eq!(report.landed, 1, "{}", display::drain(&report));
+    assert!(report.refused.is_empty(), "{:?}", report.refused);
+}
+
+#[test]
+fn a_stub_drain_never_dispatches_an_on_hold_item_at_any_priority_and_dispatches_it_once_released() {
+    for level in ALL_LEVELS {
+        let queue = |on_hold: bool| Stub {
+            items: vec!["held-one", "other"],
+            outcomes: passing(),
+            ratings: RefCell::new(vec![1, 1, 1]),
+            plan: vec![
+                PlanEntry {
+                    priority: level,
+                    on_hold,
+                    ..planned("held-one", Ladder::Implementation, &["src/a.rs"], &[])
+                },
+                planned("other", Ladder::Implementation, &["src/b.rs"], &[]),
+            ],
+            ..Stub::default()
+        };
+        let held = queue(true);
+        let report = drain::drain(&held, limits(9.0), &Quiet).unwrap();
+        assert!(!touched(&held, "held-one"), "{level:?}: {:?}", held.log());
+        assert!(
+            held.log().contains(&"run other".to_string()),
+            "{level:?}: the other item is worked: {:?}",
+            held.log()
+        );
+        assert_eq!(report.landed, 1, "{level:?}");
+
+        let released = queue(false);
+        drain::drain(&released, limits(9.0), &Quiet).unwrap();
+        assert!(
+            released.log().contains(&"run held-one".to_string()),
+            "{level:?}: {:?}",
+            released.log()
+        );
+    }
+}
+
+#[test]
+fn an_item_depending_on_an_on_hold_item_is_not_dispatched() {
+    let queue = |on_hold: bool| Stub {
+        items: vec!["h", "d", "x"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1, 1, 1]),
+        plan: vec![
+            PlanEntry {
+                priority: Priority::Urgent,
+                on_hold,
+                ..planned("h", Ladder::Implementation, &["src/h.rs"], &[])
+            },
+            planned("d", Ladder::Implementation, &["src/d.rs"], &["h"]),
+            planned("x", Ladder::Implementation, &["src/x.rs"], &[]),
+        ],
+        ..Stub::default()
+    };
+    let held = queue(true);
+    drain::drain(&held, limits(9.0), &Quiet).unwrap();
+    assert!(
+        !touched(&held, "h") && !touched(&held, "d"),
+        "{:?}",
+        held.log()
+    );
+    assert!(
+        held.log().contains(&"run x".to_string()),
+        "{:?}",
+        held.log()
+    );
+
+    // Released, the dependency runs first and the dependent after it.
+    let released = queue(false);
+    drain::drain(&released, limits(9.0), &Quiet).unwrap();
+    let log = released.log();
+    let at = |entry: &str| log.iter().position(|l| l == entry);
+    assert!(at("run h").is_some() && at("run d").is_some(), "{log:?}");
+    assert!(at("run h") < at("run d"), "{log:?}");
+}
+
+#[test]
+fn an_on_hold_item_is_never_dispatched_at_any_priority_and_runs_once_released() {
+    for level in ["urgent", "high", "normal", "low"] {
+        let fx = Fixture::new();
+        let scenario = rated_scenario();
+        let invocations = scenario.invocations.clone();
+        let athena = fx.athena(scenario.script());
+        let (job, _) = athena.queue(FIRST).unwrap();
+        athena.set_priority(job.as_str(), level).unwrap();
+        athena.set_hold(job.as_str()).unwrap();
+        let lander = RecordingLander::default();
+        let steps = real_steps(&athena, &lander);
+
+        // Nothing is read, run or landed while the item is on hold.
+        let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+        assert!(lander.0.lock().unwrap().is_empty(), "{level}");
+        assert_eq!((report.landed, report.jobs.len()), (0, 0), "{level}");
+        assert_eq!(
+            readers(&invocations),
+            0,
+            "{level}: an on-hold item is not read"
+        );
+        let records = Records::load(&fx.git, &fx.head()).unwrap();
+        assert_eq!(
+            records.jobs[job.as_str()].state(),
+            JobState::Queued,
+            "{level}"
+        );
+
+        // Released, the same item is worked and landed.
+        athena.release_hold(job.as_str()).unwrap();
+        let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+        let landed: Vec<String> = lander
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(j, _)| j.clone())
+            .collect();
+        assert_eq!(landed, [job.as_str()], "{level}");
+        assert_eq!(report.landed, 1, "{level}");
+    }
+}
+
+#[test]
+fn a_read_proposed_item_on_hold_is_not_dispatched_and_runs_once_released() {
+    let fx = Fixture::new();
+    let athena = fx.athena(rated_scenario().script());
+    let (job, _) = athena.queue(FIRST).unwrap();
+    // `go` reads a queued request, which leaves it proposed and still in drain's queue.
+    athena.go(job.as_str(), AcceptedBy::Flag, &Quiet).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[job.as_str()].state(), JobState::Proposed);
+    assert_eq!(queued_ids(&fx), [job.as_str()]);
+
+    athena.set_hold(job.as_str()).unwrap();
+    assert_eq!(queued_ids(&fx), [job.as_str()], "still listed, but on hold");
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    assert!(lander.0.lock().unwrap().is_empty());
+    assert_eq!((report.landed, report.jobs.len()), (0, 0));
+
+    athena.release_hold(job.as_str()).unwrap();
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    assert_eq!(report.landed, 1, "{}", display::drain(&report));
+    assert_eq!(lander.0.lock().unwrap()[0].0, job.as_str());
+}
+
+#[test]
+fn the_plan_lists_an_on_hold_item_until_it_is_released() {
+    let fx = Fixture::new();
+    let athena = fx.athena(rated_scenario().script());
+    let (job, _) = athena.queue(FIRST).unwrap();
+    let job = job.as_str().to_string();
+    athena.set_hold(&job).unwrap();
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let report = drain::plan(&steps, 5.0, &Quiet).unwrap();
+    assert!(report.plan.order.is_empty(), "{:?}", report.plan);
+    let held = &report.plan.refused[0];
+    assert_eq!(held.id, job);
+    assert!(held.missing.is_empty());
+    assert!(held.reason.contains("on hold"), "{}", held.reason);
+    assert_eq!(report.spent_usd, 0.0, "an on-hold item is not read");
+    let text = display::plan(&report);
+    assert!(text.contains("1 held back"), "{text}");
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("held") && l.contains(&job))
+        .unwrap_or_else(|| panic!("a held line for {job}: {text}"));
+    assert!(line.contains("on hold"), "{line}");
+
+    athena.release_hold(&job).unwrap();
+    let report = drain::plan(&steps, 5.0, &Quiet).unwrap();
+    assert_eq!(report.plan.order, [job.as_str()], "{:?}", report.plan);
+    assert!(report.plan.refused.is_empty(), "{:?}", report.plan.refused);
+    let text = display::plan(&report);
+    assert!(
+        !text.lines().any(|l| l.starts_with("held")) && text.contains("0 held back"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_request_depending_on_an_on_hold_request_waits_with_it_in_the_real_plan() {
+    let fx = Fixture::new();
+    let athena = fx.athena(rated_scenario().script());
+    let (first, _) = athena.queue(FIRST).unwrap();
+    let first = first.as_str().to_string();
+    let (second, _) = athena
+        .queue(&format!("{SECOND}\nDepends on {first}"))
+        .unwrap();
+    let second = second.as_str().to_string();
+    athena.set_hold(&first).unwrap();
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let report = drain::plan(&steps, 5.0, &Quiet).unwrap();
+    assert!(report.plan.order.is_empty(), "{:?}", report.plan);
+    let mut refused: Vec<&str> = report.plan.refused.iter().map(|r| r.id.as_str()).collect();
+    refused.sort();
+    let mut want = [first.as_str(), second.as_str()];
+    want.sort();
+    assert_eq!(refused, want);
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    assert_eq!(report.landed, 0);
+    assert!(lander.0.lock().unwrap().is_empty());
+
+    athena.release_hold(&first).unwrap();
+    let report = drain::plan(&steps, 5.0, &Quiet).unwrap();
+    assert_eq!(report.plan.order, [first.as_str(), second.as_str()]);
+}
+
+#[test]
+fn status_marks_an_on_hold_request_until_it_is_released() {
+    let fx = Fixture::new();
+    let athena = fx.athena(deterministic());
+    let (job, _) = athena.queue("Tidy the notes in docs.").unwrap();
+    let on_hold = |athena: &Athena| {
+        athena
+            .status()
+            .unwrap()
+            .open
+            .into_iter()
+            .find(|l| l.id == job.as_str())
+            .unwrap()
+            .on_hold
+    };
+    assert!(!on_hold(&athena));
+    athena.set_hold(job.as_str()).unwrap();
+    assert!(on_hold(&athena));
+    let line = athena
+        .status()
+        .unwrap()
+        .open
+        .into_iter()
+        .find(|l| l.id == job.as_str())
+        .unwrap();
+    assert!(display::status(&athena.status().unwrap()).contains(&format!("{} ", line.id)));
+    assert!(
+        display::status(&athena.status().unwrap()).contains("on hold"),
+        "the status text says the job is on hold"
+    );
+    athena.release_hold(job.as_str()).unwrap();
+    assert!(!on_hold(&athena));
+    assert!(!display::status(&athena.status().unwrap()).contains("on hold"));
+}
+
+fn athena_cli_run(fx: &Fixture, args: &[&str]) -> (bool, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_athena"))
+        .env_remove("ATHENA_NESTED")
+        .env_remove("ATHENA_SCRATCH_DIR")
+        .current_dir(fx.root())
+        .env("ATHENA_STATE_DIR", fx.state.path())
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn hold_and_release_commands_append_records_and_refuse_what_they_must() {
+    use athena_data::records::{AnyRecord, HoldState, check_record_file};
+    let fx = Fixture::new();
+    let athena = fx.athena(rated_scenario().script());
+    let (job, _) = athena.queue(FIRST).unwrap();
+    let id = job.as_str().to_string();
+    let request_path = format!("{}/request.json", job.dir());
+    let hold_path = |n: u32| format!("{}/hold-{n}.json", job.dir());
+    let at_head = |path: &str| fx.git.show_file(&fx.head(), path).unwrap();
+    let request_before = at_head(&request_path).expect("the request is committed");
+    let state_of = |n: u32| match check_record_file(&hold_path(n), &at_head(&hold_path(n)).unwrap())
+    {
+        Ok(Some(AnyRecord::Hold(record))) => (record.n, record.state),
+        other => panic!("hold-{n}.json is not a hold record: {other:?}"),
+    };
+    assert!(at_head(&hold_path(1)).is_none());
+
+    // Hold appends a record.
+    let head = fx.head();
+    let (ok, stdout, stderr) = athena_cli_run(&fx, &["hold", &id]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("on hold"), "{stdout}");
+    assert_ne!(fx.head(), head);
+    assert_eq!(state_of(1), (1, HoldState::OnHold));
+
+    // Holding it again is refused and commits nothing.
+    let head = fx.head();
+    let (ok, _, stderr) = athena_cli_run(&fx, &["hold", &id]);
+    assert!(!ok);
+    assert!(stderr.contains("already on hold"), "{stderr}");
+    assert_eq!(fx.head(), head);
+    assert!(at_head(&hold_path(2)).is_none());
+
+    // Release appends a later record.
+    let (ok, stdout, stderr) = athena_cli_run(&fx, &["release", &id]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("released"), "{stdout}");
+    assert_ne!(fx.head(), head);
+    assert_eq!(state_of(2), (2, HoldState::Released));
+    assert_eq!(
+        state_of(1),
+        (1, HoldState::OnHold),
+        "the first record is kept"
+    );
+
+    // Releasing a job that is not on hold is refused and commits nothing.
+    let head = fx.head();
+    let (ok, _, stderr) = athena_cli_run(&fx, &["release", &id]);
+    assert!(!ok);
+    assert!(stderr.contains("is not on hold"), "{stderr}");
+    assert_eq!(fx.head(), head);
+    // A job that was never on hold is refused the same way.
+    let (other, _) = athena.queue(SECOND).unwrap();
+    let head = fx.head();
+    let (ok, _, stderr) = athena_cli_run(&fx, &["release", other.as_str()]);
+    assert!(!ok);
+    assert!(stderr.contains("is not on hold"), "{stderr}");
+    assert_eq!(fx.head(), head);
+
+    // A job that is closed, or unknown, cannot be held.
+    athena
+        .close(other.as_str(), "no longer wanted", &Quiet)
+        .unwrap();
+    let head = fx.head();
+    let (ok, _, stderr) = athena_cli_run(&fx, &["hold", other.as_str()]);
+    assert!(!ok);
+    assert!(stderr.contains("only an open request"), "{stderr}");
+    assert!(!athena_cli_run(&fx, &["hold", "no-such-job-at-all"]).0);
+    assert_eq!(fx.head(), head);
+
+    // A request that has been read (proposed) can be held.
+    let (read, _) = athena
+        .queue("Add the demo study to the studies area.")
+        .unwrap();
+    athena.go(read.as_str(), AcceptedBy::Flag, &Quiet).unwrap();
+    let (ok, _, stderr) = athena_cli_run(&fx, &["hold", read.as_str()]);
+    assert!(ok, "{stderr}");
+
+    // --json reports the state, and the request record is byte-identical throughout.
+    let (ok, stdout, stderr) = athena_cli_run(&fx, &["hold", &id, "--json"]);
+    assert!(ok, "{stderr}");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        (json["job"].as_str(), json["on_hold"].as_bool()),
+        (Some(id.as_str()), Some(true))
+    );
+    assert_eq!(state_of(3), (3, HoldState::OnHold));
+    let (ok, stdout, stderr) = athena_cli_run(&fx, &["release", &id, "--json"]);
+    assert!(ok, "{stderr}");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["on_hold"].as_bool(), Some(false));
+    assert_eq!(at_head(&request_path).unwrap(), request_before);
+}
+
+#[test]
+fn hold_and_release_help_say_what_they_do() {
+    let help_of = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_athena"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let hold = help_of(&["hold", "--help"]);
+    for needle in ["open", "drain", "priority", "athena release"] {
+        assert!(hold.contains(needle), "{needle}: {hold}");
+    }
+    let release = help_of(&["release", "--help"]);
+    for needle in ["hold", "priority order"] {
+        assert!(release.contains(needle), "{needle}: {release}");
+    }
+    let top = help_of(&["--help"]);
+    assert!(top.contains("hold") && top.contains("release"), "{top}");
+    let drain = help_of(&["drain", "--help"]);
+    assert!(
+        drain.contains("athena hold") && drain.contains("on hold"),
+        "{drain}"
+    );
+}
+
 #[test]
 fn a_speed_improving_request_is_read_as_urgent_with_a_reason_and_an_ordinary_one_is_not() {
     let fx = Fixture::new();

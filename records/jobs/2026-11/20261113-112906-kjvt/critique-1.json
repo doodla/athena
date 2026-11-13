@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-112906-kjvt",
+  "round": 1,
+  "at": "2026-11-13T11:36:21.003714542Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The guide rewrite will not fit the briefs size limits, and the plan's fallback is to raise them, against the accepted reading.",
+      "evidence": "The reading says the guidance goes in reader.rs 'only as far as the briefs tests allow'. the_reader_brief_names_each_reading_rule_in_one_short_line asserts section.len() <= READING_RULES_BASELINE_BYTES (3045) and < 3150, with a comment that the section 'does not grow past the 3045 bytes'. The current guide (reader.rs:356-363) is about 1.1 KB (estimate) and the 12 rule lines about 2 KB, so the section is at or near the cap. The plan keeps the refusal-rule sentences, adds six labels with long descriptions (the Direct check description alone is about 350 bytes) and a filled-in example of about 450 bytes, and says 'if it still does not fit, raise both'. Fix: Fit within 3045 bytes. Replace the 'Cover: …' sentence with a short list of the labels. Keep the filled-in example out of the brief: put it in a separate constant that both refusal errors print (error text has no size limit), and pin the guide's labels to the parser's labels with a test. If it still does not fit, report that rather than changing READING_RULES_BASELINE_BYTES or the 3150 limit.",
+      "location": "Decision 3, Step 1-2; crates/athena-context/src/briefs.rs:3591 and 3704-3715",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The skip-switch name rule refuses common names: any all-caps underscore token, and any name with a `no` part or a `skip` prefix.",
+      "evidence": "Plan: an all-caps token with at least one `_` and at least 4 characters is an environment variable and is refused in a Direct check unless negated. A lowercase name with a part equal to `no`, or starting with `skip`, is refused too. Rust constants such as INPUT_FORMS, READING_RULES or MAX_ROUNDS (refusal_corpus.rs:90, reader.rs:287), Athena's `no_change` outcome (run/candidate.rs no_change_reason), `line_no` and `skip_whitespace` would all be refused. The plan accepts the `no_change_reason` false positive as a limit. A reader gets one retry (decision 5), so each false refusal can fail a job, and it inflates the replay share. Fix: Treat an all-caps token as a skip switch only when one of its `_` parts is NO, SKIP, SKIPPED, DISABLE, DISABLED or BYPASS (ATHENA_NO_PROBE still matches). Match lowercase and --flag forms only on a leading skip/no/disable/bypass part. Never refuse a name the survey lists as its Entry point or in its Gate order. Add accepted examples for `INPUT_FORMS`, `MAX_ROUNDS` and `line_no`.",
+      "location": "Decision 10 (identifier forms) and Decision 11",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "File paths pass as function names for Entry point, Gate order and Reuses.",
+      "evidence": "An identifier is 'a backtick-quoted token with no whitespace, or a bare token containing `_`'. So `crates/foo/src/x.rs`, or a bare path like crates/athena-core/src/run_pin_tests.rs, satisfies (a) and (b). Decision 2 says (b) needs a function name. Fix: Exclude tokens that contain `/` or end in a file extension, and add a refused example where the reuse names only a path.",
+      "location": "Decision 6 (identifier definition) and Decision 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "One shared test survey with a single 'criterion 1' Direct check will not fit test readings with several behavior criteria, or with the behavior criterion not first.",
+      "evidence": "Decision 8 requires one Direct check per non-routine behavior criterion, numbered by position. The history-fixture and records-measure test readings that now reach the new step can carry several behavior criteria, and FULL_SURVEY cites only criterion 1. Fix: Add a helper that builds the complete survey from a reading's own criteria (one Direct check per non-routine behavior position) and use it wherever a whole-gate test reading needs a survey.",
+      "location": "Steps 5 and 9 (FULL_SURVEY / COMPLETE_SURVEY)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The replay test sets the share itself (3 of 10), so it cannot show the real share, which is likely above the declared 35% limit.",
+      "evidence": "The plan says the test 'proves the arithmetic only'. Every past code reading with a behavior criterion lacks the new labels, so all of them will be newly refused. The verification replay will then hold the job if they exceed 35% of the cases. Fix: Name the replay record made at verification (`athena.replay/1`, from replay.rs) as the evidence for the real share. State in Risks that the job is likely held if code readings are more than 35% of the replayed cases, and what the producer reports then.",
+      "location": "Demonstration for criterion 5",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The example is found by searching the guide text, and silently becomes an empty template if the line is missing.",
+      "evidence": "survey_example() returns the 'Example survey: ' line of CODE_SURVEY_GUIDE, 'empty if absent'. Fix: Make the example its own pub constant in athena-context and print it where needed; this also fits the fix for the size-limit finding.",
+      "location": "Decision 4 (survey_example)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Reading tags from serde's error message is roundabout, since the pin test already parses the enum source.",
+      "evidence": "accepted_record_tags_come_from_the_enums parses each #[serde(rename = \"athena.…\")] line from records.rs and history.rs. Fix: Optional: keep a hand-written tag list in surveys.rs pinned to the source by the same test. The reading's 'serde tag list pinned by a test' allows either.",
+      "location": "Decision 7 (accepted_record_tags)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code; the plan's names and line numbers match it: the step! after check_code_survey at checks.rs:539, the verify.rs helpers at 1337/1368/1378, existing_code_assumptions at surveys.rs:1329, check_reading_command at main.rs:687, loop_replay at run/mod.rs:2294 and INPUT_FORMS of length 63. AnyRecord and HistoryRecord are both #[serde(tag = \"schema\")], so probing serde's error for the accepted tags works. The dependents list matches every check_reading_text caller grep found: CLI, steward::queued_work, the drain tests, run/tests.rs, replay.rs and the reading tests. No prompt file is edited. Two findings are major. (1) The rewritten CODE_SURVEY_GUIDE will not fit the briefs tests: the section is capped at 3045 bytes and already sits near it, and the plan's fallback is to raise both limits. The accepted reading allows guidance only as far as those tests allow. (2) The skip-switch name rule refuses every all-caps underscore token (ordinary Rust constants) and every name with a `no` part, or starting with `skip`, in a Direct check. That causes false refusals on common text, and the reader gets only one retry. Smaller issues: the identifier rule accepts file paths as function names; one shared test survey with a single \"criterion 1\" Direct check will not fit test readings with several behavior criteria; and the criterion-5 test sets its own share, so it cannot show the real one. Verdict: revise."
+}

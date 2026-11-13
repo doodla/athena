@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-112836-b7sx",
+  "round": 1,
+  "at": "2026-11-13T11:34:57.390720298Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Retry requests ('try again on <job>') are never checked: the parts of the retried job's request are ignored.",
+      "evidence": "`read_for` passes `&request.text` to `refusing_check` (reading.rs:722). For a retry that text is 'try again on <job>' (run/mod.rs:501, 528, 565 describe this request form; status.rs and run/tests.rs build it). This job's own request has that form. The retried request is available as `attempt.request` (`EarlierAttempt.request`, set by `earlier()` in refusal_corpus.rs:268-276), and `refusing_check` already receives `attempt`. The plan parses only `request`, so a retry whose reading drops part (3) of the original request is accepted. This is the exact situation of a job retried after deferring a part. The plan neither handles it nor lists it as a limit. Fix: When the request is a retry or follow-up (the existing `continued_jobs`/`attempt` logic), take the parts from `attempt.request`, or from the request plus the earlier request. Add a corpus case: a 'try again on <job>' request whose earlier attempt's request has parts (1)-(3), and a reading that drops (3), is refused. If this is deliberately left out, name it in the doc comment, the CHANGELOG and the Risks.",
+      "location": "Plan decision 1 / step 4 (check_request_parts reads only `request`); crates/athena-core/src/reading.rs:720-726",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Path and command words are ignored only in deliverable paths, not in criterion text, so a stock `cargo test -p athena-core` criterion covers a dropped 'core test' part.",
+      "evidence": "Criterion 3 says path words 'are ignored when matching'. In the plan, PATH_WORDS applies only to `path_stems` of deliverable paths. Criterion text goes through `part_stems`, which splits on non-alphanumerics and drops only FUNCTION_WORDS, COMMON_WORDS and PART_FILLER. 'cargo' is filler and 'athena' is common, but 'core' and 'test' survive. So '[behavior] Run cargo test -p athena-core' has stems {core, test}, and the plan's own criterion-3 part '(2) Add a core test for the timeout' has distinctive stems {core, test, timeou} with need 2. Any criterion holding that command, or holding a path like crates/athena-core/tests/x.rs, covers the part. Readings in this repo routinely carry such commands. The corpus case passes only because base_reading's stock criterion has no command. Fix: Before stemming criterion text, remove path and identifier tokens (the same rule as `plain_line`: tokens holding '/', '_' or '::') and `cargo …` command spans, or apply PATH_WORDS to every path-like or command token in criterion text. Keep the pooled path stems as the only path contribution. Add a Refuse corpus case whose part-(1) criterion holds `cargo test -p athena-core --test timeout` and a crates/…/tests path, with no criterion for the dropped test part.",
+      "location": "Decision 5 (path stems) and decision 6 (coverage); demonstration for criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The alternatives rule matches common words ('pick', 'choose', 'one of') anywhere before the first marker, so ordinary lead-ins turn required parts into a group that any single part covers.",
+      "evidence": "Rule (i) groups an inline sequence when the text before its first marker in the same sentence holds 'either', 'one of', 'choose' or 'pick'. Rule (ii) does the same for line parts after such a line. A covered group needs only one covered member. 'Pick up where job X left off: (1) … (2) … (3) …', 'This is one of three fixes: (1)…' or 'Choose sensible names and (1) … (2) …' would let a reading drop two of three parts. This is the miss the check exists to stop, and it fails silently. The soundness bar names rules that match common words. Fix: Require a phrase that actually introduces alternatives: 'either … or' spanning the markers, 'one of the following', 'pick one', 'choose one', 'choose between', or ' or ' right before the last marker. Do not match a bare 'pick', 'choose' or 'one of' anywhere in the sentence. Add Refuse corpus cases for 'Pick up where … left off: (1)…(2)…(3)' with (2) dropped, and for 'one of three fixes'.",
+      "location": "Decision 4 (alternatives grouping, rule i and ii)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The negator guard covers the whole sentence, and the request-side list goes beyond criterion 4's words. Both can flip whether a part is deferred.",
+      "evidence": "The guard cancels a deferral when the sentence holds not, n't, never or cannot anywhere. 'Part (3) is out of scope for now; do not touch athena.toml.' then leaves part 3 required. Separately, MARKER_NEGATION adds skip, skipped, omitted and excluded, which criterion 4 does not list. A clarifying sentence such as 'In (2), skip blank lines.' or 'For (1), excluded files are listed.' would defer a part the request wants done. Fix: Apply the negator guard only to the clause that holds the deferral phrase. On the request side, use only criterion 4's words (later, out of scope, for now, defer, follow-up, and close variants), not skip, skipped, omitted or excluded. Add an Accept case and a Refuse case for each.",
+      "location": "Decision 8 (request-side deferral, negator guard and MARKER_NEGATION)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan ignores the replay the producer loop already runs, which reports newly refused past readings to the producer.",
+      "evidence": "run/mod.rs:2280-2319 (`loop_replay`) runs the replay after each producer report when `crates/` changes, and sends the list and the share back to the producer. Its limit is the declared share plus 5 points (replay.rs:304-308). The plan says only that 'Athena's replay measures it at verification'. It gives the producer no instruction for a replay send-back. The 10% is an unmeasured estimate, and an above-limit share fails the job late. Fix: Add a step for the replay send-back. For each newly refused past reading, decide whether it is a real dropped part or a false refusal. Fix false refusals in the matcher, not in the declared share. Report the measured share. Never raise the declaration to fit the result.",
+      "location": "Demonstration for criterion 8; Risks (first item)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The path-stem example keeps 'athena', which part stems always drop as a COMMON_WORDS entry.",
+      "evidence": "COMMON_WORDS (topics.rs:157-161) contains 'athena', so no part stem can be 'athena'. Every crate path carries it. Fix: Drop COMMON_WORDS from path stems as well, and make the worked example {foo}.",
+      "location": "Decision 5 worked example 'path stems of crates/athena-core/tests/foo.rs = {athena, foo}'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot using Read and Grep only. The named files and functions all exist: `refusing_check` and its `step!` list at checks.rs:520-549, `plain_request_prose` at terms.rs:189, `is_generated_line` at terms.rs:62, `reading_source` at reading.rs:1578, `refuser_for` at 7288, `terms_reading` at 7293, the corpus helpers, `replay_declaration`, the replay limit and `StewardRequest::new`. Putting the step last keeps every existing refusal name, and the dependents list matches the files that call the gate. Three findings are major. First, the gate is given only `request.text` (reading.rs:720-726). For a retry, which is a standard request form and the form of this very job, that text is just 'try again on <job>', so the parts of the retried request (`attempt.request`) are never checked. Second, criterion 3 says path words are ignored when matching, but the plan filters them only from deliverable paths. Criterion text such as `cargo test -p athena-core` still yields the stems 'core' and 'test', so a stock command criterion can cover a dropped 'core test' part. Third, the alternatives rule uses common words ('pick', 'choose', 'one of') anywhere before the first marker. A lead-in like 'Pick up where job X left off: (1)..(2)..(3)' would wrongly make the parts one group that any single part covers. The smaller findings: the negator guard applies to the whole sentence, the request-side deferral list adds verbs beyond criterion 4, and the plan never mentions the in-loop replay feedback. Verdict: revise."
+}

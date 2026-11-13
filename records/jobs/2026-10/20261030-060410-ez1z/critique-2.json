@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060410-ez1z",
+  "round": 2,
+  "at": "2026-11-13T08:36:45.696526612Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Hestia's error-review backfill can close a held request and queue an unheld copy, which the same drain then dispatches",
+      "evidence": "Before reading the queue, `drain_with` calls `steps.review_passes()` (drain.rs:3076: \"so a request the backfill queues is worked in this drain\"). `Athena::review_passes` runs the error-review backfill at drain start (hestia.rs:40-41, 3187-3189). In `backfill_step`, a request in state Queued, Proposed or Declined (`can_requeue`, hestia.rs:1740-1745) whose rebuilt text differs, or a Proposed one whose priority changes, gets `Step::Requeue`. That arm calls `self.queue(&text)` and then `self.close(old, ...)` (hestia.rs:2946-2954). The new job has no hold record, so `on_hold()` is false and the drain dispatches it, possibly at a raised priority. The old held job is now Closed, so the plan treats it as a met dependency (plan.rs:662-666: closed ids count as done) and its dependents are freed as well. This is the only automatic `close` in the codebase (grep `self.close(`). The plan's dependents list and risks do not mention Hestia's backfill, and no test covers it. Fix: In `backfill_step`, leave an on-hold request alone: `if old.on_hold() { return skip(format!(\"request {id} is on hold; it is left alone\")) }`, placed before the requeue and reprioritise decisions. Alternatively, copy the hold record onto the replacement job. Add crates/athena-core/src/hestia.rs to Files, add the backfill as a dependent, and add a hestia unit test: a held request that would be requeued is reported as skipped, and no new job or closing record is made.",
+      "location": "Dependents list; crates/athena-core/src/hestia.rs backfill_step (1815-1871) and its Requeue arm (2946-2954); drain start crates/athena-cli/src/drain.rs:3076",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`athena status` loads records from a different place than hold and drain do, so the 'on hold' mark can be missing after the records cutover",
+      "evidence": "`Athena::status` uses `Records::load_current(&self.git, &head, &worktree)`, which reads the `athena/records` worktree when it exists (status.rs:1182-1185). `set_hold`, modeled on `set_priority`, uses `Records::load(&self.git, &head)` (reading.rs:1005), and so does `RealSteps::records` (drain.rs:4285-4287). `commit_records` commits on the current branch (commits.rs:129-133). With a worktree present, a hold could work in drain but not show in status. The priority shown in status has the same split already. Fix: Either state in the plan and doc comment that the status mark follows the same source as the priority shown in status, or read the mark from the records the drain uses. Make the status test cover the source that ships.",
+      "location": "Decision 5 / Step 7 (status.rs `job_line`); crates/athena-core/src/status.rs:1185",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A deliverable in the accepted reading (crates/athena-cli/tests/job_plan.rs, modify) is left unchanged",
+      "evidence": "The reading's deliverables list `crates/athena-cli/tests/job_plan.rs (modify)`. The plan says it 'is not edited' because it never builds a PlanEntry, JobLine or hold. The reason is plausible, but the change will not match the listed deliverables, and a verifier checking deliverables may flag it. Fix: Keep the reasoning, and say in the producer report (or as a stated deviation) that job_plan.rs is deliberately unchanged and why. Alternatively, place one of the new binary tests there if it fits.",
+      "location": "Dependents: 'Job-planning tests and `athena close`'; Expected deliverables",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "'held' already means two other things in this code",
+      "evidence": "`JobLine.hold` and invariant.rs `held()` refer to a disk-space hold (status.rs:94-99, invariant.rs:232-236). The plan's `held` line in `athena plan` also covers dependency holds (display.rs:738-740). The new `HoldState::Held` adds a third meaning. Fix: Use 'on hold' consistently in user-facing text and doc comments (as the reason text already does), and in the `HoldRecord` doc comment say it is unrelated to the disk hold.",
+      "location": "Decision 2 / HoldState naming",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the hold in the right place. `Plan::build_with` (plan.rs:676-770) is what both `athena plan` and `athena drain` use (`Drain::prepare` → `build_improving`), and `batches_for` (drain.rs:3034-3064) never dispatches anything in `plan.refused`. Dependents are held by the existing loop at plan.rs:700-726, provided on-hold entries are kept in `pending` as the plan says. A drain whose items are all held ends cleanly: the loop stops when there are no batches (drain.rs:3165), which settles the plan's second risk. `RealSteps::entry_of` only returns nothing for an unknown job (drain.rs:4330). The only producers of the drain queue are `approved_work`, `queued_work` and `interrupted_work` (called only from `RealSteps::queue`), and `athena go` always needs an explicit job id. The new record path does not clash with the gate's closing-file list (invariant.rs:241-246), and no test reads docs/records.md. The demonstrations use real seams (`drain::drain`, `drain::plan`, `Plan::build`, the binary) and would fail without the behavior. One major gap remains. At the start of every drain, Hestia's error-review backfill (`steps.review_passes()`, drain.rs:3076) can requeue an existing request: it closes the old job and queues a new job in its place (hestia.rs:1851-1870, 2946-2954). For a held request, that drops the hold, and the same drain dispatches the replacement. The closed original then counts as a met dependency, so its dependents are freed too. The dependents list omits this path. Smaller points: `athena status` reads records from the records worktree when it exists, while hold and drain read them at the current commit; and the plan leaves tests/job_plan.rs, a listed deliverable, unchanged."
+}

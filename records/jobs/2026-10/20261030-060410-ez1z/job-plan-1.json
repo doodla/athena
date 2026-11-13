@@ -1,0 +1,365 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-060410-ez1z",
+  "round": 1,
+  "at": "2026-11-13T08:29:31.906460713Z",
+  "invocation_seq": 2,
+  "approach": "Add a hold as an append-only per-job record (`athena.hold/1`, `<job>/hold-<n>.json`, state `held` or `released`; highest `n` wins). `JobRecords::on_hold()` is true when the job is still queued and its latest hold record is `held`. `RealSteps::entry_of` copies that into a new `PlanEntry.on_hold` flag. `Plan::build_with`, which every plan builder calls (`build`, `build_capped`, `build_improving`), refuses an `on_hold` entry before anything else, with reason \"on hold\" and an empty `missing`. Anything that depends on it is held through the existing dependency-hold loop. `Drain::prepare` skips reading a held item, and `batches_for` already drops everything in `plan.refused`, so drain never dispatches it at any priority. `athena plan` already prints refused items with an empty `missing` as a `held` line. `Athena::set_hold` and `release_hold` copy `set_priority`. `athena hold` and `athena release` dispatch through commands.rs. Status shows \"on hold\". Priority is untouched.",
+  "decisions": [
+    {
+      "choice": "Enforce the hold in `Plan::build_with` through a new `PlanEntry.on_hold: bool` (serde skipped when false). The hold reason is built in plan.rs.",
+      "reason": "The plan is the one place that decides what drain dispatches: `Drain::prepare` builds it, `athena plan` prints it, and `batches_for` (drain.rs:3034) dispatches only its groups. Holding there makes `Plan::build` alone never order a held item, so the unit test covers all four priorities, and dependents are held by the existing loop (plan.rs:700-726) with no new logic. `PlanEntry::bare` plus `..bare` spreads keep most literals compiling.",
+      "rejected": [
+        {
+          "option": "A new `Steps::on_hold` method merged into `Drain::prepare`'s `held` map (drain.rs:2302), the way a paused line is held.",
+          "why": "The rule would live only in the CLI crate, so `Plan::build` would still order a held item. It would also need a stub override and a separate dependents loop; the paused-line loop at drain.rs:2313 words its reason as 'its line is paused'."
+        },
+        {
+          "option": "Filter held items out of `RealSteps::queue`.",
+          "why": "They would not appear in `athena plan`, which the request requires, and `athena status` would lose them."
+        },
+        {
+          "option": "Lower the item's priority, or add a fifth 'held' priority level.",
+          "why": "This is the failure the request describes. The request forbids tying hold to priority, and a new level would change how `Priority::parse`, the caps and the order work, all out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Hold state is a separate record type, `HoldRecord { job, n, at, state: held|released }`, at `<job>/hold-<n>.json`. `n` is numbered per job and the highest wins, as for priority records. No reason text.",
+      "reason": "Records are append-only (`PriorityRecord` doc, records.rs:520-523), so a release is a later record, not an edit. A separate type leaves `athena.priority/1` and its validator (PRIORITY_LEVELS) alone, so hold stays independent of priority. The request left a reason text optional ('a short optional text'); omitting it is the smallest design.",
+      "rejected": [
+        {
+          "option": "Overload `PriorityRecord` with a `held` field.",
+          "why": "It changes an existing schema (`deny_unknown_fields`, records.rs:524), and the latest-record-wins rule would tie hold and priority together, so setting a priority would implicitly release the hold."
+        },
+        {
+          "option": "A free-text hold reason shown in plan.",
+          "why": "Not needed to meet the request, and it adds validation and a longer display line."
+        }
+      ]
+    },
+    {
+      "choice": "`JobRecords::on_hold()` requires `state() == Queued` as well as a latest `held` record. `set_hold` refuses a job that is not queued or is already held. `release_hold` refuses a job that is not held.",
+      "reason": "Mirrors `set_priority`, which allows a priority only on a queued request (reading.rs:1008). A hold left on a job that later got read (`athena go`) can then never block that job's retry, which drain works as an interrupted or proposed item.",
+      "rejected": [
+        {
+          "option": "Let the hold apply to any job state.",
+          "why": "A stale hold would silently stop a retry of an interrupted job that the operator can no longer release, since release is checked against queued state."
+        }
+      ]
+    },
+    {
+      "choice": "In `Plan::build_with`, an `on_hold` entry wins over an incomplete plan: it is kept in `pending` and put in the held list first, so it is never listed as 'lacking'. `Drain::prepare` does not read an on-hold item to fill its plan.",
+      "reason": "The operator sees 'on hold', the actionable reason. A held item must not cost a reader call (drain.rs:2243-2266 would read it otherwise).",
+      "rejected": [
+        {
+          "option": "Hold only entries whose plan is complete.",
+          "why": "An unread held item would be read and charged against the budget, and shown as 'lacking' instead of 'on hold'."
+        }
+      ]
+    },
+    {
+      "choice": "Show the hold in `athena status` through a new `JobLine.on_hold: bool` (serde skipped when false) and an ' · on hold' suffix in `plan_suffix`. It is a new field, not the existing `JobLine.hold`, which means a disk-space hold.",
+      "reason": "The operator needs to see held items in the open-work list. status.rs and display.rs are deliverables. Reusing `hold: Option<String>` would print '(still queued)' text that means something else (display.rs:1068).",
+      "rejected": [
+        {
+          "option": "Leave status unchanged.",
+          "why": "Held jobs would look the same as queued ones there, and the operator would not know why drain skips them."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `HoldRecord` (job, n, at, state), `HoldState` {Held, Released} and `AnyRecord::Hold`, with validation (n from 1), canonical path `<job dir>/hold-<n>.json`, schema `athena.hold/1`, and round-trip tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Add `JobRecords.holds`, load and sort it by n (`add`, `sort`, `job_of`), add `JobRecords::on_hold()` (queued and latest hold is held), and a store test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "Add `PlanEntry.on_hold` (default false, serde skipped when false) and the on-hold reason text. `Plan::build_with` keeps an on-hold entry in `pending`, puts it first in the held list with that reason, and never lists it as lacking. Update the doc comments; add unit tests for the four priorities, the lone low-priority item and the dependent.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `Athena::set_hold` and `Athena::release_hold`, modeled on `set_priority` (queued-only check, hold and release checks, next `n`, a records-only commit with an Athena-Job trailer).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "`RealSteps::entry_of` sets `entry.on_hold = record.on_hold()`; `Drain::prepare` does not read an on-hold item to fill its plan; add a sentence to the module docs; unit tests if they sit better here.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Add `Command::Hold` and `Command::Release` with doc comments (and `--json`), dispatched to `commands::hold` / `commands::release`; mention hold in the drain help text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/commands.rs",
+      "action": "modify",
+      "purpose": "Add `hold` and `release` functions that call `set_hold` / `release_hold` and print or emit JSON, as `priority` does.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Show ' · on hold' in `plan_suffix`; add `on_hold: false` to the two `JobLine` test literals; add a display test for the `held` line with the on-hold reason.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add `JobLine.on_hold` (skipped when false), set from `job.on_hold()` in `job_line`, and a status test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the tests for criteria 1-5 and 7: Stub drain tests, real-steps drain and plan tests, the real-binary hold and release test, and the help test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under Unreleased / Added.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "Add rows for `athena hold <job>` and `athena release <job>` to the command table, after `athena correct` (line 88).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "Document `athena.hold/1` in the per-job file list and record table (near lines 34 and 92), beside `athena.priority/1`.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "plan.rs: add `pub on_hold: bool` to `PlanEntry` (`#[serde(skip_serializing_if = \"std::ops::Not::not\")]`, false in `bare`) and a function that builds the on-hold reason (names the hold and `athena release <id>`). In `build_with`, push an entry into `pending` when `missing.is_empty() || entry.on_hold`; seed `held` with every on-hold pending entry before the dependency loop, with that reason. Update the `build_with` doc comment. Add the plan.rs unit tests for criteria 1, 2 and 5.",
+    "records.rs (athena-data): add `HoldState` (serde lowercase `held` / `released`), `HoldRecord { job, n, at, state }` with `validate` (n >= 1), and `AnyRecord::Hold` with serde rename `athena.hold/1`. Add arms to `parse` (validate), `canonical_path` (`{job dir}/hold-{n}.json`) and `schema`. Add the round-trip, canonical-path and invalid tests.",
+    "store.rs: add `holds: Vec<HoldRecord>` to `JobRecords`, handle `AnyRecord::Hold` in `add`, `sort` by `n` and `job_of`. Add `JobRecords::on_hold()` (`state() == Queued` and the highest-`n` hold is `Held`). Add the load-order test through `Records::from_parts`.",
+    "reading.rs: add `Athena::set_hold(job_ref) -> Result<JobId>` and `release_hold(job_ref) -> Result<JobId>`, copying `set_priority` (reading.rs:997-1029): resolve the job, require `Queued` (message 'only a queued request can be held'), refuse a second hold ('already on hold') or a release when not held ('is not on hold'), and compute `n` as the highest hold `n` plus 1. Each commits one `HoldRecord` through `commit_records` with an `Athena-Job` trailer and nothing else.",
+    "main.rs and commands.rs: add `Command::Hold { job, json }` and `Command::Release { job, json }` with doc comments, next to `Priority` (main.rs:201). Dispatch them (main.rs:1065) to `commands::hold` and `commands::release`, which print '<id> is now on hold' or '<id> is released' (or JSON). Mention hold in the drain help text.",
+    "drain.rs: in `RealSteps::entry_of` (after `plan_entry`, ~4354-4372) set `entry.on_hold = record.on_hold()`. In `Drain::prepare`'s read loop (2243-2266) skip an item whose plan entry has `on_hold`, so it is not read or paid for. Add one sentence to the module docs (the header at lines 24-51). The refusal and `batches_for` code is not otherwise changed.",
+    "status.rs and display.rs: add `JobLine.on_hold`, set in `job_line`, shown as ' · on hold' in `plan_suffix`; add `on_hold: false` to the display.rs literals at 2623 and 2676. Add the display and status unit tests.",
+    "tests/drain.rs: add the Stub tests for criteria 1, 2 and 5; the real-steps tests `a_held_item_is_never_dispatched_at_any_priority_and_runs_once_released` and `the_plan_lists_a_held_item_as_on_hold_until_it_is_released`; the binary test `hold_and_release_commands_append_records_and_refuse_what_they_must` with a local `run()` helper copied from focus.rs; and the help test.",
+    "CHANGELOG.md (Unreleased, Added), README.md (command table rows) and docs/records.md (file list and record table): describe the hold state, the two commands, the `held` line in `athena plan`, and the status mark, for an outside reader. Do not touch job_history, athena.toml, defaults.toml or .github/workflows.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix any literal the compiler flags."
+  ],
+  "risks": [
+    {
+      "risk": "Adding a field to `PlanEntry` or `JobLine` breaks a struct literal that lists every field.",
+      "mitigation": "The literals seen in plan.rs, tests/drain.rs, drain.rs and display.rs use `..PlanEntry::bare(..)`. The compiler finds any remaining one (hestia.rs:7369, drain.rs:5037, 6305, 7260, display.rs:2623 and 2676). The step list ends with a full `cargo clippy --all-targets` pass."
+    },
+    {
+      "risk": "A drain whose only queued items are all held might not end cleanly or might spin. I read `batches_for` (drain.rs:3034), which drops refused items, but did not trace the whole loop's end condition.",
+      "mitigation": "The real-steps test asserts the drain returns with no jobs run and no landing. Paused items, which sit in `plan.refused` the same way, already end a drain, and tests/drain.rs:995 and 1332 cover them."
+    },
+    {
+      "risk": "`docs/records.md` is not in the brief's deliverable list. `docs/ontology.toml:56` checks that file for a wording marker.",
+      "mitigation": "The edit adds only table rows and a file-list line, and avoids the marker phrase 'the dispatched job'. If the ontology check objects, drop the docs edit; the criteria do not depend on it."
+    },
+    {
+      "risk": "A hold on a job that is later read with `athena go` is ignored, because `on_hold()` needs the Queued state.",
+      "mitigation": "This is deliberate (see decisions). `go` is an explicit operator act and drain would otherwise be blocked on a hold the operator can no longer release. A test covers a released and a read job showing no hold."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Plan::build_with refuses entries with `on_hold` set",
+      "dependent": "Every caller of `Plan::build` / `build_with` / `build_capped` / `build_improving`: crates/athena-cli/src/drain.rs:2357 (prepare) and drain.rs:4913 and 6720 (tests); crates/athena-core/src/hestia.rs:7379; crates/athena-core/src/reading.rs:2691-3202 (tests) and reading/retry.rs",
+      "kind": "code",
+      "test": "The existing plan.rs, reading.rs, hestia.rs and drain.rs tests pass unchanged, since `PlanEntry::bare` sets `on_hold: false` and nothing else sets it. New: `a_held_item_is_not_planned_at_any_priority` and `an_item_depending_on_a_held_item_is_held_with_it` in plan.rs.",
+      "reason": null
+    },
+    {
+      "name": "Held items arrive as `plan.refused` entries with an empty `missing`",
+      "dependent": "crates/athena-cli/src/drain.rs `Drain::prepare` (reads at 2243-2266; held map at 2302-2339; refusals at 2381-2392) and `batches_for` (3034-3064), which drops items in `plan.refused`",
+      "kind": "code",
+      "test": "`a_held_item_is_never_dispatched_at_any_priority_and_runs_once_released` and `the_plan_lists_a_held_item_as_on_hold_until_it_is_released` (tests/drain.rs). The paused-line and awaiting-diagnosis hold paths, which go through the separate `held` map, are not edited; the existing tests at tests/drain.rs:995 and 1332 cover them.",
+      "reason": null
+    },
+    {
+      "name": "The `athena plan` held-back listing",
+      "dependent": "crates/athena-cli/src/display.rs `plan` (734-750): a refusal with an empty `missing` prints as a `held` line",
+      "kind": "code",
+      "test": "`the_plan_lists_a_held_item_as_on_hold_until_it_is_released` and the existing dependency-hold display asserts at tests/drain.rs:7680-7710, which stay unchanged.",
+      "reason": null
+    },
+    {
+      "name": "New `JobLine.on_hold` field",
+      "dependent": "crates/athena-core/src/status.rs `job_line` (901-913), `JobLine` literals at display.rs:2623 and 2676, and `athena status --json` consumers",
+      "kind": "code",
+      "test": "Existing status tests pass because `on_hold` is skipped in JSON when false and the two display.rs literals get `on_hold: false`. New: a status test checks that a held queued job shows the mark and a released one does not.",
+      "reason": null
+    },
+    {
+      "name": "New `PlanEntry.on_hold` field",
+      "dependent": "`athena plan --json` / `PlanReport` consumers: `PlanEntry` derives `Serialize` (plan.rs:146)",
+      "kind": "code",
+      "test": null,
+      "reason": "The field carries `skip_serializing_if` when false, so the output for any plan with no held item is byte-identical to before."
+    },
+    {
+      "name": "New `AnyRecord::Hold` variant",
+      "dependent": "AnyRecord exhaustive matches: records.rs `parse` (1188, wildcard), `canonical_path` (1271), `schema` (1368); store.rs `JobRecords::add` (177, falls to `other`) and `job_of` (335, wildcard)",
+      "kind": "code",
+      "test": "`a_hold_record_has_a_path_a_schema_and_round_trips` and `holds_load_in_order_of_n`. Without the arm in `job_of`, `Records::from_parts` would hit the `.expect(\"every other record names its job\")` at store.rs:439 and panic on a hold file; the store test loads one.",
+      "reason": null
+    },
+    {
+      "name": "The records validation allow-list",
+      "dependent": "Record-file validation of records pushed to the records branch and checked at landing (`check_record_file`, records.rs:1415; RecordSet in athena-gate): a hold file is accepted only at its canonical path `<job dir>/hold-<n>.json`",
+      "kind": "rule",
+      "test": "`a_hold_record_has_a_path_a_schema_and_round_trips` (Misplaced at a wrong number). The gate has no schema list of its own: grep for `athena.priority` and `athena.focus` in crates/athena-gate finds only unrelated `.schema()` uses at attribution.rs:577 and legacy.rs:143.",
+      "reason": null
+    },
+    {
+      "name": "Commit shape of `athena hold` / `athena release`",
+      "dependent": "Landing, history-check and attribution rules (athena-gate, `commit_records`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The change adds no landing, history-check or attribution rule and edits no classification function. A hold commit has the shape of a `set_priority` commit (one records-only commit with an `Athena-Job` trailer through `commit_records`, reading.rs:1015-1027), a shape these rules already handle. A commit-shape table is therefore not needed. The real-binary CLI test (criterion 4) commits both shapes to a fixture repository and reads them back."
+    },
+    {
+      "name": "Queued state of a held job",
+      "dependent": "crates/athena-core/src/steward.rs `queued_work` / `request_jobs` and `athena status` open work, which derive state from `JobRecords::state()`",
+      "kind": "code",
+      "test": null,
+      "reason": "A hold adds no hold-dependent branch to `state()`. A held job stays `Queued`, is still listed as open work, and `athena go <job>` still reads it, which is an explicit operator act and not drain. `JobRecords::state()` is unchanged."
+    },
+    {
+      "name": "Priority records and the priority order",
+      "dependent": "crates/athena-cli/tests/focus.rs:256 (`after.jobs[id].priorities == job.priorities`), `set_priority` (reading.rs:997) and `JobRecords::priority()` (store.rs:97)",
+      "kind": "code",
+      "test": "The existing `a_priority_record_overrides_the_priority_in_the_request_text` (tests/drain.rs:7328) and tests/focus.rs pass unchanged.",
+      "reason": "Hold is a separate record and field. No priority record, level or ordering rule is read or written by the new code, so `athena priority` and `Plan`'s ordering are untouched."
+    },
+    {
+      "name": "Job-planning tests",
+      "dependent": "crates/athena-cli/tests/job_plan.rs (a deliverable listed in the brief)",
+      "kind": "code",
+      "test": null,
+      "reason": "They cover the planner and critic roles of a job, not queue planning. They never construct a PlanEntry, JobLine or hold, so nothing in them reads a changed behavior; the file is not edited."
+    },
+    {
+      "name": "No host or configuration setting changes",
+      "dependent": "Host settings, athena.toml, defaults.toml, .github/workflows, refusal_corpus",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The change reads and writes only records in the job directory. It adds no config key, check name, CI step or host call, and no reading refusal or matching rule, so no refusal_corpus case applies and the replay refusal rate is unaffected."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A test per layer. (a) In plan.rs: for each of the four priorities, `Plan::build` of one `on_hold` entry gives an empty order and one refusal. (b) In tests/drain.rs with the existing `Stub`: a drain whose `plan` holds an `on_hold` entry at each priority, plus a normal item, logs no `run` for the held one. (c) A test on real steps: for each priority a new `Fixture` queues a request and sets its priority and then `set_hold`. `drain::drain` over `real_steps` lands nothing, and `RecordingLander` stays empty. After `release_hold`, the same drain asks the lander for that job.",
+      "command": "cargo test -p athena-cli --test drain a_held_item_is_never_dispatched_at_any_priority_and_runs_once_released && cargo test -p athena-core held_item_is_not_planned",
+      "observes": "The held item has no `run` entry in the Stub log and no lander call in the real-steps drain, for urgent, high, normal and low. After release, the same job is run and the lander is asked for it. The plan.rs unit test sees an empty `order` and a refusal with `missing` empty.",
+      "fails_without": "Without the `on_hold` check in `Plan::build_with`, the held item appears in `order`; the Stub drain logs `run <id>` and the real-steps drain calls the lander, so the 'never dispatched' asserts fail. Without release clearing the flag, the post-release drain does not land it.",
+      "seam": "Production entry points: `athena_cli::drain::drain(&dyn Steps, Limits, &dyn Ui)` and `athena_core::plan::Plan::build`. Doubles: `Stub` (tests/drain.rs:127, exists) takes the entries through its `plan` field, so the `on_hold` flag is the only new input; real steps use `real_steps(&athena, &lander)` (tests/drain.rs:4765), `Fixture`, `RecordingLander` and `rated_scenario().script()`, all existing. Added by step 1 and step 4: the `PlanEntry.on_hold` field and `Athena::set_hold` / `release_hold`. The hold rule is not in any double: the Stub only supplies entries, and the production `Drain::prepare` and `Plan::build_with` decide."
+    },
+    {
+      "criterion": 2,
+      "method": "Test that lower priority alone does not stop an eligible item. (a) In plan.rs: a single low-priority entry with a complete plan is in `order`. A low item next to an on-hold urgent item is still in `order`, and the urgent one is refused. (b) A Stub drain with one low-priority entry logs `run`.",
+      "command": "cargo test -p athena-core a_low_priority_item_alone_is_still_planned && cargo test -p athena-cli --test drain a_low_priority_item_alone_is_still_dispatched",
+      "observes": "The low item is in `plan.order` and in the drain log as `run <id>`, with nothing held, so lower priority does not hold anything.",
+      "fails_without": "If the hold were tied to priority (e.g. treating `Priority::Low` as held), the lone low item would be missing from `order` and from the log, and both tests would fail.",
+      "seam": "`Plan::build` (plan.rs:657) and `drain::drain` with the existing `Stub` (tests/drain.rs:127) and `planned()` plus `PlanEntry { priority: Priority::Low, ..}` (tests/drain.rs:348), all existing. No new seam."
+    },
+    {
+      "criterion": 3,
+      "method": "Plan display on real steps. Queue a request, hold it, call `drain::plan(&steps, 5.0, &Quiet)` and render with `display::plan`. Check the `held` line. Then release it and check again. Also a display.rs unit test builds a `PlanReport` with a refusal made by the plan.rs on-hold constructor and checks the line.",
+      "command": "cargo test -p athena-cli --test drain the_plan_lists_a_held_item_as_on_hold_until_it_is_released && cargo test -p athena-cli --lib display::tests::a_held_item_is_listed_on_a_held_line",
+      "observes": "Before release the text has '1 held back' and a line starting `held` that holds the job id and 'on hold'. After release it has '0 held back' and no line starting `held`, and the job is in `report.plan.order`.",
+      "fails_without": "If `entry_of` did not copy the hold into the entry, or `build_with` did not refuse it, the job would appear in `order`, '0 held back' would show and the `held` line would be missing.",
+      "seam": "`athena_cli::drain::plan` and `athena_cli::display::plan`, called as in the existing dependency test (tests/drain.rs:7636-7711) with `Fixture`, `real_steps` and `rated_scenario`, all existing. Added by steps 4 and 6: `Athena::set_hold` / `release_hold`, and the on-hold reason in plan.rs."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the real `athena` binary in a temporary fixture repository, as tests/focus.rs does (`run()` with `CARGO_BIN_EXE_athena`, `ATHENA_STATE_DIR`). `ask --later` queues a job, `hold <id>` succeeds, then `release <id>`. After each step read the committed file at `fx.head()`. Then try `hold` on a read (proposed) job made in-process with `athena.ask`, `release` of a job that is not held, and `hold` of an already-held job. Compare the request record bytes before and after, and `fx.head()` after each refusal.",
+      "command": "cargo test -p athena-cli --test drain hold_and_release_commands_append_records_and_refuse_what_they_must",
+      "observes": "After `hold`, `<job dir>/hold-1.json` exists, passes `check_record_file` and has state `held`. After `release`, `hold-2.json` exists with state `released`. `request.json` is byte-identical. The three refusals exit non-zero with stderr 'only a queued request', 'is not on hold' and 'already on hold', and `fx.head()` is unchanged.",
+      "fails_without": "Without the commands the binary exits non-zero on `hold` (unknown subcommand). Without the state checks, the refusal cases would commit a record and `fx.head()` would move.",
+      "seam": "The binary `athena` (`Command::Hold` / `Command::Release` in main.rs, added by step 5) against `Fixture` (tests/common, used by focus.rs:16-42, exists). A read job comes from `fx.athena(deterministic()).ask(..)`, as in tests/drain.rs:7408; the fake script is injected through `Fixture::athena`. The new test helper `run()` is copied from focus.rs."
+    },
+    {
+      "criterion": 5,
+      "method": "(a) plan.rs unit test: `h` is on hold at urgent and `d` depends on `h`. `Plan::build` gives an empty `order`, and `d`'s reason contains 'depends on h, which is held back'. When `h` is not held, the order is `h` then `d`. (b) Stub drain: the same two entries log no `run` for either, and a third independent item runs.",
+      "command": "cargo test -p athena-core an_item_depending_on_a_held_item_is_held_with_it && cargo test -p athena-cli --test drain an_item_depending_on_a_held_item_is_not_dispatched",
+      "observes": "Both `h` and `d` are in `plan.refused` with an empty `missing`, and neither is dispatched. After release, `h` and then `d` are dispatched in that order.",
+      "fails_without": "If only the held entry were refused and its dependents not, `d` would be in `order` and the Stub log would show `run d`.",
+      "seam": "`Plan::build` and `drain::drain` over the existing `Stub` and `planned(.., deps)` (tests/drain.rs:348). Hold state arrives through `PlanEntry.on_hold`, added by step 1; the dependents rule is the existing loop (plan.rs:700-726), not the double."
+    },
+    {
+      "criterion": 6,
+      "method": "Unit tests: `a_hold_record_has_a_path_a_schema_and_round_trips` in records.rs (schema 'athena.hold/1', path `records/jobs/.../hold-1.json`, parse and re-serialize, `check_record_file` accepts the canonical path and returns `Misplaced` for another number, n=0 is `Invalid`, an unknown state fails to parse). In store.rs, a `Records::from_parts` test with hold-2 listed before hold-1 checks `holds` order and `on_hold()` for the highest n.",
+      "command": "cargo test -p athena-data a_hold_record && cargo test -p athena-core holds_load_in_order_of_n",
+      "observes": "Round-trip equality, a Misplaced error at the wrong path, an Invalid error for n=0, and `holds` sorted by `n` with `on_hold()` following the highest.",
+      "fails_without": "Without the `AnyRecord` variant, `check_record_file` returns a Parse error and the round trip fails; without the per-job vector and its sort, `holds` order follows file order and the sorted-by-n assert fails.",
+      "seam": "`AnyRecord::parse`, `check_record_file` and `Records::from_parts` (store.rs:355-460), all existing. The new `HoldRecord` type and `JobRecords.holds` are added by steps 2 and 3."
+    },
+    {
+      "criterion": 7,
+      "method": "Test on the binary's help: `athena --help` lists `hold` and `release`; `athena hold --help` and `athena release --help` print their doc comments (queued only, skipped by drain at any priority, release lifts it). Read the diff for the dispatch in commands.rs and the new methods in reading.rs.",
+      "command": "cargo test -p athena-cli --test drain hold_and_release_help_say_what_they_do && git diff -- crates/athena-cli/src/main.rs crates/athena-cli/src/commands.rs crates/athena-core/src/reading.rs",
+      "observes": "The help texts hold 'queued' and 'drain'. The diff shows `Command::Hold` / `Command::Release` arms calling `commands::hold` / `commands::release`, which call `Athena::set_hold` / `release_hold`.",
+      "fails_without": "Without the subcommands, `hold --help` exits non-zero and the help test fails.",
+      "seam": "The binary via `CARGO_BIN_EXE_athena`, as in the existing help test (tests/drain.rs:2522-2541). No new double."
+    },
+    {
+      "criterion": 8,
+      "method": "Read the diff of CHANGELOG.md.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new bullet under `## [Unreleased]` / `### Added` (line 8-10) that names the `athena.hold/1` record, `athena hold` / `athena release`, that drain skips a held item at any priority, and the `held` line in `athena plan` and the status mark.",
+      "fails_without": null,
+      "seam": "Not a behavior criterion; no seam."
+    },
+    {
+      "criterion": 9,
+      "method": "Show that the diff touches none of the governance files and that the dependency-on-rejected rule's tests still pass. The `job_history` tests and the plan.rs dependency-hold tests are not edited.",
+      "command": "git diff --stat && cargo test -p athena-core rejected",
+      "observes": "The stat lists none of athena.toml, defaults.toml or .github/workflows. The plan.rs and reading.rs test bodies for rejected or failed dependencies (reading.rs:3102-3202, plan.rs:1288) are unchanged in the diff and pass.",
+      "fails_without": null,
+      "seam": "Not a behavior criterion; no seam."
+    },
+    {
+      "criterion": 10,
+      "method": "Run the three recorded checks on the final tree. Existing tests are not edited except for adding `on_hold: false` where a struct literal lists every field.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "If an existing PlanEntry or JobLine literal were left without the new field, compilation would fail; an unrelated change would fail an existing test.",
+      "seam": "Not a behavior criterion with a new seam; the checks are the repository's own."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "4f47803f240a21cc9a552b29097e752e9076a7a76b7ecff1163fbb13faeda46f"
+}

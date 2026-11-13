@@ -336,6 +336,18 @@ pub struct Models {
 /// The effort levels Claude Code's `--effort` flag accepts, weakest first.
 pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
+/// The effort level `steps` places above `base` in [`EFFORT_LEVELS`], stopping at the last level (`max`).
+/// A `base` that is not a known level is returned unchanged, so a value this function cannot rank is never
+/// replaced by a guess.
+pub fn escalated_effort(base: &str, steps: u32) -> String {
+    let Some(index) = EFFORT_LEVELS.iter().position(|level| *level == base) else {
+        return base.to_string();
+    };
+    let last = EFFORT_LEVELS.len() - 1;
+    let target = index.saturating_add(steps as usize).min(last);
+    EFFORT_LEVELS[target].to_string()
+}
+
 fn default_effort() -> String {
     "medium".into()
 }
@@ -1076,6 +1088,40 @@ pub(crate) mod tests {
         let m = Config::parse(&stripped).unwrap().models;
         assert_eq!(m.producer_effort, "medium");
         assert_eq!(m.hard_producer_model, None);
+    }
+
+    #[test]
+    fn escalated_effort_moves_one_level_per_step() {
+        assert_eq!(escalated_effort("low", 1), "medium");
+        assert_eq!(escalated_effort("medium", 1), "high");
+        assert_eq!(escalated_effort("high", 1), "xhigh");
+        assert_eq!(escalated_effort("xhigh", 1), "max");
+        assert_eq!(escalated_effort("high", 2), "max");
+        assert_eq!(escalated_effort("low", 3), "xhigh");
+        assert_eq!(escalated_effort("high", 0), "high");
+    }
+
+    #[test]
+    fn escalated_effort_stops_at_max() {
+        assert_eq!(escalated_effort("max", 1), "max");
+        assert_eq!(escalated_effort("high", 5), "max");
+        assert_eq!(escalated_effort("low", u32::MAX), "max");
+    }
+
+    #[test]
+    fn escalated_effort_keeps_an_unknown_base_unchanged() {
+        assert_eq!(escalated_effort("turbo", 0), "turbo");
+        assert_eq!(escalated_effort("turbo", 3), "turbo");
+        assert_eq!(escalated_effort("", 1), "");
+    }
+
+    #[test]
+    fn escalated_effort_follows_the_level_list_for_every_level() {
+        for (i, level) in EFFORT_LEVELS.iter().enumerate() {
+            let next = EFFORT_LEVELS[(i + 1).min(EFFORT_LEVELS.len() - 1)];
+            assert_eq!(escalated_effort(level, 1), next, "one step above {level}");
+            assert_eq!(escalated_effort(level, 0), *level);
+        }
     }
 
     #[test]

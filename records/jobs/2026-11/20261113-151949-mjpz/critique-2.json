@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-151949-mjpz",
+  "round": 2,
+  "at": "2026-11-13T15:51:27.148071471Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Name the report field for the reading.rs deliverable that stays unchanged",
+      "evidence": "Athena flags an expected deliverable that the producer leaves unchanged unless the report excuses it (run_pin_tests.rs:1213 `a_deliverable_left_unchanged_is_flagged_even_when_the_job_has_no_plan`; send_back.rs:252; outputs.rs:135 `unchanged_planned_files`). The plan only says the producer 'says so in its report'. Fix: Say that the producer lists crates/athena-core/src/reading.rs in `unchanged_planned_files`, with the reason that `agent_spec` already supplies the base effort and the raise is made at the call site.",
+      "location": "Plan Files: crates/athena-core/src/reading.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new test helper copies `run_planned` instead of reusing it",
+      "evidence": "`run_planned` (tests.rs:1227-1244) already builds `athena_with(repo, &state, PASSES, plenty_of_space, planning_script(..))` and calls `finished_job`, but it throws away the job id and the Athena handle, and both are needed for `Records::load`. The plan's helper rebuilds the same setup. Fix: Build `run_planned_efforts` on a shared inner helper that returns the Athena handle and the job id, or make `run_planned` return them, so the scripted-job setup lives in one place.",
+      "location": "Plan Step 5 `run_planned_efforts`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The refusal test relies on toml's error text quoting the key",
+      "evidence": "Validation errors for the other effort keys name the key by construction (config.rs:665-675, `ConfigError::Effort(name, v)`). An enum field fails inside serde with 'unknown variant `extreme`'. The key name appears only because toml 0.9.12 (Cargo.lock:848) prints the source line in the error. The existing 'surprise' row passes for another reason: unknown-field errors name the field themselves. Fix: Keep the assertion that the error contains `thrash_effort`, since that is what catches a toml upgrade that drops the snippet. Add a comment in the test saying that the key appears only through toml's source snippet.",
+      "location": "Decision 4 / Criterion 1 demonstration (c)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Criterion 5 compares against a config parsed separately from the one the job ran",
+      "evidence": "`repo_with_config` copies athena.toml without its `[job_plan]` table, so `verifier_effort` is the repo's \"high\" in both. But the test re-parses the root athena.toml, not the test repo's file. Fix: Read `models.verifier_effort` from the test repo's athena.toml (or from `athena`'s loaded config), so the comparison uses the same config the job ran with.",
+      "location": "Criterion 5 demonstration",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan names and checked it against the request, the reading and the criteria. I found nothing that blocks the plan, and its approach is sound. These claims match the code. `planning_round` builds the planner spec with `agent_spec` at planning.rs:140, and `Attempt{round, mechanical_passes}` is destructured at lines 89-93. `AgentInvocation.effort` is a `String`, the same pattern as producer.rs:339. invocation.rs:202 copies `spec.effort` into the record. `JobPlanConfig` derives `Copy` and uses `deny_unknown_fields` (config.rs:210-211), and its only struct literal is `Default` (lines 253-264). `reading_inputs` sets `job_plan = None` (line 639), so reading digests do not change. The test helpers the plan relies on all exist with the behavior it assumes: `repo_with_planning` (whose `[job_plan]` has no `thrash_effort`), `planning_script` (repeats the last answer), `bad_plan`, `good_plan`, `revising_critique`, `accepting_critique`, `run_planned` and `finished_job`. The repo sets `verifier_effort` to \"high\" at athena.toml:21. Every text reader of the athena.toml `[job_plan]` table either strips the whole table or matches only its first three lines: hestia.rs:3579, job_plan.rs `repository_job_plan_config`, scope_guard.rs:1210, `without_job_plan` in common/mod.rs, and `unplanned` in config.rs. So placing the key after `max_rounds = 5` is safe. Nothing else reads planner effort: status/planning.rs looks only at producer buckets, and drain.rs:7983 checks reader, verifier and producer only. Each demonstration goes through `Athena::go` with the fake driver and would fail without its own condition (with no override, with only `round > 1`, with an unconditional override, or with a plain replacement). The raise-to-at-least design fixes the case where `verifier_effort = \"max\"` would make the \"thrash\" call weaker, and it keeps `Copy` without touching callers. My findings are minor: how the unchanged reading.rs deliverable is reported, a duplicated test helper, and two small brittleness points."
+}

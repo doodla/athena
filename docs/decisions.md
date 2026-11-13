@@ -5145,3 +5145,43 @@ should replace those estimates with its figures.
   records it once and empties the queue; an intervention is deferred, run on start and not run by a second start; a
   failed record with the kill switch text is rerun once and one with another failure is not. Not measured: a real
   model call, the number of old records the rule matches, and two simultaneous starts.
+
+## D178 · The planner's effort rises one level on each revision, up to max
+
+- **Case:** When planning thrashes, the planner is called again for the same job: the critic sent the plan back, or
+  Athena's own plan checks found a blocker or major finding. Every such call ran at the configured effort (`high`),
+  so the repeat was the same attempt at the same setting. The request was to improve the model instead of
+  repeating.
+  Amends D136 in prose only: its alternative (a) said the planner and critic run at the verifier's setting; the
+  planner now runs higher on a revision.
+- **Decision:** `escalated_effort(base, steps)` in `crates/athena-data/src/config.rs` returns the level `steps`
+  places above `base` in `EFFORT_LEVELS`, stops at the last level (`max`), and returns an unknown base unchanged.
+  `planning_round` counts the planner invocations already in the run's `closing.new_invocations` and, only when the
+  call carries a revision (a re-call), runs the planner at `escalated_effort(effort_for(Planner), count)`. It passes
+  that level to `Athena::agent_spec_with_effort`, which `agent_spec` calls with no override, so no other role
+  changes. With the shipped `verifier_effort` of `high` the planner runs at `high`, then `xhigh`, then `max` for
+  every later call. The first call and the critic keep the configured effort. The count covers mechanical and
+  critic-driven calls alike and carries across rounds. The planner line in the run output names the effort; the
+  invocation record already stored it. No configuration key, record type or schema changes.
+- **Alternatives:** Derive the step from the round and mechanical pass in `Attempt`: the pass count resets each
+  round, so the effort could fall. A `step` field on `PlanRevision` or `Attempt`: it changes structs and every
+  constructor for a number the closing already holds. Jump to `max` on the first revision: it spends the most on
+  jobs that would have passed one step up. A `[job_plan]` key for the step or ceiling: a schema field, validation
+  and an `athena.toml` change for a rule with one sensible value. Escalating the critic too: the request is about
+  the planner thrashing.
+- **Tradeoff:** A higher effort costs more and takes longer per call, and a call at `xhigh` or `max` can reach
+  `planner_usd` or `planner_timeout_s` where a call at `high` would not; those caps are unchanged. A run that is
+  started again from round 1, and a retry's first call, begin at the configured effort even if the earlier run
+  thrashed, because the count is of calls in this run. Whether the pinned Claude Code version accepts `xhigh` and
+  `max` for the planner's model was not checked, because no agent was run; the first thrashing job's planner record
+  and failure reason will show it.
+- **Reversal cost:** Low; call `agent_spec` for the planner again, delete `escalated_effort`,
+  `agent_spec_with_effort` and their tests, and revert the design paragraph.
+- **Provenance:** Read: `crates/athena-core/src/run/planning.rs` (`plan_round`, `planning_round`),
+  `crates/athena-core/src/reading.rs` (`agent_spec`), `crates/athena-data/src/config.rs` (`effort_for`,
+  `EFFORT_LEVELS`), `crates/athena-core/src/run/producer.rs` (the hard-job effort override). Measured:
+  `cargo test -p athena-data escalated_effort` on each step, the cap and an unknown base, and
+  `cargo test -p athena-core planner_effort`, which read the recorded planner and critic efforts after a critic
+  revise (high then xhigh), across mechanical passes, at the mechanical stop (high, xhigh, max, no critic call) and
+  across rounds (high, xhigh, max, max) with a scripted planner and critic. Not measured: a real agent, the extra
+  cost of the higher efforts, and whether they reduce planning stops.
