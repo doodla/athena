@@ -169,7 +169,7 @@ Rows whose status did not change were re-read and their cells updated only where
 | S4-4 | For Athena, its own records are primary evidence | `BRIEF.md:316` | `docs/records.md` | Partial: the records exist; the Athena study has not run |
 | S5-1 | Every claim cites its source and is marked read, observed or both | `BRIEF.md:320` | `crates/athena-cap-study/src/rules.rs` (evidence rules); `studies/firstmate-work-handling/claims.json` | Partial: validation core and one study; not wired into the CLI for use as a gate by the user |
 | S5-2 | Every significant design decision gets a rationale card with alternatives, tradeoff, reversal cost and provenance | `BRIEF.md:321` | `studies/firstmate-work-handling/rationales.json`; `docs/decisions.md` | Partial: Athena's decision log has the shape; study rationale cards exist for one mechanism |
-| S6-1 | A living, machine-readable critique ledger with severity, impact, effort, evidence and the strongest defense | `BRIEF.md:325` | none | Not covered |
+| S6-1 | A living, machine-readable critique ledger with severity, impact, effort, evidence and the strongest defense | `BRIEF.md:325` | `docs/critique-ledger.toml`; `crates/athena-core/src/critique_ledger.rs` | Partial: no severity, impact, effort or defense fields; Athena check is presence only |
 | S7-1 | Map all three systems onto shared concepts and compare mechanism by mechanism, naming convergent and divergent patterns | `BRIEF.md:329-330` | none | Not covered |
 | S7-2 | Close the comparison with a short essay on what the three teach | `BRIEF.md:331` | none | Not covered |
 

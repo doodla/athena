@@ -21,10 +21,10 @@ over the real files. Statuses are the map's: covered, partial, not covered.
 | G3 Safe, traceable, verified work | 19 | 4 | 15 | 0 |
 | G4 Sound shape, standards and resumption | 14 | 6 | 8 | 0 |
 | G5 Efficiency, learning and delegation | 14 | 2 | 8 | 4 |
-| G6 The study of three systems | 23 | 0 | 7 | 16 |
+| G6 The study of three systems | 23 | 0 | 8 | 15 |
 | G7 Explainer site, report and adoption | 15 | 0 | 3 | 12 |
 | G8 Work Athena does so the user does not have to | 5 | 0 | 4 | 1 |
-| **Total** | **128** | **20** | **68** | **40** |
+| **Total** | **128** | **20** | **69** | **39** |
 
 Reading the table: the core of v0 is built and gated (G3, G4), and the addenda of 2026-10-12 to 2026-10-14
 have moved the most since the map was first written: pull-request landing, introspection, defaults proposals,
@@ -105,9 +105,8 @@ The aim: firstmate, Hermes Agent and Athena, understood through their prompts, r
 cited at every claim.
 
 - **Covered:** none.
-- **Partial:** A3-2, S1-1, S1-3, S4-1, S4-4, S5-1, S5-2.
-- **Not covered:** S1-2, S1-4, S1-5, S2-1, S2-2, S2-3, S3-1, S3-2, S3-3, S3-4, S3-5, S4-2, S4-3, S6-1, S7-1,
-  S7-2.
+- **Partial:** A3-2, S1-1, S1-3, S4-1, S4-4, S5-1, S5-2, S6-1.
+- **Not covered:** S1-2, S1-4, S1-5, S2-1, S2-2, S2-3, S3-1, S3-2, S3-3, S3-4, S3-5, S4-2, S4-3, S7-1, S7-2.
 - **Bet:** validation rules that fail a study with unmarked or unsourced claims
   (`crates/athena-cap-study/src/rules.rs`) keep findings honest before the breadth arrives.
 - **Risk:** the lab (S3) is the largest unbuilt piece, and every observed-evidence claim depends on it.
