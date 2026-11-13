@@ -87,7 +87,38 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 63] = [
+const INPUT_FORMS: [&str; 94] = [
+    "design-part-missing",
+    "design-stop-gate-in-prose",
+    "design-stop-gate-not-in-order",
+    "design-partial-reuse",
+    "design-typed-record",
+    "design-skip-switch-or-helper",
+    "design-negated-phrase",
+    "design-direct-check-per-criterion",
+    "design-complete",
+    "design-split-across-surveys",
+    "design-outside-gate",
+    "design-backtick-single-word-identifier",
+    "design-refusal-word-not-a-negator",
+    "design-roundtrip-test-file",
+    "design-one-clause-many-criteria",
+    "design-guide-example",
+    "design-unknown-record-kind",
+    "design-known-record-kind",
+    "design-skip-identifier",
+    "design-routine-criterion",
+    "design-direct-check-subject",
+    "design-path-not-identifier",
+    "design-constant-name-not-skip-switch",
+    "design-routine-with-cargo-flags",
+    "design-no-change-field-name",
+    "design-reuses-skip-name",
+    "design-comma-list-negation",
+    "design-negator-governs-other-word",
+    "design-gate-named-skip",
+    "design-measurement-verb-stem",
+    "design-several-entry-points",
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -264,6 +295,36 @@ fn lines(lines: &[&str]) -> String {
     lines.join("\n")
 }
 
+/// The complete test-design survey for a reading (`check_behavior_test_design`): entry point, gate order, stop
+/// gate, reuse, output and one direct check for each behavior criterion, numbered by position. It names no
+/// crates/ path, so the survey `check_code_survey` reads is unchanged. The twin of `complete_survey_for` in the
+/// unit tests of `reading.rs`, which an integration test cannot see.
+fn complete_survey_for(reading: &Reading) -> String {
+    let mut survey = format!("Code survey: {} {}", DESIGN_ENTRY, DESIGN_BODY);
+    for (i, c) in reading.acceptance_criteria.iter().enumerate() {
+        if c.kind == CriterionKind::Behavior {
+            survey.push_str(&format!(" {}", direct_check(i + 1)));
+        }
+    }
+    survey
+}
+
+const DESIGN_ENTRY: &str = "Entry point: `refusing_check`.";
+const DESIGN_GATES: &str = "Gate order: `check_criteria_evidence`, `check_code_survey`.";
+const DESIGN_STOP: &str = "Stop gate: `check_code_survey`.";
+const DESIGN_REUSE: &str = "Reuses: `names_record_evidence`.";
+const DESIGN_OUTPUT: &str = "Output: no new output.";
+const DESIGN_BODY: &str = "Gate order: `check_criteria_evidence`, `check_code_survey`. Stop gate: \
+     `check_code_survey`. Reuses: `names_record_evidence`; no existing function checks gate order. \
+     Output: no new output.";
+
+fn direct_check(n: usize) -> String {
+    format!(
+        "Direct check: criterion {n} counts the calls `refusing_check` makes to `check_code_survey` and \
+         asserts the count is 1."
+    )
+}
+
 /// An earlier attempt of `job` whose candidate changed `crates/athena-core/src/reading.rs`.
 fn earlier(job: &str, request: &str) -> EarlierAttempt {
     EarlierAttempt {
@@ -308,6 +369,7 @@ fn cases() -> Vec<Case> {
     out.extend(defined_terms_cases());
     out.extend(scope_limit_cases());
     out.extend(records_measure_cases());
+    out.extend(design_cases());
     out
 }
 
@@ -368,6 +430,8 @@ fn records_measure_cases() -> Vec<Case> {
         c.reading.class_of_work = "code".into();
         c.reading.acceptance_criteria[0].kind = CriterionKind::Behavior;
         c.reading.assumptions = vec![survey.into()];
+        let design = complete_survey_for(&c.reading);
+        c.reading.assumptions.push(design);
         c.reading.deliverables = paths
             .iter()
             .map(|p| deliverable(p, DeliverableAction::Modify))
@@ -497,6 +561,481 @@ fn records_measure_cases() -> Vec<Case> {
         &["crates/athena-data/src/records/throughput.rs"],
         Expected::Accept,
     ));
+    out
+}
+
+/// Readings whose code survey is judged by `check_behavior_test_design`: the four parts (a) to (d), the
+/// contradictions with the code, the routine criteria and the forms of negation. Each is built from the same
+/// request as the survey cases of jobs 20261028-055601-hg0n and 20261028-082151-67fa.
+fn design_cases() -> Vec<Case> {
+    const SOURCE: &str =
+        "jobs 20261028-055601-hg0n and 20261028-082151-67fa, rebuilt from the job brief";
+    const REFUSED: Expected = Expected::Refuse("check_behavior_test_design");
+    let request = lines(&[
+        "Make the gate refuse a retry that omits its prior job.",
+        "- A retry reading that omits the prior job id is refused by cargo test",
+    ]);
+    let (e, g, s, r, o) = (
+        DESIGN_ENTRY,
+        DESIGN_GATES,
+        DESIGN_STOP,
+        DESIGN_REUSE,
+        DESIGN_OUTPUT,
+    );
+    let d = direct_check(1);
+    let d = d.as_str();
+    let dc =
+        |id: &'static str, forms: &'static [&'static str], parts: &[&str], expected: Expected| {
+            let mut c = case(id, SOURCE, forms, &request, 1, expected);
+            c.reading.class_of_work = "code".into();
+            c.reading.acceptance_criteria[0].kind = CriterionKind::Behavior;
+            c.reading.assumptions = vec![format!(
+                "Code survey: read crates/athena-core/src/reading.rs. {}",
+                parts.join(" ")
+            )];
+            c
+        };
+    let behavior = |text: &str| Criterion {
+        text: text.into(),
+        kind: CriterionKind::Behavior,
+    };
+    let direct = |text: &str| format!("Direct check: criterion 1 {text}");
+    let mut out = vec![
+        dc(
+            "design-missing-gate-order-and-stop-gate",
+            &["dash-bullet", "design-part-missing"],
+            &[e, r, o, d],
+            REFUSED,
+        ),
+        dc(
+            "design-missing-existing-code",
+            &["dash-bullet", "design-part-missing"],
+            &[e, g, s, o, d],
+            REFUSED,
+        ),
+        dc(
+            "design-missing-record-kind-or-roundtrip",
+            &["dash-bullet", "design-part-missing"],
+            &[e, g, s, r, d],
+            REFUSED,
+        ),
+        dc(
+            "design-missing-direct-check",
+            &["dash-bullet", "design-part-missing"],
+            &[e, g, s, r, o],
+            REFUSED,
+        ),
+        dc(
+            "design-stop-gate-in-prose",
+            &["design-stop-gate-in-prose"],
+            &[e, g, "Stop gate: the survey check.", r, o, d],
+            REFUSED,
+        ),
+        dc(
+            "design-stop-gate-not-in-order",
+            &["design-stop-gate-not-in-order"],
+            &[e, g, "Stop gate: `check_other`.", r, o, d],
+            REFUSED,
+        ),
+        dc(
+            "design-partial-reuse-accepted",
+            &["design-partial-reuse"],
+            &[
+                e,
+                g,
+                s,
+                "Reuses: `has_phrase`; no existing function checks gate order.",
+                o,
+                d,
+            ],
+            Expected::Accept,
+        ),
+        dc(
+            "design-new-typed-record-without-roundtrip-deliverable",
+            &["design-typed-record"],
+            &[e, g, s, r, "Output: a new typed record.", d],
+            REFUSED,
+        ),
+        dc(
+            "design-unknown-schema-tag",
+            &["design-unknown-record-kind"],
+            &[e, g, s, r, "Output: `athena.madeup/1`.", d],
+            REFUSED,
+        ),
+        dc(
+            "design-known-schema-tag-accepted",
+            &["design-known-record-kind"],
+            &[e, g, s, r, "Output: `athena.failure-class/1`.", d],
+            Expected::Accept,
+        ),
+        dc(
+            "design-complete-reading-accepted",
+            &["design-complete"],
+            &[e, g, s, r, o, d],
+            Expected::Accept,
+        ),
+        dc(
+            "design-criterion-uses-skip-switch",
+            &["design-skip-switch-or-helper"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct("asserts `refusing_check` is run through a skip switch."),
+            ],
+            REFUSED,
+        ),
+        dc(
+            "design-criterion-reads-internal-helper",
+            &["design-skip-switch-or-helper"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct("checks `refusing_check` by reading an internal helper."),
+            ],
+            REFUSED,
+        ),
+        dc(
+            "design-negated-skip-switch-accepted",
+            &["design-negated-phrase"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct(
+                    "asserts `refusing_check` is not a skip switch or a read of an internal helper.",
+                ),
+            ],
+            Expected::Accept,
+        ),
+        dc(
+            "design-refusal-word-does-not-cancel-skip-switch",
+            &["design-refusal-word-not-a-negator"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct(
+                    "asserts `refusing_check` refuses the reading, measured through a skip switch.",
+                ),
+            ],
+            REFUSED,
+        ),
+        dc(
+            "design-skip-identifier-direct-check",
+            &["design-skip-identifier"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct("asserts `refusing_check` stops when `skip_probe` is set."),
+            ],
+            REFUSED,
+        ),
+        dc(
+            "design-env-var-direct-check",
+            &["design-skip-identifier"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct("counts the calls `refusing_check` makes with ATHENA_NO_PROBE=1."),
+            ],
+            REFUSED,
+        ),
+        dc(
+            "design-direct-check-names-no-entry-or-gate",
+            &["design-direct-check-subject"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct("asserts `names_record_evidence` returns true."),
+            ],
+            REFUSED,
+        ),
+        dc(
+            "design-reuse-names-only-a-path",
+            &["design-path-not-identifier"],
+            &[
+                e,
+                g,
+                s,
+                "Reuses: crates/athena-core/src/run_pin_tests.rs.",
+                o,
+                d,
+            ],
+            REFUSED,
+        ),
+        dc(
+            "design-constant-name-not-skip-switch-accepted",
+            &["design-constant-name-not-skip-switch"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct("asserts `refusing_check` reads INPUT_FORMS and MAX_ROUNDS and line_no."),
+            ],
+            Expected::Accept,
+        ),
+        dc(
+            "design-no-change-field-accepted",
+            &["design-no-change-field-name"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct("asserts `refusing_check` reports `no_change`."),
+            ],
+            Expected::Accept,
+        ),
+        dc(
+            "design-reuses-skip-switch-refused",
+            &["design-reuses-skip-name"],
+            &[
+                e,
+                g,
+                s,
+                "Reuses: `skip_probe`.",
+                o,
+                &direct("counts the calls `refusing_check` makes with `skip_probe` set."),
+            ],
+            REFUSED,
+        ),
+        dc(
+            "design-comma-list-negation-accepted",
+            &["design-comma-list-negation"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct(
+                    "counts calls to `refusing_check`, not a skip switch, `skip_probe` or ATHENA_NO_PROBE.",
+                ),
+            ],
+            Expected::Accept,
+        ),
+        dc(
+            "design-negator-governs-other-word-refused",
+            &["design-negator-governs-other-word"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct(
+                    "asserts `refusing_check`: the probe does not run when ATHENA_NO_PROBE=1 is set.",
+                ),
+            ],
+            REFUSED,
+        ),
+        dc(
+            "design-no-model-calls-using-skip-refused",
+            &["design-negator-governs-other-word"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct("counts no model calls using `skip_probe`."),
+            ],
+            REFUSED,
+        ),
+        dc(
+            "design-gate-named-skip-refused",
+            &["design-gate-named-skip"],
+            &[
+                e,
+                "Gate order: `skip_probe`, `check_code_survey`.",
+                s,
+                r,
+                o,
+                &direct("counts the calls to `skip_probe`."),
+            ],
+            REFUSED,
+        ),
+        dc(
+            "design-gate-named-skip-not-cited-accepted",
+            &["design-gate-named-skip"],
+            &[
+                e,
+                "Gate order: `skip_probe`, `check_code_survey`.",
+                s,
+                r,
+                o,
+                d,
+            ],
+            Expected::Accept,
+        ),
+        dc(
+            "design-verb-stem-assert-accepted",
+            &["design-measurement-verb-stem"],
+            &[
+                e,
+                g,
+                s,
+                r,
+                o,
+                &direct("asserts that `refusing_check` stops at `check_code_survey`."),
+            ],
+            Expected::Accept,
+        ),
+        dc(
+            "design-several-entry-points-accepted",
+            &["design-several-entry-points"],
+            &[
+                "Entry point: `check_reading_command`, `reader_brief` and `refusing_check`.",
+                g,
+                s,
+                r,
+                o,
+                d,
+            ],
+            Expected::Accept,
+        ),
+        dc(
+            "design-single-word-backtick-identifiers-accepted",
+            &["design-backtick-single-word-identifier"],
+            &[
+                "Entry point: `replay`.",
+                "Gate order: `replay`, `report`.",
+                "Stop gate: `report`.",
+                r,
+                o,
+                &direct("asserts the calls `replay` makes to `report`."),
+            ],
+            Expected::Accept,
+        ),
+    ];
+    // A second behavior criterion needs its own clause; one clause for both is refused.
+    let mut c = dc(
+        "design-direct-check-per-criterion",
+        &["design-direct-check-per-criterion"],
+        &[e, g, s, r, o, d],
+        REFUSED,
+    );
+    c.reading.acceptance_criteria.push(behavior(
+        "Run `cargo test -p athena-cli`: the new case prints refuse",
+    ));
+    out.push(c);
+    let mut c = dc(
+        "design-one-clause-covers-many-criteria",
+        &["design-one-clause-many-criteria"],
+        &[
+            e,
+            g,
+            s,
+            r,
+            o,
+            "Direct check: criteria 1 and 2 count the calls `refusing_check` makes to `check_code_survey`.",
+        ],
+        REFUSED,
+    );
+    c.reading.acceptance_criteria.push(behavior(
+        "Run `cargo test -p athena-cli`: the new case prints refuse",
+    ));
+    out.push(c);
+    // Routine criteria need no clause.
+    for (id, form, text) in [
+        (
+            "design-routine-criterion-accepted",
+            "design-routine-criterion",
+            "cargo fmt, clippy and test pass",
+        ),
+        (
+            "design-routine-with-cargo-flags-accepted",
+            "design-routine-with-cargo-flags",
+            "Run `cargo test -p athena-cli --test budgets`; existing tests pass",
+        ),
+    ] {
+        let forms: &'static [&'static str] = if form == "design-routine-criterion" {
+            &["design-routine-criterion"]
+        } else {
+            &["design-routine-with-cargo-flags"]
+        };
+        let mut c = dc(id, forms, &[e, g, s, r, o, d], Expected::Accept);
+        c.reading.acceptance_criteria.push(behavior(text));
+        out.push(c);
+    }
+    // The split survey: the parts spread over two assumptions.
+    let mut c = dc(
+        "design-split-across-surveys-accepted",
+        &["design-split-across-surveys"],
+        &[e, g, s],
+        Expected::Accept,
+    );
+    c.reading
+        .assumptions
+        .push(format!("Code survey: {r} {o} {d}"));
+    out.push(c);
+    // A round-trip test deliverable in place of a record kind.
+    let mut c = dc(
+        "design-roundtrip-test-file-accepted",
+        &["design-roundtrip-test-file"],
+        &[
+            e,
+            g,
+            s,
+            r,
+            "Output: the `records_round_trip_every_kind` test.",
+            d,
+        ],
+        Expected::Accept,
+    );
+    c.reading.acceptance_criteria.push(behavior(
+        "Run `cargo test -p athena-data`: `records_round_trip_every_kind` passes",
+    ));
+    let second = direct_check(2);
+    c.reading.assumptions[0].push_str(&format!(" {second}"));
+    c.reading.deliverables.push(deliverable(
+        "crates/athena-data/tests/records.rs",
+        DeliverableAction::Create,
+    ));
+    out.push(c);
+    // The example in the survey errors and the guide.
+    let mut c = dc(
+        "design-guide-example-accepted",
+        &["design-guide-example"],
+        &[],
+        Expected::Accept,
+    );
+    c.reading.assumptions = vec![athena_context::briefs::CODE_SURVEY_EXAMPLE.to_string()];
+    c.repo_files = None;
+    out.push(c);
+    // A docs reading is outside the gate of the check.
+    let mut c = case(
+        "design-docs-class-not-checked",
+        SOURCE,
+        &["design-outside-gate"],
+        &request,
+        1,
+        Expected::Accept,
+    );
+    c.reading.assumptions = vec!["Code survey: read crates/athena-core/src/reading.rs".into()];
+    out.push(c);
     out
 }
 
@@ -2034,6 +2573,8 @@ fn reading_check_cases() -> Vec<Case> {
     c.reading.assumptions = vec![
         "Code survey: read crates/athena-core/src/reading.rs, the gate every reading passes".into(),
     ];
+    let design = complete_survey_for(&c.reading);
+    c.reading.assumptions.push(design);
     out.push(c);
 
     // A code reading with a rule on commit classification, the history check or the attribution check needs a
@@ -2054,6 +2595,8 @@ fn reading_check_cases() -> Vec<Case> {
         c.reading.class_of_work = "code".into();
         c.reading.acceptance_criteria[0].kind = CriterionKind::Behavior;
         c.reading.assumptions = vec![survey.into()];
+        let design = complete_survey_for(&c.reading);
+        c.reading.assumptions.push(design);
         c.reading.deliverables = paths
             .iter()
             .map(|p| deliverable(p, DeliverableAction::Modify))
@@ -2124,6 +2667,9 @@ fn reading_check_cases() -> Vec<Case> {
         text: fixture_text.into(),
         kind: CriterionKind::Behavior,
     });
+    c.reading
+        .assumptions
+        .push(format!("Code survey: {}", direct_check(2)));
     out.push(c);
     out.push(history_case(
         "landing-queue-reading-is-not-refused",

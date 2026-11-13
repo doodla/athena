@@ -165,13 +165,17 @@ pub(super) fn names_record_evidence(survey: &str) -> bool {
     survey
         .split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '/')))
         .any(|token| {
-            let lower = token.to_lowercase();
-            token == "check_record_file"
-                || token == "AnyRecord"
-                || lower.contains("round_trip")
-                || lower.contains("roundtrip")
-                || (lower.contains("round-trip") && token.contains('/'))
+            token == "check_record_file" || token == "AnyRecord" || is_round_trip_token(token)
         })
+}
+
+/// Whether one token (split as in [`names_record_evidence`]) names a round-trip test: an identifier with
+/// `round_trip` or `roundtrip`, or a path with `round-trip`.
+pub(super) fn is_round_trip_token(token: &str) -> bool {
+    let lower = token.to_lowercase();
+    lower.contains("round_trip")
+        || lower.contains("roundtrip")
+        || (lower.contains("round-trip") && token.contains('/'))
 }
 
 /// Refuses a reading that changes code or tests with a behavior criterion and carries no code survey: an
@@ -209,9 +213,11 @@ pub fn check_code_survey(reading: &Reading) -> Result<()> {
             "the reading was refused because it changes {} with a behavior criterion but has no `Code survey:` \
              assumption that names a crates/ path; the criteria were designed from a general idea of the feature \
              and not from the code. Read the code, then add an assumption that starts `Code survey:` and names \
-             the crates/ paths you read: the entry point and the order of resolution and probing, what the \
-             records validation allow-list accepts, and how the property is measured directly",
-            reading.class_of_work
+             the crates/ paths you read, with the labels `Entry point:`, `Gate order:`, `Stop gate:`, `Reuses:`, \
+             `Output:` and one `Direct check: criterion N` per behavior criterion (`check_behavior_test_design` \
+             judges them). Example: {}",
+            reading.class_of_work,
+            athena_context::briefs::CODE_SURVEY_EXAMPLE
         );
     }
     let new_records: Vec<&str> = reading
@@ -1450,4 +1456,904 @@ pub fn check_design_existing_code(reading: &Reading) -> Result<()> {
         );
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The test design of a code survey
+
+/// The labels `check_behavior_test_design` reads inside the `Code survey:` assumptions, lowercase. A clause
+/// runs from its label to the next label. `existing code:` is an alias of `reuses:`.
+pub(super) const SURVEY_LABELS: [&str; 7] = [
+    "entry point:",
+    "gate order:",
+    "stop gate:",
+    "reuses:",
+    "existing code:",
+    "output:",
+    "direct check:",
+];
+
+/// Every record kind the records validation accepts: (enum, variant, schema tag) for `AnyRecord` in
+/// `athena-data` `records.rs` and `HistoryRecord` in `history.rs`. Written by hand and pinned to the enum
+/// source by the test `record_kinds_match_the_enums`, so a new variant fails a test, not a reading. A pub
+/// `SCHEMA_TAGS` constant in `athena-data` would replace this list; that is a follow-up, not part of this change.
+pub(super) const RECORD_KINDS: [(&str, &str, &str); 43] = [
+    ("AnyRecord", "Request", "athena.request/1"),
+    ("AnyRecord", "Reading", "athena.reading/1"),
+    ("AnyRecord", "Correction", "athena.correction/1"),
+    ("AnyRecord", "Priority", "athena.priority/1"),
+    ("AnyRecord", "Hold", "athena.hold/1"),
+    ("AnyRecord", "Focus", "athena.focus/1"),
+    ("AnyRecord", "Job", "athena.job/1"),
+    ("AnyRecord", "Invocation", "athena.invocation/1"),
+    ("AnyRecord", "Candidate", "athena.candidate/1"),
+    ("AnyRecord", "Candidate2", "athena.candidate/2"),
+    ("AnyRecord", "Verification", "athena.verification/1"),
+    ("AnyRecord", "Outcome", "athena.outcome/1"),
+    ("AnyRecord", "Score", "athena.score/1"),
+    ("AnyRecord", "Intervention", "athena.intervention/1"),
+    ("AnyRecord", "Restart", "athena.restart/1"),
+    ("AnyRecord", "Resolution", "athena.resolution/1"),
+    ("AnyRecord", "HostError", "athena.host-error/1"),
+    ("AnyRecord", "DecisionState", "athena.decision-state/1"),
+    (
+        "AnyRecord",
+        "DefaultExpectations",
+        "athena.default-expectations/1",
+    ),
+    ("AnyRecord", "Introspection", "athena.introspection/1"),
+    ("AnyRecord", "FailureClass", "athena.failure-class/1"),
+    (
+        "AnyRecord",
+        "DefaultsProposal",
+        "athena.defaults-proposal/1",
+    ),
+    ("AnyRecord", "ClassLabel", "athena.class-label/1"),
+    ("AnyRecord", "Role", "athena.role/1"),
+    ("AnyRecord", "WorkItem", "athena.work-item/1"),
+    ("AnyRecord", "WorkDecision", "athena.work-decision/1"),
+    ("AnyRecord", "AudienceRating", "athena.audience-rating/1"),
+    ("AnyRecord", "Audit", "athena.audit/1"),
+    ("AnyRecord", "HestiaSweep", "athena.hestia-sweep/1"),
+    ("AnyRecord", "JobPlan", "athena.job-plan/1"),
+    ("AnyRecord", "Critique", "athena.critique/1"),
+    ("AnyRecord", "Baseline", "athena.baseline/1"),
+    ("AnyRecord", "Replay", "athena.replay/1"),
+    (
+        "AnyRecord",
+        "CodeHealthBaseline",
+        "athena.code-health-baseline/1",
+    ),
+    (
+        "AnyRecord",
+        "ThroughputReview",
+        "athena.throughput-review/1",
+    ),
+    (
+        "AnyRecord",
+        "BuildMeasurement",
+        "athena.build-measurement/1",
+    ),
+    ("AnyRecord", "DesignSurface", "athena.design-surface/1"),
+    ("HistoryRecord", "LandingIntent", "athena.landing-intent/1"),
+    ("HistoryRecord", "Landing", "athena.landing/1"),
+    (
+        "HistoryRecord",
+        "DeclaredIntervention",
+        "athena.declared-intervention/1",
+    ),
+    ("HistoryRecord", "Checkpoint", "athena.checkpoint/1"),
+    ("HistoryRecord", "LegacyExempt", "athena.legacy-exempt/1"),
+    (
+        "HistoryRecord",
+        "ImportManifest",
+        "athena.import-manifest/1",
+    ),
+];
+
+/// Field names that start with a skip word but are not switches: the producer report's `no_change` and
+/// `no_change_reason`. Only these are exempt from the skip-identifier rule; a name in the entry point, gate
+/// order, stop gate or reuse clause is not.
+pub(super) const KNOWN_FIELD_NAMES: [&str; 2] = ["no_change", "no_change_reason"];
+
+/// Words between a negator and the item it governs: articles, prepositions and linking words. A negator
+/// governs an item only through these (and other matched items), so `does not run when X is set` does not
+/// negate `X`.
+pub(super) const BRIDGE_WORDS: &[&str] = &[
+    "a", "an", "the", "any", "by", "via", "using", "through", "with", "reading", "read", "reads",
+    "adding", "add", "of", "as", "or", "and", "nor", "to", "just", "only", "for", "",
+];
+
+/// Past participles that pass a negator only when it comes right after it (`not measured through ...`).
+const PARTICIPLES: [&str; 4] = ["measured", "checked", "verified", "tested"];
+
+/// The stems of the words that state a measurement in a direct check.
+pub(super) const MEASURE_STEMS: [&str; 8] = [
+    "assert", "count", "compar", "observ", "measur", "check", "verif", "expect",
+];
+
+/// Words a routine criterion (a regression run of fmt, clippy and the tests) may hold.
+pub(super) const ROUTINE_WORDS: [&str; 38] = [
+    "cargo",
+    "fmt",
+    "clippy",
+    "test",
+    "tests",
+    "check",
+    "pass",
+    "passes",
+    "and",
+    "the",
+    "on",
+    "final",
+    "tree",
+    "existing",
+    "still",
+    "all",
+    "a",
+    "recorded",
+    "athena",
+    "same",
+    "locked",
+    "targets",
+    "warnings",
+    "workspace",
+    "no",
+    "unrelated",
+    "behavior",
+    "change",
+    "changes",
+    "build",
+    "clean",
+    "green",
+    "as",
+    "is",
+    "are",
+    "with",
+    "run",
+    "numbers",
+];
+
+/// The parts of a code survey, read from its labelled clauses.
+#[derive(Debug, Default)]
+pub(super) struct SurveyParts {
+    entry: Option<String>,
+    gates: Option<String>,
+    stop: Option<String>,
+    reuses: Option<String>,
+    output: Option<String>,
+    directs: Vec<String>,
+}
+
+fn append(slot: &mut Option<String>, text: &str) {
+    match slot {
+        Some(existing) => {
+            existing.push(' ');
+            existing.push_str(text);
+        }
+        None => *slot = Some(text.to_string()),
+    }
+}
+
+/// Reads the labelled clauses of every `Code survey:` assumption. A clause runs from its label (any case, at
+/// the start of the text or after white space or a full stop) to the next label. A repeated label appends
+/// (except `Direct check:`, one entry per clause); `Existing code:` folds into `Reuses:`.
+pub(super) fn survey_parts(reading: &Reading) -> SurveyParts {
+    let text = code_surveys(reading)
+        .into_iter()
+        .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let lower = text.to_ascii_lowercase();
+    let mut marks: Vec<(usize, usize, usize)> = Vec::new();
+    for (k, label) in SURVEY_LABELS.iter().enumerate() {
+        for (at, _) in lower.match_indices(label) {
+            let before = lower[..at].chars().next_back();
+            if before.is_none_or(|c| c.is_whitespace() || c == '.') {
+                marks.push((at, label.len(), k));
+            }
+        }
+    }
+    marks.sort();
+    let mut parts = SurveyParts::default();
+    for (i, (at, len, k)) in marks.iter().enumerate() {
+        let end = marks.get(i + 1).map_or(text.len(), |m| m.0);
+        let clause = text[at + len..end].trim().trim_end_matches('.').trim();
+        match k {
+            0 => append(&mut parts.entry, clause),
+            1 => append(&mut parts.gates, clause),
+            2 => append(&mut parts.stop, clause),
+            3 | 4 => append(&mut parts.reuses, clause),
+            5 => append(&mut parts.output, clause),
+            _ => parts.directs.push(clause.to_string()),
+        }
+    }
+    parts
+}
+
+/// The text that states what the change reuses: the `Reuses:` clause (and `Existing code:` inside the survey)
+/// and the text after the label of each `Existing code:` assumption.
+fn reuse_text(reading: &Reading, parts: &SurveyParts) -> String {
+    let mut text = parts.reuses.clone().unwrap_or_default();
+    for assumption in existing_code_assumptions(reading) {
+        text.push(' ');
+        text.push_str(assumption.get("existing code:".len()..).unwrap_or(""));
+    }
+    text
+}
+
+/// One whitespace token with the punctuation around a name trimmed. Returns the name and whether it was in
+/// backticks or ended in `()`.
+fn clean_token(token: &str) -> (String, bool) {
+    let mut t = token;
+    loop {
+        let before = t.len();
+        t = t.trim_start_matches(['(', '[', '"', '\'']);
+        t = t.trim_end_matches([',', ';', ':', '.', '"', '\'', ']']);
+        if t.ends_with(')') && !t.ends_with("()") {
+            t = &t[..t.len() - 1];
+        }
+        if t.len() == before {
+            break;
+        }
+    }
+    let ticked = t.starts_with('`') && t.ends_with('`') && t.len() > 1;
+    let name = t.trim_matches('`');
+    let call = name.ends_with("()");
+    (name.trim_end_matches("()").to_string(), ticked || call)
+}
+
+/// Whether a trimmed name is a code identifier: letters, digits, `_` and `::`, starting with a letter or `_`.
+/// A path (`/`, a file extension) fails because `/` and `.` are not allowed.
+fn is_identifier_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+}
+
+/// The identifiers in `text`: a backtick-quoted token with no white space, or a bare white-space token
+/// containing `_` or `::` or ending in `()`. Paths and file names are not identifiers.
+pub(super) fn identifiers(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter_map(|token| {
+            let (name, marked) = clean_token(token);
+            let shaped = marked || name.contains('_') || name.contains("::");
+            (shaped && is_identifier_name(&name)).then_some(name)
+        })
+        .collect()
+}
+
+/// Whether `text` holds `name` as a whole name (the neighbours are not letters, digits or `_`).
+fn contains_name(text: &str, name: &str) -> bool {
+    text.match_indices(name).any(|(at, _)| {
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        !text[..at].chars().next_back().is_some_and(word)
+            && !text[at + name.len()..].chars().next().is_some_and(word)
+    })
+}
+
+/// The criterion numbers a direct check clause cites: the numbers after `criterion` or `criteria`, with
+/// lists (`1, 2`, `1 and 2`) and ranges (`1-4`, `1 to 4`) expanded.
+pub(super) fn cited_criteria(clause: &str) -> Vec<usize> {
+    let lower = clause.to_lowercase();
+    let mut cited = Vec::new();
+    for key in ["criterion", "criteria"] {
+        for (at, _) in lower.match_indices(key) {
+            if lower[..at]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric)
+            {
+                continue;
+            }
+            let rest: Vec<char> = lower[at + key.len()..].chars().collect();
+            let (mut i, mut previous, mut dash) = (0, None::<usize>, false);
+            loop {
+                while rest.get(i).is_some_and(|c| c.is_whitespace()) {
+                    i += 1;
+                }
+                let Some(c) = rest.get(i) else { break };
+                if c.is_ascii_digit() {
+                    let mut n = 0usize;
+                    while let Some(d) = rest.get(i).and_then(|c| c.to_digit(10)) {
+                        n = n.saturating_mul(10).saturating_add(d as usize);
+                        i += 1;
+                    }
+                    match previous {
+                        Some(p) if dash && p < n && n - p < 200 => cited.extend(p + 1..=n),
+                        _ => cited.push(n),
+                    }
+                    previous = Some(n);
+                    dash = false;
+                } else if previous.is_some() && matches!(c, '-' | '\u{2013}') {
+                    dash = true;
+                    i += 1;
+                } else if previous.is_some() && matches!(c, ',' | '&') {
+                    i += 1;
+                } else if previous.is_some()
+                    && ["and", "to"].iter().any(|w| {
+                        let word: Vec<char> = w.chars().collect();
+                        rest.get(i..i + word.len()) == Some(&word[..])
+                            && !rest
+                                .get(i + word.len())
+                                .is_some_and(|c| c.is_alphanumeric())
+                    })
+                {
+                    dash = rest.get(i..i + 2) == Some(&['t', 'o'][..]);
+                    i += if dash { 2 } else { 3 };
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    cited.sort_unstable();
+    cited.dedup();
+    cited
+}
+
+/// Whether a criterion only asks for a regression run: fmt, clippy or the tests pass. Backticks are removed,
+/// flag tokens (and the value after `-p`, `--package`, `--test`, `--bin`, `--features`) are dropped, and every
+/// remaining word must be in [`ROUTINE_WORDS`]; the text must hold a check word and a pass word.
+pub(super) fn is_routine_criterion(text: &str) -> bool {
+    let plain = text.replace('`', "");
+    let mut kept: Vec<&str> = Vec::new();
+    let mut skip_next = false;
+    for token in plain.split_whitespace() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if token.starts_with('-') {
+            skip_next = matches!(
+                token,
+                "-p" | "--package" | "--test" | "--bin" | "--features"
+            );
+            continue;
+        }
+        kept.push(token);
+    }
+    let words = crate::verify::clause_words(&kept.join(" "));
+    !words.is_empty()
+        && words.iter().all(|w| ROUTINE_WORDS.contains(&w.as_str()))
+        && words
+            .iter()
+            .any(|w| matches!(w.as_str(), "fmt" | "clippy" | "test" | "tests"))
+        && words
+            .iter()
+            .any(|w| matches!(w.as_str(), "pass" | "passes" | "clean" | "green"))
+}
+
+/// Whether the clause holds a plain word that states a measurement: a word of letters only (a backticked
+/// token or one with `_`, `::` or `()` never counts) that starts with one of [`MEASURE_STEMS`].
+pub(super) fn has_measurement_word(clause: &str) -> bool {
+    clause.split_whitespace().any(|token| {
+        let plain = token.trim_matches(|c: char| !c.is_alphanumeric());
+        !token.contains('`')
+            && !plain.is_empty()
+            && plain.chars().all(char::is_alphabetic)
+            && token
+                .chars()
+                .all(|c| c.is_alphabetic() || ",;:.()".contains(c))
+            && {
+                let lower = plain.to_lowercase();
+                MEASURE_STEMS.iter().any(|stem| lower.starts_with(stem))
+            }
+    })
+}
+
+/// Whether the clause names a planner, producer or model call: one of those words and `call` or `calls`.
+fn names_model_call(clause: &str) -> bool {
+    let words = crate::verify::clause_words(clause);
+    words
+        .iter()
+        .any(|w| matches!(w.as_str(), "planner" | "producer" | "model"))
+        && words.iter().any(|w| matches!(w.as_str(), "call" | "calls"))
+}
+
+/// A negator that governs the item after it: the verifier's negators and the words of refusal.
+fn is_means_negator(word: &str) -> bool {
+    crate::verify::is_negator(word)
+        || matches!(
+            word,
+            "without"
+                | "instead"
+                | "refuse"
+                | "refuses"
+                | "refused"
+                | "reject"
+                | "rejects"
+                | "rejected"
+                | "forbid"
+                | "forbids"
+        )
+}
+
+/// Splits text into segments at `;`, at a full stop followed by white space or the end, at line breaks, and
+/// at the word `but`. Each segment is its white-space tokens. Commas, colons and dots inside a token do not
+/// split, so `athena.failure-class/1` and `a::b` stay whole.
+pub(super) fn measure_segments(text: &str) -> Vec<Vec<String>> {
+    let mut pieces: Vec<String> = vec![String::new()];
+    let chars: Vec<char> = text.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        let ends = match c {
+            ';' | '\n' => true,
+            '.' => chars.get(i + 1).is_none_or(|n| n.is_whitespace()),
+            _ => false,
+        };
+        if ends {
+            pieces.push(String::new());
+        } else if let Some(last) = pieces.last_mut() {
+            last.push(*c);
+        }
+    }
+    let mut segments = Vec::new();
+    for piece in pieces {
+        let mut current: Vec<String> = Vec::new();
+        for token in piece.split_whitespace() {
+            if token
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .eq_ignore_ascii_case("but")
+            {
+                segments.push(std::mem::take(&mut current));
+            } else {
+                current.push(token.to_string());
+            }
+        }
+        segments.push(current);
+    }
+    segments.retain(|s| !s.is_empty());
+    segments
+}
+
+/// The lowercase word of a token: backticks, commas, brackets, colons and `()` trimmed.
+fn token_word(token: &str) -> String {
+    token
+        .trim_matches(|c: char| {
+            matches!(
+                c,
+                '`' | ',' | '(' | ')' | '[' | ']' | ':' | '"' | '\'' | ';'
+            )
+        })
+        .to_lowercase()
+}
+
+/// Whether a raw token is an identifier that names a skip switch: an all-caps name with a NO, SKIP, SKIPPED,
+/// DISABLE, DISABLED or BYPASS part (`ATHENA_NO_PROBE`, `=value` ignored), or a lowercase `snake_case` name or
+/// `--flag` whose first part is `skip`, `skipped`, `no`, `disable`, `disabled` or `bypass`. The names in
+/// [`KNOWN_FIELD_NAMES`] are exempt.
+pub(super) fn skip_identifier(token: &str) -> bool {
+    let trimmed = token.trim_matches(|c: char| {
+        matches!(
+            c,
+            '`' | ',' | '(' | ')' | '[' | ']' | ':' | '"' | '\'' | ';' | '.'
+        )
+    });
+    let name = trimmed.split('=').next().unwrap_or("");
+    if name.is_empty() || KNOWN_FIELD_NAMES.contains(&name) {
+        return false;
+    }
+    let flag = name.starts_with("--");
+    let body = name.trim_start_matches('-');
+    if !body
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        || body.is_empty()
+    {
+        return false;
+    }
+    if !flag && !body.contains('_') {
+        return false;
+    }
+    let has_letter = body.chars().any(char::is_alphabetic);
+    if has_letter
+        && body
+            .chars()
+            .filter(|c| c.is_alphabetic())
+            .all(char::is_uppercase)
+    {
+        return body.split(['_', '-']).any(|p| {
+            matches!(
+                p,
+                "NO" | "SKIP" | "SKIPPED" | "DISABLE" | "DISABLED" | "BYPASS"
+            )
+        });
+    }
+    if body.chars().any(char::is_uppercase) {
+        return false;
+    }
+    body.split(['_', '-']).next().is_some_and(|p| {
+        matches!(
+            p,
+            "skip" | "skipped" | "no" | "disable" | "disabled" | "bypass"
+        )
+    })
+}
+
+const SWITCH_PHRASES: [&[&str]; 7] = [
+    &["skip", "switch"],
+    &["skip", "flag"],
+    &["skip", "option"],
+    &["internal", "helper"],
+    &["private", "helper"],
+    &["test", "only", "switch"],
+    &["test-only", "switch"],
+];
+
+/// A skip-switch or internal-helper item in a segment: token range and whether it is a phrase.
+#[derive(Debug, Clone)]
+struct SwitchItem {
+    start: usize,
+    end: usize,
+    phrase: bool,
+}
+
+fn switch_items(tokens: &[String]) -> Vec<SwitchItem> {
+    let words: Vec<String> = tokens.iter().map(|t| token_word(t)).collect();
+    let mut items = Vec::new();
+    for start in 0..words.len() {
+        for phrase in SWITCH_PHRASES {
+            let fits = start + phrase.len() <= words.len()
+                && phrase.iter().enumerate().all(|(k, p)| {
+                    let w = words[start + k].as_str();
+                    w == *p || (k + 1 == phrase.len() && w.strip_suffix('s') == Some(p))
+                });
+            if fits {
+                items.push(SwitchItem {
+                    start,
+                    end: start + phrase.len(),
+                    phrase: true,
+                });
+            }
+        }
+        if skip_identifier(&tokens[start]) {
+            items.push(SwitchItem {
+                start,
+                end: start + 1,
+                phrase: false,
+            });
+        }
+    }
+    items
+}
+
+/// Whether the item is negated: scanning back from its first token, every token passed is a bridge word or
+/// part of another item, and a negator is reached before any other word.
+fn item_is_negated(words: &[String], items: &[SwitchItem], item: &SwitchItem) -> bool {
+    let mut i = item.start;
+    while i > 0 {
+        i -= 1;
+        if items
+            .iter()
+            .any(|o| (o.start, o.end) != (item.start, item.end) && o.start <= i && i < o.end)
+        {
+            continue;
+        }
+        let word = words[i].as_str();
+        if is_means_negator(word) {
+            return true;
+        }
+        if PARTICIPLES.contains(&word) && i > 0 && crate::verify::is_negator(&words[i - 1]) {
+            return true;
+        }
+        if !BRIDGE_WORDS.contains(&word) {
+            return false;
+        }
+    }
+    false
+}
+
+/// Whether one of the four words before the item states how the property is measured: `through`, `via`,
+/// `using`, `by reading`, `by inspecting`, or `measured`, `checked`, `verified`, `tested` followed by `by` or
+/// `with`.
+fn has_means_phrase(words: &[String], start: usize) -> bool {
+    let from = start.saturating_sub(4);
+    (from..start).any(|i| {
+        let w = words[i].as_str();
+        let next = words.get(i + 1).map(String::as_str);
+        matches!(w, "through" | "via" | "using")
+            || (w == "by" && matches!(next, Some("reading" | "inspecting")))
+            || (matches!(w, "measured" | "checked" | "verified" | "tested")
+                && matches!(next, Some("by" | "with")))
+    })
+}
+
+/// The skip switches and internal-helper reads in `text` that are not negated. In a direct check
+/// (`strict`) every phrase and skip identifier counts; in a behavior criterion only a phrase counts, and only
+/// after a means phrase.
+pub(super) fn unnegated_switches(text: &str, strict: bool) -> Vec<String> {
+    let mut found = Vec::new();
+    for tokens in measure_segments(text) {
+        let words: Vec<String> = tokens.iter().map(|t| token_word(t)).collect();
+        let items = switch_items(&tokens);
+        for item in &items {
+            if !strict && (!item.phrase || !has_means_phrase(&words, item.start)) {
+                continue;
+            }
+            if item_is_negated(&words, &items, item) {
+                continue;
+            }
+            let shown = tokens[item.start..item.end].join(" ");
+            let shown = shown
+                .trim_matches(|c: char| matches!(c, '`' | ',' | '.'))
+                .to_string();
+            if !found.contains(&shown) {
+                found.push(shown);
+            }
+        }
+    }
+    found
+}
+
+/// What is wrong with the `Output:` clause, if anything: an unknown schema tag or variant, or no accepted
+/// record kind and no round-trip test deliverable.
+fn record_kind_problem(reading: &Reading, output: &str) -> Option<String> {
+    let lower = output.to_lowercase();
+    let says_none = has_phrase(&lower, "no new output") || has_phrase(&lower, "no new record");
+    let record_deliverables: Vec<&str> = reading
+        .deliverables
+        .iter()
+        .filter(|d| is_record_or_data_deliverable(d))
+        .map(|d| d.path.as_str())
+        .collect();
+    if says_none {
+        return (!record_deliverables.is_empty()).then(|| {
+            format!(
+                "(c) the Output clause says no new output but the deliverables add or change a record or data file ({})",
+                record_deliverables.join(", ")
+            )
+        });
+    }
+    let mut kinds = 0usize;
+    let mut unknown: Vec<String> = Vec::new();
+    for token in output.split_whitespace() {
+        let token = token.trim_matches(|c: char| matches!(c, '`' | ',' | ';' | '.' | '(' | ')'));
+        if token.starts_with("athena.") && token.contains('/') {
+            if RECORD_KINDS.iter().any(|(_, _, tag)| *tag == token) {
+                kinds += 1;
+            } else {
+                unknown.push(token.to_string());
+            }
+        } else if let Some((enum_name, variant)) = token.split_once("::")
+            && matches!(enum_name, "AnyRecord" | "HistoryRecord")
+        {
+            if RECORD_KINDS
+                .iter()
+                .any(|(e, v, _)| *e == enum_name && *v == variant)
+            {
+                kinds += 1;
+            } else {
+                unknown.push(token.to_string());
+            }
+        } else if token == "check_record_file" {
+            kinds += 1;
+        }
+    }
+    if !unknown.is_empty() {
+        return Some(format!(
+            "(c) the Output clause names a record kind the records validation does not accept ({}); name a tag or variant of AnyRecord or HistoryRecord",
+            unknown.join(", ")
+        ));
+    }
+    if kinds > 0 {
+        return None;
+    }
+    let tokens: Vec<&str> = output
+        .split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '/' | '.')))
+        .map(|t| t.trim_end_matches('.'))
+        .filter(|t| is_round_trip_token(t))
+        .collect();
+    if tokens.is_empty() {
+        return Some(
+            "(c) the Output clause names no accepted record kind (an `athena.<kind>/<n>` tag, `AnyRecord::<Variant>` or `HistoryRecord::<Variant>`), no round-trip test deliverable and does not say no new output"
+                .to_string(),
+        );
+    }
+    let named = tokens.iter().any(|t| {
+        reading
+            .acceptance_criteria
+            .iter()
+            .any(|c| c.text.contains(t))
+    });
+    let holder = reading.deliverables.iter().any(|d| {
+        d.path.contains("/tests/") || d.path.ends_with("records.rs") || output.contains(&d.path)
+    });
+    if named && holder {
+        return None;
+    }
+    Some(format!(
+        "(c) the round-trip test ({}) is not named by a criterion together with a deliverable that can hold it (a tests/ path, a records.rs or a path in the Output clause)",
+        tokens.join(", ")
+    ))
+}
+
+/// Refuses a code or tests reading with a behavior criterion whose `Code survey:` does not state how the
+/// change is built and measured, or states it against the code. It reads labelled clauses of the survey:
+/// `Entry point:`, `Gate order:`, `Stop gate:`, `Reuses:` (or `Existing code:`), `Output:` and `Direct check:`.
+///
+/// The reading is refused when any of these is missing:
+/// (a) the entry point (one or more identifiers), the gate order (at least two identifiers) and the stop gate
+/// (one identifier of the gate order);
+/// (b) a reused existing function (an identifier) or the words "no existing function";
+/// (c) the record kind the change writes (an `athena.<kind>/<n>` tag, `AnyRecord::<Variant>` or
+/// `HistoryRecord::<Variant>`, `check_record_file`), a round-trip test that a criterion names with a
+/// deliverable that can hold it, or "no new output" when no record or data file is added;
+/// (d) one `Direct check: criterion N` clause for each behavior criterion that is not routine, with a
+/// measurement word, naming an entry point, a gate or a planner, producer or model call, and not measuring
+/// through a skip switch or a read of an internal helper.
+/// It also refuses what contradicts the code: a stop gate that is not in the gate order, a record kind that
+/// is not in `AnyRecord` or `HistoryRecord`, "no new output" beside a record or data deliverable, and a skip
+/// switch or internal-helper read as the measurement. A criterion that only says fmt, clippy and the tests
+/// pass is routine and needs no clause.
+///
+/// Root cause this check removes: readings fixed tests that measured a property through a skip switch or an
+/// internal helper, or invented a record kind the records validation rejects, because the gate order, the
+/// functions to reuse and the way the property is measured were never stated before the criteria were
+/// accepted. Jobs 20261028-055601-hg0n and 20261028-082151-67fa each failed that way, and introspections
+/// 20261028-055651-dhh0 and 20261028-082240-77as traced both to it. [`check_code_survey`] asked only for a
+/// `crates/` path. It sits directly after that check in the gate order and costs no model call.
+///
+/// Limits: matching is lexical and the check reads the reading, never the repository, so it cannot tell that
+/// a named function does not exist or that a stated measurement is true; the critic and the verifier judge
+/// that. Record kinds come from [`RECORD_KINDS`], a list pinned to the enums by a test; a pub `SCHEMA_TAGS`
+/// constant in `athena-data` would replace it and is a follow-up. Skip-switch matching: a phrase (`skip
+/// switch`, `internal helper`) or an identifier whose first part is `skip`, `skipped`, `no`, `disable`,
+/// `disabled` or `bypass` (or an all-caps name with a `NO`, `SKIP`, `DISABLE` or `BYPASS` part) counts unless a
+/// negator governs it through bridge words only, so a name such as `skip_whitespace` is refused in a direct
+/// check unless negated and must be reworded or left out. Only `no_change` and `no_change_reason` are exempt.
+/// A skip switch named in other words is not caught. A behavior criterion that describes a refusal fixture
+/// with a means phrase ("through a skip switch") is refused and must be reworded.
+///
+/// This check refuses more readings; the higher refusal rate is intended. A replay of accepted readings
+/// (`replay`) holds a job that newly refuses more than 10% unless the job's criteria declare a share. Declared
+/// here: expected 30% of newly refused readings, because the check now asks for new required labels that past
+/// readings never used. That is an estimate, not measured: past readings carry none of the labels, so the real
+/// share may be higher, and the markers are not loosened to meet it. Queued proposed readings may need a
+/// re-read.
+///
+/// The error names this check, each missing part by its letter, each contradiction, and ends with an example
+/// survey (`CODE_SURVEY_EXAMPLE` in athena-context).
+pub fn check_behavior_test_design(reading: &Reading) -> Result<()> {
+    if !changes_code_with_behavior_criterion(reading) {
+        return Ok(());
+    }
+    let parts = survey_parts(reading);
+    let mut problems: Vec<String> = Vec::new();
+
+    // (a) entry point, gate order and stop gate.
+    let entry = parts.entry.as_deref().map(identifiers).unwrap_or_default();
+    if entry.is_empty() {
+        problems.push("(a) no `Entry point:` with a function name (`name` in backticks)".into());
+    }
+    let mut gates = parts.gates.as_deref().map(identifiers).unwrap_or_default();
+    gates.dedup();
+    let distinct: BTreeSet<&String> = gates.iter().collect();
+    if distinct.len() < 2 {
+        problems.push(
+            "(a) no `Gate order:` naming at least two gates by function name, in run order".into(),
+        );
+    }
+    match parts.stop.as_deref() {
+        None => problems.push("(a) no `Stop gate:`".into()),
+        Some(stop) => match identifiers(stop).first() {
+            None => problems
+                .push("(a) the `Stop gate:` is prose; name the gate by function name".into()),
+            Some(name) if !gates.contains(name) => problems.push(format!(
+                "contradiction: the stop gate `{name}` is not in the stated gate order"
+            )),
+            Some(_) => {}
+        },
+    }
+
+    // (b) reuse.
+    let reuse = reuse_text(reading, &parts);
+    if identifiers(&reuse).is_empty() && !has_phrase(&reuse.to_lowercase(), "no existing function")
+    {
+        problems.push(
+            "(b) no `Reuses:` naming an existing function by name, or the words 'no existing function'"
+                .into(),
+        );
+    }
+
+    // (c) record kind or round-trip deliverable.
+    match parts.output.as_deref() {
+        None => problems.push(
+            "(c) no `Output:` clause: say no new output, name a record kind or name a round-trip test deliverable"
+                .into(),
+        ),
+        Some(output) => {
+            if let Some(problem) = record_kind_problem(reading, output) {
+                problems.push(problem);
+            }
+        }
+    }
+
+    // (d) one direct check per non-routine behavior criterion.
+    let needing: Vec<usize> = reading
+        .acceptance_criteria
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.kind == CriterionKind::Behavior && !is_routine_criterion(&c.text))
+        .map(|(i, _)| i + 1)
+        .collect();
+    let mut covered: BTreeSet<usize> = BTreeSet::new();
+    for clause in &parts.directs {
+        let cited = cited_criteria(clause);
+        let label = match cited.as_slice() {
+            [] if needing.len() == 1 => {
+                covered.insert(needing[0]);
+                format!("criterion {}", needing[0])
+            }
+            [] => "an unnumbered clause".to_string(),
+            [n] => {
+                covered.insert(*n);
+                format!("criterion {n}")
+            }
+            many => {
+                problems.push(format!(
+                    "(d) one direct check covers {} criteria; write one Direct check clause per criterion",
+                    many.len()
+                ));
+                continue;
+            }
+        };
+        let mut faults: Vec<String> = Vec::new();
+        if !has_measurement_word(clause) {
+            faults.push("states no measurement (assert, count, compare, observe, measure, check, verify or expect)".into());
+        }
+        let names_entry = entry.iter().any(|n| contains_name(clause, n));
+        let names_gate = gates.iter().any(|n| contains_name(clause, n));
+        if !names_entry && !names_gate && !names_model_call(clause) {
+            faults.push("names no entry point, gate or model call".into());
+        }
+        let switches = unnegated_switches(clause, true);
+        if !switches.is_empty() {
+            faults.push(format!(
+                "measures through a skip switch or an internal helper ({}); cite the entry point or another gate, or reword",
+                switches.join(", ")
+            ));
+        }
+        if !faults.is_empty() {
+            problems.push(format!(
+                "(d) the direct check for {label} {}",
+                faults.join(" and ")
+            ));
+        }
+    }
+    let uncovered: Vec<String> = needing
+        .iter()
+        .filter(|n| !covered.contains(n))
+        .map(|n| n.to_string())
+        .collect();
+    if !uncovered.is_empty() {
+        problems.push(format!(
+            "(d) no `Direct check: criterion N` clause for behavior criterion {}",
+            uncovered.join(", ")
+        ));
+    }
+    for (i, c) in reading.acceptance_criteria.iter().enumerate() {
+        if c.kind == CriterionKind::Behavior {
+            let switches = unnegated_switches(&c.text, false);
+            if !switches.is_empty() {
+                problems.push(format!(
+                    "(d) criterion {} measures through a skip switch or an internal helper ({}); measure through the entry point",
+                    i + 1,
+                    switches.join(", ")
+                ));
+            }
+        }
+    }
+
+    if problems.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the reading was refused because check_behavior_test_design found that the `Code survey:` of this {} reading does not state how the change is built and measured: {}. Under the labels `Entry point:`, `Gate order:`, `Stop gate:`, `Reuses:`, `Output:` and one `Direct check: criterion N` per behavior criterion, state each part. A criterion that only says fmt, clippy and test pass needs no Direct check. Example: {}",
+        reading.class_of_work,
+        problems.join("; "),
+        athena_context::briefs::CODE_SURVEY_EXAMPLE
+    )
 }

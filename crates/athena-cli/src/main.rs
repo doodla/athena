@@ -1209,6 +1209,11 @@ mod tests {
 
     /// A stored reading with this one acceptance criterion, as `reading-1.json`'s content.
     fn reading_json(criterion: &str) -> String {
+        reading_json_with(criterion, "feature", &[])
+    }
+
+    /// A stored reading with this criterion, class of work and assumptions.
+    fn reading_json_with(criterion: &str, class: &str, assumptions: &[&str]) -> String {
         use athena_data::records::{
             AnyRecord, Criterion, CriterionKind, Deliverable, DeliverableAction, Forecast,
             Forecasts, Quantiles, Reading,
@@ -1231,13 +1236,13 @@ mod tests {
             defaults_version: 1,
             title: "Add a greeting".into(),
             summary: "Add a greeting.".into(),
-            class_of_work: "feature".into(),
+            class_of_work: class.into(),
             capability: Some("change".into()),
             decline_reason: None,
             producer_model: "producer".into(),
             verifier_model: "verifier".into(),
             defaults_applied: vec![],
-            assumptions: vec![],
+            assumptions: assumptions.iter().map(|a| a.to_string()).collect(),
             question: None,
             acceptance_criteria: vec![Criterion {
                 text: criterion.into(),
@@ -1277,6 +1282,43 @@ mod tests {
     fn check_reading_prints_accept_for_a_reading_the_rules_accept() {
         let dir = tempfile::tempdir().unwrap();
         let (request, reading) = check_reading_fixture(dir.path(), "cargo test --locked passes");
+        assert_eq!(
+            check_reading_command(&request, &reading).unwrap(),
+            ("accept".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn check_reading_refuses_a_code_reading_with_a_short_survey_and_accepts_the_example() {
+        let dir = tempfile::tempdir().unwrap();
+        let (request, reading) = check_reading_fixture(dir.path(), "cargo test --locked passes");
+        let criterion = "Run `cargo test -p athena-cli`: the greeting prints hello";
+        // A survey that names a crates/ path and nothing else passes the survey check, not the design check.
+        std::fs::write(
+            &reading,
+            reading_json_with(
+                criterion,
+                "code",
+                &["Code survey: read crates/athena-cli/src/main.rs"],
+            ),
+        )
+        .unwrap();
+        let (line, code) = check_reading_command(&request, &reading).unwrap();
+        assert_eq!(code, 2, "{line}");
+        assert!(line.starts_with("refuse: "), "{line}");
+        assert!(line.contains("check_behavior_test_design"), "{line}");
+        assert!(line.contains("`Gate order:`"), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+        // The filled-in example from the refusal text is accepted for the criterion it numbers.
+        std::fs::write(
+            &reading,
+            reading_json_with(
+                criterion,
+                "code",
+                &[athena_context::briefs::CODE_SURVEY_EXAMPLE],
+            ),
+        )
+        .unwrap();
         assert_eq!(
             check_reading_command(&request, &reading).unwrap(),
             ("accept".to_string(), 0)

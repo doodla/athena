@@ -26,11 +26,11 @@ pub use planner::{
     CriticInputs, DeliverableFact, PlanRevision, PlannerInputs, critic_brief, planner_brief,
 };
 pub use reader::{
-    CHANGELOG_DEFAULT_PHRASE, CHANGELOG_PATH, CODE_SURVEY_GUIDE, CRITERIA_RULES_HEADING,
-    DECISIONS_APPEND_ONLY_PHRASE, DEFAULT_WRITTEN_REASON, ENABLED_ROLES_HEADING, EarlierAttempt,
-    EarlierCase, PRIOR_RESULT_HEADING, READING_RULES, READING_RULES_HEADING,
-    RECORDS_APPEND_ONLY_PHRASE, REFUSAL_HEADING, ReaderInputs, RetryCause, VERDICT_RULE_LINES,
-    reader_brief,
+    CHANGELOG_DEFAULT_PHRASE, CHANGELOG_PATH, CODE_SURVEY_EXAMPLE, CODE_SURVEY_GUIDE,
+    CRITERIA_RULES_HEADING, DECISIONS_APPEND_ONLY_PHRASE, DEFAULT_WRITTEN_REASON,
+    ENABLED_ROLES_HEADING, EarlierAttempt, EarlierCase, PRIOR_RESULT_HEADING, READING_RULES,
+    READING_RULES_HEADING, RECORDS_APPEND_ONLY_PHRASE, REFUSAL_HEADING, ReaderInputs, RetryCause,
+    VERDICT_RULE_LINES, reader_brief,
 };
 
 use boundary::{banned_words_section, mirror_check_section};
@@ -3641,6 +3641,7 @@ mod tests {
             "check_criteria_evidence",
             "check_governance_coverage",
             "check_code_survey",
+            "check_behavior_test_design",
             "check_design_existing_code",
             "check_environment_reach",
             "check_defined_terms",
@@ -3721,16 +3722,24 @@ mod tests {
         let (_, section) = brief.split_once(READING_RULES_HEADING).unwrap();
         let section = section.split("\n# ").next().unwrap();
         assert!(section.contains(CODE_SURVEY_GUIDE), "{section}");
+        // The filled-in example is in the refusal errors of athena-core, not in the brief.
+        assert!(!section.contains(CODE_SURVEY_EXAMPLE), "{section}");
+        assert!(!brief.contains(CODE_SURVEY_EXAMPLE));
         for phrase in [
             "Code survey:",
             "before you give behavior criteria",
             "entry point",
-            "order in which resolution and probing run",
-            "allow-list",
-            "check_record_file",
+            "check_behavior_test_design",
+            "`Entry point:`",
+            "`Gate order:`",
+            "`Stop gate:`",
+            "`Reuses:`",
+            "`Output:`",
+            "`Direct check: criterion N`",
             "AnyRecord",
             "round-trip",
-            "measured directly",
+            "not a skip switch",
+            "needs none",
             "refuses more readings",
             "higher refusal rate is intended",
             "expected N% of newly refused readings",

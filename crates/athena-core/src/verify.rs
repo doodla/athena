@@ -1365,7 +1365,7 @@ fn split_clauses(text: &str) -> Vec<(usize, String)> {
 }
 
 /// Lowercase words of a clause: letters, digits, `_` and `'` (a curly apostrophe counts as `'`).
-fn clause_words(clause: &str) -> Vec<String> {
+pub(crate) fn clause_words(clause: &str) -> Vec<String> {
     clause
         .to_lowercase()
         .replace('\u{2019}', "'")
@@ -1375,7 +1375,7 @@ fn clause_words(clause: &str) -> Vec<String> {
         .collect()
 }
 
-fn is_negator(word: &str) -> bool {
+pub(crate) fn is_negator(word: &str) -> bool {
     NEGATORS.contains(&word) || word.ends_with("n't")
 }
 

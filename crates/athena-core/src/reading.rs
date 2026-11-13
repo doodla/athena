@@ -5139,7 +5139,8 @@ mod tests {
 
     /// The name of the check that refuses the reading, or `None`.
     fn refuser(reading: &Reading) -> Option<&'static str> {
-        refusing_check(reading, "Review the guide", None, &[], None).map(|(name, _)| name)
+        refusing_check(&with_design(reading), "Review the guide", None, &[], None)
+            .map(|(name, _)| name)
     }
 
     #[test]
@@ -7059,8 +7060,55 @@ mod tests {
         reading
     }
 
+    /// The complete test-design survey for this reading: entry point, gate order, stop gate, reuse, output and
+    /// one direct check for each non-routine behavior criterion, numbered by position. It names no crates/
+    /// path, so it never stands in for the survey `check_code_survey` reads.
+    fn complete_survey_for(reading: &Reading) -> String {
+        let record = reading
+            .deliverables
+            .iter()
+            .any(is_record_or_data_deliverable);
+        let mut survey = format!(
+            "Code survey: Entry point: `refusing_check`. Gate order: `check_criteria_evidence`, \
+             `check_code_survey`, `check_history_fixture`. Stop gate: `check_code_survey`. \
+             Reuses: `names_record_evidence`; no existing function checks gate order. Output: {}.",
+            if record {
+                "`AnyRecord::FailureClass`"
+            } else {
+                "no new output"
+            }
+        );
+        for (i, c) in reading.acceptance_criteria.iter().enumerate() {
+            if c.kind == CriterionKind::Behavior && !is_routine_criterion(&c.text) {
+                survey.push_str(&format!(
+                    " Direct check: criterion {} counts the calls `refusing_check` makes to \
+                     `check_code_survey` and asserts the count is 1.",
+                    i + 1
+                ));
+            }
+        }
+        survey
+    }
+
+    /// The reading with its complete test-design survey added as a further `Code survey:` assumption, when it
+    /// has a survey at all. Whole-gate fixtures go through this, so they are judged on the rules they test.
+    fn with_design(reading: &Reading) -> Reading {
+        let mut reading = reading.clone();
+        if !code_surveys(&reading).is_empty() {
+            let survey = complete_survey_for(&reading);
+            reading.assumptions.push(survey);
+        }
+        reading
+    }
+
     fn accept(reading: &Reading) -> Result<()> {
-        check_reading_acceptance(reading, "change the reading rules", None, &[], None)
+        check_reading_acceptance(
+            &with_design(reading),
+            "change the reading rules",
+            None,
+            &[],
+            None,
+        )
     }
 
     const MODIFY_READING: (&str, DeliverableAction) = (
@@ -7263,6 +7311,846 @@ mod tests {
         assert!(changelog.contains("higher refusal rate is intended"));
     }
 
+    // -- The test design of a code survey (`check_behavior_test_design`)
+
+    mod design_tests {
+        use super::*;
+
+        const D_ENTRY: &str = "Entry point: `refusing_check`.";
+        const D_GATES: &str = "Gate order: `check_criteria_evidence`, `check_code_survey`.";
+        const D_STOP: &str = "Stop gate: `check_code_survey`.";
+        const D_REUSE: &str = "Reuses: `names_record_evidence`.";
+        const D_OUTPUT: &str = "Output: no new output.";
+        const D_DIRECT: &str = "Direct check: criterion 1 counts the calls `refusing_check` makes to \
+         `check_code_survey` and asserts the count is 1.";
+
+        fn design_survey(parts: &[&str]) -> String {
+            format!(
+                "Code survey: crates/athena-core/src/reading/surveys.rs. {}",
+                parts.join(" ")
+            )
+        }
+
+        fn complete_parts() -> [&'static str; 6] {
+            [D_ENTRY, D_GATES, D_STOP, D_REUSE, D_OUTPUT, D_DIRECT]
+        }
+
+        fn design_reading(survey: &str) -> Reading {
+            code_reading(&[survey], &[MODIFY_READING])
+        }
+
+        fn design_error(survey: &str) -> Option<String> {
+            check_behavior_test_design(&design_reading(survey))
+                .err()
+                .map(|e| e.to_string())
+        }
+
+        /// The complete survey with its direct check replaced.
+        fn with_direct(text: &str) -> String {
+            let direct = format!("Direct check: criterion 1 {text}");
+            let parts: Vec<&str> = complete_parts()[..5]
+                .iter()
+                .copied()
+                .chain(std::iter::once(direct.as_str()))
+                .collect();
+            design_survey(&parts)
+        }
+
+        fn assert_design_ok(survey: &str) {
+            if let Some(error) = design_error(survey) {
+                panic!("{survey}\n{error}");
+            }
+        }
+
+        fn assert_design_refused(survey: &str, needles: &[&str]) {
+            let error = design_error(survey).unwrap_or_else(|| panic!("accepted: {survey}"));
+            assert!(error.contains("check_behavior_test_design"), "{error}");
+            for needle in needles {
+                assert!(error.contains(needle), "{needle}: {error}");
+            }
+        }
+
+        #[test]
+        fn design_check_has_one_step_line_after_the_survey_step() {
+            let body = reading_source()
+                .split("pub fn refusing_check(")
+                .nth(1)
+                .and_then(|rest| rest.split("\n}\n").next())
+                .unwrap();
+            let lines: Vec<&str> = body.lines().map(str::trim).collect();
+            let at = lines
+                .iter()
+                .position(|l| *l == "step!(check_code_survey(reading));")
+                .unwrap();
+            assert_eq!(lines[at + 1], "step!(check_behavior_test_design(reading));");
+            assert_eq!(
+                lines
+                    .iter()
+                    .filter(|l| l.contains("check_behavior_test_design"))
+                    .count(),
+                1
+            );
+        }
+
+        #[test]
+        fn design_check_does_not_apply_outside_its_gate() {
+            let none: &[&str] = &[];
+            let mut docs = code_reading(none, &[MODIFY_READING]);
+            docs.class_of_work = "docs".into();
+            let mut declined = code_reading(none, &[MODIFY_READING]);
+            declined.capability = None;
+            declined.decline_reason = Some("no capability fits".into());
+            let mut asking = code_reading(none, &[MODIFY_READING]);
+            asking.question = Some("which file?".into());
+            let mut content = code_reading(none, &[MODIFY_READING]);
+            content.acceptance_criteria = vec![Criterion {
+                text: "the doc comment names the cause".into(),
+                kind: CriterionKind::Content,
+            }];
+            for reading in [&docs, &declined, &asking, &content] {
+                check_behavior_test_design(reading).unwrap();
+            }
+        }
+
+        #[test]
+        fn design_check_refuses_each_omitted_part() {
+            let [entry, gates, stop, reuse, output, direct] = complete_parts();
+            assert_design_ok(&design_survey(&complete_parts()));
+            let cases: [(&str, Vec<&str>); 4] = [
+                ("(a)", vec![entry, reuse, output, direct]),
+                ("(b)", vec![entry, gates, stop, output, direct]),
+                ("(c)", vec![entry, gates, stop, reuse, direct]),
+                ("(d)", vec![entry, gates, stop, reuse, output]),
+            ];
+            for (missing, parts) in cases {
+                let survey = design_survey(&parts);
+                let error = design_error(&survey).unwrap_or_else(|| panic!("accepted: {survey}"));
+                for letter in ["(a)", "(b)", "(c)", "(d)"] {
+                    assert_eq!(
+                        error.contains(letter),
+                        letter == missing,
+                        "{letter}: {error}"
+                    );
+                }
+                // The whole gate names the check, and so does the stored-reading seam.
+                let reading = design_reading(&survey);
+                assert_eq!(
+                    gate_refuser_raw(&reading),
+                    Some("check_behavior_test_design")
+                );
+                match check_reading_text(&reading, "change the reading rules") {
+                    ReadingCheck::Refuse(reason) => {
+                        assert!(reason.contains("check_behavior_test_design"), "{reason}");
+                    }
+                    ReadingCheck::Accept => panic!("accepted: {survey}"),
+                }
+            }
+            // The refusal ends with the filled-in example.
+            let error = design_error(&design_survey(&[entry])).unwrap();
+            assert!(error.ends_with(athena_context::briefs::CODE_SURVEY_EXAMPLE));
+        }
+
+        /// The first refusing check of a reading exactly as built, with no survey added.
+        fn gate_refuser_raw(reading: &Reading) -> Option<&'static str> {
+            refusing_check(reading, "change the reading rules", None, &[], None)
+                .map(|(name, _)| name)
+        }
+
+        #[test]
+        fn design_check_accepts_a_complete_reading_in_each_form() {
+            let [entry, gates, stop, reuse, output, direct] = complete_parts();
+            assert_design_ok(&design_survey(&complete_parts()));
+            assert_eq!(
+                gate_refuser_raw(&design_reading(&design_survey(&complete_parts()))),
+                None
+            );
+            // Labels in other case and with extra spaces.
+            assert_design_ok(
+                "Code survey: crates/a/src/b.rs.   ENTRY POINT:   `refusing_check`.  gate ORDER: `check_a`,\n`check_b`. \
+             STOP gate: `check_b`. REUSES: `names_record_evidence`. output: no new output. \
+             direct CHECK: criterion 1 counts the calls `refusing_check` makes to `check_b`.",
+            );
+            // Parts spread over two surveys.
+            let mut reading = code_reading(&[], &[MODIFY_READING]);
+            reading.assumptions = vec![
+                design_survey(&[entry, gates, stop]),
+                format!("Code survey: {reuse} {output} {direct}"),
+            ];
+            check_behavior_test_design(&reading).unwrap();
+            // An `Existing code:` assumption or clause satisfies the reuse part; partial reuse and none both pass.
+            let mut existing =
+                design_reading(&design_survey(&[entry, gates, stop, output, direct]));
+            existing
+                .assumptions
+                .push("Existing code: `names_record_evidence` in surveys.rs".into());
+            check_behavior_test_design(&existing).unwrap();
+            assert_design_ok(&design_survey(&[
+                entry,
+                gates,
+                stop,
+                "Existing code: `names_record_evidence`.",
+                output,
+                direct,
+            ]));
+            assert_design_ok(&design_survey(&[
+                entry,
+                gates,
+                stop,
+                "Reuses: `has_phrase`; no existing function checks gate order.",
+                output,
+                direct,
+            ]));
+            // Identifier shapes: `f()`, `a::b`, a single backticked word, several entry points.
+            assert_design_ok(&design_survey(&[
+                "Entry point: `check_reading_command`, reader_brief() and `replay`.",
+                "Gate order: `replay`, a::b.",
+                "Stop gate: a::b.",
+                "Reuses: `check_reading_text`.",
+                output,
+                "Direct check: criterion 1 asserts the calls `replay` makes to a::b.",
+            ]));
+            // Other measurement verbs and subjects.
+            for text in [
+                "asserts `refusing_check` returns Err",
+                "checks `check_code_survey` is the stop gate",
+                "verifies the planner, producer and model calls it makes: counts 0",
+                "compares the output of `refusing_check` with the base",
+                "observes `refusing_check` stop at `check_criteria_evidence`",
+                "expects the count of model calls to be 1",
+            ] {
+                assert_design_ok(&with_direct(text));
+            }
+        }
+
+        #[test]
+        fn design_check_refuses_a_gate_order_that_is_prose_or_contradicts() {
+            let [entry, gates, stop, reuse, output, direct] = complete_parts();
+            // A prose stop gate is a missing part (a); a stop gate outside the order is a contradiction.
+            assert_design_refused(
+                &design_survey(&[
+                    entry,
+                    gates,
+                    "Stop gate: the survey check.",
+                    reuse,
+                    output,
+                    direct,
+                ]),
+                &["(a)", "prose"],
+            );
+            assert_design_refused(
+                &design_survey(&[
+                    entry,
+                    gates,
+                    "Stop gate: `check_other`.",
+                    reuse,
+                    output,
+                    direct,
+                ]),
+                &[
+                    "contradiction",
+                    "`check_other`",
+                    "not in the stated gate order",
+                ],
+            );
+            // One gate is not an order.
+            assert_design_refused(
+                &design_survey(&[
+                    entry,
+                    "Gate order: `check_code_survey`.",
+                    stop,
+                    reuse,
+                    output,
+                    direct,
+                ]),
+                &["(a)"],
+            );
+            // A path is not a function name, in the entry point or the reuse.
+            assert_design_refused(
+                &design_survey(&[
+                    "Entry point: crates/a/src/b.rs.",
+                    gates,
+                    stop,
+                    reuse,
+                    output,
+                    direct,
+                ]),
+                &["(a)"],
+            );
+            assert_design_refused(
+                &design_survey(&[
+                    entry,
+                    gates,
+                    stop,
+                    "Reuses: crates/athena-core/src/run_pin_tests.rs.",
+                    output,
+                    direct,
+                ]),
+                &["(b)"],
+            );
+        }
+
+        #[test]
+        fn design_check_numbers_criteria_by_position_and_wants_one_clause_each() {
+            let [entry, gates, stop, reuse, output, _] = complete_parts();
+            let content = |text: &str| Criterion {
+                text: text.into(),
+                kind: CriterionKind::Content,
+            };
+            let mut reading = code_reading(&[], &[MODIFY_READING]);
+            reading
+                .acceptance_criteria
+                .insert(0, content("The doc names the cause"));
+            reading
+                .acceptance_criteria
+                .insert(0, content("The changelog has an entry"));
+            // The behavior criterion is the third.
+            let at = |n: usize| {
+                format!(
+                    "Direct check: criterion {n} counts the calls `refusing_check` makes to `check_code_survey`."
+                )
+            };
+            reading.assumptions = vec![design_survey(&[entry, gates, stop, reuse, output, &at(1)])];
+            let error = check_behavior_test_design(&reading)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("behavior criterion 3"), "{error}");
+            reading.assumptions = vec![design_survey(&[entry, gates, stop, reuse, output, &at(3)])];
+            check_behavior_test_design(&reading).unwrap();
+            // A clause with no number covers the only behavior criterion.
+            reading.assumptions = vec![design_survey(&[
+                entry,
+                gates,
+                stop,
+                reuse,
+                output,
+                "Direct check: counts the calls `refusing_check` makes to `check_code_survey`.",
+            ])];
+            check_behavior_test_design(&reading).unwrap();
+            // One clause for many criteria is refused.
+            add_behavior(
+                &mut reading,
+                "Run `cargo test -p athena-cli`: the new case prints refuse",
+            );
+            for cited in [
+                "criteria 3-4",
+                "criteria 3 and 4",
+                "criteria 3, 4",
+                "criterion 3 and criterion 4",
+            ] {
+                reading.assumptions = vec![design_survey(&[
+                    entry,
+                    gates,
+                    stop,
+                    reuse,
+                    output,
+                    &format!(
+                        "Direct check: {cited} count the calls `refusing_check` makes to `check_code_survey`."
+                    ),
+                ])];
+                let error = check_behavior_test_design(&reading)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("one direct check covers 2 criteria"),
+                    "{cited}: {error}"
+                );
+            }
+            // Two clauses, one each.
+            reading.assumptions = vec![design_survey(&[
+                entry,
+                gates,
+                stop,
+                reuse,
+                output,
+                &at(3),
+                &at(4),
+            ])];
+            check_behavior_test_design(&reading).unwrap();
+            assert_eq!(cited_criteria("criteria 1-4"), [1, 2, 3, 4]);
+            assert_eq!(cited_criteria("Criterion 2 counts 3"), [2]);
+            assert_eq!(cited_criteria("no number"), Vec::<usize>::new());
+        }
+
+        #[test]
+        fn design_check_wants_a_measurement_and_a_subject_in_each_direct_check() {
+            // Words about the code are not a measurement; a name alone is not one either.
+            assert_design_refused(
+                &with_direct("directly calls `refusing_check` through the gates"),
+                &["(d)", "states no measurement"],
+            );
+            assert_design_refused(
+                &with_direct("`check_code_survey`"),
+                &["(d)", "states no measurement"],
+            );
+            assert_design_refused(
+                &with_direct("asserts `names_record_evidence` returns true"),
+                &["(d)", "names no entry point, gate or model call"],
+            );
+            // A name that merely contains an entry point name is not that name.
+            assert_design_refused(
+                &with_direct("asserts `refusing_check_twice` returns true"),
+                &["names no entry point"],
+            );
+        }
+
+        #[test]
+        fn design_check_routine_criteria_need_no_direct_check() {
+            let [entry, gates, stop, reuse, output, direct] = complete_parts();
+            let survey = design_survey(&[entry, gates, stop, reuse, output, direct]);
+            for routine in [
+                "cargo fmt, clippy and test pass",
+                "existing tests pass",
+                "cargo test -p athena-cli passes",
+                "Run `cargo test -p athena-core`; existing tests pass",
+                "No unrelated behavior changes: cargo fmt --check, cargo clippy and cargo test pass on the final tree, as a recorded Athena check on the same tree.",
+                "Run `cargo test --locked --test refusal_corpus`: all tests pass",
+            ] {
+                assert!(is_routine_criterion(routine), "{routine}");
+                let mut reading = design_reading(&survey);
+                add_behavior(&mut reading, routine);
+                check_behavior_test_design(&reading).unwrap_or_else(|e| panic!("{routine}: {e}"));
+            }
+            // A criterion with an added property is not routine and is named when it has no clause.
+            for other in [
+                "cargo test passes and the greeting prints hello",
+                "Run `cargo test`: the new unit test passes",
+            ] {
+                assert!(!is_routine_criterion(other), "{other}");
+                let mut reading = design_reading(&survey);
+                add_behavior(&mut reading, other);
+                let error = check_behavior_test_design(&reading)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("behavior criterion 2"), "{error}");
+            }
+            // A reading whose only behavior criterion is routine needs no Direct check at all.
+            let mut only = design_reading(&design_survey(&[entry, gates, stop, reuse, output]));
+            only.acceptance_criteria = vec![Criterion {
+                text: "cargo fmt, clippy and test pass".into(),
+                kind: CriterionKind::Behavior,
+            }];
+            check_behavior_test_design(&only).unwrap();
+        }
+
+        #[test]
+        fn design_check_record_output_needs_an_accepted_kind_or_a_round_trip_deliverable() {
+            let [entry, gates, stop, reuse, _, direct] = complete_parts();
+            let with_output =
+                |output: &str| design_survey(&[entry, gates, stop, reuse, output, direct]);
+            for output in [
+                "Output: `athena.failure-class/1`.",
+                "Output: a `athena.landing/1` record.",
+                "Output: `AnyRecord::FailureClass`.",
+                "Output: `AnyRecord::Candidate2`.",
+                "Output: `HistoryRecord::LandingIntent`.",
+                "Output: `check_record_file` accepts it.",
+            ] {
+                assert_design_ok(&with_output(output));
+            }
+            for (output, needle) in [
+                ("Output: `athena.madeup/1`.", "athena.madeup/1"),
+                ("Output: `AnyRecord::Nonsense`.", "AnyRecord::Nonsense"),
+                (
+                    "Output: `HistoryRecord::Request`.",
+                    "HistoryRecord::Request",
+                ),
+                ("Output: `AnyRecord`.", "names no accepted record kind"),
+                (
+                    "Output: a new typed record.",
+                    "names no accepted record kind",
+                ),
+                ("Output: `AnyRecord::<Variant>`.", "AnyRecord::<Variant>"),
+            ] {
+                assert_design_refused(&with_output(output), &["(c)", needle]);
+            }
+            // A round-trip test counts when a criterion names it and a deliverable can hold it.
+            let round_trip = "Output: the `records_round_trip_every_kind` test.";
+            let mut reading = code_reading(&[&with_output(round_trip)], &[MODIFY_READING]);
+            let error = check_behavior_test_design(&reading)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("(c)") && error.contains("round-trip test"),
+                "{error}"
+            );
+            add_behavior(
+                &mut reading,
+                "Run `cargo test`: `records_round_trip_every_kind` passes",
+            );
+            reading.deliverables.push(Deliverable {
+                path: "crates/athena-data/tests/records.rs".into(),
+                action: DeliverableAction::Create,
+                p: 0.9,
+            });
+            reading.assumptions = vec![format!(
+                "{} Direct check: criterion 2 asserts `refusing_check` runs `records_round_trip_every_kind`.",
+                with_output(round_trip)
+            )];
+            check_behavior_test_design(&reading).unwrap_or_else(|e| panic!("{e}"));
+            // `no new output` beside a record deliverable contradicts the deliverables.
+            let mut contradiction = design_reading(&with_output(D_OUTPUT));
+            contradiction.deliverables.push(Deliverable {
+                path: "crates/foo/src/records.rs".into(),
+                action: DeliverableAction::Modify,
+                p: 0.9,
+            });
+            let error = check_behavior_test_design(&contradiction)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("says no new output"), "{error}");
+        }
+
+        #[test]
+        fn record_kinds_match_the_enums() {
+            fn parse(source: &str, name: &str) -> Vec<(String, String)> {
+                let body = source
+                    .split(&format!("pub enum {name} {{"))
+                    .nth(1)
+                    .and_then(|rest| rest.split("\n}\n").next())
+                    .unwrap();
+                let mut out = Vec::new();
+                let mut lines = body.lines().map(str::trim);
+                while let Some(line) = lines.next() {
+                    if let Some(rest) = line.strip_prefix("#[serde(rename = \"") {
+                        let tag = rest.split('"').next().unwrap().to_string();
+                        let variant = lines
+                            .by_ref()
+                            .find(|l| !l.starts_with("///") && !l.starts_with("#["))
+                            .unwrap();
+                        out.push((variant.split('(').next().unwrap().to_string(), tag));
+                    }
+                }
+                out
+            }
+            let any = parse(
+                include_str!("../../athena-data/src/records.rs"),
+                "AnyRecord",
+            );
+            let history = parse(
+                include_str!("../../athena-data/src/history.rs"),
+                "HistoryRecord",
+            );
+            assert!(!any.is_empty() && !history.is_empty());
+            for (name, parsed) in [("AnyRecord", &any), ("HistoryRecord", &history)] {
+                let listed: Vec<(String, String)> = RECORD_KINDS
+                    .iter()
+                    .filter(|(e, _, _)| *e == name)
+                    .map(|(_, v, t)| (v.to_string(), t.to_string()))
+                    .collect();
+                assert_eq!(&listed, parsed, "{name}");
+            }
+            assert_eq!(any.len() + history.len(), RECORD_KINDS.len());
+            let unknown = |error: serde_json::Error| error.to_string().contains("unknown variant");
+            for (enum_name, _, tag) in RECORD_KINDS {
+                let json = format!("{{\"schema\":\"{tag}\"}}");
+                let rejected = match enum_name {
+                    "AnyRecord" => serde_json::from_str::<AnyRecord>(&json)
+                        .err()
+                        .is_some_and(unknown),
+                    _ => serde_json::from_str::<athena_data::history::HistoryRecord>(&json)
+                        .err()
+                        .is_some_and(unknown),
+                };
+                assert!(!rejected, "{tag}");
+            }
+            let json = "{\"schema\":\"athena.madeup/1\"}";
+            assert!(
+                serde_json::from_str::<AnyRecord>(json)
+                    .err()
+                    .is_some_and(unknown)
+            );
+            assert!(
+                serde_json::from_str::<athena_data::history::HistoryRecord>(json)
+                    .err()
+                    .is_some_and(unknown)
+            );
+        }
+
+        #[test]
+        fn design_check_refuses_a_skip_switch_or_a_helper_read_as_the_measurement() {
+            for text in [
+                "asserts `refusing_check` is run through a skip switch",
+                "asserts `refusing_check` refuses when `skip_probe` is set",
+                "asserts `refusing_check` with disable_probe on",
+                "asserts `refusing_check` stops with --no-probe",
+                "counts the calls `refusing_check` makes with ATHENA_NO_PROBE=1",
+                "asserts `refusing_check` reads an internal helper",
+                "checks `refusing_check` by reading an internal helper",
+                // A negator that governs another word does not carry.
+                "asserts `refusing_check`: the probe does not run when ATHENA_NO_PROBE=1 is set",
+                "counts no model calls using `skip_probe`",
+                "asserts the probe is not run with ATHENA_NO_PROBE and `refusing_check` stops",
+                "asserts `refusing_check` is not `skip_probe` but ATHENA_NO_PROBE=1",
+            ] {
+                assert_design_refused(
+                    &with_direct(text),
+                    &["(d)", "skip switch or an internal helper"],
+                );
+            }
+            // A skip switch hidden in the reuse or the gate order is caught when the direct check cites it.
+            let [entry, gates, stop, _, output, _] = complete_parts();
+            assert_design_refused(
+                &design_survey(&[
+                    entry,
+                    gates,
+                    stop,
+                    "Reuses: `skip_probe`.",
+                    output,
+                    "Direct check: criterion 1 counts the calls `refusing_check` makes with `skip_probe` set.",
+                ]),
+                &["skip_probe"],
+            );
+            let skip_gate = design_survey(&[
+                entry,
+                "Gate order: `skip_probe`, `check_code_survey`.",
+                stop,
+                "Reuses: `has_phrase`.",
+                output,
+                "Direct check: criterion 1 counts the calls to `skip_probe`.",
+            ]);
+            assert_design_refused(&skip_gate, &["skip_probe"]);
+            // The same gate in the order is fine when the direct check cites the entry point.
+            assert_design_ok(&skip_gate.replace(
+                "counts the calls to `skip_probe`",
+                "counts the calls `refusing_check` makes to `check_code_survey`",
+            ));
+            // A behavior criterion that measures through a skip switch or a helper is refused; the negated one is not.
+            for text in [
+                "Run `cargo test`: the greeting is measured through a skip switch",
+                "Run `cargo test`: the rule is checked by reading an internal helper",
+            ] {
+                let mut reading = design_reading(&design_survey(&complete_parts()));
+                reading.acceptance_criteria[0].text = text.into();
+                let error = check_behavior_test_design(&reading)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("criterion 1 measures through"),
+                    "{text}: {error}"
+                );
+            }
+        }
+
+        #[test]
+        fn design_check_accepts_a_negated_mention_and_names_that_look_like_switches() {
+            for text in [
+                "asserts `refusing_check` is not a skip switch or a read of an internal helper",
+                "counts calls to `refusing_check`, not a skip switch, `skip_probe` or ATHENA_NO_PROBE",
+                "asserts `refusing_check` never by reading an internal helper or adding a skip switch",
+                "counts calls to `refusing_check`, not `skip_probe`",
+                "counts calls to `refusing_check` without ATHENA_NO_PROBE",
+                "counting planner, producer or model calls, not reads of an internal helper and not a skip switch added just for the test",
+                // Names that merely look like switches.
+                "asserts `refusing_check` reads INPUT_FORMS and MAX_ROUNDS and line_no",
+                "asserts `refusing_check` reports `no_change` and no_change_reason",
+            ] {
+                assert_design_ok(&with_direct(text));
+            }
+            let [entry, _, stop, reuse, output, direct] = complete_parts();
+            // A skip-named gate that the direct check does not cite.
+            assert_design_ok(&design_survey(&[
+                entry,
+                "Gate order: `skip_probe`, `check_code_survey`.",
+                stop,
+                reuse,
+                output,
+                direct,
+            ]));
+            // A behavior criterion that says it does not measure through a switch.
+            let mut reading = design_reading(&design_survey(&complete_parts()));
+            reading.acceptance_criteria[0].text =
+            "Run `cargo test`: the greeting is not measured through a skip switch or an internal helper".into();
+            check_behavior_test_design(&reading).unwrap();
+            // The identifier rule: leading part only, field names exempt.
+            for yes in [
+                "skip_probe",
+                "ATHENA_NO_PROBE=1",
+                "--no-probe",
+                "disable_probe",
+                "`bypass_gate`",
+            ] {
+                assert!(skip_identifier(yes), "{yes}");
+            }
+            for no in [
+                "INPUT_FORMS",
+                "MAX_ROUNDS",
+                "line_no",
+                "no_change",
+                "no_change_reason",
+                "no",
+                "skip",
+                "check_code_survey",
+            ] {
+                assert!(!skip_identifier(no), "{no}");
+            }
+        }
+
+        #[test]
+        fn design_check_accepts_the_guide_example_and_the_template_of_the_survey_error() {
+            use athena_context::briefs::CODE_SURVEY_EXAMPLE;
+            let reading = design_reading(CODE_SURVEY_EXAMPLE);
+            check_code_survey(&reading).unwrap();
+            check_behavior_test_design(&reading).unwrap();
+            assert_eq!(gate_refuser_raw(&reading), None);
+            // The error of `check_code_survey` ends its instruction with the same example, and following it passes both steps.
+            let error = check_code_survey(&code_reading(&[], &[MODIFY_READING]))
+                .unwrap_err()
+                .to_string();
+            let template = error.split("Example: ").nth(1).unwrap();
+            assert_eq!(template, CODE_SURVEY_EXAMPLE);
+            let followed = design_reading(template);
+            check_code_survey(&followed).unwrap();
+            check_behavior_test_design(&followed).unwrap();
+        }
+
+        #[test]
+        fn guide_labels_match_the_parser() {
+            use athena_context::briefs::{CODE_SURVEY_EXAMPLE, CODE_SURVEY_GUIDE};
+            let example = CODE_SURVEY_EXAMPLE.to_lowercase();
+            let guide = CODE_SURVEY_GUIDE.to_lowercase();
+            for label in SURVEY_LABELS {
+                // `existing code:` is an alias that the example and the guide leave out.
+                if label == "existing code:" {
+                    continue;
+                }
+                assert!(example.contains(label), "{label}");
+                assert!(guide.contains(label.trim_end_matches(':')), "{label}");
+            }
+            assert!(CODE_SURVEY_GUIDE.contains("check_behavior_test_design"));
+        }
+
+        #[test]
+        fn design_check_replay_share_is_within_the_declared_range() {
+            // Ten stored readings: three code readings with the short survey (newly refused), three with the complete
+            // survey, four docs readings. Both builds run the real rules; the base is what accepted the short survey.
+            let case = |n: usize, kind: &str| {
+                let mut reading = match kind {
+                    "short" => code_reading(&[SURVEY], &[MODIFY_READING]),
+                    "complete" => with_design(&code_reading(&[SURVEY], &[MODIFY_READING])),
+                    _ => {
+                        let mut docs = code_reading(&[], &[MODIFY_READING]);
+                        docs.class_of_work = "docs".into();
+                        docs
+                    }
+                };
+                reading.job = JobId::parse(&case_id(n)).unwrap();
+                ReplayCase {
+                    job: reading.job.clone(),
+                    request: "change the reading rules".into(),
+                    reading,
+                }
+            };
+            let kinds = [
+                "short", "short", "short", "complete", "complete", "complete", "docs", "docs",
+                "docs", "docs",
+            ];
+            let cases: Vec<ReplayCase> =
+                kinds.iter().enumerate().map(|(n, k)| case(n, k)).collect();
+            // The base build did not have the new step: it judges each reading with the complete survey added.
+            let base = |request: &str, reading: &Reading| {
+                Ok(check_reading_text(&with_design(reading), request))
+            };
+            let candidate =
+                |request: &str, reading: &Reading| Ok(check_reading_text(reading, request));
+            let mut reading = reading_with_criterion(
+                "The change refuses more readings; expected 30% of newly refused readings, because the check now \
+             asks for new required labels that past readings never used",
+            );
+            reading.out_of_scope = vec![];
+            let declaration = replay_declaration_of(&reading);
+            assert_eq!(declaration.share, Some(30));
+            assert!(declaration.reason.is_some());
+            let run = replay(&cases, &base, &candidate, declaration.effective_share());
+            assert_eq!(run.no_replay, None);
+            assert!(!run.held, "{:?}", run.newly_refused);
+            assert_eq!(run.total, 10);
+            assert!(!run.newly_refused.is_empty());
+            assert!(
+                run.newly_refused.len() * 100 <= run.total * replay_limit_percent(Some(30)),
+                "{:?}",
+                run.newly_refused
+            );
+            // Every newly refused reading is accepted once the complete survey is added: nothing else refuses it.
+            for refusal in &run.newly_refused {
+                let case = cases.iter().find(|c| c.job == refusal.job).unwrap();
+                assert!(
+                    refusal.reason.contains("check_behavior_test_design"),
+                    "{}",
+                    refusal.reason
+                );
+                assert_eq!(
+                    check_reading_text(&with_design(&case.reading), &case.request),
+                    ReadingCheck::Accept
+                );
+            }
+            // A candidate that refuses every code reading is held.
+            let strict =
+                |request: &str, reading: &Reading| match check_reading_text(reading, request) {
+                    ReadingCheck::Accept if reading.class_of_work == "code" => {
+                        Ok(ReadingCheck::Refuse("too broad".into()))
+                    }
+                    other => Ok(other),
+                };
+            let held = replay(&cases, &base, &strict, declaration.effective_share());
+            assert!(held.held);
+        }
+
+        #[test]
+        fn design_check_refusal_is_declared_intended() {
+            let source = reading_source();
+            let doc = source
+                .split("pub fn check_behavior_test_design")
+                .next()
+                .unwrap()
+                .rsplit("\n\n")
+                .next()
+                .unwrap();
+            for needle in [
+                "This check refuses more readings; the higher refusal rate is intended.",
+                "expected 30% of newly refused readings",
+                "20261028-055601-hg0n",
+                "20261028-082151-67fa",
+                "20261028-055651-dhh0",
+                "20261028-082240-77as",
+                "SCHEMA_TAGS",
+                "skip_whitespace",
+                "no_change",
+            ] {
+                assert!(doc.contains(needle), "{needle}");
+            }
+        }
+
+        #[test]
+        fn design_check_changelog_entry_states_the_rule() {
+            let changelog = include_str!("../../../CHANGELOG.md")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let unreleased = changelog
+                .split("## [Unreleased]")
+                .nth(1)
+                .expect("an Unreleased section")
+                .split(" ## [")
+                .next()
+                .unwrap();
+            for needle in [
+                "check_behavior_test_design",
+                "refuses more readings",
+                "the higher refusal rate is intended",
+                "expected 30% of newly refused readings",
+                "queued proposed readings may need a re-read",
+                "CODE_SURVEY_EXAMPLE",
+                "SCHEMA_TAGS",
+                "no_change",
+                "skip_whitespace",
+                "local negation",
+                "routine",
+            ] {
+                assert!(unreleased.contains(needle), "{needle}");
+            }
+        }
+    }
+
     /// A behavior criterion that names a realistic-branch fixture with the three shapes the check requires.
     const HISTORY_FIXTURE_CRITERION: &str = "Run `cargo test -p athena-cli --test reconcile`: on a \
          realistic-branch fixture with an intervention commit, a records-only commit and the job landing, the \
@@ -7281,12 +8169,19 @@ mod tests {
 
     /// The first refusing check of the reading, as the gate runs them.
     fn gate_refuser(reading: &Reading) -> Option<&'static str> {
-        refusing_check(reading, "change the reading rules", None, &[], None).map(|(name, _)| name)
+        refusing_check(
+            &with_design(reading),
+            "change the reading rules",
+            None,
+            &[],
+            None,
+        )
+        .map(|(name, _)| name)
     }
 
     /// The first refusing check of the reading for this request, as the gate runs them.
     fn refuser_for(reading: &Reading, request: &str) -> Option<&'static str> {
-        refusing_check(reading, request, None, &[], None).map(|(name, _)| name)
+        refusing_check(&with_design(reading), request, None, &[], None).map(|(name, _)| name)
     }
 
     /// A reading that passes every check for a docs change, plus these assumptions.
@@ -8221,7 +9116,11 @@ mod tests {
             .iter()
             .position(|l| *l == "step!(check_code_survey(reading));")
             .unwrap();
-        assert_eq!(steps[survey + 1], line);
+        assert_eq!(
+            steps[survey + 1],
+            "step!(check_behavior_test_design(reading));"
+        );
+        assert_eq!(steps[survey + 2], line);
         let acceptance_doc = source
             .split("pub fn check_reading_acceptance(")
             .next()
@@ -8379,7 +9278,7 @@ mod tests {
             error
         );
         // The stored-reading seam (drain, plan, steward and `athena check-reading`) refuses it too.
-        match check_reading_text(&reading, "change the reading rules") {
+        match check_reading_text(&with_design(&reading), "change the reading rules") {
             ReadingCheck::Refuse(reason) => {
                 assert!(reason.contains("real records"), "{reason}");
                 assert!(reason.contains("\"landing time\""), "{reason}");
@@ -8522,7 +9421,7 @@ mod tests {
         assert_eq!(gate_refuser(&reading), None);
         accept(&reading).unwrap();
         assert_eq!(
-            check_reading_text(&reading, "change the reading rules"),
+            check_reading_text(&with_design(&reading), "change the reading rules"),
             ReadingCheck::Accept
         );
         // The example in the refusal text satisfies the check it comes from.
