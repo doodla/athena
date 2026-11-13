@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-205925-c3n6",
+  "round": 1,
+  "at": "2026-11-13T21:05:51.086081728Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The existing config test roles_without_sonnet_are_refused breaks, and the dependents list omits it",
+      "evidence": "`roles_without_sonnet_are_refused` uses `edited()` on REPO_CONFIG to set `producer_allowed = [\"claude-haiku-5-5\"]` and expects `ConfigError::ModelFamily(\"sonnet\")` through `family_refused`. After step 5, REPO_CONFIG also holds `planner_revision_model = \"claude-sonnet-5-5\"`. Step 3 adds the check that this model is in producer_allowed next to the hard_producer_model check at config.rs:677-681, which runs before the family loop at 685-695. The parse then returns PlannerRevisionNotAllowed and the `matches!` assertion fails. The test survives today only because it also rewrites `hard_producer_model`. The Dependents entry for Models names only `a_config_without_effort_keys_still_parses_with_the_default_effort` and the REPO_CONFIG parse. Fix: Choose one fix and state it in the plan. Either (a) place the planner_revision_model membership check after the OLY-B-SET-02 family loop, or (b) extend the test's `edited()` list to also rewrite `planner_revision_model = \"claude-sonnet-5-5\"` to haiku, in the same way as hard_producer_model. Add `roles_without_sonnet_are_refused` and the other `family_refused` tests (config.rs:1383-1440) to the Dependents list, with `cargo test -p athena-data roles_without` as their test.",
+      "location": "Plan step 3 and the Dependents entry 'Models struct'; crates/athena-data/src/config.rs:1393-1413 and 677-695",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The model 'not weaker' rule rests on list order that nothing enforces. The planned mitigation pins only this repo's order.",
+      "evidence": "producer_allowed is used elsewhere only as a membership set (config.rs:650-681; reading.rs:795). Nothing documents or checks its order today. The accepted reading assumes the order, so the design is allowed. Still, a config that lists sonnet before haiku would make a haiku revision key count as stronger and quietly lower the model. Fix: Keep the design. Also make the athena.toml comment and the field doc comment say that a key is ignored whenever it is earlier in the list than the current model. Add a config.rs table row with a reversed producer_allowed so the documented behavior under reordering is pinned, not just the repo's current order.",
+      "location": "Decision 2 and Risks 1; Models::planner_revision_setting",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Clearing the keys in reading_inputs also hides a change of them from the steward's settings-change re-read logic, and the plan does not say so",
+      "evidence": "`reread_changed_scope` compares `config_sha256` of consecutive readings. This is consistent with `job_plan` already being cleared (config.rs:639), so the behavior is fine. But the plan's dependents list names capability.rs, pin.rs and mod.rs and not this reader of the digest. Fix: Add steward.rs:365 (`reread_changed_scope`) and gate jobs.rs:466 to the 'reading config digest' dependent. Give the reason that a planner-only setting does not change scope, the same as [job_plan].",
+      "location": "Decision 5; crates/athena-core/src/steward.rs:365",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The drain.rs test checks only the parsed config, not anything the owner sees",
+      "evidence": "The drain.rs test calls `Config::parse` and `planner_revision_setting` on `common::test_config()`. It needs no CLI crate and duplicates what a config.rs test on REPO_CONFIG would show. What the owner actually sees is covered by the core test's `Lines` assertion. Fix: Optionally move this assertion into the config.rs tests over REPO_CONFIG and leave drain.rs unchanged. Or keep it, but give it a shorter name that still matches the `planner_revision` filter.",
+      "location": "Demonstration for criterion 5; Plan step 8",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the request and the accepted reading. It adds dedicated planner_revision_* keys and leaves hard_producer_* alone. It escalates only when `round > 1 || mechanical_passes > 0`, which matches planning.rs:41-71 and keeps round 1 and a seeded retry's first call unchanged. It overrides `spec.effort` after `agent_spec`, the same pattern as producer.rs:340. The override is recorded because invocation.rs:202 and :244 copy `spec.effort`. Clearing the keys in `reading_inputs` matches how `job_plan` is treated (config.rs:635-644). I checked the CHANGELOG claim that the model part changes nothing in this repo, and it holds: athena.toml sets `[job_plan] mode = \"hard\"`, so only hard readings are planned, and their producer_model is hard_producer_model, claude-sonnet-5-5 (reading.rs:869-871). The demonstrations use seams that exist: `athena_with`, `planning_script`, `good_plan`/`bad_plan`, `revising_critique`, `Lines` and `repo_with_config`. The base reader in the tests picks claude-haiku-5-5 with no hard_reason (run/tests.rs:232), so the expected round-1 setting (haiku, high) is right. One existing test breaks, and the dependents list does not name it. `roles_without_sonnet_are_refused` (config.rs:1393-1413) narrows producer_allowed to haiku only but keeps REPO_CONFIG's new `planner_revision_model = \"claude-sonnet-5-5\"`. If the new membership check runs before the OLY-B-SET-02 family check, as step 3 implies by placing it beside the hard_producer check at config.rs:677-681, the test gets PlannerRevisionNotAllowed instead of ModelFamily(\"sonnet\") and fails. The fix is small. Other findings are minor."
+}

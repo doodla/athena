@@ -18,6 +18,9 @@ impl Athena {
     /// critic's look at one plan. When Athena's own plan rules find a blocker or major problem in a plan,
     /// the plan goes straight back to the planner, with no critic call and without using the round, up to
     /// [`MAX_MECHANICAL_PASSES`] times per round; a plan that still breaks a rule after that stops the job.
+    /// Round 1's first call runs at the ordinary planner model and effort; every later call, after a critic
+    /// revise or a mechanical revision, runs at `[models] planner_revision_*` where set and not weaker
+    /// (see `Models::planner_revision_setting`).
     /// A critic's revise sends the planner a revision brief that quotes the previous plan and every
     /// finding. On accept, the invocations, plans and critiques go into `closing` and the rendered
     /// producer section is returned. Reject, a reading the critic judged a misread, revise in the last
@@ -135,9 +138,15 @@ impl Athena {
         let composed = compose(&[CONTRACT.into(), PLANNER_FRAME.into()]);
         crate::pin::remove_tree(&snap_dir)?;
         Snapshot::create(&self.git, &p, &p, &snap_dir, SnapshotRepo::PlainWithHistory)?;
-        let model = ctx.reading.producer_model.clone();
+        // A revision call (after a critic revise or a mechanical plan-rule revision) may run at the
+        // `[models] planner_revision_*` setting; round 1 and a seeded first call keep the ordinary one.
+        let mut model = ctx.reading.producer_model.clone();
+        let mut effort = jc.config.effort_for(Role::Planner).to_string();
+        if round > 1 || mechanical_passes > 0 {
+            (model, effort) = jc.config.models.planner_revision_setting(&model, &effort);
+        }
         let seq = ctx.next_seq(closing);
-        let spec = self.agent_spec(
+        let mut spec = self.agent_spec(
             jc,
             &id,
             seq,
@@ -153,6 +162,7 @@ impl Athena {
             cfg.planner_timeout_s,
             plan_schema(),
         )?;
+        spec.effort = effort.clone();
         let invoked = self.invoke_and_record(
             &InvocationFacts {
                 job: &id,
@@ -172,7 +182,7 @@ impl Athena {
             }
         };
         ctx.ui.line(&format!(
-            "planner    {model} · {:.0}s · {}",
+            "planner    {model} · {effort} · {:.0}s · {}",
             output.wall_s,
             cost_text(&record)
         ));

@@ -1,0 +1,327 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261113-205925-c3n6",
+  "round": 1,
+  "at": "2026-11-13T21:03:49.419545962Z",
+  "invocation_seq": 2,
+  "approach": "Add two optional keys to `Models` in config.rs: `planner_revision_model` and `planner_revision_effort`. Both are validated like the hard_producer_* keys. A new `Models::planner_revision_setting(model, effort)` returns the setting for a revision call. Each part is used only if the key is set and not weaker than the current planner value. Effort is ranked by position in `EFFORT_LEVELS`. The model is ranked by position in `producer_allowed`, which is weakest first. A weaker or unrankable value leaves that part unchanged. In `planning_round` (planning.rs), a call is a revision call when `round > 1 || mechanical_passes > 0`. That covers a critic revise and a mechanical plan-rule revision, and leaves round 1 pass 0 alone, including a seeded retry's first call. A revision call computes the planner's model and effort through the new function. It sets `spec.effort` after `agent_spec`, as producer.rs:338 does for the producer. It prints the effort in the `planner` UI line. The recorded invocation then carries the model and effort, because invocation.rs:202 records `spec.model` and `spec.effort`. `reading_inputs` clears both keys, so setting them in athena.toml does not invalidate stored readings. athena.toml sets `planner_revision_model = \"claude-sonnet-5-5\"` and `planner_revision_effort = \"xhigh\"`. Docs and CHANGELOG state the effective settings. `producer_setting` and `hard_producer_*` are not touched or read on the planner path.",
+  "decisions": [
+    {
+      "choice": "Dedicated keys planner_revision_model and planner_revision_effort, never derived from hard_producer_*.",
+      "reason": "In this repo hard_producer_model is claude-sonnet-5-5 and hard_producer_effort is high (athena.toml:25-26). The planner of a hard job already runs on the hard producer model (reading.rs:869-886) at verifier_effort, which is high (config.rs:835, athena.toml:21). Reusing hard_producer_* would change nothing, and in another config could lower the setting. Dedicated keys can be set above the planner's own setting.",
+      "rejected": [
+        {
+          "option": "Reuse hard_producer_model and hard_producer_effort via producer_setting",
+          "why": "A no-op here (same model, same effort), and it can lower the planner setting. The request forbids it."
+        },
+        {
+          "option": "Add a revision escalation that bumps effort one level in code",
+          "why": "It hides the rule from athena.toml and has no owner-chosen value; the request asks for keys."
+        }
+      ]
+    },
+    {
+      "choice": "Judge 'not weaker' in code: effort by index in EFFORT_LEVELS, model by index in producer_allowed (weakest first). A part that would lower the value, or whose current value cannot be ranked, is ignored on its own.",
+      "reason": "The rule is enforced by mechanism and tested. Both ranks exist today: EFFORT_LEVELS is weakest first (config.rs:336-337) and athena.toml:14 lists haiku before sonnet. reading.rs:795 makes the current planner model a member of producer_allowed.",
+      "rejected": [
+        {
+          "option": "Ignore both keys together when either would lower the setting",
+          "why": "The reading says only that part falls back."
+        },
+        {
+          "option": "Hard-code a model family order (haiku < sonnet < opus)",
+          "why": "Brittle on version bumps; the allowed list already carries the order."
+        }
+      ]
+    },
+    {
+      "choice": "Escalate when `round > 1 || mechanical_passes > 0`, in `planning_round`.",
+      "reason": "It is exactly a call after a critic revise (round advances in plan_round, planning.rs:41) or after a mechanical revision (passes counted, planning.rs:68-70). A seeded first call has `revision` Some but is neither, so testing `revision.is_some()` would wrongly escalate it.",
+      "rejected": [
+        {
+          "option": "Escalate whenever `revision` is Some",
+          "why": "A seeded retry's first call (planning.rs:39-40, 48-52) would escalate, against 'round 1 is unchanged'."
+        }
+      ]
+    },
+    {
+      "choice": "Set `spec.effort` after `agent_spec` rather than change `effort_for` or `agent_spec`.",
+      "reason": "Same pattern as the producer (producer.rs:338-340). `effort_for(Role::Planner)` stays the baseline and no other caller of `agent_spec` changes.",
+      "rejected": [
+        {
+          "option": "Add a revision flag to `agent_spec`",
+          "why": "It has about 14 parameters and many callers; the override is local to the planner."
+        }
+      ]
+    },
+    {
+      "choice": "Clear both keys in `Config::reading_inputs`, like `job_plan`.",
+      "reason": "They do not change what the reader sees or what a job may do (D38). Without the reset, adding them to athena.toml changes the config digest (capability.rs:45) and stales readings. They are skipped in serialization when None, so existing digests hold.",
+      "rejected": [
+        {
+          "option": "Leave them in the digest",
+          "why": "Setting them would invalidate every stored reading for no reason."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add `planner_revision_model` and `planner_revision_effort` to `Models`, with a doc comment that producer_allowed is ordered weakest first. Add `Models::planner_revision_setting(model, effort)`. Add `ConfigError::PlannerRevisionNotAllowed` and validation (effort via the existing loop, model in producer_allowed). Reset both keys in `reading_inputs`. Add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "In `planning_round`, compute the planner model and effort (escalated when `round > 1 || mechanical_passes > 0`), set `spec.effort`, and show the effort in the `planner` UI line. Do not touch producer_setting or hard_producer_*.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the helpers and the tests for a critic revise, a mechanical revision, weaker keys, unset keys and the UI line. Make `repo_with_config` strip planner_revision_* lines.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "Add `planner_revision_model = \"claude-sonnet-5-5\"` and `planner_revision_effort = \"xhigh\"` under [models], with a comment. This is a governance file; the brief lists it as a deliverable.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under [Unreleased] ### Added with the keys, the rule, and the effective planner model and effort in this repo with and without the change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D179 after D178 with Provenance. No existing entry is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "Extend the OLY-A-11 mechanism text to mention the revision setting `[models] planner_revision_*`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add a test `the_repository_config_escalates_the_planner_effort_on_a_revision_planner_revision` that parses `common::test_config()` and checks the effective revision setting.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "config.rs: add the two `Option<String>` fields to `Models` with `#[serde(default, skip_serializing_if = \"Option::is_none\")]` and doc comments (no-weaker rule; producer_allowed is weakest first; independent of hard_producer_*).",
+    "config.rs: add `Models::planner_revision_setting(&self, model: &str, effort: &str) -> (String, String)`. The effort part is the key when set and its EFFORT_LEVELS index is at least the current effort's index, else the current effort. The model part is the key when set and its producer_allowed index is at least the current model's index (both found), else the current model.",
+    "config.rs: add `ConfigError::PlannerRevisionNotAllowed(String)`. In `validate`, add `planner_revision_effort` to the effort-check array beside hard_producer_effort (config.rs:665-676), and check the model is in producer_allowed. In `reading_inputs`, set both fields to None on the clone, with a doc note.",
+    "planning.rs `planning_round`: compute `escalate = round > 1 || mechanical_passes > 0`. Start from `ctx.reading.producer_model` and `jc.config.effort_for(Role::Planner)`. When `escalate`, replace them with `jc.config.models.planner_revision_setting(..)`. Pass the model to `agent_spec`, bind `let mut spec`, set `spec.effort`, and change the UI line to `planner    {model} · {effort} · {wall}s · {cost}`. Update the doc comment of `plan_round` to say the revision setting applies.",
+    "athena.toml: under [models] after hard_producer_effort add a comment (revision calls only; each part used only if not weaker than the planner's own setting; producer_allowed is weakest first; Opus cannot be named because it may not produce) and the two keys, `claude-sonnet-5-5` and `xhigh`.",
+    "run/tests.rs: make `repo_with_config` also drop lines starting `planner_revision_`. Add `repo_with_revision_keys(max_rounds, model: Option<&str>, effort: Option<&str>)`, which inserts the key lines after the `[models]` header and appends the job_plan text. Add a script wrapper recording `(Role, model, effort)`. Add the tests: `a_critic_revise_sends_the_next_planner_call_at_the_revision_model_and_effort`, and `planner_revision_*` tests for a mechanical pass, weaker keys (reader overridden to claude-sonnet-5-5; weaker model with stronger effort falls back for the model only) and unset keys over 3 rounds with a mechanical pass.",
+    "config.rs tests: keys optional and loaded; out-of-list model and effort refused (add planner_revision_effort to the existing key loop at config.rs:1047-1052); a `planner_revision_setting` table; independence from hard_producer_*; `reading_inputs` digest unchanged by the keys; REPO_CONFIG ordering haiku before sonnet.",
+    "drain.rs: add the test that parses `common::test_config()` and asserts the revision setting differs from the round 1 planner setting in effort and is not weaker in model.",
+    "CHANGELOG.md: add the entry under [Unreleased] ### Added. State: without the change, hard jobs plan at claude-sonnet-5-5 and high in every round. With it, round 1 is unchanged and revision calls run claude-sonnet-5-5 at xhigh. The model part changes nothing here. Name the keys, the rule and the tests.",
+    "docs/decisions.md: append D179 after D178 with Case, Decision, Alternatives (reuse hard_producer_*; code-side bump), Tradeoff, Reversal cost and Provenance (read: planning.rs, config.rs, reading.rs, athena.toml; why dedicated keys; the prior job 20261113-194336-scfc). Edit no existing entry.",
+    "docs/spec.toml: extend the OLY-A-11 `mechanism` string only.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix failures in the files above only."
+  ],
+  "risks": [
+    {
+      "risk": "The model ordering is read from producer_allowed list order, and nothing in code enforces it. A reordered list would invert the model comparison.",
+      "mitigation": "The doc comment on the field and the athena.toml comment state the order. A config.rs test pins it for REPO_CONFIG (haiku before sonnet). The model part is a no-op in this repo anyway."
+    },
+    {
+      "risk": "The effect in this repo is effort only: sonnet is already the planner's model for a hard job, and Opus cannot be named because it may not produce (config.rs:650).",
+      "mitigation": "The CHANGELOG and D179 say so. The drain.rs test asserts the effective difference is in effort (high to xhigh)."
+    },
+    {
+      "risk": "xhigh effort on revision calls may cost more or run longer. `planner_usd` stays 3.00 and `planner_timeout_s` 600 (athena.toml:209-216), so a call could hit its cap.",
+      "mitigation": "The caps are not changed, and a timeout stops planning with the existing reason. Out of scope: raising caps. The change is reversible by deleting two keys."
+    },
+    {
+      "risk": "Adding a key to `Models` while `deny_unknown_fields` is set could stop an older Athena binary from reading the new athena.toml.",
+      "mitigation": "A job reads its config from its own base commit, and the new binary lands with the change. Drain rebuilds Athena after landing its own code (D140)."
+    },
+    {
+      "risk": "Changing `repo_with_config` to strip the keys might hide a regression where the keys leak into a test's config.",
+      "mitigation": "The new tests set the keys explicitly through the helper, and the drain.rs test reads athena.toml as it is."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Models struct: two new optional fields",
+      "dependent": "crates/athena-data/src/config.rs `Models` serde (`deny_unknown_fields`) and the parse of every athena.toml, including `REPO_CONFIG` tests at config.rs:1036-1094",
+      "kind": "code",
+      "test": "cargo test -p athena-data planner_revision (a config without the keys loads; REPO_CONFIG with the keys parses). Existing `a_config_without_effort_keys_still_parses_with_the_default_effort` (config.rs:1071) strips lines containing `_effort`, which also removes planner_revision_effort, and keeps the valid model line, so it still passes.",
+      "reason": null
+    },
+    {
+      "name": "reading config digest",
+      "dependent": "`Config::reading_inputs` and `config_sha256` (crates/athena-core/src/capability.rs:45; crates/athena-core/src/run/pin.rs:146; crates/athena-core/src/run/mod.rs:93)",
+      "kind": "code",
+      "test": "cargo test -p athena-data planner_revision: digest equal with and without the keys, because reading_inputs resets them and the fields are skipped when None. Existing reading_inputs tests (config.rs:1111, 1146) stay.",
+      "reason": null
+    },
+    {
+      "name": "planner effort baseline",
+      "dependent": "`Athena::agent_spec` effort line `jc.config.effort_for(role)` (crates/athena-core/src/reading.rs:443) and `effort_for` (config.rs:830-837)",
+      "kind": "code",
+      "test": null,
+      "reason": "Neither is changed. The override is applied after `agent_spec` in planning_round, so the baseline still comes from `effort_for` and round 1 is identical. Covered by the round 1 assertion (haiku, high) in the criterion 1 test."
+    },
+    {
+      "name": "hard producer setting",
+      "dependent": "`Models::producer_setting` and `hard_producer_*` (config.rs:346-358; reading.rs:869-871, 922; drain.rs:7930-7980)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain a_hard_reading_gets_the_stronger_producer_setting",
+      "reason": "Not changed and not read by the new code, which reads only the planner_revision keys and `producer_allowed`. The existing test `a_hard_reading_gets_the_stronger_producer_setting_...` (drain.rs:7930) still guards it."
+    },
+    {
+      "name": "planner invocation record model and effort",
+      "dependent": "Invocation records (crates/athena-core/src/invocation.rs:202, 244, 290) written from `spec.model` and `spec.effort`",
+      "kind": "code",
+      "test": "cargo test -p athena-core a_critic_revise_sends_the_next_planner_call (reads the Planner invocation records of the finished job)",
+      "reason": null
+    },
+    {
+      "name": "planner UI line gains the effort",
+      "dependent": "UI line `planner    {model} · …` (planning.rs:174-178). Grep found no other reader of the line text in crates/ or docs.",
+      "kind": "code",
+      "test": null,
+      "reason": "Nothing parses it: a grep for `planner    `, `starts_with(\"planner` and `\"critic     ` found only the two format sites in planning.rs. The new core test asserts the new shape."
+    },
+    {
+      "name": "records measure by producer model and effort",
+      "dependent": "crates/athena-core/src/status/planning.rs `producer_settings` (lines 394-420) and `specialization` (484-531), the status measures of model and effort",
+      "kind": "code",
+      "test": null,
+      "reason": "They read only the first Producer invocation's model and effort. Planner invocations are never bucketed, and the plan says no records measure changes (out of scope)."
+    },
+    {
+      "name": "model family rule across configured roles",
+      "dependent": "crates/athena-core/tests/model_roster.rs:24 and the OLY-B-SET-02 family check (config.rs:682-695)",
+      "kind": "rule",
+      "test": null,
+      "reason": "planner_revision_model must be a member of producer_allowed, so it adds no new family and is not added to the family list. The rule's inputs are unchanged."
+    },
+    {
+      "name": "planner cost caps",
+      "dependent": "Budget reserve `budget_reserve` and `ReserveStage::Planner` (config.rs `planning_usd`; planning.rs:113)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The reserve is computed from the unchanged `planner_usd`, `critic_usd` and `max_rounds` caps, not from model or effort. A higher effort may spend more per call but stays under the same cap."
+    },
+    {
+      "name": "decision governs check",
+      "dependent": "D156 governed paths in docs/decision-links.toml:219-224 (D08: snapshot.rs, candidate.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan touches neither governed path, so no `[[link]]` is needed for the new entry. The new decision supersedes nothing, so condition (a) of `athena backtest` adds no hit."
+    },
+    {
+      "name": "athena.toml now sets planner_revision_*",
+      "dependent": "crates/athena-cli/tests/job_plan.rs, tests/lifecycle.rs and other cli tests that run planning on `test_config()` (athena.toml minus job_plan)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli (the full suite in the test check)",
+      "reason": "They count and order calls and read prompts. A grep of job_plan.rs for `model` and `effort` found no assertion on the planner's model or effort (the one hit, job_plan.rs:1554, is a literal record fixture). Revision calls now run at sonnet and xhigh, which the fake driver accepts the same way."
+    },
+    {
+      "name": "test repository config copied from athena.toml",
+      "dependent": "Existing core planning tests in run/tests.rs (for example lines 1305-1530) that build repos through `repo_with_config`",
+      "kind": "code",
+      "test": "cargo test -p athena-core",
+      "reason": "Step 6 makes `repo_with_config` drop planner_revision_* lines, so these tests keep the unset behavior and need no change."
+    },
+    {
+      "name": "docs/spec.toml OLY-A-11 mechanism text",
+      "dependent": "docs/spec.toml tests that parse the spec (crates/athena-core/tests/buy_first.rs:89, mechanism_explanation.rs:37 and others) and the D158 mirror registry",
+      "kind": "rule",
+      "test": "cargo test -p athena-core (the spec-parsing tests run in the test check)",
+      "reason": "Only the mechanism prose of OLY-A-11 changes. No id, status, measure or source changes, so the parsers and the Covered-status rule (D94) are unaffected."
+    },
+    {
+      "name": "always-loaded prompt sets",
+      "dependent": "Prompt budgets (docs/system-facts.md budget lines; `system_facts_budgets_match_computed`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt file, brief or docs/system-facts.md changes, so the computed sizes stay."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A scripted job with [job_plan] on (`repo_with_planning`-style, max_rounds 3), keys set to claude-sonnet-5-5 and xhigh through a new helper. The planner queue is `[good_plan()]`; the critic queue is `[revising_critique(), accepting_critique()]`. A wrapper around `planning_script` records `(role, spec.model, spec.effort)`. The test also reads the job's records and the `Lines` UI.",
+      "command": "cargo test -p athena-core a_critic_revise_sends_the_next_planner_call_at_the_revision_model_and_effort",
+      "observes": "Planner call 1 records (claude-haiku-5-5, high), the reader's scripted model and verifier_effort. Planner call 2 after the critic's revise records (claude-sonnet-5-5, xhigh). Both appear in the job's Planner invocation records. Both appear in the UI lines `planner    <model> · <effort> · …`. Critic calls keep (claude-opus-5-5, high). The job lands.",
+      "fails_without": "With planning.rs unchanged, call 2 would record (haiku, high), and the effort-in-line assertion would fail.",
+      "seam": "Entry point `Athena::go` (via `athena.ask` then `athena.go`) with `Athena` built by `athena_with` and the `FakeAgentDriver` script injected, as `run_planned` does. `athena_with`, `planning_script`, `good_plan`, `revising_critique`, `accepting_critique`, `Lines` and `Records::load` exist (run/tests.rs:172, 190, 1193, 1140, 1173, 1166). Plan step 6 adds the settings-recording wrapper and the revision-keys repo helper."
+    },
+    {
+      "criterion": 2,
+      "method": "Three more tests in run/tests.rs on the same seam. (a) A mechanical revision escalates: planner queue `[bad_plan(), good_plan()]`, critic accepts. (b) Weaker keys are ignored: the scripted reader's `producer_model` is overridden to claude-sonnet-5-5 as `run_planned_behavior` mutates the reader output, with keys model=claude-haiku-5-5 and effort=medium and a revising critic. A second job has model=haiku and effort=xhigh. (c) With both keys unset, planner queue `[bad_plan(), good_plan()]` and a revising critic over 3 rounds.",
+      "command": "cargo test -p athena-core planner_revision",
+      "observes": "(a) Planner calls are (haiku, high) then (sonnet, xhigh), with no critic call between them, and the critic then runs once. (b) Every planner call stays (sonnet, high) for the weaker pair. For model=haiku with effort=xhigh, revision calls are (sonnet, xhigh), so only the effort part applies. (c) Every planner call across the mechanical pass and all 3 rounds is (haiku, high).",
+      "fails_without": "Without the mechanical-pass condition, (a) records (haiku, high) on the second call. Without the no-weaker rule, (b) records (haiku, medium) on revision calls. Without the unset fallback, (c) fails if any call differs.",
+      "seam": "Same as criterion 1: `Athena::go`, `athena_with`, a `FakeAgentDriver` script wrapping `planning_script`, and the plan-step-6 helpers. Existing tests that call `repo_with_config` run with both keys stripped, so they are unaffected. Plan step 6 adds the helper and test names containing `planner_revision`."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in config.rs `mod tests` on `Config::parse(REPO_CONFIG)`. (1) The keys parse as Some in REPO_CONFIG and as None once those lines are stripped, and the stripped config loads. (2) A model outside producer_allowed (the verifier's Opus, or an unknown name) gives `ConfigError::PlannerRevisionNotAllowed`. An effort 'turbo' gives `ConfigError::Effort(\"planner_revision_effort\", ..)`; `planner_revision_effort` is added to the key loop of the existing effort test. (3) Table test of `planner_revision_setting`: stronger, equal and weaker for model and effort, plus unset. (4) A test that changing hard_producer_model and hard_producer_effort does not change the result. (5) `reading_inputs` and its digest are equal with and without the keys.",
+      "command": "cargo test -p athena-data planner_revision",
+      "observes": "Optional parse, rejection of values outside the allowed lists, a config without the keys still loads, weaker parts ignored independently, and an unchanged config digest.",
+      "fails_without": "Without the new validation, the out-of-list cases parse as Ok and the test fails. Without the no-weaker rule, the table test fails on weaker rows. Without the reading_inputs reset, the digest test fails.",
+      "seam": "`Config::parse` and `Config::reading_inputs` over the `REPO_CONFIG` constant that config.rs tests already use (config.rs:1037, 1112). It exists; no fake is needed."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff. `Models` gains two `Option<String>` fields, with `#[serde(default, skip_serializing_if = \"Option::is_none\")]` and doc comments. The planner path in planning.rs gains the call to `planner_revision_setting` and no use of `producer_setting` or `hard_producer_*`. The config.rs test from criterion 3, point (4), also shows the independence.",
+      "command": "git diff -- crates/athena-core/src/run/planning.rs crates/athena-data/src/config.rs",
+      "observes": "planning.rs changes contain no `producer_setting` or `hard_producer`; config.rs shows the fields and function reading only `planner_revision_*`, `producer_allowed` and `EFFORT_LEVELS`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "The same core test as criterion 1 asserts the UI line `planner    claude-sonnet-5-5 · xhigh · …` on the revision round and the ordinary line (haiku, high) on round 1. A drain.rs test parses the repository's own config from `common::test_config()`. It asserts that `planner_revision_setting(hard_producer_model, effort_for(Role::Planner))` is stronger than the plain planner effort, so the athena.toml entry takes effect.",
+      "command": "cargo test -p athena-cli --test drain planner_revision",
+      "observes": "The effective revision setting of this repo's athena.toml (claude-sonnet-5-5, xhigh) differs from the round 1 setting (claude-sonnet-5-5, high) in effort. The core test shows the recorded line and invocation record per round.",
+      "fails_without": "If athena.toml lacked the entry, or the setting were weaker, the drain.rs test fails. Without the effort in the planner line, the core test's line assertion fails.",
+      "seam": "The drain.rs test calls the production `Config::parse` and `Models::planner_revision_setting` on the `common::test_config()` string (athena.toml minus job_plan, tests/common/mod.rs:19-45). It needs no agent (the drain Fixture runs with planning off). The core test uses `Athena::go` and the `Lines` UI (run/tests.rs:168-176). Plan step 8 adds the drain test."
+    },
+    {
+      "criterion": 6,
+      "method": "Read athena.toml `[models]`, the CHANGELOG [Unreleased] ### Added entry and the docs/spec.toml OLY-A-11 mechanism. Then run `cargo test -p athena-data planner_revision` and `cargo test -p athena-cli --test drain planner_revision`, which parse the real athena.toml.",
+      "command": "git diff -- athena.toml CHANGELOG.md docs/spec.toml",
+      "observes": "athena.toml has `planner_revision_model = \"claude-sonnet-5-5\"` and `planner_revision_effort = \"xhigh\"` with a comment that producer_allowed is ordered weakest first. The CHANGELOG entry says: without the change the planner runs claude-sonnet-5-5 at high in every round (mode hard: the model is the hard producer model, athena.toml:25; the effort is verifier_effort, athena.toml:21). With the change, round 1 and a seeded first call are unchanged, and each call after a critic revise or a mechanical revision runs claude-sonnet-5-5 at xhigh. The model part is a no-op here because the verifier's Opus may not produce. It also says what the keys do and that `planner_usd` is unchanged. The spec row mentions the revision setting.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff of docs/decisions.md: one new entry D179 appended after D178 (decisions.md:5149-5166), in the D136 field shape. Its Provenance bullet records why dedicated keys replace hard_producer_*, citing the no-op in this repo, the possible lowering, and the earlier job 20261113-194336-scfc. No existing line changes. D136 alternative (a) is not edited.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "The diff shows additions only, starting at the end of the file, with a `Provenance` bullet.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three checks on the final tree.",
+      "command": "cargo fmt --all --check",
+      "observes": "fmt is clean. `cargo clippy --all-targets --locked -- -D warnings` has no warnings, and `cargo test --locked` passes in all crates, including config.rs tests, run/tests.rs, drain.rs, the system_facts budget test and `model_roster`. These are the Athena-recorded checks fmt, clippy and test.",
+      "fails_without": "A compile error, a clippy warning (for example an unused import or too many arguments), or a test regression such as a stale expectation of the planner line would fail the matching check.",
+      "seam": "The checks are the repository's own cargo commands. No fake or double is involved."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "d3f5ea9e6614246f3204f468f6ba1d30290c4cee9e6c1f2b8bedf0f6bd1f41e9"
+}

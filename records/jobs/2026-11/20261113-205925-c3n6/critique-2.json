@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-205925-c3n6",
+  "round": 2,
+  "at": "2026-11-13T21:09:05.393147577Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The claimed effect in this repo is wrong: the model part does apply, to planned jobs that are not hard",
+      "evidence": "crates/athena-core/src/run/mod.rs:1087-1092 plans a reading in hard mode when `reading.hard_reason.is_some() || asks_for_fails_without_run(&reading)`. crates/athena-cli/tests/job_plan.rs:1232-1249 (`an_easy_job_with_a_fails_without_criterion_is_planned_in_hard_mode...`) confirms that an unmarked reading is planned. For that reading, reading.rs:869-871 calls producer_setting(.., false), so producer_model is the reader's pick from producer_allowed = [claude-haiku-5-5, claude-sonnet-5-5] (athena.toml:14). planning.rs:138 runs the planner on that model. Such a job plans at haiku/high today. With planner_revision_model = claude-sonnet-5-5, its revision calls would run sonnet/xhigh. Yet the plan says 'without the change, hard jobs plan at claude-sonnet-5-5 and high in every round … The model part changes nothing here'. The drain.rs test also checks only the hard_producer_model input. Criterion 6 requires the CHANGELOG to state the effective planner model and effort with and without the change, so this is the very misstatement the prior job's finding (b) flagged. Fix: Restate the effect for both planned cases in this repo. (1) A hard reading: sonnet/high in every round today; revision calls go to sonnet/xhigh, effort only. (2) A reading not marked hard but planned because it asks for a fails-without run: the reader's producer model (haiku or sonnet) at high today; revision calls go to sonnet/xhigh, so a haiku planner moves up to sonnet. Correct Decision 1's reason, Risks item 2, step 9 and the D179 text to match. In the drain.rs test, add a second assertion for current model claude-haiku-5-5: the revision setting is (claude-sonnet-5-5, xhigh).",
+      "location": "Decision 1 reason; Risks item 2; Step 9 (CHANGELOG); Criterion 6 demonstration; Step 8 / Criterion 5 drain.rs test",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 8 demonstration chains the three checks with &&",
+      "evidence": "Criterion 8 asks that fmt, clippy and test 'each [be] named as its own simple command'. The demonstration's command is `cargo fmt --all --check && cargo clippy ... && cargo test --locked`. Fix: List the three commands separately, or cite the Athena-recorded passing checks by name.",
+      "location": "Demonstrations, Criterion 8 command",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An athena.toml comment that contains key text can break an existing effort test",
+      "evidence": "`an_unknown_effort_value_is_rejected_and_a_known_one_is_accepted` uses `REPO_CONFIG.find(\"{key} = \")` to find the line it replaces. Step 7 adds planner_revision_effort to that loop. If the new comment in [models] contains literal text such as `planner_revision_effort = ...`, find returns the comment line, the edit hits the comment, and the test parses Ok and panics. Fix: Keep the comment free of `key = ` text, for example by naming the keys in backticks without an `=`, or make the test match only at the start of a line.",
+      "location": "Step 5 (athena.toml comment); config.rs:1046-1068",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Treating producer_allowed order as model strength is an assumption the reading accepted. It is documented, not enforced.",
+      "evidence": "config.rs:317 has no order contract on producer_allowed. EFFORT_LEVELS states 'weakest first' (config.rs:336), but producer_allowed does not. Fix: Also put the 'weakest first' contract on the producer_allowed field's own doc comment, not only on the new fields, so a later editor of that list sees it.",
+      "location": "Decision 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the reading and mostly fits the code. I read planning.rs, config.rs, reading.rs, run/mod.rs, run/tests.rs, cli tests/common/mod.rs, drain.rs, job_plan.rs, athena.toml and spec.toml. The code it names exists: planning_round with round and mechanical_passes, the agent_spec effort line at reading.rs:443, the spec.effort override at producer.rs:338-340, the validate order at config.rs:664-695, reading_inputs at config.rs:635-644, and the test helpers in run/tests.rs. Putting the membership check after the family loop keeps the family tests passing. Clearing the keys in reading_inputs is consistent with how [job_plan] is handled. One major problem remains, the same kind of misstatement that sank the prior job (finding b). The plan says that in this repo the planner always runs on hard_producer_model, so 'the model part changes nothing here'. That is false: hard mode also plans a reading that is not marked hard but asks for a run that fails without the fix (run/mod.rs:1087-1092). Such a job plans on the reader's chosen producer model, which can be claude-haiku-5-5. With the change, its revision calls move to claude-sonnet-5-5 at xhigh. The CHANGELOG text and the drain.rs test must cover that case. Everything else is minor."
+}
