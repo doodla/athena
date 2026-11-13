@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060843-f4s2",
+  "round": 4,
+  "at": "2026-11-13T11:22:53.016524741Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Part (b) adds a new `Reuses:` label that duplicates the existing `Existing code:` assumption and the helpers that parse it.",
+      "evidence": "surveys.rs already has `existing_code_assumptions` (1329) and `names_existing_path` (1341) for an assumption that starts `Existing code:` and lists the functions and files a change reuses (check_design_existing_code, 1396-1453). This job's own accepted reading states reuse in an `Existing code:` assumption, not inside the Code survey. Under the plan, a reader that lists reused functions in `Existing code:` is still refused for lacking `Reuses:`. The request's root cause is near-duplicate helpers. Fix: Satisfy (b) from an `Existing code:` assumption, read with existing_code_assumptions plus an identifier (or the 'no existing function' phrase), or accept `Reuses:` only as an alias. Teach that one label in the guide and the example, and test that an `Existing code:` assumption alone satisfies (b).",
+      "location": "Decision 6 / Step 4 (b) `Reuses:` label; crates/athena-core/src/reading/surveys.rs:1329-1359",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The new clause splitter and negator list near-duplicate helpers that already exist, in a job whose request is to stop near-duplicate helpers.",
+      "evidence": "verify.rs has `NEGATORS`, `split_clauses` (splits on ; : . , and newline), `clause_words` and `is_negator` (also matches words ending in n't). surveys.rs:1370 has a local `NEGATORS` list in requires_existing_code_section, and scan_segments (643) splits text into segments. Step 3 writes a fresh `segments(text)` and a fresh negator list, and the dependents list names none of these. Fix: Move one negator list and clause splitter into a shared module (for example reading/surveys.rs, or a small text module used by verify.rs too) and call it from the new check and the existing callers. If the verify.rs splitting rules (split on ':') don't fit, give the reason in a decision. Add the moved helpers' callers and tests to the dependents list.",
+      "location": "Step 3 (`segments`, negator test) and Decision 9; crates/athena-core/src/verify.rs:1261-1380; surveys.rs:1370",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The pin test asserts at least 40 accepted tags, but AnyRecord has 37 variants, so the test fails as specified. The number was guessed, not read from the code.",
+      "evidence": "records.rs:1124-1198 lists 37 variants, from Request through DesignSurface. `AnyRecord::schema()` (1407-1446) maps each variant to its tag. Fix: Pin against the code, not a count: assert the probed set equals the tags in `AnyRecord::schema()` for the listed variants, or assert exactly 37 tags plus named examples. Check the variant-to-tag mapping against `schema()` too, not only against the naming convention.",
+      "location": "Decision 7, Step 7 `accepted_record_tags_come_from_anyrecord`; Criterion 3 demonstration; crates/athena-data/src/records.rs:1124-1198",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Real history record tags are refused as contradictions, so a history-record job can never name its record kind and be accepted.",
+      "evidence": "history.rs:393-413 defines a second tagged enum, `HistoryRecord`, with tags athena.landing-intent/1, athena.landing/1, athena.declared-intervention/1, athena.checkpoint/1, athena.legacy-exempt/1 and athena.import-manifest/1. Decision 7 probes only AnyRecord and refuses any other `athena.<kind>/<n>` token as 'a tag AnyRecord does not accept', even when a round-trip test is listed. Fix: Probe HistoryRecord with the same method and add its tags to the accepted set, or refuse an unknown tag only when no round-trip identifier and test deliverable are present. Add an accepting fixture for `Output: athena.landing/1`.",
+      "location": "Decision 7 (i) unknown-tag contradiction; crates/athena-data/src/history.rs:391-413",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Corpus cases built with `case()` check paths against a small file list, so the example's `crates/foo/src/run.rs` would be refused by check_reading_references and the Accept expectation would fail.",
+      "evidence": "`case()` sets `repo_files: Some(repo_files())`, a list of 4 files. check_reading_references requires every path token under a known top directory, including assumption text, to be in that list or created by a deliverable. Fix: Set `c.repo_files = None` for these two cases (as lines 375 and 2062 do), or add the example path to the case's file list, and say which in step 9.",
+      "location": "Step 9 corpus cases `design-guide-example-accepted` and `design-template-verbatim-accepted`; tests/refusal_corpus.rs:228-258; checks.rs:402-414",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say whether 'criterion N' counts all criteria or only behavior criteria.",
+      "evidence": "Readings mix content and behavior criteria (this job's reading has content criteria 1 and 6 among behavior criteria 2-5 and 7). Decision 8 says each behavior criterion needs a clause citing its number, without defining the numbering. Fix: State that N is the 1-based position in acceptance_criteria, use the same numbering in the error, and add a fixture where content criteria come before the behavior criterion.",
+      "location": "Decision 8 (`cited_criteria`, uncovered criterion numbers)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is mostly sound: one pure check added right after check_code_survey, a guide and error text that share one example, and the replay risk raised as a blocking question. Four problems are major. (1) Part (b) invents a `Reuses:` label inside the Code survey. Readings already state reuse in an `Existing code:` assumption, which existing helpers parse (existing_code_assumptions, names_existing_path), so (b) duplicates both the label and its parsing, the very failure the request targets. (2) Step 3 writes a new clause splitter and negator list, although verify.rs (split_clauses, NEGATORS, is_negator) and surveys.rs (the NEGATORS list in requires_existing_code_section) already have them. (3) The record-tag pin test asserts at least 40 tags, but AnyRecord has 37 variants, so the test fails as written. (4) Only AnyRecord tags count as accepted, so the real history record tags (athena.landing/1 and others in history.rs) are refused as made up. A history-record job could never name its record kind and be accepted. Two findings are minor: the guide-example corpus cases would be refused by check_reading_references because of `crates/foo/src/run.rs`, and the plan does not define how criterion numbers are counted. The list of affected code (steward, drain, CLI check-reading, corpus, briefs) is complete as far as I checked."
+}
