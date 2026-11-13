@@ -1,0 +1,326 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-033234-vm1m",
+  "round": 1,
+  "at": "2026-11-13T01:26:32.45076231Z",
+  "invocation_seq": 3,
+  "approach": "Add crates/athena-core/src/context_load.rs, which measures context compression per class of work. For each class with at least 3 landed jobs it reports tokens loaded per landed job (input + cache_read + cache_write via Quantity::best_lower, counted over every invocation of the class's closed jobs, divided by its landed jobs). Beside that it reports the share of closed jobs that landed and the class's mistake count from status::mistake_report. A pure analyze() mirrors class_trend::analyze; ContextLoad::compute(&Records) feeds it from Records::all_invocations(). A thin class prints nothing, and no qualifying class gives None, so a thin history never reads as success. Register the module in lib.rs. Add (\"context\", \"context_load\") to STATUS_MEASURE_LABELS, a StatusView field context_load, and a context_section in display.rs. Name the mechanism and a measure ending `status: context` in docs/spec.toml. Tests: a core integration test (exact figures, thin class, spec entry) and a cli test that drives the real `athena status` text. CHANGELOG.md and an appended D175 record the change. Two files outside the reading's deliverables are kept, each because a gate or a criterion needs it: xtask/shard-timings.txt (two lines) and crates/athena-cli/tests/status_context.rs. The reasons are in the decisions.",
+  "decisions": [
+    {
+      "choice": "Cost is tokens loaded per LANDED job: the numerator counts the tokens of all the class's closed jobs (landed, rejected, failed, timed out); the denominator is its landed jobs.",
+      "reason": "Compression that cuts tokens by losing outcomes must show up. Failed work's tokens are charged to the landed jobs, and the landed share and mistakes sit beside the figure, as the requirement says. This mirrors how status/throughput.rs charges time on non-landed jobs.",
+      "rejected": [
+        {
+          "option": "Mean tokens of landed jobs only",
+          "why": "Hides the cost of failed attempts, so a cheaper class that fails more would look better."
+        },
+        {
+          "option": "Use context.prompt_tokens (the always-loaded prompt set)",
+          "why": "That is the fixed per-role budget D25 already enforces; it says nothing about what a class of work loaded across a job."
+        }
+      ]
+    },
+    {
+      "choice": "Tokens loaded = input + cache_read + cache_write, each via Quantity::best_lower(). Output tokens are excluded.",
+      "reason": "Those three are what the model took in as context (Tokens in athena-data records, invocation.rs tokens_lower_bound). best_lower is the value, else the lower bound, else 0, so a killed invocation counts as the least it loaded.",
+      "rejected": [
+        {
+          "option": "Count output tokens too",
+          "why": "Output is what the model wrote, not context loaded; it blurs the compression goal."
+        },
+        {
+          "option": "Input only",
+          "why": "With prompt caching most loaded context shows as cache_read or cache_write, so input alone understates it."
+        }
+      ]
+    },
+    {
+      "choice": "Read Records::all_invocations() and attribute each invocation by its job field to a classed, closed request job.",
+      "reason": "The system facts and the all_invocations doc (store.rs:519-524) say a usage measure reads that iterator. The core test includes an auditor run tagged to a job to show it is counted. An invocation whose job is not a classed closed request job is attributed to no class.",
+      "rejected": [
+        {
+          "option": "Sum only JobRecords::invocations",
+          "why": "Partial source by the store's own comment; it would miss steward, audience and auditor runs tagged to a job."
+        }
+      ]
+    },
+    {
+      "choice": "Minimum of 3 landed jobs per class (MIN_LANDED_JOBS). A class below it prints no line, and no class qualifying gives None.",
+      "reason": "Matches class_trend's thin-history rule (MIN_CLASS_JOBS) and the no-empty-success default.",
+      "rejected": [
+        {
+          "option": "Print every class with a 'thin' note",
+          "why": "A figure from 1 or 2 jobs reads like a result."
+        }
+      ]
+    },
+    {
+      "choice": "Mistakes come from status::mistake_report(records).by_class. Landed share is landed divided by closed jobs. No new quality judgement.",
+      "reason": "Reuses the printed `mistakes` measure, so the two lines cannot disagree on what a mistake is.",
+      "rejected": [
+        {
+          "option": "A new per-class outcome-quality score",
+          "why": "Out of scope; the accepted reading says outcomes held means landed share and mistakes."
+        }
+      ]
+    },
+    {
+      "choice": "Keep crates/athena-cli/tests/status_context.rs as a new cli test file, outside the reading's deliverable list (answers finding 3).",
+      "reason": "Criterion 4 needs the real `athena status` text with and without data. StatusView has no Default or builder: it is built only at status.rs:1285, and display.rs's mod tests (display.rs:2046) have no way to build one. The nearest deliverable file, display.rs, therefore cannot host that test. The fixture pattern is status_role_need.rs:118-196. The file adds only a test and no behavior.",
+      "rejected": [
+        {
+          "option": "Unit-test only a context_section helper inside display.rs",
+          "why": "It cannot show the line is absent from `athena status` when data is missing, which is the no-empty-success check."
+        },
+        {
+          "option": "Append the test to the existing status_role_need.rs",
+          "why": "It edits an unrelated existing test file, which is wider than a new file with its own name."
+        }
+      ]
+    },
+    {
+      "choice": "Edit xtask/shard-timings.txt by adding exactly two lines, one for each new test target (answers finding 4).",
+      "reason": "The deliverable tests/context_compression.rs is a new test target. xtask/tests/ci_shards.rs:411-421 asserts the timings file lists exactly the workspace's test units, so `cargo test --locked` fails without the line. The cli target adds the second line. The line form is `athena-core --test context_compression 5.00`, matching existing lines such as `athena-cli --test budgets 8.00`.",
+      "rejected": [
+        {
+          "option": "Skip the timings file",
+          "why": "Criterion 5 (cargo test passes) would fail on checked_in_timings_cover_every_workspace_test_unit."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/context_load.rs",
+      "action": "create",
+      "purpose": "New module. Module doc, MIN_LANDED_JOBS = 3, ClassJob, ClassLoad, ContextLoad, analyze(), ContextLoad::compute(&Records), lines(), and unit tests (grouping, minimum, None, lower-bound quantity, line text).",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Register `pub mod context_load;` after class_trend (line 99).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add (\"context\", \"context_load\") to STATUS_MEASURE_LABELS (line 305), the context_load field with skip_serializing_if and a doc comment after class_trend (line 462), and the compute call in the StatusView literal (line 1285 onward).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Add context_section (first line prefixed `context     `, later lines indented to match trend_section at line 1103) and call it after the trend block (line 1353) when v.context_load is Some.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "Edit only OLY-B-A13-01: the mechanism names context_load.rs (ContextLoad::compute, run by status.rs, printed by display.rs) and tests/context_compression.rs; the measure ends `status: context`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/context_compression.rs",
+      "action": "create",
+      "purpose": "The three behavior tests (exact per-class figures, thin class yields none, spec entry is no gap and none makes one) and the content test of the spec entry and label.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-cli/tests/status_context.rs",
+      "action": "create",
+      "purpose": "Outside the reading's deliverable list, kept for criterion 4 (reason in the decisions). Seeds records in a fixture repository and asserts the `context` line is absent with no data or a thin class and present with exact figures.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "purpose": "Outside the reading's deliverable list, kept because the ci_shards test requires a line per test target (reason in the decisions). Add two lines for the two new test targets, in sorted position.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet at the top of `### Added` under [Unreleased] for this job.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D175 after D174 with Provenance. Edit no existing entry.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read class_trend.rs (the shape to mirror), status.rs lines 305-323, 462 and 1285-1320, display.rs lines 1103 and 1353, and status_role_need.rs, before editing.",
+    "Create crates/athena-core/src/context_load.rs. Module doc: what is measured (input + cache_read + cache_write via Quantity::best_lower, output excluded), the minimum, and that a thin history prints nothing. Define MIN_LANDED_JOBS: usize = 3, ClassJob {id, class, landed, tokens}, ClassLoad {class, closed_jobs, landed_jobs, tokens, tokens_per_landed_job, landed_percent, mistakes} (derive Debug, Clone, PartialEq, Serialize) and ContextLoad {classes}. analyze(&[ClassJob], &BTreeMap<String, usize>) -> Option<ContextLoad> groups by class in a BTreeMap, keeps a class only when landed jobs >= MIN_LANDED_JOBS, and fills mistakes from the map (0 if absent). compute(records) takes records.request_jobs() in a closed state (Landed, Rejected, Failed, TimedOut) with a class from j.class(), and sums records.all_invocations() per job id into that job's tokens. A job with no attributed invocation is left out because it did no model work. Mistakes come from crate::status::mistake_report(records).by_class. lines() gives a header plus one line per class in the form `docs: 1200 tokens per landed job · 3 of 4 closed jobs landed (75%) · 2 mistake(s)` (tokens {:.0}, percent {:.0}). Add unit tests: two classes grouped, a class under the minimum dropped, no class gives None, a lower-bound quantity counts as its lower bound, and the lines() text.",
+    "Register `pub mod context_load;` in crates/athena-core/src/lib.rs after class_trend.",
+    "In status.rs: add the label to STATUS_MEASURE_LABELS, the context_load field with its doc comment and skip_serializing_if, and `context_load: crate::context_load::ContextLoad::compute(&records)` in the StatusView literal.",
+    "In display.rs: add context_section(&ContextLoad) -> String and call it after the trend block when v.context_load is Some. Keep the literal `\"context     {line}\"` so the label scan finds `\"context `.",
+    "Create crates/athena-core/tests/context_compression.rs (fixtures and expected numbers as in demonstration 3, plus the content test of demonstration 1) and crates/athena-cli/tests/status_context.rs (demonstration 4, with seed, invocation, outcome and job_record helpers copied from status_role_need.rs and status.rs). Run each behavior test once against a stub that returns None to confirm it fails, then restore the real code.",
+    "Edit xtask/shard-timings.txt (add `athena-core --test context_compression 5.00` and `athena-cli --test status_context 8.00` in the file's sorted position), docs/spec.toml (OLY-B-A13-01 mechanism and measure only), CHANGELOG.md (one bullet at the top of `### Added`), and append D175 to docs/decisions.md with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance (Read: the files above; Measured: the new tests; Not measured: figures on real records, and whether a smaller context holds outcomes). Edit nothing else in decisions.md or records/.",
+    "Run `cargo fmt --all`, then separately `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix any failure."
+  ],
+  "risks": [
+    {
+      "risk": "The cli fixture may reject or ignore a seeded Job record, so class() stays None and no line prints.",
+      "mitigation": "Step 6 copies job_record field-for-field from status.rs:1900-1932 and writes it at its canonical_path(). If the load rejects it, the producer seeds a Reading with class_of_work instead (JobRecords::class() falls back to the latest reading, store.rs:165-170). The core integration test does not depend on the fixture."
+    },
+    {
+      "risk": "Tokens loaded mixes measured and lower-bound quantities (a killed invocation records a lower bound), so a figure can understate the load.",
+      "mitigation": "The header line says the figures are tokens of the recorded invocations, and D175 states the limit. A unit test pins best_lower behavior for a lower-bound quantity."
+    },
+    {
+      "risk": "A class with 3 landed jobs of very different sizes gives a mean dominated by one big job.",
+      "mitigation": "Accepted and stated in D175 as a tradeoff: an exact mean is explainable and testable, while a median would hide the failed jobs' tokens. The landed share and mistakes appear beside it."
+    },
+    {
+      "risk": "Class names on interventions and on jobs may differ, so the mistake count reads 0 for a class that had mistakes.",
+      "mitigation": "Classes are a closed list in configuration (D42), and mistake_report is the same source as the printed `mistakes` line. The tests use one name for both, and D175 notes the limit."
+    },
+    {
+      "risk": "The two new test targets fail the xtask timings test if their lines are missing or misordered.",
+      "mitigation": "Step 7 adds both lines, and criterion 5 runs the full cargo test --locked, which includes ci_shards."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "STATUS_MEASURE_LABELS gains (\"context\", \"context_load\")",
+      "dependent": "crates/athena-core/src/hestia.rs measure_problem (line 1219) and spec_gaps (line 1291)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test context_compression (the_spec_entry_is_not_a_gap_and_none_makes_it_one). Those functions only check that the label after `status:` is a known label or `not shown`, so adding one label changes no existing measure.",
+      "reason": null
+    },
+    {
+      "name": "label, StatusView field and printed line",
+      "dependent": "crates/athena-core/src/status.rs test every_measure_label_names_a_status_view_field_and_a_printed_line (line 1688)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --lib every_measure_label_names_a_status_view_field_and_a_printed_line. It now also covers `context`: it requires `pub context_load:` in status.rs and `\"context ` in status.rs, display.rs or hestia.rs, and steps 4 and 5 add both.",
+      "reason": null
+    },
+    {
+      "name": "docs/spec.toml OLY-B-A13-01 mechanism and measure",
+      "dependent": "xtask/tests/spec.rs check_how_it_is_met (line 194) and the whole-spec test (line 627)",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test spec. It requires a non-blank mechanism, an owner that is not none, and a measure with a non-empty `status:` label. The edit supplies all three and leaves the entry's source and statement fields unchanged.",
+      "reason": null
+    },
+    {
+      "name": "New StatusView field context_load",
+      "dependent": "crates/athena-core/src/status.rs StatusView construction (single literal at status.rs:1285) and serializers of the view",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test status_context (covers the absent case). Only one place builds `StatusView {`, found by searching crates/. The field has skip_serializing_if = \"Option::is_none\", so JSON of a status without the data is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "New `context` section printed by athena status",
+      "dependent": "crates/athena-cli/src/display.rs status (line 1258, near the trend block at 1353) and the status tests that read athena status text (status_role_need.rs role_need_line, status_durations.rs, status_snapshot.rs)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli (all status_* tests) and status_context",
+      "reason": "The section is printed only when context_load is Some, which needs a class with 3 landed jobs and classed jobs. Those tests seed none or too few classed jobs (the role_need fixture has no Job record, so class() is None), so no `context` line appears; their assertions look for other labels."
+    },
+    {
+      "name": "Mistake counts per class (read, not changed)",
+      "dependent": "crates/athena-core/src/status.rs mistake_report (line 595) and the printed `mistakes` line",
+      "kind": "code",
+      "test": "context_compression::tokens_per_landed_job_and_outcomes_are_exact_for_two_classes asserts the count (2 Mistake interventions counted, 1 CorrectedOutput not). compute calls mistake_report read-only, so its behavior and the `mistakes` line are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "Invocation token facts",
+      "dependent": "Other readers of invocation token facts: role_need.rs, status/throughput.rs, planning_cost, store.rs all_invocations",
+      "kind": "code",
+      "test": "cargo test -p athena-core --lib (store::all_invocations_covers_every_loaded_invocation unchanged)",
+      "reason": "Read only through Records::all_invocations() and Quantity::best_lower(). No record schema or data file is added or changed, so check_record_file, AnyRecord and the round-trip test are untouched."
+    },
+    {
+      "name": "Two new test targets: athena-core context_compression and athena-cli status_context",
+      "dependent": "xtask/shard-timings.txt and xtask/tests/ci_shards.rs checked_in_timings_cover_every_workspace_test_unit (line 411)",
+      "kind": "code",
+      "test": "cargo test -p xtask --test ci_shards. The test compares the file's units with the workspace's test units, so plan step 7 adds `athena-core --test context_compression 5.00` and `athena-cli --test status_context 8.00` in the file's sorted order.",
+      "reason": null
+    },
+    {
+      "name": "Requirement status of A13-1 (Partial)",
+      "dependent": "docs/design/requirements-map.md row A13-1 (line 145) and docs/design/strategy-view.md (lines 95, 177)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli (strategy tests unchanged)",
+      "reason": "The plan marks no row Covered (D94 forbids a job marking its own rows). The map keeps saying Partial and no test reads it against spec.toml's mechanism field; `strategy` reads the map, not the spec."
+    },
+    {
+      "name": "New appended D175 and a changelog bullet",
+      "dependent": "docs/decisions.md append-only checks (D162 mirror registry, log append-only test) and CHANGELOG.md",
+      "kind": "rule",
+      "test": "cargo test --locked (xtask policy and mirror tests)",
+      "reason": "Both files only gain lines: at the end of the decision log and at the top of the Unreleased section. No existing entry is edited. docs/decision-links.toml needs no link because D175 neither replaces nor extends an entry and names no [[governs]] path."
+    },
+    {
+      "name": "No config key, prompt or budget changes",
+      "dependent": "athena.toml, defaults.toml, workflows, prompts and the budget lines in docs/system-facts.md",
+      "kind": "host_setting",
+      "test": "cargo test -p athena-cli --test budgets (unchanged)",
+      "reason": "The plan changes none of them. system_facts_budgets_match_computed computes from prompt files, which are not touched."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content test on the real files. spec_entry_names_the_module_its_test_and_a_shown_label follows spec_entry_has_a_real_mechanism (learnings_recorded.rs:289-309). It reads docs/spec.toml with parse_spec, finds OLY-B-A13-01, asserts the mechanism contains `crates/athena-core/src/context_load.rs` and `crates/athena-core/tests/context_compression.rs`, asserts owner `Athena`, the measure ends `status: context`, measure_problem is None, and STATUS_MEASURE_LABELS contains (\"context\", \"context_load\"). The existing status.rs test every_measure_label_names_a_status_view_field_and_a_printed_line (status.rs:1688-1708) then requires `pub context_load:` in status.rs and `\"context ` in status.rs, display.rs or hestia.rs.",
+      "command": "cargo test -p athena-core --test context_compression spec_entry_names_the_module_its_test_and_a_shown_label && cargo test -p athena-core --lib every_measure_label_names_a_status_view_field_and_a_printed_line",
+      "observes": "Both pass: the entry's mechanism is no longer none and names the module and test, the owner is Athena, the measure ends `status: context`, and the label, field and printed line all exist.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Compilation plus tests. The integration test imports athena_core::context_load::ContextLoad, so it fails to compile unless lib.rs has `pub mod context_load;`. Unit tests in context_load.rs check analyze grouping (landed share and mistakes per class) and the lines() text. The StatusView field and the display wiring are shown by the label test of criterion 1 and by the criterion 4 test, which reads the printed output.",
+      "command": "cargo test -p athena-core --test context_compression && cargo test -p athena-core --lib context_load",
+      "observes": "Tests compile and pass. Per-class figures include tokens per landed job, landed share and mistakes. lines() starts with a header and a per-class line.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Three tests in crates/athena-core/tests/context_compression.rs, using only public API. (a) tokens_per_landed_job_and_outcomes_are_exact_for_two_classes builds Records::default(), inserts JobRecords (pub fields, Default derive, as in role_need.rs tests) with job: Some(Job{class_of_work,..}), invocations and an outcome, adds Records.interventions, and calls ContextLoad::compute(&records). Every invocation has output = 5000 so the output exclusion is tested. docs: d1 landed 400 (two invocations, 350+50), d2 landed 900 plus an auditor run tagged to d2 in records.auditor_runs of 100, d3 landed 1600, d4 failed 600. Expected for docs: closed 4, landed 3, tokens 3600, 1200.0 per landed job, share 75%, mistakes 2 (two Mistake interventions counted, one CorrectedOutput not). Expected for code: c1..c3 landed 2000, 3000, 4000, so 3000.0 per landed job, share 100%, mistakes 0. It also asserts the lines() text `docs: 1200 tokens per landed job · 3 of 4 closed jobs landed (75%) · 2 mistake(s)`. (b) a_class_below_the_minimum_yields_no_figure: a `config` class with 2 landed jobs is absent from classes, and records holding only that class give None. (c) the_spec_entry_is_not_a_gap_and_none_makes_it_one: as spec_check_refuses_a_none_mechanism (learnings_recorded.rs:311-318), the real entry is absent from spec_gaps and a copy with mechanism `none` yields a gap for OLY-B-A13-01. Expected numbers are written from the constants, not computed by the code.",
+      "command": "cargo test -p athena-core --test context_compression",
+      "observes": "Exact figures 1200.0 and 3000.0, shares 75% and 100%, mistakes 2 and 0, no `config` class, no gap for the real entry, and a gap for the `none` copy.",
+      "fails_without": "Without the module the file does not compile. If compute read only jobs[..].invocations, docs would be 3500/3 and the 1200.0 assertion fails. If output tokens were counted, every figure changes. If the minimum were not enforced, `config` would appear. With the mechanism left `none` in the real spec, the spec test fails.",
+      "seam": "Production entry points: athena_core::context_load::ContextLoad::compute (added by plan step 2) and athena_core::hestia::{parse_spec, spec_gaps} (exist, hestia.rs:1172 and 1291). Fixture: hand-built Records, Job, Invocation and Intervention values. Records, JobRecords and the record structs are pub, so they are injected by direct construction and no fake is needed. The Job field list is copied from status.rs:1900-1932 and the Invocation from status_role_need.rs:19-69 with token values changed. No logic under test sits in the fixture."
+    },
+    {
+      "criterion": 4,
+      "method": "New test status_prints_the_context_line_only_when_a_class_has_enough_landed_jobs in crates/athena-cli/tests/status_context.rs, following status_role_need.rs:118-196. Phase 1: a fresh Fixture, `athena.status()`, then athena_cli::display::status(&view) has no line starting `context`. Phase 2: seed 2 landed docs jobs (a Job record with class_of_work `docs`, invocations, a Landed outcome) and commit; still no `context` line, since a thin history is not success. Phase 3: seed a third landed docs job and a fourth failed one (landed 400, 900 and 1600, failed 600, output 5000 each); the text has a line starting `context` containing `docs: 1200 tokens per landed job · 3 of 4 closed jobs landed (75%)`. It also checks that serde_json::to_value(&view) has `context_load` only in phase 3. Expected values come from the seeded constants.",
+      "command": "cargo test -p athena-cli --test status_context",
+      "observes": "No `context` line in phases 1 and 2; the exact line in phase 3; the JSON key present only in phase 3.",
+      "fails_without": "Without the StatusView field or the printing code there is no `context` line in phase 3. Without the minimum, phase 2 prints a line. Without all_invocations, phase 3's figure is off.",
+      "seam": "Production entry points: Athena::status() (builds context_load in the StatusView literal at status.rs:1285) and athena_cli::display::status (display.rs:1258). Fixture: common::Fixture::new() and fx.athena(Scenario::default().script()) (exist, used at status_role_need.rs:120-121). Records are seeded by committing AnyRecord::to_json() files through a seed helper copied from status_role_need.rs:96-110 (exists as a pattern; the new file is added by plan step 6). The seeded Job record must load under the records loader; if it does not, a Reading with class_of_work is seeded instead, since JobRecords::class() falls back to it (store.rs:165-170)."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three checks Athena runs, as separate commands, on the final tree. cargo test --locked includes xtask/tests/ci_shards.rs checked_in_timings_cover_every_workspace_test_unit (needs the two new timings lines), the status.rs label test, the boundary and personal-data scans over the new and edited files, and the decisions append-only and mirror checks. clippy runs with -D warnings over all targets, so unused or dead code in the new module fails it.",
+      "command": "cargo fmt --all --check",
+      "observes": "Then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, each run as its own command. All three exit 0, with no failing test in any crate (core, cli, xtask).",
+      "fails_without": "Without the two shard-timings lines, ci_shards::checked_in_timings_cover_every_workspace_test_unit fails (its assert_eq at ci_shards.rs:420). Without the status.rs field or the display.rs `\"context ` literal, the label test fails. A formatting slip fails fmt. A dead helper or unused import in context_load.rs fails clippy -D warnings. A wrong figure fails the criterion 3 or 4 tests.",
+      "seam": "Production entry points: the three Athena check commands (fmt, clippy, test) on the working tree. Fixture: the real workspace, no fake. xtask's ci_shards test reads xtask/shard-timings.txt and the workspace's test units; the status.rs label test reads status.rs and display.rs source. Both exist today (read in this plan). Plan step 8 runs them after steps 2-7."
+    },
+    {
+      "criterion": 6,
+      "method": "Diff review. CHANGELOG.md gains one bullet under `## [Unreleased]` / `### Added` (before the OLY-B-A9-01 bullet at CHANGELOG.md:12) naming OLY-B-A13-01, the module, the `context` label, the `context_load` field and the tests. docs/decisions.md gains a final `## D175 · ...` section after D174 with Case, Decision, Alternatives, Tradeoff, Reversal cost and a Provenance bullet (Read, Measured, Not measured). The diff shows only added lines for the two files and nothing under records/. The append-only and mirror checks inside cargo test --locked back this up.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md records",
+      "observes": "Only `+` lines in the two files, no change to any existing D-entry, and an empty diff for records/.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Host: Real records live on the athena/records branch, which the planning snapshot does not hold, so no run on real records could be planned or checked. The expected figures in the tests are hand-computed from fixture constants. Whether the owner's real `athena status` shows a `context` line depends on how many classes have 3 landed jobs; that check is left to the owner after landing."
+  ],
+  "producer_section_sha256": "d15ce8c901f159bbb370262929f0495e3cdd4738e9ecc569e5863a9a6656a9c7"
+}
