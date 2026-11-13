@@ -72,6 +72,13 @@ For a change to a function or core flow, list every existing caller and mode tha
 /// the plan for the demonstration. At most 200 bytes, pinned by a test in `briefs.rs`.
 pub(super) const REAL_RECORDS_RULE: &str = "A plan that changes a measure computed from records (throughput, keep rule, landing time) needs a demonstration run on real records with an expected range from an independent source.";
 
+/// The planner's rule for a plan that reuses an existing field. Root cause: neither the reader nor the
+/// planner was told to read a reused struct field, CLI argument, record key or config key for its documented
+/// meaning before mapping a requirement onto it, so two jobs matched a field by name (jobs
+/// 20261030-013421-tfwf and 20261113-194336-scfc). This is information, not a refusal: whether a meaning fits
+/// cannot be judged by code. Pinned by a test in `briefs.rs`.
+pub(super) const FIELD_MEANING_RULE: &str = "A plan that reuses an existing struct field, CLI argument, record key or config key must quote its documented meaning from the code or config docs (crates/ or config path:line) and say why it matches what the requirement needs. For a config key, check the live athena.toml value for each role it affects. When the meaning differs, plan a new field instead.";
+
 /// The planner's brief: the request, the reading with each criterion numbered by kind, the checks, the
 /// verifier's commands and the state of the deliverables; a revision also quotes the previous plan and every
 /// finding on it.
@@ -138,7 +145,7 @@ pub fn planner_brief(inputs: &PlannerInputs) -> String {
     }
     let _ = writeln!(
         out,
-        "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above. Each names the production entry point it calls, its guards and preconditions, the seam, fake or fixture and how it is injected, and whether that seam exists today (checked by reading the code) or which plan step adds it. Never put the logic under test inside the test double.\n\n{REFUSAL_CORPUS_RULE}\n\n{OPEN_QUESTION_RULE}\n\n{REAL_RECORDS_RULE}"
+        "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above. Each names the production entry point it calls, its guards and preconditions, the seam, fake or fixture and how it is injected, and whether that seam exists today (checked by reading the code) or which plan step adds it. Never put the logic under test inside the test double.\n\n{REFUSAL_CORPUS_RULE}\n\n{OPEN_QUESTION_RULE}\n\n{REAL_RECORDS_RULE}\n\n{FIELD_MEANING_RULE}"
     );
     out
 }
