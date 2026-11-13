@@ -6,6 +6,7 @@
 //! and publishing are later jobs (see D65 in `docs/decisions.md`).
 
 pub mod model;
+pub mod prompts_inventory;
 pub mod records;
 pub mod rules;
 
