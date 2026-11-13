@@ -87,6 +87,9 @@
 //!   `athena.design-surface/1` record that keeps one for later comparison;
 //! - [`iris`]: the Iris budget guard: the committed spend ledger and the check that refuses a generation
 //!   which would take lifetime spend over $15;
+//! - [`critique_ledger`]: the critique ledger (OLY-B-S6-01): the committed `docs/critique-ledger.toml` of
+//!   critiques, improvements and open questions, a strict parser, and the check that Athena is among the
+//!   subjects; entered by tests only;
 //! - [`pin`]: a study's repository ref resolved to a commit by the core, and mounted read-only;
 //! - [`preflight`]: the capability preflight (OLY-B-RUN-01): before the producer starts, the programs a job's
 //!   checks run are looked up on PATH and recorded in the job's note; a missing one stops the job with a
@@ -109,6 +112,7 @@ pub mod class_trend;
 pub mod code_health;
 pub mod commits;
 pub mod context_load;
+pub mod critique_ledger;
 pub mod design_surface;
 pub mod disk;
 pub mod divergence;
