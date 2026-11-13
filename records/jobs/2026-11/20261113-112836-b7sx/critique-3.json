@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-112836-b7sx",
+  "round": 3,
+  "at": "2026-11-13T11:46:09.219953665Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "An existing corpus test that checks the wrapper against refusing_check will fail on the new correction cases, and the dependents list leaves it out.",
+      "evidence": "`the_wrapper_agrees_with_refusing_check_on_every_case` runs `check_reading_acceptance(&c.reading, &c.request, c.attempt, &c.referenced, c.repo_files)` and `run(&c)` on every case and panics when one is Ok and the other is Some. Under the plan, `check_reading_acceptance` passes `&[]` corrections and `run` (2771) passes `c.corrections`. So `request-parts-correction-defers-part-three` is accepted by `run` and refused by the wrapper, and the test panics. Only `request-parts-retry-correction-defers-part-three` carries its correction in `EarlierAttempt` and still agrees. The dependents list names the callers at 1094-2771 but not this test, and the doc comment of `refusing_check` still says the order and error text are those of the gate. Fix: Name this test as a dependent. Either have it compare the wrapper with `refusing_check(.., &[], ..)` for cases that carry corrections and state why, or add a corrections-taking gate wrapper and use it in the test. Update the `refusing_check` doc sentence that says it matches the gate.",
+      "location": "Decision 2 / Dependents (`refusing_check` signature); crates/athena-core/tests/refusal_corpus.rs:2800-2822",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan says a stored reading accepted after a deferring correction is re-read and accepted. In fact the drain silently holds that job, because `check_reading_text` sees no corrections.",
+      "evidence": "`queued_work` checks a Proposed job's latest reading with `check_reading_text(latest, &request.text)`. If the result is not Accept it returns None: the job leaves the queue and is not re-read. The drain doc at drain.rs:127-129 says such jobs 'wait for a person to run `athena go`'. `check_reading_text` (replay.rs:54-55) passes no corrections. So a user who runs `athena correct` 'leave (3) for a follow-up' gets an accepted reading that the next drain will silently skip, and `athena check-reading` (main.rs:709) will report it refused. Step 12 tells the producer to count these as artifacts and not fix them. Fix: Pass the job's stored corrections to the stored-reading check. For example, add a `check_reading_text` variant that takes corrections, call it from `queued_work` with `j.corrections` texts, add steward.rs to the deliverables, and add a steward test showing that a corrected, deferring reading stays queued. If that is out of scope, correct the dependent entry, state the hold as an intended limit in the doc comment and CHANGELOG, and add a test that pins it.",
+      "location": "Dependents: 'stored-reading reuse' entry; Decision 10 / Step 12 ('replay artifact: count separately'); crates/athena-core/src/steward.rs:419-429",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A re-read after a config change drops the user's corrections, so a deferral made with `athena correct` is lost on that path.",
+      "evidence": "`reread_after_configuration_change` builds `history` as `job.readings.iter().map(|r| (r.clone(), None))`. Every correction is None, so `read_once` passes no corrections to the new check, and the reader does not see the deferral either. Fix: Either fill in the corrections there from `job.corrections`, as `correct` does at reading.rs:1402-1414, or name it as a stated limit. Do not describe it as passing the corrections.",
+      "location": "Dependents: 'user corrections and answers' entry ('run/pin.rs:167 pass their own history'); crates/athena-core/src/run/pin.rs:163-164",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the snapshot code and ran nothing. The plan's core design matches the code. `refusing_check` (checks.rs:520-551) has the stated steps and callers. Every source scan of its body (reading.rs 5005, 5487, 7510, 7544, 8209, 8243, 8689, 8968; refusal_corpus.rs 2876, 2926) only filters `step!(check_` lines or looks for its own step line, so the added parameter, the shadowing `let request` line and a new last step do not break them. `no_check_bypasses_refusing_check` still holds. `read_once` (reading.rs:571-729) has `history: &[(Reading, Option<String>)]`, and `correct` fills it with the user's correction lines (1402-1414). `EarlierAttempt` carries `request` and `corrections` (reader.rs:43-63). The new `corrections` argument is the weak point: two readers outside the read path ignore it. First, the corpus test `the_wrapper_agrees_with_refusing_check_on_every_case` (refusal_corpus.rs:2800-2822) compares `check_reading_acceptance`, which will pass `&[]`, with `run(&c)`, which will pass the case's corrections. It will panic on the planned correction-defers cases, and the dependents list leaves it out. Second, the dependent entry for stored readings is wrong. `queued_work` (steward.rs:423-428) does not re-read a stored reading that fails `check_reading_text`; it drops the job from the drain until a person runs `athena go` (drain.rs:127-129). So a reading accepted after a deferring `athena correct` will now be held. Step 12 tells the producer to treat these as replay artifacts rather than fix them. The config-change re-read in run/pin.rs:163-164 also drops all corrections. The word-list matcher is heuristic, but the accepted criteria require it, and its limits and tensions are stated, so I raise no soundness finding against it. Verdict: revise."
+}

@@ -1,0 +1,478 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261113-112836-b7sx",
+  "round": 1,
+  "at": "2026-11-13T11:32:12.99718584Z",
+  "invocation_seq": 2,
+  "approach": "Root cause: `refusing_check` (crates/athena-core/src/reading/checks.rs:520-549) is an ordered list of `step!` checks, and none compares the request's explicit parts with the reading's deliverables and criteria. No rule says an explicit part stays in scope unless the request defers it, so a reading that moves part (3) to `out_of_scope` is accepted (jobs 20261029-084645-sza7 and 20261029-110953-bw7k; failed attempt 20261030-060839-1njk). Fix it at that gate: add `check_request_parts` as the last step, so every existing refusal keeps its check name. The round-5 design is kept: the shared `request_own_lines` filter factored out of `plain_request_prose` (terms.rs:189), Enumerated and Bullet kinds, distinctive-stem coverage, clause-scoped criterion negation, and enforcement by code only. Round 6 changes, one per finding. (F1) terms.rs is now a listed deliverable. (F2) A request sentence outside every part that cites a part's marker defers it on the broad MARKER_NEGATION list (later, out of scope, for now, defer, skip, follow-up...), guarded against a negator such as 'must not be skipped'. The part's own text and unmarked sentences keep the narrow DEFER_PHRASES list. (F3) Alternatives become one group covered by any member; an optional part may be left out. (F4) Bullet parts have marker None, and marker rules apply only to Enumerated parts. (F5) The sza7 fixture names crates/athena-core/src/checks.rs (the timeout file). (F6) Coverage by a deliverable path alone is dropped; a path only adds stems to a criterion that contains it, and generic path words are ignored. (F7) Four Acceptance headings open the bullet section.",
+  "decisions": [
+    {
+      "choice": "1. Build `request_parts` on a shared line filter. Factor the loop of `plain_request_prose` (terms.rs:189-208: ROOT_CAUSE_ANCHOR and APPROVAL_ANCHOR flags, stop at '## Source' for approved work, drop fenced lines, drop `is_generated_line` lines, terms.rs:62) into `pub(super) fn request_own_lines(request: &str) -> Vec<&str>`. `plain_request_prose` becomes `request_own_lines(request).into_iter().map(plain_line).join(\"\\n\")` with identical output. `request_parts` (topics.rs) reads only `request_own_lines` and, for an approved-work request, skips its first line (the proposal title). RequestPart = {marker: Option<String>, kind: Enumerated|Bullet, text, group: Option<usize>, optional: bool}. `request_text_acceptance` and `is_bullet` stay unchanged. terms.rs is a listed deliverable (finding 1): the brief's Expected deliverables now include it, so the file is in scope.",
+      "reason": "Generated and copied text (approved-work '## Source' copies from work_decisions.rs, the root-cause title and 'Cause:' lines from hestia.rs, fenced 'Request:' blocks) holds 'Acceptance:' bullets and numbered lists that must never become parts. One shared filter means a later change to the generated shapes is made once. The plan parses nothing in the 'Introspection ... prevention it proposed:' lines because `is_generated_line` skips them. `request_text_acceptance` is the parse `athena plan` uses (topics.rs plan_entry; steward.rs:587) and the corpus pins its bullet counts, so it stays.",
+      "rejected": [
+        {
+          "option": "Keep a private skip list in `request_parts`",
+          "why": "Misses fences and the approved-work '## Source' copy and drifts from terms.rs."
+        },
+        {
+          "option": "Extend `is_bullet` to read `N)` and `(a)`",
+          "why": "Moves plan acceptance of every queued request and the pinned bullet counts."
+        },
+        {
+          "option": "Read inline sequences from the whole request",
+          "why": "Quoted or copied text with markers would become required parts."
+        }
+      ]
+    },
+    {
+      "choice": "2. Place `step!(check_request_parts(reading, request));` last in `refusing_check`, after `check_reading_references` (checks.rs:549). It returns Ok when `capability` is none or `question` is some, as `check_governance_coverage` does.",
+      "reason": "Each existing Refuse case keeps its refusing check; `an_extra_check_with_no_case_is_reported` anchors on the `check_reading_references` step line and still works. Only Accept cases with explicit parts can change.",
+      "rejected": [
+        {
+          "option": "Place it early, after `check_criteria_evidence`",
+          "why": "It would pre-empt `check_outcome_state` in the delivery cases with `2)` and `(a)` parts."
+        }
+      ]
+    },
+    {
+      "choice": "3. Parser kinds (finding 4 and 7). `request_parts` runs over `request_own_lines` with states before / in section / after. Before the heading, Enumerated parts are line-start `N.`, `N)`, `(N)`, `a)`, `(a)` and inline `(1)..(2)..` or `(a)..(b)..` sequences (start at 1 or a, consecutive, 2+ markers, each marker followed by text with a significant stem; the last part ends at the first '. ' or line end). The Acceptance section opens on a trimmed, case-insensitive line equal to one of `Acceptance:`, `Acceptance criteria:`, `## Acceptance` or `## Acceptance criteria`. Any other heading is a stated limit in the doc comment. In the section, a line starting `-`, `*` or `N.` is a Bullet with marker None (never also Enumerated, no inline scan); `N)`, `(N)`, `a)`, `(a)` lines are Enumerated. Blank and indented lines stay in the section. The section ENDS at the first non-blank line that has no leading whitespace and is not a list line; after that nothing is read as a part. Marker-cited coverage (5c) and every MARKER_NEGATION rule apply only to Enumerated parts, because a Bullet has no marker, so criterion 2's own words 'leaves (3) out ... as a follow-up' do not number bullets by position.",
+      "reason": "Findings 4 and 7. Enumerated parts are the failure class; Acceptance bullets are the second introspection's proposal. The two kinds need different stem counts (2 and 1), so a line has exactly one kind. StewardRequest puts a `Files:` line after its bullets (steward.rs:581-585), and a later Notes list or copied block must not become required bullets. Many tests run the real gate with short dash-bullet requests and no heading; a free-form dash bullet is not a named part.",
+      "rejected": [
+        {
+          "option": "Only the exact line `Acceptance:` opens the section",
+          "why": "Finding 7: hand-written variants leave their bullets unenforced."
+        },
+        {
+          "option": "Number bullets by position so a marker can cite them",
+          "why": "Finding 4: the own-reading case would depend on an unstated choice and criterion 2's '(3) ... follow-up' would cancel itself."
+        },
+        {
+          "option": "The section never ends, or resumes Enumerated parsing after it",
+          "why": "A later Notes or Files list would become required parts."
+        },
+        {
+          "option": "Treat every dash or star bullet as a part",
+          "why": "False refusals over fixtures with free-form bullets."
+        }
+      ]
+    },
+    {
+      "choice": "4. Alternatives and optional parts (finding 3). Groups: (i) an inline sequence is one group when the text before its first marker in the same sentence holds 'either', 'one of', 'choose' or 'pick', or when the last marker is preceded by ' or ' / ', or '; (ii) contiguous line-start parts that follow a non-part line holding 'either', 'one of', 'choose' or 'pick' are one group; (iii) a part line ending ' or' groups with the next part. A group is covered when any member is covered, is skipped when every member is skipped (deferred or optional), and the error names the group ('one of (a) ..., (b) ...'). A part is optional, and skipped, when its text after the marker starts with 'optionally' or holds 'if time permits' or 'nice to have'. Groups apply to Enumerated parts only. Known limits (doc comment): an 'or' inside one part's text is not a group; 'either' without markers is not read.",
+      "reason": "'Store it either as (a) a JSON file or (b) a TOML table.' must accept a reading that picks (a). out_of_scope never covers, so without groups the only repair would be a criterion for work not being done.",
+      "rejected": [
+        {
+          "option": "Treat every (a)/(b) sequence as required parts",
+          "why": "Finding 3: refuses a reading that chose one option, with no honest repair."
+        },
+        {
+          "option": "Let any reading omit parts that contain 'or'",
+          "why": "Too wide: 'Add a flag or alias' style parts would never be enforced."
+        }
+      ]
+    },
+    {
+      "choice": "5. Stems (`part_stems`), unchanged from round 5 except for paths. Strip a leading `[tag]`; lowercase ASCII alphanumeric words; drop all-digit words and words under 3 letters. For each word w, s = w without one trailing 's' when w is longer than 3. Drop the word when w or s is in FUNCTION_WORDS (the, and, for, not, with, without, unless, are, its, can, all, any, one, add, use, new, via, per, but, has, how, out, was, may, our, you, see, two, who, why, too, now), COMMON_WORDS (topics.rs:157-161) or PART_FILLER (pass, passes, passed, passing, cargo, clippy, fmt, content, behavior). Keep s cut to 6 chars; map `doc` to `docume` (STEM_ALIASES). `stems_match(a,b)`: equal, or the shorter has 4+ chars and is a prefix of the other. Path stems (finding 6): for a deliverable path, split on non-alphanumerics and ignore the words crates, src, core, tests, test, lib, mod, bin, and the extensions rs, md, toml, json, txt, yml, yaml, lock before stemming. The unit test `part_stems_worked_examples` asserts: 'Add the --json flag to status' = {json, flag, statu}; 'Document the flag in the guide' = {docume, flag, guide}; 'Cover the flag with a timeout test' = {cover, flag, timeou, test}; '[content] docs/guide.md describes --json' = {docume, guide, descri, json}; 'A test fails without the change and passes with it' = {test, fail, change}; and the path stems of crates/athena-core/tests/foo.rs = {athena, foo}.",
+      "reason": "The filler list applies to the bare word and its singular so gate words add no stems. The alias keeps 'docs/guide.md describes --json' covering '(2) Document the flag in the guide'. Ignoring generic path words means 'crates/athena-core/tests/foo.rs' cannot share the stem 'test' with a dropped test part.",
+      "rejected": [
+        {
+          "option": "Keep path segments such as crates, core and tests as stems",
+          "why": "Finding 6: every repo path carries them, so a test-file path would cover any test part."
+        },
+        {
+          "option": "Drop the alias and require 4-letter stems",
+          "why": "The natural criterion 'docs/guide.md describes --json' would be falsely refused."
+        }
+      ]
+    },
+    {
+      "choice": "6. Coverage (finding 6). For each kind with 2+ parts, drop from every part the stems that occur in every part of that kind (fallback to the full set if that empties a part); n is the remaining count; need = min(2,n) for Enumerated, min(1,n) for Bullet; n = 0 is skipped. A part is covered when (a) one usable criterion, pooled with the path stems (decision 5) of every deliverable path whose text the criterion contains, shares at least `need` stems with it, or (c) a usable criterion cites the marker of an Enumerated part (`(N)`, `part N`, `item N`, `(c)`, `part c`; not bare `N)`) and shares at least 1 distinctive stem. Rule (b), a deliverable path alone covers, is REMOVED. A deliverable is required by the existing checks and the error says 'cover it with a deliverable and a criterion'. `out_of_scope` never covers.",
+      "reason": "Criterion 3 of the brief: a path alone does not cover a part. Dropping shared stems stops a criterion for part (2) covering part (3) through the shared subject 'flag'. The tension is named in the doc comment: stricter refuses more reworded readings, looser misses dropped parts. Athena's replay holds a candidate whose newly refused share exceeds the declared 10% plus the 5-point margin, 15% (replay.rs:296-308).",
+      "rejected": [
+        {
+          "option": "Keep rule (b) with generic path words removed",
+          "why": "Still lets a path cover a part with no criterion, against the brief and introspection 20261029-111106-c3pq."
+        },
+        {
+          "option": "Assign each criterion to its one best part",
+          "why": "More logic and tie rules than dropping shared stems."
+        },
+        {
+          "option": "Count shared words across the whole reading text",
+          "why": "The summary and title echo the request, so a dropped part would look covered."
+        }
+      ]
+    },
+    {
+      "choice": "7. Criterion-side negation is scoped to a clause and to the part, as in round 5. DEFER_PHRASES: follow-up job, follow up job, in a follow-up, in a follow up, as a follow-up, as a follow up, separate job, next job, later job, not in this job, deferred to, can wait. CRITERION_NEGATION = DEFER_PHRASES plus out of scope, out-of-scope, deferred, postponed, not done, not covered, left out, not part of. MARKER_NEGATION = CRITERION_NEGATION plus skipped, omitted, excluded, bare later, defer, skip, follow-up, follow up, followup, for now. `negation_hit(criterion, part)` splits the criterion into clauses at '. ', '; ', ', ', ': ' and ' and ', ' but ', ' while ', ' so '. A clause is relevant when it holds a word whose stem matches a distinctive stem of the part, or (MARKER_NEGATION, Enumerated parts only) cites the part's marker. A CRITERION_NEGATION phrase in a relevant clause, or a MARKER_NEGATION phrase in a marker-citing clause, makes the criterion unusable for that part, unless the part's own text holds the phrase. A criterion unusable for one part may cover another. The error lists each ignored criterion with its phrase.",
+      "reason": "Criteria here often describe refusal behaviour ('moves it to out_of_scope as a follow-up'); the phrase cancels only next to the part's own subject. 'The timeout test is deferred' still cannot cover part (3); 'status lists skipped checks' still covers '(2) Report skipped checks in status'. Bullets have no marker, so for them only CRITERION_NEGATION in a relevant clause applies.",
+      "rejected": [
+        {
+          "option": "Count a phrase anywhere in the criterion",
+          "why": "Cancels criteria that mention refusal in another clause."
+        },
+        {
+          "option": "A flat list where skipped, omitted and excluded cancel every criterion",
+          "why": "Refuses 'status lists skipped checks'."
+        }
+      ]
+    },
+    {
+      "choice": "8. Request-side deferral (finding 2). A part is skipped as deferred when (i) its own text holds a DEFER_PHRASES phrase ('(3) Add a dashboard in a follow-up job'), or (ii) another sentence of `request_own_lines`, taken outside every part span (spans blanked before splitting at '. ', '! ', '? ' and newlines), cites its marker as `(N)`, `N)`, `part N`, `item N`, `(c)`, `part c` or `item c` and holds any MARKER_NEGATION phrase, which includes 'later', 'out of scope', 'for now', 'defer', 'skip' and 'follow-up'; or (iii) such a sentence holds a DEFER_PHRASES phrase and cites the marker. A sentence is not a deferral when, after removing the phrases that themselves hold 'not' ('not in this job', 'not part of', 'not done', 'not covered'), it still holds not, n't, never or cannot ('Part 2 must not be skipped'). Parts of a text with no marker citation outside the parts are never deferred by (ii). The narrow list applies to a part's own text and to unmarked sentences, so '(2) Reject future timestamps', '(1) List each file separately', '(3) Defer the flush until exit' and '(3) Add a latest-value column' stay required. Stated departure from criterion 4's 'later' example: bare 'later' inside the part's own text (for example '(3) Add the dashboard later') does not defer it; criterion 4 speaks of a sentence outside the part, which is handled by (ii). 'Parts 2 and 3 can come later' cites only part 2 (word-boundary 'part N'); that is a stated limit.",
+      "reason": "Finding 2: the same trust the plan gives MARKER_NEGATION when a criterion names the marker applies to a request sentence that names the marker. The marker citation is the guard against stray words. The negator guard prevents 'must not be skipped' from deferring a part.",
+      "rejected": [
+        {
+          "option": "Narrow DEFER_PHRASES only for request sentences",
+          "why": "Finding 2: 'Part (3) is out of scope for now.' and 'Part 3 can come later.' would leave the part required and the reader could not follow the request."
+        },
+        {
+          "option": "Broad list for the part's own text",
+          "why": "Exempts real parts such as '(3) Defer the flush until exit'."
+        }
+      ]
+    },
+    {
+      "choice": "9. Enforce by code only. The doc comment and CHANGELOG say why information alone is not enough: the reader already sees the request and still deferred part (3) in jobs 20261029-084645-sza7 and 20261029-110953-bw7k, so a refusal rule is the allowed fix. 'Pass the parsed request parts to the reader' is named as a follow-up, not done here. No prompt is edited (reader budget 1998 of 2000, docs/system-facts.md). The refusal text reaches the reader on its one corrected re-read (reading.rs:738-759).",
+      "reason": "No token headroom in the reader prompt, and a prompt line is not a mechanism.",
+      "rejected": [
+        {
+          "option": "Add a rule line to the reader prompt",
+          "why": "No budget; prose only."
+        },
+        {
+          "option": "Build the parsed parts into the reader brief now",
+          "why": "A larger change across briefs and budgets."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "purpose": "Add `check_request_parts` with its root-cause doc comment (names sza7, bw7k and the failed attempt, forms handled, exact Acceptance headings, limits, intended higher refusal rate, expected 10%), the last `step!` line in `refusing_check`, and the doc-list entry in `check_reading_acceptance`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/terms.rs",
+      "action": "modify",
+      "purpose": "Factor the generated-text line filter of `plain_request_prose` into `pub(super) fn request_own_lines`; output of `plain_request_prose` unchanged. Listed in the brief's deliverables (finding 1).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/topics.rs",
+      "action": "modify",
+      "purpose": "Add RequestPart, request_parts (Enumerated and Bullet, groups, optional parts, four Acceptance headings, section end), stem helpers and lists, path-word filter, clause-scoped `negation_hit`, own-text and request-sentence deferral.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Unit tests: doc and step test, stems and path stems, part-three variants, request deferral with later/for now/out of scope, alternatives and optional parts, bullets without marker, heading variants, section end, skipped copied/generated text, `plain_request_prose` unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/replay.rs",
+      "action": "modify",
+      "purpose": "Add a test module with `steward_request_bullets_become_bullet_parts_only`, which builds StewardRequest text and checks the parts; no change to replay logic or thresholds.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add INPUT_FORMS tags, `parts_case`, `generated_root_cause_request_with`, `request_parts_cases()` wired into `cases()`, the sza7 and bw7k cases, the new deliverable-path, request-deferral, alternatives, heading cases, the declared-intended, shape and generated-request proxy tests; repair the criteria of the two '-not-read-today' cases; update the module doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry at the top of `### Added` under `## [Unreleased]`: root cause, the check, the shared filter, forms handled, why information alone is not enough, limits, follow-up, higher refusal rate intended, expected 10% (estimate).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read terms.rs 50-80 and 186-208 (`is_generated_line`, `plain_request_prose`), work_decisions.rs 181-345, topics.rs 156-215 (`COMMON_WORDS`, `topic_words`), surveys.rs:39 (`has_phrase`), checks.rs:520-551 and the `check_governance_coverage` guard, hestia.rs:1025-1097, steward.rs:519-595 and 1579, and refusal_corpus.rs:172-297, 1327-1392, 1430, so new code reuses what exists.",
+    "In terms.rs add `pub(super) fn request_own_lines(request: &str) -> Vec<&str>` holding the loop of `plain_request_prose` (anchors, '## Source' stop, fence toggle, `is_generated_line`); make `plain_request_prose` call it and apply `plain_line`; output unchanged.",
+    "In topics.rs add RequestPart {marker: Option<String>, kind, text, group, optional}, FUNCTION_WORDS, PART_FILLER, STEM_ALIASES, PATH_WORDS (crates, src, core, tests, test, lib, mod, bin and the extensions), DEFER_PHRASES, CRITERION_NEGATION, MARKER_NEGATION with the exact lists of decisions 5, 7 and 8. Add `request_parts(text)` over `request_own_lines` (states before / in section / after; four Acceptance headings; Bullet marker None; groups and optional parts of decision 4; skip the first line of an approved-work request), `part_stems`, `path_stems`, `stems_match`, `distinctive_stems`, clause splitting and `negation_hit` (Enumerated markers only), `part_defers(text)` (narrow list) and `request_defers_part` (sentence outside every part span, MARKER_NEGATION with the negator guard). Make items `pub(super)` where tests use them.",
+    "In checks.rs add `pub fn check_request_parts(reading: &Reading, request: &str) -> Result<()>`: Ok when `capability` is none or `question` is some; skip deferred, optional and n = 0 parts; coverage by rules (a) and (c) of decision 6 with NO path-alone rule and usability by `negation_hit`; a group is covered by any member. For an uncovered part or group keep every criterion that would have covered it but was unusable, with its phrase, and note whether an `out_of_scope` item shares stems. Error text: each part as marker plus text, the cause, each ignored criterion and phrase, 'cover it with a deliverable and a criterion', and 'unless the request itself defers it'. Write the doc comment as one paragraph: root cause ('does not compare', 'in scope'), jobs 20261029-084645-sza7, 20261029-110953-bw7k and the failed attempt 20261030-060839-1njk, why information alone is not enough ('the reader already sees the request'), forms handled, the shared filter, the false-refusal versus miss tension, known limits including the exact Acceptance headings accepted, 'This check refuses more readings; the higher refusal rate is intended.' and 'expected 10% of newly refused readings' (an estimate).",
+    "Add `step!(check_request_parts(reading, request));` as the last `step!` in `refusing_check` (after `check_reading_references`, checks.rs:549) and add 'then the explicit parts of the request ([`check_request_parts`])' to the `check_reading_acceptance` doc list. Run `cargo build -p athena-core`.",
+    "In replay.rs add `#[cfg(test)] mod tests` with `steward_request_bullets_become_bullet_parts_only`: build requests with `StewardRequest::new(..).render()` and assert `request_parts` returns Bullet parts only, as many as the acceptance bullets, none from the Files line.",
+    "In reading.rs's tests module add `request_parts_doc_names_root_cause_and_step`, `part_stems_worked_examples`, `request_parts_path_words_are_ignored`, `request_parts_refused_when_part_three_is_left_out` (variants a-m and the dropped bullet), `request_parts_error_names_the_part_and_the_repair`, `request_parts_request_defers_*` (later, for now, out of scope, follow-up, must-not-be-skipped, own-text later), `request_parts_alternatives_group_members_and_optional_parts`, `plain_request_prose_is_unchanged_by_the_shared_filter`, and parser tests `request_parts_*` for `N.`, `N)`, `(N)`, `a)`, `(a)`, inline sequences, marker list without text, bullets with no marker, heading variants, the numbered line after Acceptance, section end, and skipped copied or generated text. Helpers: `terms_reading` (7293), `governed_reading` (4635), `refuser_for` (7288), `reading_source` (1578).",
+    "In refusal_corpus.rs add the INPUT_FORMS tags (update the array length: part-dropped, part-moved-to-out-of-scope, part-narrowed, part-deferred-by-request, part-deferred-by-later-sentence, request-says-for-now, acceptance-bullet-part, acceptance-heading-variant, numbered-bullet-after-acceptance, acceptance-section-end, reworded-bullet, inline-paren-parts, marker-list-without-text, alternatives-group, optional-part, deliverable-path-alone, defer-word-in-criterion, criterion-says-out-of-scope, criterion-says-deferred, part-uses-negation-word, sibling-shared-subject, quoted-proposal-enumeration, cause-title-enumeration, approved-work-copied-sections, fenced-acceptance, handwritten-cause-line, criterion-cites-marker, reworded-criterion, refusal-wording-in-other-clause), `parts_case`, `generated_root_cause_request_with(cause, prevention, sentence)` built through `athena_core::hestia::root_cause_request` from a `RepeatedCause` as at ~1334-1349 (the old function delegates), and `request_parts_cases()` wired into `cases()` with every case id named in demonstrations 3-9. Build the approved-work case on `generated_approval_request` (1362). Repair the criteria and comment of `numbered-paren-parts-not-read-today` and `lettered-paren-parts-not-read-today` so they cover their parts. Put the sza7 fixture's out_of_scope as: crates/athena-core/src/checks.rs, crates/athena-cli/src/display.rs, crates/athena-cli/tests/status_durations.rs, crates/athena-core/src/disk.rs, crates/athena-core/src/run/mod.rs, crates/athena-core/src/status.rs. State each new case's stems in a comment. Update the module doc.",
+    "In refusal_corpus.rs add `request_parts_refusal_is_declared_intended`, `sza7_and_bw7k_shapes_are_in_the_corpus` and `generated_requests_with_typical_readings_are_accepted`.",
+    "Add the CHANGELOG entry at the top of `### Added` under `## [Unreleased]`: root cause ('does not compare', 'explicit parts'), why information alone is not enough ('already sees the request'), the check `check_request_parts`, the shared filter `request_own_lines`, forms handled, limits, follow-up 'pass the parsed request parts to the reader', jobs 20261029-084645-sza7 and 20261029-110953-bw7k, 'higher refusal rate is intended', 'expected 10% of newly refused readings'.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-core`, `cargo test -p athena-core run::`, `cargo test -p athena-core steward::tests`, `cargo test -p athena-core work_decisions`, `cargo test -p athena-cli --test drain`, `cargo test -p athena-cli`, `cargo test --locked` and `git diff --stat`. Confirm none of crates/athena-core/src/checks.rs, display.rs, status_durations.rs, disk.rs, run/mod.rs, status.rs is touched. Repair any pre-existing fixture a newly refused scripted or stored reading breaks (its criteria, not the check) and name the file in the report."
+  ],
+  "risks": [
+    {
+      "risk": "False refusals of good readings that reword a part so it shares too few distinctive stems with any criterion; stricter matching refuses more, looser misses dropped parts.",
+      "mitigation": "Tension named in the doc comment. Bullets need one distinctive stem; n = 0 parts are skipped; filler and gate words are filtered; a marker-citing criterion with one distinctive stem covers an Enumerated part; one criterion pools with the paths it names; the error names the part, the repair and each ignored criterion, and the reader gets one re-read (reading.rs:738-759). The proxy test and the own-reading case guard the common case. The 10% is an estimate; Athena's replay measures it at verification (records/ is absent for the planner)."
+    },
+    {
+      "risk": "A request sentence that cites a marker with a broad word is read as a deferral when it is not (for example 'Part 3 must not be skipped', or 'Parts 2 and 3 can come later' naming only part 2).",
+      "mitigation": "Marker citation is required; a negator guard blocks 'must not be skipped'; the Refuse case `request-parts-request-says-part-must-not-be-skipped` pins it; 'Parts N and M' lists are a stated limit. A missed deferral is refused with text telling the reader to cover the part."
+    },
+    {
+      "risk": "Bare 'later' in a part's own text is not a deferral, so a reading that follows '(3) Add the dashboard later' is refused (stated departure from criterion 4's wording, which speaks of a sentence outside the part).",
+      "mitigation": "Stated in the doc comment and pinned by `request-parts-part-own-text-later-stays-required`; the request can defer with a sentence naming the marker."
+    },
+    {
+      "risk": "Alternatives grouping misses a form (an 'or' inside one part, 'either' with no markers) so one option is required, or groups too much.",
+      "mitigation": "Groups need an introducer word or an ' or ' before the last marker; limits are listed in the doc comment; corpus cases cover each form plus a none-covered Refuse."
+    },
+    {
+      "risk": "The shared filter changes `plain_request_prose` output by accident, moving defined-terms results.",
+      "mitigation": "The helper holds the same loop; `plain_request_prose_is_unchanged_by_the_shared_filter`, the defined-terms corpus cases and `approve_request_has_the_generators_shapes` run in `cargo test --locked`."
+    },
+    {
+      "risk": "An existing scripted or stored reading whose request has an Acceptance heading or enumerated markers is newly refused, forcing edits outside the listed files (reading.rs:7396, 7743; steward.rs tests; run/tests.rs; drain.rs).",
+      "mitigation": "Dash bullets count only inside an Acceptance section. The producer runs the listed package tests, repairs the fixture's criteria never the check, and names the file in the report."
+    },
+    {
+      "risk": "A part-like list after the Acceptance section ends, an Acceptance heading written another way, or a part inside a fence is not enforced.",
+      "mitigation": "A stated narrow rule with the exact four headings in the doc comment; copied text and fences must not become parts."
+    },
+    {
+      "risk": "The recorded request text of jobs sza7 and bw7k is not in the snapshot, so the corpus shapes are rebuilt from the introspections' account.",
+      "mitigation": "The case `source` strings say 'rebuilt from the introspection's account', not verbatim; unit tests hold the property for any part (3)."
+    },
+    {
+      "risk": "The producer tunes corpus wording until cases pass and hides a matcher gap, or lowers a threshold.",
+      "mitigation": "Stem sets are pinned by `part_stems_worked_examples`; the fixture keeps 'flag' in all three parts on purpose; a count that differs from the plan is reported with the stem set shown, never fixed by a silent threshold change."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`refusing_check` order and result",
+      "dependent": "crates/athena-core/src/reading.rs:720 `read_for` calls `refusing_check` on every reader output; the refusal text goes back for one corrected re-read (738-759)",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading::tests::request_parts_refused_when_part_three_is_left_out; cargo test -p athena-core --test refusal_corpus",
+      "reason": null
+    },
+    {
+      "name": "`refusing_check` on a pinned job's re-read",
+      "dependent": "crates/athena-core/src/run/pin.rs:167 (`self.read_for(...)`): a pinned job's re-read passes through the new step",
+      "kind": "code",
+      "test": "cargo test -p athena-core run::",
+      "reason": "Pin tests (run_pin_tests.rs, run/tests.rs) use requests with no Acceptance heading and no enumerated markers, so `request_parts` returns none and the check accepts."
+    },
+    {
+      "name": "`check_reading_acceptance` result for stored readings",
+      "dependent": "crates/athena-core/src/reading/replay.rs:54-65 `check_reading_text`, `replay_cases` (142-157) and crates/athena-cli/src/main.rs `athena check-reading`",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus generated_requests_with_typical_readings_are_accepted; request_parts_refusal_is_declared_intended; cargo test -p athena-core reading::replay (the real replay needs records/, so the 10% is an estimate)",
+      "reason": null
+    },
+    {
+      "name": "approved-work request text through the gate",
+      "dependent": "crates/athena-core/src/work_decisions.rs:293-345 (`approve_request`, `approve_work` through `self.ask`) and its copied sections (`job_text`, `path_text`, evidence)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus (request-parts-approved-work-copied-sections-ignored); cargo test -p athena-core work_decisions",
+      "reason": null
+    },
+    {
+      "name": "`plain_request_prose` line filter, factored into `request_own_lines`",
+      "dependent": "crates/athena-core/src/reading/terms.rs:189-208 `plain_request_prose` and its callers (`check_defined_terms`, the ambiguous-name check), `is_generated_line` (62-80)",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading::tests::plain_request_prose_is_unchanged_by_the_shared_filter; refusal_corpus `defined_terms_cases`, `ambiguous_name_cases`, `approve_request_has_the_generators_shapes`",
+      "reason": null
+    },
+    {
+      "name": "title and 'Cause:' prefixes of generated root-cause requests",
+      "dependent": "crates/athena-core/src/reading/terms.rs:66-73 prefixes ('Cause: ', 'Failure class: ', title prefix) and hestia.rs:1025-1061 which writes them",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus (`generated_request_has_the_generators_shapes`, `request-parts-cause-title-enumeration-ignored`, `request-parts-handwritten-cause-line-is-a-part`)",
+      "reason": "Unchanged: hestia.rs is not edited; `request_parts` reads these lines only through `is_generated_line`, so the strings stay as they are. A hand-written 'Cause:' line without the anchor is a part."
+    },
+    {
+      "name": "stored-reading reuse",
+      "dependent": "crates/athena-core/src/steward.rs:424 `queued_work` and crates/athena-cli/src/drain.rs:121 (stored-reading reuse after a changed `check_reading_text` result)",
+      "kind": "code",
+      "test": "cargo test -p athena-core steward::tests (a_stored_reading_that_fails_a_reading_check_is_left_for_a_person); cargo test -p athena-cli --test drain. A stored reading that fails the new check is re-read, the intended effect.",
+      "reason": null
+    },
+    {
+      "name": "requests built by the generators",
+      "dependent": "crates/athena-core/src/steward.rs:519-585 `StewardRequest::new` (Acceptance section of '- ' bullets, then a Files line), hestia.rs:1025-1097, code_health.rs:1348",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading::replay (steward_request_bullets_become_bullet_parts_only); refusal_corpus `request-parts-bullets-after-acceptance-section-ignored`, `generated_requests_with_typical_readings_are_accepted`",
+      "reason": null
+    },
+    {
+      "name": "callers of `check_reading_text` in tests",
+      "dependent": "crates/athena-core/src/run/tests.rs:1817, 1824, 2142 and reading.rs tests calling `check_reading_text`",
+      "kind": "code",
+      "test": null,
+      "reason": "Their requests have no Acceptance heading and no enumerated markers, so `request_parts` returns none; `cargo test --locked` runs them."
+    },
+    {
+      "name": "the list of `step!(check_*` lines in `refusing_check`",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `every_acceptance_check_has_a_refusing_corpus_case`, `an_extra_check_with_no_case_is_reported` (anchor `step!(check_reading_references(`, ~2927), `no_check_bypasses_refusing_check` (~3209)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": null
+    },
+    {
+      "name": "`check_reading_acceptance` doc comment",
+      "dependent": "reading.rs tests that check doc comments name each check (`history_fixture_has_one_step_line` ~8205-8230 and siblings)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core reading::tests",
+      "reason": null
+    },
+    {
+      "name": "request bullet parse `request_text_acceptance` / `is_bullet`",
+      "dependent": "topics.rs plan_entry (~411), steward.rs:587, hestia.rs:1781, code_health.rs:1348",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged: `request_parts` is a new function and the two existing ones keep their bodies; the corpus `bullets_expected` assertion (~2788) still holds."
+    },
+    {
+      "name": "corpus Accept outcome for requests with enumerated parts",
+      "dependent": "refusal_corpus.rs `numbered-dot-parts` (~1879), `numbered-paren-parts-not-read-today` (~1894), `lettered-paren-parts-not-read-today` (~1907), scope-limit cases with a '1. ' marker (~548-560)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus; the two '-not-read-today' cases get criteria that cover their parts",
+      "reason": null
+    },
+    {
+      "name": "first refusing check of an existing Refuse case",
+      "dependent": "refusal_corpus.rs delivery cases with `2)` and `(a)` parts (~936-949) and every case refused by an earlier check",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus corpus_cases_get_the_expected_outcome",
+      "reason": "Unaffected: the new step is last, so an earlier check still refuses first."
+    },
+    {
+      "name": "gate result for requests with dash bullets and no Acceptance heading",
+      "dependent": "reading.rs:2638-2961 and 3177-3286, crates/athena-cli/tests/drain.rs, crates/athena-cli/tests/job_plan.rs:166-169, run/tests.rs",
+      "kind": "code",
+      "test": "cargo test --locked",
+      "reason": "No heading and no enumerated markers, so no parts."
+    },
+    {
+      "name": "corpus helper `generated_root_cause_request(sentence)`",
+      "dependent": "refusal_corpus.rs `generated_root_cause_request` (~1327) callers",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "The old function delegates to `generated_root_cause_request_with` with its current cause and prevention texts, so existing case text is unchanged."
+    },
+    {
+      "name": "CHANGELOG entry",
+      "dependent": "CHANGELOG.md `## [Unreleased]` / `### Added`; refusal_corpus.rs declared-intended tests (~2985-2992)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus request_parts_refusal_is_declared_intended",
+      "reason": "An item added at the top of `### Added` changes no existing assertion; those tests look for their own check names and phrases."
+    },
+    {
+      "name": "check names and text shown to the reader",
+      "dependent": "crates/athena-context/src/briefs/reader.rs and briefs.rs (text shown to the reader)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Unchanged: no prompt or brief is edited (reader budget 1998 of 2000, docs/system-facts.md); the refusal text reaches the reader on the re-read."
+    },
+    {
+      "name": "decisions and configuration",
+      "dependent": "docs/decisions.md, athena.toml, defaults.toml",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Not edited, as the brief directs; no config key, check name in config or record type is added, so `AnyRecord` and the round-trip test are untouched."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Source-text unit test in the style of `history_fixture_has_one_step_line` (reading.rs:8205-8230). It reads `reading_source()` (reading.rs:1578) and asserts: `pub fn check_request_parts(reading: &Reading, request: &str) -> Result<()>` is defined; the `refusing_check` body has exactly one line equal to `step!(check_request_parts(reading, request));`, and it is the last `step!`; the doc comment above the function contains 'does not compare', 'in scope', '20261029-084645-sza7', '20261029-110953-bw7k', '20261030-060839-1njk', 'already sees the request', 'Acceptance criteria:', '## Acceptance criteria', 'This check refuses more readings; the higher refusal rate is intended'; the `check_reading_acceptance` doc contains '[`check_request_parts`]'.",
+      "command": "cargo test -p athena-core reading::tests::request_parts_doc_names_root_cause_and_step",
+      "observes": "The test passes once the check, its step line and the doc paragraph (root cause, three jobs, forms handled, exact headings accepted, limits) exist.",
+      "fails_without": "On the base tree the function, step line and doc sentences are absent, so the source-text assertions fail.",
+      "seam": "No injection. Test reads source through `reading_source()`, which exists (reading.rs:1578). The test is added by plan step 7."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in reading.rs. Request 'Do three things:' with '(1) Add the --json flag to status', '(2) Document the flag in the guide', '(3) Cover the flag with a timeout test', inline and as separate lines; all three name 'flag' on purpose. Base reading from `terms_reading` (reading.rs:7293, wraps `governed_reading` 4635) with deliverables src/status.rs and docs/guide.md and criteria '[behavior] status --json prints json' and '[content] docs/guide.md documents the flag'. (a) part 3 absent: `refuser_for(&reading, request)` (reading.rs:7288) returns Some(\"check_request_parts\"). (b) part 3 only in `out_of_scope` as a follow-up: same. (c) criterion '[behavior] a test fails when the timeout is missing' added: None and `check_reading_acceptance` Ok. (d) '(2) Reject future timestamps' dropped: refused. (e) criterion 'Later retries reject future timestamps': accepted. (f) 'Part (3) is out of scope for this job' added to (a): still refused. (g) 'Part (3) timeout test will be added later': still refused. (h) 'The timeout test is deferred': still refused. (i) part '(2) Report skipped checks in status' with criterion 'status lists skipped checks': covered. (j) 'Part (2) skipped checks are omitted': ignored, error names it and 'omitted'. (k) criterion 'a reading that moves the flag to a follow-up job is refused, and the timeout test passes' added to (a): accepted (the follow-up clause holds no distinctive stem of part 3). (l) 'the timeout test is moved to a follow-up job': refused. (m) the same reading with deliverable tests/timeout.rs added and no criterion: still refused (path alone does not cover; see criterion 3). A request Acceptance bullet dropped: refused (Bullet case, two bullets, one without a criterion).",
+      "command": "cargo test -p athena-core reading::tests::request_parts_refused_when_part_three_is_left_out && cargo test -p athena-core reading::tests::part_stems_worked_examples",
+      "observes": "The refusing check is exactly `check_request_parts` for (a), (b), (d), (f), (g), (h), (l), (m) and the dropped bullet; the reading is accepted for (c), (e), (i), (k); stem sets equal the stated ones.",
+      "fails_without": "With the `step!(check_request_parts(...))` line removed, `refuser_for` returns None for the refused variants and the `Some(\"check_request_parts\")` assertions fail.",
+      "seam": "Production entry points `refusing_check` and `check_reading_acceptance` through the existing helper `refuser_for` (reading.rs:7288); fixtures `terms_reading` and `governed_reading` exist. Nothing is faked. `part_stems` and `stems_match` are `pub(super)` in topics.rs so the test calls them. Tests added by plan step 7."
+    },
+    {
+      "criterion": 3,
+      "method": "New corpus case `request-parts-test-file-deliverable-alone-does-not-cover` (Refuse by `check_request_parts`): request '(1) Add the --json flag to status', '(2) Add a core test for the timeout'; the reading has deliverables src/status.rs and crates/athena-core/tests/timeout.rs, a criterion for part (1) only, nothing in out_of_scope. Its sibling `request-parts-test-file-deliverable-with-criterion-covers` (Accept) adds '[behavior] a test fails when the timeout is missing'. A unit test in reading.rs, `request_parts_path_words_are_ignored`, asserts the path stems of crates/athena-core/tests/foo.rs are {athena, foo} and that crates, src, core, tests, lib, mod and the extensions add no stem. The error text of a refused part says 'cover it with a deliverable and a criterion'.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "The test-file-only case is refused by `check_request_parts`; the case with a criterion is accepted.",
+      "fails_without": "With rule (b) (path alone covers) present the first case is accepted; without the step it is accepted too.",
+      "seam": "Production entry point `refusing_check` through `run(&Case)` (refusal_corpus.rs ~2760-2778); fixtures `case(..)` and `base_reading` (172, 241) exist. `parts_case(..)` is added by plan step 8."
+    },
+    {
+      "criterion": 4,
+      "method": "Corpus Accept cases (a reading that follows the request wording, leaving part 3 out): `request-parts-request-says-out-of-scope-for-now` ('Part (3) is out of scope for now.' in a sentence after '(1)..(2)..(3)..'), `request-parts-request-says-can-come-later` ('Part 3 can come later.'), `request-parts-request-says-follow-up` ('Handle (3) in a follow-up.'), `request-parts-request-defers-part-three` (part's own text '(3) Add a dashboard in a follow-up job'), `request-parts-later-sentence-defers-part-three` ('Part 3 can wait for a follow-up job.'). Refuse cases that must stay required: `request-parts-request-says-part-must-not-be-skipped` ('Part (3) must not be skipped.'), `request-parts-future-word-part-dropped` ('(2) Reject future timestamps'), `request-parts-separately-and-defer-words-stay-required` ('(1) List each file separately', '(3) Defer the flush until exit'), `request-parts-part-own-text-later-stays-required` ('(3) Add the dashboard later'; the stated departure). Unit tests `request_parts_request_defers_with_later_for_now_out_of_scope` assert the same through `check_reading_acceptance`.",
+      "command": "cargo test -p athena-core --test refusal_corpus && cargo test -p athena-core reading::tests::request_parts_request_defers",
+      "observes": "A reading that follows a request deferring a marked part is accepted; words that only resemble deferral, or a negated sentence, do not defer.",
+      "fails_without": "With only the narrow DEFER_PHRASES list the first three Accept cases are refused and the corpus outcome check fails; without the step the Refuse cases are accepted.",
+      "seam": "Production entry points `refusing_check` through `run(&Case)` and `check_reading_acceptance` through `refuser_for` (reading.rs:7288); fixtures exist. Cases added by plan step 8, unit tests by step 7."
+    },
+    {
+      "criterion": 5,
+      "method": "Corpus Accept cases: `request-parts-alternatives-inline-either` ('Store it either as (a) a JSON file or (b) a TOML table.' with only (a) covered by a criterion), `request-parts-alternatives-inline-or` ('(a) A JSON file or (b) a TOML table.'), `request-parts-alternatives-one-of-list` ('Choose one of:' then '(a) ...' '(b) ...' lines), `request-parts-alternatives-pick-list`, `request-parts-optionally-part` ('(3) Optionally add a dashboard'), `request-parts-if-time-permits-part`, `request-parts-nice-to-have-part`. Refuse cases: `request-parts-alternatives-none-covered` (neither (a) nor (b) covered) and `request-parts-non-optional-part-still-required` (a sibling of an optional part). Unit tests `request_parts_alternatives_group_members_and_optional_parts` check the group ids and the `optional` flag from `request_parts` directly.",
+      "command": "cargo test -p athena-core --test refusal_corpus && cargo test -p athena-core reading::tests::request_parts_alternatives",
+      "observes": "A group is covered by any member and refused when none is covered; an optional part may be left out; other parts of the same request are still required.",
+      "fails_without": "Without grouping the 'either' case is refused for (b); without the step the Refuse cases are accepted.",
+      "seam": "Production entry points `refusing_check` through `run(&Case)` and `request_parts` (pub(super), called from reading.rs tests); fixtures exist. Added by plan steps 8 and 7."
+    },
+    {
+      "criterion": 6,
+      "method": "Corpus cases for each heading: `request-parts-heading-acceptance-colon`, `request-parts-heading-acceptance-criteria-colon`, `request-parts-heading-hash-acceptance`, `request-parts-heading-hash-acceptance-criteria` (each Refuse with a dropped bullet), plus `request-parts-acceptance-bullet-dropped`, `request-parts-acceptance-bullet-moved-to-out-of-scope` (Refuse), `request-parts-acceptance-bullets-covered`, `request-parts-acceptance-bullet-reworded-one-stem` (Accept), `request-parts-star-bullet-dropped` (Refuse), `request-parts-numbered-bullet-after-acceptance-dropped` (Refuse; N. lines inside Acceptance read as Bullet), `request-parts-dash-bullets-without-acceptance-heading` (Accept, not parts), `request-parts-bullets-after-acceptance-section-ignored` (Accept; a Notes list after the section), `request-parts-bullet-criterion-mentions-marker-of-no-bullet` (Accept: the criterion 'leaves (3) out ... as a follow-up' does not cancel a Bullet covering criterion, since Bullets have marker None), `request-parts-marker-list-without-text` (Accept). Unit tests: `request_parts_bullets_have_no_marker`, `request_parts_numbered_line_after_acceptance_is_a_bullet_only`, `request_parts_acceptance_section_ends_at_the_next_heading`, `request_parts_heading_variants_open_the_section`.",
+      "command": "cargo test -p athena-core --test refusal_corpus && cargo test -p athena-core reading::tests::request_parts",
+      "observes": "All four headings open the section; Bullet parts have marker None; marker coverage and marker-based deferral act only on Enumerated parts; the section ends at the next heading.",
+      "fails_without": "With only 'Acceptance:' accepted the three variant cases are Accept instead of Refuse; without the step none of the Refuse cases refuses.",
+      "seam": "Production entry points `refusing_check` through `run(&Case)` and `request_parts` through reading.rs tests; fixtures exist. Added by plan steps 8 and 7."
+    },
+    {
+      "criterion": 7,
+      "method": "Unit test `plain_request_prose_is_unchanged_by_the_shared_filter` compares `plain_request_prose` on the generated shapes (root-cause request, approved-work request, fenced block) with the text the old loop gave, written out in the test. Corpus Accept case `request-parts-approved-work-copied-sections-ignored`, built on `generated_approval_request` (refusal_corpus.rs:1362), whose copied text after '## Source' holds 'Acceptance:' dash bullets, a numbered list, an inline '(1) .. (2) ..' line and a fenced 'Request:' block. Related Accept cases: `request-parts-fenced-acceptance-ignored`, `request-parts-quoted-proposal-enumeration-ignored`, `request-parts-cause-title-enumeration-ignored`; Refuse `request-parts-handwritten-cause-line-is-a-part`. Unit test `request_parts_skip_copied_and_generated_text` asserts none of those lines yields a part. The existing tests `every_acceptance_check_has_a_refusing_corpus_case` and `an_extra_check_with_no_case_is_reported` (anchor at refusal_corpus.rs:2927) pass because every `step!` has a refusing case and the new step is last.",
+      "command": "cargo test -p athena-core reading::tests::plain_request_prose_is_unchanged_by_the_shared_filter && cargo test -p athena-core --test refusal_corpus && cargo test -p athena-core",
+      "observes": "Approved-work requests give no parts after '## Source'; the prose seen by the defined-terms check is byte-identical; existing refusals keep their check names.",
+      "fails_without": "A private skip list would turn the copied bullets into required parts and the approved-work case is refused; without the step the self-check finds no refusing case for it.",
+      "seam": "Production entry points `plain_request_prose`, `request_parts` and `refusing_check`; `generated_approval_request` (1362) exists; `generated_root_cause_request_with` is added by plan step 8 and delegates from the old `generated_root_cause_request` (1327)."
+    },
+    {
+      "criterion": 8,
+      "method": "A new unit test module in crates/athena-core/src/reading/replay.rs, `steward_request_bullets_become_bullet_parts_only`: builds requests with `StewardRequest::new(..).render()` (steward.rs:535, 639; optional Priority line, title, body, 'Acceptance:' dash bullets, `Files:` line) and asserts `request_parts` returns only Bullet parts equal in number to the acceptance bullets and none from the `Files:` line. In refusal_corpus.rs `generated_requests_with_typical_readings_are_accepted` runs `refusing_check` over every generated-request shape (root_cause_request 280-297, `generated_root_cause_request`, the cause-title shape, the StewardRequest-style 'Acceptance:' request with a `Files:` line, an approved-work request) with `base_reading` plus a variant with bullets reworded to keep one distinctive word, and asserts none is refused by `check_request_parts`. The case `request-parts-this-jobs-own-reading-accepted` rebuilds this job's request and accepted reading (its criteria 2, 3 and 4 say 'as a follow-up' and 'deferred' while describing refusal tests) and is Accept. `request_parts_refusal_is_declared_intended` (modelled on `design_existing_code_refusal_is_declared_intended`, refusal_corpus.rs:2945-2993) asserts `replay_declaration` on 'expected 10% of newly refused readings' gives `share == Some(10)`, and that the doc comment and CHANGELOG hold 'higher refusal rate is intended'. The change refuses more readings and the higher rate is intended; expected 10% of newly refused readings is an estimate, not measured: Athena's replay (`replay_cases`, replay.rs:142-157, hold at the declared 10% plus margin 5, replay.rs:296-308) reads `records/`, absent from the snapshot.",
+      "command": "cargo test -p athena-core --test refusal_corpus generated_requests_with_typical_readings_are_accepted && cargo test -p athena-core reading::replay && cargo test -p athena-core --test refusal_corpus request_parts_refusal_is_declared_intended",
+      "observes": "Zero new false refusals on the generated shapes including the standard Steward bullets; the declaration parses as 10; the own-reading case is accepted.",
+      "fails_without": "A false refusal of a generated shape or a Steward bullet fails the proxy test; without the doc sentence or CHANGELOG text the declaration test fails.",
+      "seam": "Production entry points `refusing_check`, `request_parts`, `StewardRequest::new/render` (exists, steward.rs:535, 639) and `replay_declaration` (exists); the replay.rs test module and the proxy tests are added by plan steps 6 and 9. Local proxy only; the real replay needs `records/`."
+    },
+    {
+      "criterion": 9,
+      "method": "Corpus case `request-parts-inline-part-three-deferred-sza7` (Refuse by `check_request_parts`) and `request-parts-inline-all-three-kept-bw7k` (Accept); both name jobs 20261029-084645-sza7 and 20261029-110953-bw7k in `source` and say the shape is rebuilt from the introspection's account (the recorded request text is not in the snapshot). The three parts share the subject 'check timeouts'. The sza7 reading puts part 3 in `out_of_scope` and names crates/athena-core/src/checks.rs (the timeout file, not reading/checks.rs), crates/athena-cli/src/display.rs, crates/athena-cli/tests/status_durations.rs, crates/athena-core/src/disk.rs, crates/athena-core/src/run/mod.rs and crates/athena-core/src/status.rs as already landed or rejected. The bw7k reading keeps all three parts in criteria. `sza7_and_bw7k_shapes_are_in_the_corpus` asserts both ids with the two jobs in `source` and the checks.rs path in the sza7 out_of_scope. `git diff --stat` must show none of those six files; crates/athena-core/src/reading/checks.rs is the deliverable and is a different file.",
+      "command": "cargo test -p athena-core --test refusal_corpus sza7_and_bw7k_shapes_are_in_the_corpus && git diff --stat",
+      "observes": "The sza7 case is refused by `check_request_parts`, the bw7k case is accepted, the shape test finds both ids, and the six timeout files are untouched in the diff.",
+      "fails_without": "Without the step the sza7 case is accepted and `corpus_cases_get_the_expected_outcome` reports a mismatch.",
+      "seam": "Production entry point `refusing_check` through `run(&Case)`; fixtures `case()` and `base_reading` exist. `git diff` is a verifier-allowed command."
+    },
+    {
+      "criterion": 10,
+      "method": "The test reads CHANGELOG.md through `include_str!(\"../../../CHANGELOG.md\")` (as at refusal_corpus.rs:2986), collapses whitespace, and asserts the new top entry of `### Added` under `## [Unreleased]` holds `check_request_parts`, 'does not compare', 'explicit parts', both job ids, 'already sees the request', 'request_own_lines', 'higher refusal rate is intended', 'expected 10% of newly refused readings' and the follow-up 'pass the parsed request parts to the reader'.",
+      "command": "cargo test -p athena-core --test refusal_corpus request_parts_refusal_is_declared_intended",
+      "observes": "The entry exists and names the root cause, the check, the shared filter, why information alone is not enough and the follow-up.",
+      "fails_without": "Without the changelog entry the `contains` assertions fail.",
+      "seam": "`include_str!` of CHANGELOG.md exists (refusal_corpus.rs:2986). The entry is added by plan step 10."
+    },
+    {
+      "criterion": 11,
+      "method": "Run Athena's three checks on the final tree as separate commands: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. Before finishing the producer also runs `cargo test -p athena-core run::`, `cargo test -p athena-core steward::tests`, `cargo test -p athena-core work_decisions`, `cargo test -p athena-cli --test drain` and `cargo test -p athena-cli`, and repairs any pre-existing fixture whose scripted or stored reading is newly refused (its criteria, never the check or the thresholds), naming the file in the report.",
+      "command": "cargo test --locked",
+      "observes": "All three exit 0 with the new unit tests, the corpus tests including the self-check that `check_request_parts` has a refusing case, the pin re-read path, steward, work_decisions and drain tests.",
+      "fails_without": "A newly refused scripted or stored reading fails its test; unformatted code fails fmt; a warning fails clippy.",
+      "seam": "No injection; the production commands run on the final tree. They exist today; the new tests are added by plan steps 6-9."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "0632beae47c202a2fa18cfd4f69ec827b2a5f409f383e505405de3d93cce9a06",
+  "resumed_from": "20261030-060839-1njk"
+}
