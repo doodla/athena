@@ -305,6 +305,7 @@ fn empty_row(rule: &str) -> RuleRefusals {
 pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
     ("throughput", "throughput"),
     ("trend", "class_trend"),
+    ("context", "context_load"),
     ("role need", "role_need"),
     ("checks", "check_durations"),
     ("planning", "planning_cost"),
@@ -460,6 +461,10 @@ pub struct StatusView {
     /// with the job after which a rising class got worse; absent until a class has enough landed jobs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub class_trend: Option<crate::class_trend::ClassTrend>,
+    /// Tokens loaded per landed job for each class of work with enough landed jobs, beside the share of its
+    /// closed jobs that landed and its mistakes (requirement OLY-B-A13-01); absent until a class has enough.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_load: Option<crate::context_load::ContextLoad>,
     /// Which roles ran in the newest jobs that did model work (requirement OLY-9-11), read from every source of
     /// invocations; absent until enough jobs ran a model. `athena status` prints it only when a role is a
     /// retire candidate.
@@ -1315,6 +1320,7 @@ impl Athena {
                 &crate::proposals::current(&records.proposals),
             )),
             class_trend: crate::class_trend::ClassTrend::compute(&records),
+            context_load: crate::context_load::ContextLoad::compute(&records),
             role_need: crate::role_need::RoleNeed::compute(&records),
             interventions_by_category: by_category,
             interventions_by_class: by_class,
@@ -4323,6 +4329,56 @@ pub(crate) mod reading_rule_tests {
         assert_eq!(listed[0]["overdue"], false);
         assert_eq!(listed[3]["id"], "design-review");
         assert_eq!(listed[3]["overdue"], true);
+    }
+
+    #[test]
+    fn status_carries_the_context_load_for_a_class_with_enough_landed_jobs() {
+        use super::planning_cost_tests::timed_job;
+        use super::records_worktree_tests::{job_record, write_in_worktree};
+        let (_dir, _state, athena) = crate::code_health::tests::set_up();
+        // A job of class `docs`: a reader, a producer and a verifier run, each loading 3 tokens
+        // (input, cache read and cache write of 1 each; the output token is not counted).
+        let docs_job = |text: &str, hour: u32, state: OutcomeState| {
+            let start: jiff::Timestamp = format!("2026-10-2{hour}T10:00:00Z").parse().unwrap();
+            let minutes = StageMinutes {
+                reading: 1.0,
+                producer: 2.0,
+                verifier: 1.0,
+                ..StageMinutes::default()
+            };
+            let mut records = timed_job(text, start, minutes, state);
+            records.push(job_record(text, "docs"));
+            records
+        };
+        // No records: no line, rather than a success.
+        let view = athena.status().unwrap();
+        assert_eq!(view.context_load, None);
+        assert!(
+            serde_json::to_value(&view)
+                .unwrap()
+                .get("context_load")
+                .is_none()
+        );
+        // Two landed jobs are below the minimum.
+        let mut first = docs_job("20261021-100000-aaaa", 1, OutcomeState::Landed);
+        first.extend(docs_job("20261022-100000-aaab", 2, OutcomeState::Landed));
+        write_in_worktree(&athena, &first);
+        assert_eq!(athena.status().unwrap().context_load, None);
+        // A third landed job and a failed one: 4 closed jobs of 9 tokens each, 3 landed.
+        let mut more = docs_job("20261023-100000-aaac", 3, OutcomeState::Landed);
+        more.extend(docs_job("20261024-100000-aaad", 4, OutcomeState::Failed));
+        write_in_worktree(&athena, &more);
+        let view = athena.status().unwrap();
+        let load = view.context_load.as_ref().expect("docs has 3 landed jobs");
+        assert_eq!(load.classes.len(), 1);
+        let docs = &load.classes[0];
+        assert_eq!(docs.class, "docs");
+        assert_eq!((docs.closed_jobs, docs.landed_jobs), (4, 3));
+        assert_eq!(docs.tokens, 36.0);
+        assert_eq!(docs.tokens_per_landed_job, 12.0);
+        assert_eq!(docs.landed_percent, 75.0);
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["context_load"]["classes"][0]["class"], "docs");
     }
 }
 
