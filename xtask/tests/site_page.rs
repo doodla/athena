@@ -190,8 +190,21 @@ fn the_rendered_page_has_the_newcomer_fixes() {
     let next = &html[at("<h2>Next steps</h2>")..at("<h2>Claims and sources</h2>")];
     assert!(next.contains("<code>./setup.sh</code>"));
     assert!(next.contains("<code>git clone https://github.com/doodla/athena.git</code>"));
-    assert!(next.contains("git 2.40 or later, a C linker, curl"));
-    assert!(next.contains("press Enter to run it on your repository"));
+    // The prerequisites are a nested list: one item each for git, the C linker, curl and Claude Code or npm.
+    assert!(next.contains(
+        "<li>Before installing, check that you have these prerequisites:<ul>\
+         <li>git 2.40 or later;</li>\
+         <li>a C linker (<code>cc</code>), which cargo needs to build Athena;</li>\
+         <li>curl, which setup uses to download pinned tools;</li>\
+         <li>Claude Code, or npm to install it.</li></ul></li>"
+    ));
+    // Says which repository `athena ask` acts on.
+    assert!(
+        next.contains(
+            "<code>athena ask</code> acts on the git repository in the current directory."
+        )
+    );
+    assert!(next.contains("press Enter to run it on that repository"));
     // The header says who Athena is for and what problem it solves, before "Start here".
     let header = &html[..at("Start here")];
     assert!(header.contains("It is for people who want to give a lazy"));
