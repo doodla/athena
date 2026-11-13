@@ -6,9 +6,10 @@ use crate::plan::Priority;
 use anyhow::{Result, anyhow, bail};
 use athena_data::records::{
     AnyRecord, Baseline, Candidate, Correction, Critique, DecisionState, DecisionStateKind,
-    DefaultExpectations, FailureClass, HostError, Intervention, IntrospectionRecord, Invocation,
-    Job, JobPlan, Outcome, OutcomeState, PriorityRecord, ProposalRecord, Reading, Replay, Request,
-    Resolution, Restart, Role, Score, Verification, fold_decision_states,
+    DefaultExpectations, FailureClass, HoldRecord, HoldState, HostError, Intervention,
+    IntrospectionRecord, Invocation, Job, JobPlan, Outcome, OutcomeState, PriorityRecord,
+    ProposalRecord, Reading, Replay, Request, Resolution, Restart, Role, Score, Verification,
+    fold_decision_states,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::records::RecordSet;
@@ -25,6 +26,8 @@ pub struct JobRecords {
     pub corrections: Vec<Correction>,
     /// The user's priority records, by `n` (`athena.priority/1`); the latest wins.
     pub priorities: Vec<PriorityRecord>,
+    /// The user's hold records, by `n` (`athena.hold/1`); the latest wins. See [`JobRecords::on_hold`].
+    pub holds: Vec<HoldRecord>,
     pub job: Option<Job>,
     /// The model invocations recorded under this job. This is a PARTIAL source for measuring usage: the
     /// steward's, the audience's and the auditor's runs are never in it (they are kept apart in
@@ -116,6 +119,24 @@ impl JobRecords {
         Priority::Normal
     }
 
+    /// The latest hold record (highest `n`), if the job has any.
+    pub fn latest_hold(&self) -> Option<&HoldRecord> {
+        self.holds.iter().max_by_key(|h| h.n)
+    }
+
+    /// True when the user has put the job on hold (`athena hold`) and not released it, and the job is one
+    /// drain works: queued, proposed (read) or dispatched (interrupted). Drain never dispatches such a job,
+    /// whatever its priority. A job that is closed, declined or blocked is not in drain's queue, so a hold on
+    /// it changes nothing and is not reported.
+    pub fn on_hold(&self) -> bool {
+        self.latest_hold()
+            .is_some_and(|h| h.state == HoldState::OnHold)
+            && matches!(
+                self.state(),
+                JobState::Queued | JobState::Proposed | JobState::Dispatched
+            )
+    }
+
     pub fn state(&self) -> JobState {
         if let Some(later) = &self.later_outcome {
             return JobState::Closed(later.state);
@@ -180,6 +201,7 @@ impl JobRecords {
             AnyRecord::Reading(r) => self.readings.push(*r),
             AnyRecord::Correction(c) => self.corrections.push(c),
             AnyRecord::Priority(p) => self.priorities.push(p),
+            AnyRecord::Hold(h) => self.holds.push(h),
             AnyRecord::Job(j) => self.job = Some(*j),
             AnyRecord::Invocation(i) => self.invocations.push(*i),
             AnyRecord::Candidate(c) | AnyRecord::Candidate2(c) => self.candidate = Some(*c),
@@ -201,6 +223,7 @@ impl JobRecords {
         self.readings.sort_by_key(|r| r.n);
         self.corrections.sort_by_key(|c| c.n);
         self.priorities.sort_by_key(|p| p.n);
+        self.holds.sort_by_key(|h| h.n);
         self.invocations.sort_by_key(|i| i.seq);
         self.scores.sort_by_key(|s| s.at);
         self.plans.sort_by_key(|p| p.round);
@@ -338,6 +361,7 @@ fn job_of(record: &AnyRecord) -> Option<&JobId> {
         AnyRecord::Reading(r) => Some(&r.job),
         AnyRecord::Correction(r) => Some(&r.job),
         AnyRecord::Priority(r) => Some(&r.job),
+        AnyRecord::Hold(r) => Some(&r.job),
         AnyRecord::Job(r) => Some(&r.id),
         AnyRecord::Invocation(r) => Some(&r.job),
         AnyRecord::Candidate(r) | AnyRecord::Candidate2(r) => Some(&r.job),
@@ -937,6 +961,128 @@ mod tests {
         let tree = Records::load(&git, "HEAD").unwrap();
         assert_eq!(job_ids(&current), job_ids(&tree));
         assert_eq!(job_ids(&current), vec![job_id().as_str().to_string()]);
+    }
+
+    fn request_record() -> AnyRecord {
+        AnyRecord::Request(Request {
+            job: job_id(),
+            text: "Add a file".into(),
+            received_at: "2026-10-10T15:30:12Z".parse().unwrap(),
+            channel: "cli".into(),
+        })
+    }
+
+    fn hold_record(n: u32, state: HoldState) -> AnyRecord {
+        AnyRecord::Hold(HoldRecord {
+            job: job_id(),
+            n,
+            at: "2026-10-10T15:30:12Z".parse().unwrap(),
+            state,
+        })
+    }
+
+    fn file_of(record: AnyRecord) -> athena_gate::records::RecordFile {
+        athena_gate::records::RecordFile {
+            path: record.canonical_path(),
+            record: Some(record),
+            error: None,
+            bytes: Vec::new(),
+        }
+    }
+
+    fn loaded(records: Vec<AnyRecord>) -> JobRecords {
+        let files = records.into_iter().map(file_of).collect();
+        let mut records = Records::from_parts(&RecordSet { files }, &[]);
+        records.jobs.remove(job_id().as_str()).expect("the job")
+    }
+
+    #[test]
+    fn holds_load_in_order_of_n() {
+        // The release is listed before the hold it follows, to show that loading sorts by `n`.
+        let job = loaded(vec![
+            request_record(),
+            hold_record(2, HoldState::Released),
+            hold_record(1, HoldState::OnHold),
+        ]);
+        assert_eq!(job.holds.iter().map(|h| h.n).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(job.latest_hold().unwrap().state, HoldState::Released);
+        assert!(!job.on_hold());
+        let job = loaded(vec![
+            request_record(),
+            hold_record(3, HoldState::OnHold),
+            hold_record(2, HoldState::Released),
+            hold_record(1, HoldState::OnHold),
+        ]);
+        assert_eq!(job.holds.iter().map(|h| h.n).collect::<Vec<_>>(), [1, 2, 3]);
+        assert!(job.on_hold());
+    }
+
+    #[test]
+    fn a_hold_counts_for_every_state_drain_works_and_for_no_other() {
+        let on_hold = || hold_record(1, HoldState::OnHold);
+        // Queued: a request and nothing else.
+        let queued = loaded(vec![request_record(), on_hold()]);
+        assert_eq!(queued.state(), JobState::Queued);
+        assert!(queued.on_hold());
+        // Without a hold record nothing is on hold.
+        assert!(!loaded(vec![request_record()]).on_hold());
+        // Proposed: read (here, an invocation exists); the hold still counts.
+        let invocation =
+            crate::status::planning_cost_tests::invocation(&job_id(), 1, Role::Reader, 1.0);
+        let proposed = loaded(vec![
+            request_record(),
+            AnyRecord::Invocation(Box::new(invocation)),
+            on_hold(),
+        ]);
+        assert_eq!(proposed.state(), JobState::Proposed);
+        assert!(proposed.on_hold());
+        // Dispatched (interrupted when no process owns it).
+        let dispatched = loaded(vec![
+            request_record(),
+            AnyRecord::Job(Box::new(dispatched())),
+            on_hold(),
+        ]);
+        assert_eq!(dispatched.state(), JobState::Dispatched);
+        assert!(dispatched.on_hold());
+        // Closed: not in drain's queue, so a hold on it is not reported.
+        let outcome = |state| {
+            AnyRecord::Outcome(Box::new(Outcome {
+                job: job_id(),
+                state,
+                reason: "test".into(),
+                at: "2026-10-10T15:30:12Z".parse().unwrap(),
+                totals: None,
+                branch: None,
+                base_commit: None,
+                candidate_commit: None,
+                after_blocked: false,
+                through_commit: None,
+            }))
+        };
+        for state in [OutcomeState::Dropped, OutcomeState::Blocked] {
+            let job = loaded(vec![request_record(), on_hold(), outcome(state)]);
+            assert!(!job.on_hold(), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn a_hold_in_the_records_worktree_is_loaded_by_load_current() {
+        // `athena status` reads the records worktree when it exists; a hold written there must be seen.
+        let (_dir, git) = repo_with_in_tree_job();
+        let worktree = tempfile::tempdir().unwrap();
+        for record in [request_record(), hold_record(1, HoldState::OnHold)] {
+            let path = worktree.path().join(record.canonical_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, record.to_json()).unwrap();
+        }
+        let current = Records::load_current(&git, "HEAD", worktree.path()).unwrap();
+        assert!(current.invalid.is_empty(), "{:?}", current.invalid);
+        let job = &current.jobs[job_id().as_str()];
+        assert_eq!(job.holds.len(), 1);
+        assert!(job.on_hold());
+        // The tree at HEAD has no hold: the worktree is the source when it exists.
+        let tree = Records::load(&git, "HEAD").unwrap();
+        assert!(!tree.jobs[job_id().as_str()].on_hold());
     }
 
     #[test]

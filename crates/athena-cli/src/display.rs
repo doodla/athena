@@ -736,7 +736,8 @@ pub fn plan(report: &crate::drain::PlanReport) -> String {
             entry_lines(&mut out, e);
         }
         if r.missing.is_empty() {
-            // Held for a dependency that has not landed: the plan is complete, so nothing "lacks".
+            // Held for a dependency that has not landed, or put on hold by the user (`athena hold`): the plan
+            // is complete (or not the reason), so nothing "lacks".
             let _ = writeln!(out, "held        {} · {}: {}", r.id, r.title, r.reason);
         } else {
             let _ = writeln!(
@@ -1054,7 +1055,8 @@ pub fn score_line(score: &Score) -> String {
 }
 
 /// The priority and plan state at the end of a job's line. The priority shows only when it is not normal
-/// (absence means normal); the plan state is empty for a job that was not planned.
+/// (absence means normal); the plan state is empty for a job that was not planned. A job the user put on hold
+/// (`athena hold`) ends with ` · on hold`; that is not the disk-space hold shown before it.
 fn plan_suffix(j: &athena_core::status::JobLine) -> String {
     let priority = if j.priority == athena_core::plan::Priority::Normal {
         String::new()
@@ -1076,7 +1078,8 @@ fn plan_suffix(j: &athena_core::status::JobLine) -> String {
         .retried_as
         .as_ref()
         .map_or(String::new(), |new| format!(" · retried as {new}"));
-    format!("{priority}{plan}{hold}{retried}")
+    let on_hold = if j.on_hold { " · on hold" } else { "" };
+    format!("{priority}{plan}{hold}{retried}{on_hold}")
 }
 
 /// The lines of work the scope guard flagged or paused, one block each: level, first id and signals (T1 to
@@ -2630,12 +2633,50 @@ mod tests {
             priority,
             hold: None,
             retried_as: None,
+            on_hold: false,
         };
         assert_eq!(
             plan_suffix(&line(Priority::High)),
             " · priority high · plan accepted r1"
         );
         assert_eq!(plan_suffix(&line(Priority::Normal)), " · plan accepted r1");
+        let mut held = line(Priority::Low);
+        held.on_hold = true;
+        assert_eq!(
+            plan_suffix(&held),
+            " · priority low · plan accepted r1 · on hold"
+        );
+    }
+
+    #[test]
+    fn an_on_hold_item_is_listed_on_a_held_line() {
+        use athena_core::plan::{Plan, PlanEntry, Priority};
+        let mut entry = PlanEntry::bare("20261030-000000-abcd", "Hold me");
+        entry.priority = Priority::Urgent;
+        entry.goal = "g".into();
+        entry.rung = Some(athena_data::roles::Ladder::Implementation);
+        entry.acceptance = vec!["it works".into()];
+        let report_of = |entry: &PlanEntry| {
+            let plan = Plan::build(std::slice::from_ref(entry));
+            crate::drain::PlanReport {
+                entries: vec![entry.clone()],
+                plan,
+                notes: Vec::new(),
+                spent_usd: 0.0,
+            }
+        };
+        entry.on_hold = true;
+        let text = plan(&report_of(&entry));
+        assert!(text.contains("1 held back"), "{text}");
+        let line = text.lines().find(|l| l.starts_with("held")).expect(&text);
+        assert!(
+            line.contains("20261030-000000-abcd") && line.contains("on hold"),
+            "{line}"
+        );
+        entry.on_hold = false;
+        let text = plan(&report_of(&entry));
+        assert!(text.contains("0 held back"), "{text}");
+        assert!(!text.lines().any(|l| l.starts_with("held")), "{text}");
     }
 
     #[test]
@@ -2683,6 +2724,7 @@ mod tests {
             priority: athena_core::plan::Priority::Normal,
             hold: None,
             retried_as: Some("20260101-000000-abcd".into()),
+            on_hold: false,
         };
         assert_eq!(plan_suffix(&line), " · retried as 20260101-000000-abcd");
     }
