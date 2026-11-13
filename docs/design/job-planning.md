@@ -121,6 +121,17 @@ brief quotes the previous plan and every finding. Caps: `planner_usd` 0.75 and `
 $0.14 and the verifier's p50 $0.33 **(read)**). At dispatch, one round plus the producer and verifier caps must
 fit `job_usd`; before each planning call, that call's cap plus the producer and verifier caps must still fit.
 
+**Planner effort after thrash (design, D178).** Planning thrashes when the planner is called again for the same
+job: after a critic revise (round 2 or later) or after a mechanical re-plan (a re-plan in the same round). Such a
+call runs at the higher of its configured effort (`verifier_effort`, which `Config::effort_for` gives the planner)
+and `[job_plan] thrash_effort`, which defaults to `xhigh` and takes the same values as the other effort keys. The
+raise never lowers the effort, so a `verifier_effort` of `max` stays `max`; setting `thrash_effort` to the base
+effort turns the escalation off. The first planner call of a job, the critic, the model, the caps and timeouts,
+`max_rounds` and the mechanical-pass limit are unchanged. A plan kept from an earlier job and revised in round 1
+is not thrash, so its first call keeps the configured effort; raising effort across jobs was considered and
+deferred. An unknown `thrash_effort` is refused when the file is parsed. The invocation record of each planner
+call carries the effort it ran at.
+
 **Models (design).** The planner is the reading's producer model and the critic is its verifier model: the
 producer–verifier pair moved earlier, as Sri put it. `Config::validate` already keeps the verifier out of
 `producer_allowed`, so no model reviews its own plan **(read)**.

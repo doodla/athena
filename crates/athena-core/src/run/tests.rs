@@ -1446,6 +1446,94 @@ mod produce_and_verify_order_tests {
         }
     }
 
+    /// Runs a job over `repo` with these planner and critic answers, and returns the role and recorded effort
+    /// of each of its invocations, in order. The job must land.
+    fn run_planned_efforts(
+        repo: &tempfile::TempDir,
+        planner: Vec<serde_json::Value>,
+        critic: Vec<serde_json::Value>,
+    ) -> Vec<(Role, String)> {
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_with(
+            repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            planning_script(planner, critic, Calls::default()),
+        );
+        let (job, finished) = finished_job(&athena);
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let mut invocations: Vec<_> = records.jobs[job.as_str()]
+            .invocations
+            .iter()
+            .map(|i| (i.seq, i.role, i.effort.clone().expect("effort is recorded")))
+            .collect();
+        invocations.sort_by_key(|(seq, _, _)| *seq);
+        invocations
+            .into_iter()
+            .map(|(_, role, effort)| (role, effort))
+            .collect()
+    }
+
+    fn efforts_of(all: &[(Role, String)], role: Role) -> Vec<&str> {
+        all.iter()
+            .filter(|(r, _)| *r == role)
+            .map(|(_, e)| e.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_critic_revise_raises_the_next_planner_effort_to_the_thrash_effort() {
+        let repo = repo_with_planning(3);
+        let all = run_planned_efforts(
+            &repo,
+            vec![good_plan()],
+            vec![revising_critique(), accepting_critique()],
+        );
+        assert_eq!(efforts_of(&all, Role::Planner), ["high", "xhigh"]);
+        // The critic is not escalated.
+        assert_eq!(efforts_of(&all, Role::Critic), ["high", "high"]);
+    }
+
+    #[test]
+    fn a_mechanical_replan_raises_the_planner_effort() {
+        let repo = repo_with_planning(3);
+        let all = run_planned_efforts(
+            &repo,
+            vec![bad_plan(), good_plan()],
+            vec![accepting_critique()],
+        );
+        assert_eq!(efforts_of(&all, Role::Planner), ["high", "xhigh"]);
+        assert_eq!(efforts_of(&all, Role::Critic), ["high"]);
+    }
+
+    #[test]
+    fn a_plan_accepted_in_one_pass_records_the_configured_planner_effort() {
+        let repo = repo_with_planning(3);
+        let all = run_planned_efforts(&repo, vec![good_plan()], vec![accepting_critique()]);
+        let configured = athena_data::Config::parse(include_str!("../../../../athena.toml"))
+            .unwrap()
+            .models
+            .verifier_effort;
+        assert_eq!(efforts_of(&all, Role::Planner), ["high"]);
+        assert_eq!(configured, "high");
+    }
+
+    #[test]
+    fn a_thrash_effort_below_the_base_does_not_lower_the_planner_effort() {
+        let repo = repo_with_config(
+            "\n[job_plan]\nenabled = true\nmode = \"all\"\nplanner_usd = 0.75\ncritic_usd = 0.75\n\
+             planner_timeout_s = 600\ncritic_timeout_s = 600\nmax_rounds = 3\nthrash_effort = \"low\"\n",
+        );
+        let all = run_planned_efforts(
+            &repo,
+            vec![good_plan()],
+            vec![revising_critique(), accepting_critique()],
+        );
+        assert_eq!(efforts_of(&all, Role::Planner), ["high", "high"]);
+    }
+
     #[test]
     fn a_plan_that_still_breaks_a_rule_after_two_mechanical_passes_stops_without_the_critic() {
         let repo = repo_with_planning(4);

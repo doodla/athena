@@ -19,7 +19,8 @@ impl Athena {
     /// the plan goes straight back to the planner, with no critic call and without using the round, up to
     /// [`MAX_MECHANICAL_PASSES`] times per round; a plan that still breaks a rule after that stops the job.
     /// A critic's revise sends the planner a revision brief that quotes the previous plan and every
-    /// finding. On accept, the invocations, plans and critiques go into `closing` and the rendered
+    /// finding. A planner call after a critic revise, or after a mechanical re-plan, runs at the higher of its
+    /// configured effort and `[job_plan] thrash_effort`; the first call keeps the configured effort. On accept, the invocations, plans and critiques go into `closing` and the rendered
     /// producer section is returned. Reject, a reading the critic judged a misread, revise in the last
     /// round, or a failure of either agent stops the job: it is failed in `closing` and `None` is
     /// returned.
@@ -137,7 +138,7 @@ impl Athena {
         Snapshot::create(&self.git, &p, &p, &snap_dir, SnapshotRepo::PlainWithHistory)?;
         let model = ctx.reading.producer_model.clone();
         let seq = ctx.next_seq(closing);
-        let spec = self.agent_spec(
+        let mut spec = self.agent_spec(
             jc,
             &id,
             seq,
@@ -153,6 +154,12 @@ impl Athena {
             cfg.planner_timeout_s,
             plan_schema(),
         )?;
+        // Thrash is a critic revise (a later round) or a mechanical re-plan in this round. The planner then runs
+        // at the thrash effort, raised from the configured one and never lowered. The first attempt of round 1
+        // keeps the configured effort, and the critic's spec is not touched.
+        if round > 1 || mechanical_passes > 0 {
+            spec.effort = cfg.thrash_effort.raise_base(&spec.effort);
+        }
         let invoked = self.invoke_and_record(
             &InvocationFacts {
                 job: &id,

@@ -229,6 +229,53 @@ pub struct JobPlanConfig {
     pub planner_timeout_s: u64,
     #[serde(default = "JobPlanConfig::default_timeout_s")]
     pub critic_timeout_s: u64,
+    /// The planner effort for a call that follows thrash in the same job: a critic revise, or a re-plan after
+    /// Athena's own plan rules found a major problem. The first planner call keeps the configured effort, and
+    /// the raise never lowers it. The default is `xhigh`; an unknown value is refused when the file is parsed.
+    #[serde(default = "JobPlanConfig::default_thrash_effort")]
+    pub thrash_effort: EffortLevel,
+}
+
+/// An effort level (`--effort`), in the order of [`EFFORT_LEVELS`], so a higher level compares greater.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortLevel {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl EffortLevel {
+    /// The name `--effort` takes, from [`EFFORT_LEVELS`].
+    pub fn as_str(self) -> &'static str {
+        EFFORT_LEVELS[self as usize]
+    }
+
+    /// The level named by `name`, or None when it is not one of [`EFFORT_LEVELS`].
+    pub fn parse(name: &str) -> Option<EffortLevel> {
+        const ALL: [EffortLevel; 5] = [
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+            EffortLevel::Xhigh,
+            EffortLevel::Max,
+        ];
+        EFFORT_LEVELS
+            .iter()
+            .position(|n| *n == name)
+            .map(|i| ALL[i])
+    }
+
+    /// The higher of this level and the effort `base` names, as an `--effort` value. An escalation never
+    /// lowers the effort a call already had; a base that is not a level gives this level.
+    pub fn raise_base(self, base: &str) -> String {
+        match EffortLevel::parse(base) {
+            Some(b) if b > self => b.as_str().to_string(),
+            _ => self.as_str().to_string(),
+        }
+    }
 }
 
 impl JobPlanConfig {
@@ -248,6 +295,9 @@ impl JobPlanConfig {
     fn default_timeout_s() -> u64 {
         600
     }
+    fn default_thrash_effort() -> EffortLevel {
+        EffortLevel::Xhigh
+    }
 }
 
 impl Default for JobPlanConfig {
@@ -260,6 +310,7 @@ impl Default for JobPlanConfig {
             critic_usd: Self::default_usd(),
             planner_timeout_s: Self::default_timeout_s(),
             critic_timeout_s: Self::default_timeout_s(),
+            thrash_effort: Self::default_thrash_effort(),
         }
     }
 }
@@ -1292,6 +1343,89 @@ pub(crate) mod tests {
         assert_eq!(plan.critic_usd, 0.75);
         assert_eq!(plan.planner_timeout_s, 600);
         assert_eq!(plan.critic_timeout_s, 600);
+        assert_eq!(plan.thrash_effort, EffortLevel::Xhigh);
+        assert_eq!(JobPlanConfig::default().thrash_effort, EffortLevel::Xhigh);
+    }
+
+    fn job_plan_with(line: &str) -> Result<JobPlanConfig, ConfigError> {
+        let text = format!("{}\n[job_plan]\n{line}\n", unplanned(REPO_CONFIG));
+        Config::parse(&text).map(|c| c.job_plan.unwrap())
+    }
+
+    #[test]
+    fn thrash_effort_has_a_default_an_explicit_value_and_refuses_an_unknown_one() {
+        assert_eq!(
+            job_plan_with("enabled = true").unwrap().thrash_effort,
+            EffortLevel::Xhigh
+        );
+        assert_eq!(
+            job_plan_with("thrash_effort = \"max\"")
+                .unwrap()
+                .thrash_effort,
+            EffortLevel::Max
+        );
+        let error = job_plan_with("thrash_effort = \"extreme\"")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("thrash_effort") && error.contains("extreme"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn effort_levels_agree_with_the_effort_list_and_are_ordered() {
+        let mut last: Option<EffortLevel> = None;
+        for (i, name) in EFFORT_LEVELS.iter().enumerate() {
+            let level = job_plan_with(&format!("thrash_effort = \"{name}\""))
+                .unwrap()
+                .thrash_effort;
+            assert_eq!(level.as_str(), *name);
+            assert_eq!(level as usize, i);
+            assert_eq!(EffortLevel::parse(name), Some(level));
+            if let Some(previous) = last {
+                assert!(previous < level, "{name}");
+            }
+            last = Some(level);
+        }
+        assert_eq!(EffortLevel::parse("extreme"), None);
+    }
+
+    #[test]
+    fn a_raise_never_lowers_the_effort() {
+        assert_eq!(EffortLevel::Xhigh.raise_base("max"), "max");
+        assert_eq!(EffortLevel::Xhigh.raise_base("high"), "xhigh");
+        assert_eq!(EffortLevel::Xhigh.raise_base("xhigh"), "xhigh");
+        assert_eq!(EffortLevel::Xhigh.raise_base("not-a-level"), "xhigh");
+        assert_eq!(EffortLevel::Low.raise_base("high"), "high");
+    }
+
+    #[test]
+    fn the_repository_job_plan_table_sets_thrash_effort_and_says_what_triggers_it() {
+        let table: String = REPO_CONFIG
+            .lines()
+            .skip_while(|l| l.trim_end() != "[job_plan]")
+            .skip(1)
+            .take_while(|l| !l.starts_with('['))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            table
+                .lines()
+                .any(|l| l.starts_with("thrash_effort = \"xhigh\"")),
+            "{table}"
+        );
+        let comments: String = table
+            .lines()
+            .filter(|l| l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            comments.contains("critic revise") && comments.contains("mechanical"),
+            "{comments}"
+        );
+        let plan = Config::parse(REPO_CONFIG).unwrap().job_plan.unwrap();
+        assert_eq!(plan.thrash_effort, EffortLevel::Xhigh);
     }
 
     #[test]
@@ -1332,6 +1466,7 @@ pub(crate) mod tests {
             ("planner_timeout_s = 0", "planner_timeout_s"),
             ("critic_timeout_s = 0", "critic_timeout_s"),
             ("surprise = true", "surprise"),
+            ("thrash_effort = \"extreme\"", "thrash_effort"),
         ] {
             let text = format!(
                 "{}\n[job_plan]\nenabled = true\n{line}\n",

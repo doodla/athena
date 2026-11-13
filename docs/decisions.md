@@ -5145,3 +5145,33 @@ should replace those estimates with its figures.
   records it once and empties the queue; an intervention is deferred, run on start and not run by a second start; a
   failed record with the kill switch text is rerun once and one with another failure is not. Not measured: a real
   model call, the number of old records the rule matches, and two simultaneous starts.
+
+## D178 · Planner effort rises after a critic revise or a mechanical re-plan
+
+- **Case:** Job 20261113-151949-mjpz asked that planning raise its "intelligence" when it thrashes. Every planner and
+  critic call ran at `verifier_effort`, so a planner called again after a critic revise or after Athena's own plan
+  rules sent the plan back ran at the same effort as the call that had just failed to satisfy them.
+- **Decision:** `[job_plan] thrash_effort` (default `xhigh`, one of `EFFORT_LEVELS`) is read as `EffortLevel`, an
+  ordered `Copy` enum in `crates/athena-data/src/config.rs`. In `planning_round`
+  (`crates/athena-core/src/run/planning.rs`), when `round > 1` or `mechanical_passes > 0`, the planner spec's effort
+  becomes the higher of its configured effort and `thrash_effort` (`EffortLevel::raise_base`), the same way the
+  producer's effort is overridden after `agent_spec`. The first attempt of round 1, the critic, the model, the caps
+  and the timeouts are unchanged. An unknown value is refused by the parser as a parse error that quotes the key and
+  the value, not by `Config::validate` as `ConfigError::Effort`.
+- **Alternatives:** Replace the effort with `thrash_effort`: with `verifier_effort = "max"` the re-plan would run
+  below the first call. A String field checked in `validate`: `JobPlanConfig` would lose `Copy` and about fifty uses
+  would change. A flag in `agent_spec` or `effort_for`: both serve every role and could reach the critic. A stronger
+  model: the verifier's model may not produce, so no stronger allowed model exists. Treating a plan resumed from an
+  earlier job as thrash: considered and deferred, because it widens the trigger beyond the request.
+- **Tradeoff:** A planner call at `xhigh` costs more and may reach `planner_usd` or the 600 s timeout, which stops
+  planning; the caps stay per call and unchanged. The refusal of a bad value has a different error type from the
+  `[models]` effort keys.
+- **Reversal cost:** Low; remove the field, the enum, the lines in `planning_round`, the key in `athena.toml` and the
+  tests. A config that still sets the key then fails to parse, because unknown keys are refused.
+- **Provenance:** Read: `crates/athena-core/src/run/planning.rs` (`plan_round`, `planning_round`),
+  `crates/athena-data/src/config.rs` (`JobPlanConfig`, `effort_for`), `crates/athena-core/src/run/producer.rs` line
+  339 (the override pattern). Measured: the tests with `planner_effort` in their names in
+  `crates/athena-core/src/run/tests.rs` read the effort of each planner invocation record: a critic revise gives
+  `high` then `xhigh`, a mechanical re-plan gives `high` then `xhigh`, a plan accepted in one pass gives `high`, and a
+  `thrash_effort` of `low` leaves `high`; the critic stays at `high`. The config tests cover the default, an explicit
+  value and the refusal. Not measured: whether planning stops fall, or whether `xhigh` calls reach the cap.
