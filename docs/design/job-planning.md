@@ -121,6 +121,19 @@ brief quotes the previous plan and every finding. Caps: `planner_usd` 0.75 and `
 $0.14 and the verifier's p50 $0.33 **(read)**). At dispatch, one round plus the producer and verifier caps must
 fit `job_usd`; before each planning call, that call's cap plus the producer and verifier caps must still fit.
 
+**Effort on revision (design).** A plan that keeps coming back is a sign the planner needs more thought, not
+the same call again. Every planner call after the first in a run, whether it follows a critic's revise or one of
+Athena's mechanical revisions, runs one effort level higher for each planner call already made in that run. The
+levels are the closed list in `EFFORT_LEVELS` (low, medium, high, xhigh, max); the step is one entry and the
+ceiling is the last, `max`. With the configured `verifier_effort` of high, the second planner call runs at xhigh
+and the third and every later one at max. The first call, and the critic in every round, keep the configured
+effort. The count is of the planner calls in the run, so it carries across rounds and a later round never falls
+back; a run resumed from the start, or a retry's first call, begins again at the configured effort. There is no
+configuration key: the step and the ceiling are fixed by `escalated_effort` in `athena-data`, and each planner
+invocation record and the planner line in the run output name the effort it ran at. A higher effort costs more
+per call and can reach `planner_usd` or `planner_timeout_s` sooner; those caps are unchanged and a planner that
+reaches one stops the job with the usual "the planner did not complete" reason.
+
 **Models (design).** The planner is the reading's producer model and the critic is its verifier model: the
 producer–verifier pair moved earlier, as Sri put it. `Config::validate` already keeps the verifier out of
 `producer_allowed`, so no model reviews its own plan **(read)**.
@@ -258,7 +271,9 @@ one producer run; review 1 split jobs 3 and 5.
    stop. A major finding from Athena's checks is a mechanical pass: `planning_round` returns it to `plan_round`,
    which asks the planner again in the same round with no critic call, up to `MAX_MECHANICAL_PASSES` (2) per
    round. Nothing is filed for such a plan; the stop after the second pass files that plan with an Athena-only
-   critique and fails the job with the findings. Only critic reviews count toward `max_rounds`. A job
+   critique and fails the job with the findings. Only critic reviews count toward `max_rounds`. Each planner
+   re-call runs one effort level higher per earlier planner call, up to `max` (`escalated_effort`,
+   `agent_spec_with_effort`); tests read the recorded planner efforts. A job
    stopped in planning scores `verification_passes` as unknown in `athena-score` (a job with planner or critic
    invocations and no producer or verifier), and `reading::carry` quotes the stopping critique's findings.
    Tests are in `crates/athena-cli/tests/job_plan.rs`.

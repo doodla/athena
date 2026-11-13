@@ -1243,6 +1243,158 @@ mod produce_and_verify_order_tests {
         (finished, calls)
     }
 
+    /// `run_planned`, but returns the invocations the job recorded (sorted by number) in place of the calls.
+    fn run_planned_records(
+        repo: &tempfile::TempDir,
+        planner: Vec<serde_json::Value>,
+        critic: Vec<serde_json::Value>,
+    ) -> (Box<Finished>, Vec<athena_data::records::Invocation>) {
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_with(
+            repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            planning_script(planner, critic, Calls::default()),
+        );
+        let (job, finished) = finished_job(&athena);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let mut invocations = records.jobs[job.as_str()].invocations.clone();
+        invocations.sort_by_key(|i| i.seq);
+        (finished, invocations)
+    }
+
+    /// The effort each invocation of this role ran at, in order, as recorded.
+    fn efforts_of(invocations: &[athena_data::records::Invocation], role: Role) -> Vec<String> {
+        invocations
+            .iter()
+            .filter(|i| i.role == role)
+            .map(|i| i.effort.clone().expect("the record names its effort"))
+            .collect()
+    }
+
+    /// The position of an effort level in `EFFORT_LEVELS`, weakest first.
+    fn effort_rank(level: &str) -> usize {
+        athena_data::config::EFFORT_LEVELS
+            .iter()
+            .position(|l| *l == level)
+            .unwrap_or_else(|| panic!("unknown effort {level}"))
+    }
+
+    /// The repository's configured efforts for the planner and the critic.
+    fn configured_planning_efforts() -> (String, String) {
+        let config =
+            athena_data::config::Config::parse(include_str!("../../../../athena.toml")).unwrap();
+        (
+            config.effort_for(Role::Planner).to_string(),
+            config.effort_for(Role::Critic).to_string(),
+        )
+    }
+
+    #[test]
+    fn planner_effort_rises_after_a_critic_revise() {
+        let repo = repo_with_planning(3);
+        let (finished, invocations) = run_planned_records(
+            &repo,
+            vec![good_plan()],
+            vec![revising_critique(), accepting_critique()],
+        );
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let (planner_base, critic_base) = configured_planning_efforts();
+        let planner = efforts_of(&invocations, Role::Planner);
+        assert_eq!(planner.len(), 2, "{planner:?}");
+        assert_eq!(
+            planner[0], planner_base,
+            "the first call is at the configured effort"
+        );
+        assert!(
+            effort_rank(&planner[1]) > effort_rank(&planner[0]),
+            "the revision runs at a higher effort: {planner:?}"
+        );
+        assert_eq!(planner[1], "xhigh", "one step above high");
+        // The critic is never escalated.
+        assert_eq!(
+            efforts_of(&invocations, Role::Critic),
+            [critic_base.clone(), critic_base]
+        );
+    }
+
+    #[test]
+    fn planner_effort_rises_across_mechanical_passes() {
+        let repo = repo_with_planning(3);
+        let (finished, invocations) = run_planned_records(
+            &repo,
+            vec![bad_plan(), good_plan()],
+            vec![accepting_critique()],
+        );
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let (planner_base, critic_base) = configured_planning_efforts();
+        let planner = efforts_of(&invocations, Role::Planner);
+        assert_eq!(planner.len(), 2, "{planner:?}");
+        assert_eq!(planner[0], planner_base);
+        assert!(
+            effort_rank(&planner[1]) > effort_rank(&planner[0]),
+            "the mechanical re-call runs at a higher effort: {planner:?}"
+        );
+        assert_eq!(efforts_of(&invocations, Role::Critic), [critic_base]);
+    }
+
+    #[test]
+    fn planner_effort_keeps_rising_while_a_plan_still_breaks_a_rule_and_the_stop_is_unchanged() {
+        let repo = repo_with_planning(4);
+        // The critic queue is empty, so any critic call fails the test.
+        let (finished, invocations) = run_planned_records(&repo, vec![bad_plan()], vec![]);
+        assert_eq!(finished.state, OutcomeState::Failed);
+        assert!(
+            finished
+                .reason
+                .starts_with(athena_data::records::PLANNING_STOPPED_PREFIX),
+            "{}",
+            finished.reason
+        );
+        assert!(
+            finished.reason.contains("after 2 mechanical revisions"),
+            "{}",
+            finished.reason
+        );
+        let (planner_base, _) = configured_planning_efforts();
+        assert_eq!(
+            efforts_of(&invocations, Role::Planner),
+            [planner_base, "xhigh".to_string(), "max".to_string()]
+        );
+        for role in [Role::Critic, Role::Producer, Role::Verifier] {
+            assert!(
+                efforts_of(&invocations, role).is_empty(),
+                "{role:?} was recorded"
+            );
+        }
+    }
+
+    #[test]
+    fn planner_effort_carries_across_rounds_and_holds_at_max() {
+        let repo = repo_with_planning(3);
+        let (finished, invocations) = run_planned_records(
+            &repo,
+            vec![bad_plan(), good_plan()],
+            vec![revising_critique()],
+        );
+        assert_eq!(finished.state, OutcomeState::Failed);
+        assert!(
+            finished
+                .reason
+                .contains(athena_data::records::PLANNING_CAP_REASON),
+            "{}",
+            finished.reason
+        );
+        let (planner_base, critic_base) = configured_planning_efforts();
+        // Planner calls: first, mechanical pass, then one per revising critic round after the first.
+        assert_eq!(
+            efforts_of(&invocations, Role::Planner),
+            [planner_base, "xhigh".into(), "max".into(), "max".into()]
+        );
+        assert_eq!(efforts_of(&invocations, Role::Critic), vec![critic_base; 3]);
+    }
+
     /// `run_planned` for a reading whose one criterion is a behavior criterion, which Athena's plan rules
     /// hold to a named test seam.
     fn run_planned_behavior(

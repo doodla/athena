@@ -19,7 +19,9 @@ impl Athena {
     /// the plan goes straight back to the planner, with no critic call and without using the round, up to
     /// [`MAX_MECHANICAL_PASSES`] times per round; a plan that still breaks a rule after that stops the job.
     /// A critic's revise sends the planner a revision brief that quotes the previous plan and every
-    /// finding. On accept, the invocations, plans and critiques go into `closing` and the rendered
+    /// finding. Every planner re-call, mechanical or after a critic's revise, runs one effort level higher
+    /// for each planner call already made in this run, up to the last level; the first call and the critic
+    /// keep the configured effort. On accept, the invocations, plans and critiques go into `closing` and the rendered
     /// producer section is returned. Reject, a reading the critic judged a misread, revise in the last
     /// round, or a failure of either agent stops the job: it is failed in `closing` and `None` is
     /// returned.
@@ -123,6 +125,20 @@ impl Athena {
                 bytes,
             });
         }
+        // A re-call is a revision: the planner runs one effort level higher for each planner call already made
+        // in this run, up to the last level. The first call keeps the configured effort.
+        let earlier_planner_calls = closing
+            .new_invocations
+            .iter()
+            .filter(|i| i.role == Role::Planner)
+            .count();
+        let steps = if revision.is_some() {
+            u32::try_from(earlier_planner_calls).unwrap_or(u32::MAX)
+        } else {
+            0
+        };
+        let effort =
+            athena_data::config::escalated_effort(jc.config.effort_for(Role::Planner), steps);
         let planner_brief_text = planner_brief(&PlannerInputs {
             job: id.as_str().to_string(),
             request: request.clone(),
@@ -137,7 +153,7 @@ impl Athena {
         Snapshot::create(&self.git, &p, &p, &snap_dir, SnapshotRepo::PlainWithHistory)?;
         let model = ctx.reading.producer_model.clone();
         let seq = ctx.next_seq(closing);
-        let spec = self.agent_spec(
+        let spec = self.agent_spec_with_effort(
             jc,
             &id,
             seq,
@@ -152,6 +168,7 @@ impl Athena {
             cfg.planner_usd,
             cfg.planner_timeout_s,
             plan_schema(),
+            Some(&effort),
         )?;
         let invoked = self.invoke_and_record(
             &InvocationFacts {
@@ -172,7 +189,7 @@ impl Athena {
             }
         };
         ctx.ui.line(&format!(
-            "planner    {model} · {:.0}s · {}",
+            "planner    {model} · {effort} · {:.0}s · {}",
             output.wall_s,
             cost_text(&record)
         ));
