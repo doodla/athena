@@ -42,6 +42,9 @@
 //!   check; `defaults.toml` is never written by Athena;
 //! - [`lab`]: the recorded lab run configuration (OLY-B-S3-01): task, pinned commit and a positive spend cap
 //!   per system, the refusal of a run at its cap, and a fingerprint of the configuration;
+//! - [`divergence`]: reconciling observed behavior against claims in prompts and docs (OLY-B-S3-02): each
+//!   mismatch, unobserved claim and undocumented observation becomes a `Divergence` finding; a pure function,
+//!   not wired into any command;
 //! - [`labeled`]: the labeled set of reviewed introspections and the scoring of Jev's recorded shadow answers
 //!   against it, read-only;
 //! - [`evidence_labels`]: class labels derived from what happened after an introspection (the retry that
@@ -106,6 +109,7 @@ pub mod commits;
 pub mod context_load;
 pub mod design_surface;
 pub mod disk;
+pub mod divergence;
 pub mod evidence_labels;
 pub mod exploration;
 pub mod fake;
