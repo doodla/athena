@@ -1,0 +1,220 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-033238-b87q",
+  "round": 1,
+  "at": "2026-11-13T03:54:07.564557104Z",
+  "invocation_seq": 2,
+  "approach": "Add crates/athena-core/tests/study_instance_split.rs, modelled on learnings_recorded.rs (repo_file, owner_problem, measure_label_problem, parse_spec, measure_problem, spec_gaps from athena_core::hestia). Pure functions return problem lists: `instance_problems(dir_listing)` (non-data file or .rs file in a studies/<id>/ dir, missing pin.json), `capability_problems(sources, instance_ids)` (a capability source naming an instance id). The real tests walk the real studies/*/ and crates/athena-cap-study/src (and prompts/) and assert no problems. Negative unit tests feed in-memory listings and sources to the same functions. Then fill OLY-B-S1-02 in docs/spec.toml (mechanism, measure ending `status: not shown`), add a CHANGELOG entry, and register the new test unit in xtask/shard-timings.txt. Fresh context per instance and gap-fix-and-recheck are not shown by static checks. The measure and the test docs say so.",
+  "decisions": [
+    {
+      "choice": "Check the split with static file checks on the real repo, iterating every studies/*/ directory.",
+      "reason": "Only firstmate-work-handling exists (Glob of studies/**), so iterating covers later instances without a code change. The existing sibling test learnings_recorded.rs uses the same approach for OLY-B-A3-02.",
+      "rejected": [
+        {
+          "option": "A runtime check in the study capability that rejects instance names.",
+          "why": "Out of scope: the request forbids changing the capability's runtime behavior or prompts."
+        },
+        {
+          "option": "Claim the whole requirement with a status label from `athena status`.",
+          "why": "Fresh context and gap re-check are not observable from files. The honest label is `status: not shown`, as learnings_recorded.rs does."
+        }
+      ]
+    },
+    {
+      "choice": "Search capability sources only for the full instance id (directory name, e.g. `firstmate-work-handling`), not for fragments such as `work-handling`.",
+      "reason": "I grepped crates/athena-cap-study for firstmate|work-handling. The only hits are `mechanism: \"work-handling\"` (rules.rs:861), a doc comment (records.rs:145) and `the work-handling model` (model.rs:1). These name a mechanism, not the instance. The full id does not appear, so the real test passes without editing capability code.",
+      "rejected": [
+        {
+          "option": "Ban the substring `firstmate` or `work-handling`.",
+          "why": "`work-handling` is the generic mechanism name used by the capability, so it would be a false positive."
+        }
+      ]
+    },
+    {
+      "choice": "Data-only means every file in studies/<id>/ has extension json or md, and none is .rs, .sh, .toml or other code. pin.json must exist.",
+      "reason": "Matches the existing instance layout (claims, rationales, model, intro, validation, pin, findings, all .json) and the pin path in crates/athena-core/src/run/pin.rs.",
+      "rejected": [
+        {
+          "option": "Parse pin.json fields.",
+          "why": "The pin schema belongs to the pin code and its own tests (run_pin_tests.rs). This test only checks existence."
+        }
+      ]
+    },
+    {
+      "choice": "Add one line for the new test unit to xtask/shard-timings.txt.",
+      "reason": "xtask/tests/ci_shards.rs:411-421 (`checked_in_timings_cover_every_workspace_test_unit`) asserts the file's units equal the workspace's test units, so a new test file without a line fails `cargo test`. Every sibling test file has a line (for example line 56). It is a timing data file, not governance.",
+      "rejected": [
+        {
+          "option": "Leave the timings file alone.",
+          "why": "It would break the xtask ci_shards test."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/tests/study_instance_split.rs",
+      "action": "create",
+      "purpose": "The mechanism for OLY-B-S1-02: real-file checks that studies/<id>/ holds only data and a pin, that the capability sources name no instance, and that the spec entry has a mechanism, owner and measure. Includes negative unit tests and a doc comment stating the limit: fresh context and gap re-check are not shown.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "Set OLY-B-S1-02 mechanism to `crates/athena-core/tests/study_instance_split.rs` plus a short description, keep owner `Athena`, and set the measure to name the command and end `status: not shown`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add one bullet under `## [Unreleased]` / `### Added` for this job.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "purpose": "Add `athena-core --test study_instance_split 5.00` so the xtask timings-coverage test passes. It is a data file, not governance.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Create crates/athena-core/tests/study_instance_split.rs. Start with a //! doc comment (requirement id, what the test checks, limits). Use constants REQUIREMENT=\"OLY-B-S1-02\" and TEST_COMMAND=\"cargo test -p athena-core --test study_instance_split\". Add repo_file, owner_problem and measure_label_problem copied from learnings_recorded.rs:24-29 and 153-163, and real_requirement, which parses docs/spec.toml with athena_core::hestia::parse_spec and finds the id.",
+    "Add pure functions. `instance_problems(id: &str, files: &[String]) -> Vec<String>` reports a file with extension .rs, or any extension not in {json, md}, or a nested directory, and reports a missing `pin.json`. `capability_problems(sources: &[(String, String)], instance_ids: &[String]) -> Vec<String>` reports each (file, id) pair where the text contains the id. Add helpers that list studies/* directories and read the files of crates/athena-cap-study/src and prompts recursively.",
+    "Add the real-file tests: `every_study_instance_holds_only_data_and_a_pin` (assert at least one instance exists, then an empty problem list) and `the_study_capability_names_no_instance`.",
+    "Add negative tests. Each first asserts the clean input gives no problem, then the mutated one gives the specific problem: a .rs file in an instance, a missing pin.json, a source containing `firstmate-work-handling`, a measure missing the label, a measure missing the command, a wrong owner, and mechanism `none` appearing in spec_gaps.",
+    "Add `spec_entry_has_a_real_mechanism`: mechanism is not `none` and names the test file path, owner_problem is None, measure_problem is None, measure_label_problem is None, and OLY-B-S1-02 is not in spec_gaps(&requirements).",
+    "Edit docs/spec.toml at the OLY-B-S1-02 table. Set mechanism to `crates/athena-core/tests/study_instance_split.rs: checks that every studies/<id>/ holds only data and a pin, and that crates/athena-cap-study names no instance; fresh context per instance and gap re-check are not covered`. Keep owner = \"Athena\". Set measure to `Reusable study logic is in crates/athena-cap-study and instance data is in studies/<id>/, checked on the real files; cargo test -p athena-core --test study_instance_split; status: not shown`. Leave statement, kind, status and sources alone.",
+    "Add `athena-core --test study_instance_split 5.00` to xtask/shard-timings.txt next to the other athena-core test lines (line order is not checked).",
+    "Add a CHANGELOG.md bullet at the top of `## [Unreleased]` / `### Added`, in the style of the OLY-B-A3-02 bullet: the requirement id, the test file, what it checks, the `status: not shown` limit, the timings registration, and that no runtime or prompt change was made.",
+    "Run `cargo fmt --all`, then `cargo test -p athena-core --test study_instance_split`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any failure in the new files."
+  ],
+  "risks": [
+    {
+      "risk": "Static checks do not show fresh context per instance or the gap-fix-and-re-check loop, so the requirement is only partly shown.",
+      "mitigation": "The measure ends `status: not shown`, as the task allows. The test doc comment and the changelog entry state the limit. Out-of-scope work (studying Hermes and Athena) is not attempted."
+    },
+    {
+      "risk": "A later instance directory legitimately holds another file type, such as .txt or a binary pin artifact, and the test blocks it.",
+      "mitigation": "The allowed extension set (json, md) is one constant in the test, and the error message names the file and the rule."
+    },
+    {
+      "risk": "A future capability source mentions an instance id in a comment.",
+      "mitigation": "This is the behaviour wanted, since the id names an instance. The error names the file and the id."
+    },
+    {
+      "risk": "The test scans prompts/*.md as well as src and could hit an id in prose.",
+      "mitigation": "I grepped crates/athena-cap-study (all files, case-insensitive) for firstmate and work-handling and found no full-id hit. The producer runs the test before finishing."
+    },
+    {
+      "risk": "The spec.toml edit is in a 211 KB file with long lines, so a wrong replace could hit another entry.",
+      "mitigation": "Edit only the OLY-B-S1-02 table (docs/spec.toml:2927-2934), anchored on `id = \"OLY-B-S1-02\"`. The spec parse tests catch a TOML error."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "docs/spec.toml OLY-B-S1-02 mechanism and measure",
+      "dependent": "crates/athena-core/src/hestia.rs `spec_gaps` / `spec_request` and the drain's spec-gap queueing (hestia.rs:1291, 1321)",
+      "kind": "code",
+      "test": "study_instance_split::spec_entry_has_a_real_mechanism asserts the entry is not in spec_gaps. The re-queue stops once the gap is closed.",
+      "reason": null
+    },
+    {
+      "name": "docs/spec.toml schema and entries",
+      "dependent": "Other tests that parse docs/spec.toml (for example learnings_recorded.rs `spec_entry_has_a_real_mechanism`, and `athena status` / Hestia reviews via parse_spec)",
+      "kind": "code",
+      "test": "cargo test --locked, which runs every spec parser test.",
+      "reason": "Only the three field values of one existing [[requirement]] table change. Keys, ids and neighbouring entries are untouched, so parsing is unaffected."
+    },
+    {
+      "name": "Workspace test units listed in xtask/shard-timings.txt",
+      "dependent": "xtask/tests/ci_shards.rs `checked_in_timings_cover_every_workspace_test_unit` (line 411) and the CI shard split in xtask/src/shard.rs",
+      "kind": "rule",
+      "test": "xtask ci_shards test. The plan adds the line `athena-core --test study_instance_split 5.00`; the check compares sets, so order does not matter.",
+      "reason": null
+    },
+    {
+      "name": "Capability sources the new test reads",
+      "dependent": "crates/athena-cap-study/src/{lib,model,records,rules}.rs and prompts/*.md",
+      "kind": "code",
+      "test": "study_instance_split::the_study_capability_names_no_instance",
+      "reason": "The test only reads them and no capability file changes. Its text names no instance id. The grep hits for `work-handling` are the generic mechanism name, which the test does not forbid."
+    },
+    {
+      "name": "studies/<id>/ layout (pin.json plus data)",
+      "dependent": "crates/athena-core/src/run/pin.rs, run_pin_tests.rs, crates/athena-cli/src/drain.rs (study_text) and other readers of studies/<id>/",
+      "kind": "code",
+      "test": "crates/athena-core/src/run_pin_tests.rs and crates/athena-cli/tests/drain.rs are unchanged and still run in cargo test --locked.",
+      "reason": "No study file is added, moved or edited. The new test only reads the directory."
+    },
+    {
+      "name": "CHANGELOG.md Unreleased entry",
+      "dependent": "CHANGELOG.md consumers (crates/athena-context/src/briefs tests tied to CHANGELOG_PATH)",
+      "kind": "rule",
+      "test": "cargo test --locked.",
+      "reason": "Adding a bullet under `### Added` does not change structure. No test pins the bullet count."
+    },
+    {
+      "name": "Refusal or matching rules",
+      "dependent": "refusal_corpus (crates/athena-core/tests/refusal_corpus.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan adds no parser, stem list or reading check, only a test over files, so there are no input forms to map to corpus cases."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Test reads docs/spec.toml with parse_spec, finds OLY-B-S1-02, and asserts the mechanism contains `crates/athena-core/tests/study_instance_split.rs` and is not `none`. It asserts the owner is `Athena` and the measure names `cargo test -p athena-core --test study_instance_split` and ends with `status: not shown`.",
+      "command": "cargo test -p athena-core --test study_instance_split spec_entry_has_a_real_mechanism",
+      "observes": "The test passes only once the spec entry is filled in. Before the change, the mechanism is `none` and the measure is `The spec gap list; status: requirement` (docs/spec.toml:2929-2931), so it fails.",
+      "fails_without": "Mechanism `none` and the old measure fail the mechanism, measure-command and label assertions.",
+      "seam": "Production entry point `athena_core::hestia::parse_spec` (hestia.rs:1172) on the real docs/spec.toml via CARGO_MANIFEST_DIR/../.. . No fake. Exists (same pattern as learnings_recorded.rs:165-171)."
+    },
+    {
+      "criterion": 2,
+      "method": "Two real-file tests: `every_study_instance_holds_only_data_and_a_pin` walks studies/*/ and calls instance_problems on the file names. `the_study_capability_names_no_instance` reads every file under crates/athena-cap-study/src and prompts and calls capability_problems with the directory names under studies/. Both assert an empty problem list.",
+      "command": "cargo test -p athena-core --test study_instance_split",
+      "observes": "Both pass on the real tree: firstmate-work-handling holds only .json files including pin.json, and cap-study sources do not contain the full id `firstmate-work-handling`.",
+      "fails_without": "Without the test file the command has no such target and cargo errors. With the file, the negative cases in criterion 3 show the checks bite.",
+      "seam": "Pure functions inside the new test file, driven by std::fs reads of the real repo. Added by plan step 1. No double."
+    },
+    {
+      "criterion": 3,
+      "method": "Negative unit tests call the same pure functions on in-memory input. (a) A listing with `helper.rs` yields a problem. (b) A listing with no `pin.json` yields a problem. (c) A capability source string containing `firstmate-work-handling` yields a problem naming the id. (d) A requirement whose measure lacks `status: not shown`, or lacks the test command, yields measure_label_problem Some. Also a wrong owner yields owner_problem Some, and mechanism `none` is a gap in spec_gaps. Each test first asserts the clean input gives no problem, then the mutated input gives the specific problem.",
+      "command": "cargo test -p athena-core --test study_instance_split",
+      "observes": "Each mutated input produces exactly the expected problem, so a deleted check or a loosened rule makes the test fail. The real-file tests pass.",
+      "fails_without": "If instance_problems stopped flagging .rs files or missing pins, or capability_problems ignored instance ids, the corresponding negative test would see an empty list and fail.",
+      "seam": "instance_problems(&[&str] file names) and capability_problems(&[(&str,&str)] sources, &[&str] ids) are the production checks, taking data as arguments. The fixtures are plain strings. Added by plan step 1. The logic under test is not in the fixtures."
+    },
+    {
+      "criterion": 4,
+      "method": "The same test calls spec_gaps on the parsed real requirements and asserts none has id OLY-B-S1-02, and asserts measure_problem(&r.measure) is None. A companion test sets mechanism to `none` on the real requirement and asserts spec_gaps returns one gap with no_mechanism true.",
+      "command": "cargo test -p athena-core --test study_instance_split spec_entry_has_a_real_mechanism",
+      "observes": "OLY-B-S1-02 is absent from spec_gaps on the changed spec. The `none` copy is reported, so the check is not vacuous.",
+      "fails_without": "The old entry (mechanism `none`, measure `status: requirement`) is a gap, so the assertion fails.",
+      "seam": "athena_core::hestia::{parse_spec, spec_gaps, measure_problem} (hestia.rs:1172, 1219, 1291) on the real spec file. Exists."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks on the final tree. The full test run includes xtask `checked_in_timings_cover_every_workspace_test_unit` (xtask/tests/ci_shards.rs:411), which needs the shard-timings line, and the other spec tests that parse docs/spec.toml.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "A missing timings line fails the xtask ci_shards test. A bad TOML edit fails every parse_spec user.",
+      "seam": "The cargo commands themselves. Exists."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of the final tree.",
+      "command": "git diff --stat",
+      "observes": "CHANGELOG.md gains one `### Added` bullet under `## [Unreleased]` (CHANGELOG.md:8-12) naming OLY-B-S1-02, the test file and its `status: not shown` label. The other changed files are the test file, docs/spec.toml and xtask/shard-timings.txt. athena.toml, defaults.toml and .github/workflows are untouched.",
+      "fails_without": null,
+      "seam": "git diff of the producer tree. Exists."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "2c9ed355a8a2f2e052eff38a1dac156b61f9156a20204591dad18932c87ec858"
+}
