@@ -1,0 +1,157 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-060852-dy62",
+  "n": 1,
+  "at": "2026-11-13T23:21:59.181521473Z",
+  "invocation_seq": 2,
+  "base_commit": "fd2677f0fb640145be09e84c2407843a9ef83354",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add pin-policy and hermetic-check defaults so readings settle them",
+  "summary": "Root cause: defaults.toml records no stance on version pins (exact, never auto-floated, who bumps them) or on checks that depend on ambient tools or environment. So the reader had to ask the user (jobs 20261016-005805-p806 and 20261025-183644-t67q). The fix adds two written defaults, makes the reader prompt budget fit them, and adds tests proving the reader prompt carries them.",
+  "class_of_work": "config",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New test plus passing cargo test and clippy."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix in the defaults, the origin shared by both jobs."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the rendered reader prompt, not file existence."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Outcome criterion checks the reader can settle the policy unasked."
+    },
+    {
+      "id": "mechanism",
+      "how": "A test enforces the defaults and the budget."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the reader role, and the person running Athena who would otherwise be asked; they should find pin and hermetic-check stances already written in defaults.toml.",
+    "Code survey: crates/athena-data/src/defaults.rs (loads defaults.toml, renders the 'The user's default expectations (version N)' block, has a test that the model parses). crates/athena-context/src/lib.rs (BudgetSet token budgets, Contract = 350; the reader set is 2000 and has 2 tokens left). crates/athena-core/src/run_pin_tests.rs line 1625 (a test that hardcodes 'of 2000 tokens used' for the reader). No record or data file is added under crates/, so check_record_file and AnyRecord are not touched.",
+    "Job 20261016-005805-p806 is addressed by writing the policy that its request left open: pins stay exact, are never auto-floated, and are bumped only by the person running Athena through one explicit command. Its candidate (patch-tolerant claude::accepts in claude.rs, xtask claude_accepts, wiring.rs, live.rs, README.md) is dropped, not kept; its findings (D154 link missing from decision-links.toml, duplicated rule, unrun full test) do not apply because none of that code is re-landed.",
+    "Job 20261025-183644-t67q is addressed by writing the second default: a check never depends on inherited environment or ambient tools, the runner passes each path explicitly, and any preferred-versus-fallback tool choice is recorded in the check output. It made no changes, so no file is kept or dropped; its nextest work (athena.toml, ci.yml, checks.rs, gh.rs, config.rs, run.rs, xtask, policy.rs) is out of scope here.",
+    "Existing code: defaults.toml, crates/athena-data/src/defaults.rs and crates/athena-context/src/lib.rs are extended, not replaced; new entries follow the existing [[default]] shape (id, classes, text).",
+    "Consumers: defaults.toml is read by crates/athena-data/src/defaults.rs and rendered into the reader prompt; the reader budget in crates/athena-context/src/lib.rs bounds it.",
+    "defaults.toml 'version' stays 1 unless the defaults loader requires a bump for added entries; the producer decides after reading defaults.rs.",
+    "Changing a prompt budget and the reader prompt content is an agent-behavior change: only the reader role is affected."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "defaults.toml has a new [[default]] entry for version pins whose text says pins are exact, are never auto-floated, and are bumped only by the person running Athena through one explicit command that sets the pin to the installed version; it is applied to the classes code, config and build.",
+      "kind": "content"
+    },
+    {
+      "text": "defaults.toml has a second new [[default]] entry saying a check never depends on inherited environment or ambient tools, that the runner passes every path a check needs explicitly, and that any preferred-versus-fallback tool choice is recorded in the check output.",
+      "kind": "content"
+    },
+    {
+      "text": "The reader token budget in crates/athena-context/src/lib.rs is raised enough for the new entries (same file and same change as the reader budget line in crates/athena-core/src/run_pin_tests.rs line 1625, updated to match), and docs/decisions.md gets a new appended decision, with a Provenance bullet, naming the root cause, the two jobs, and the budget change; no existing entry is edited.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry naming the root cause (defaults silent on pin and ambient-tool policy). athena.toml, workflows and the files changed by the two earlier candidates (claude.rs, wiring.rs, live.rs, README.md, xtask, checks.rs, gh.rs) are not changed; defaults.toml is the only governance file changed.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test` and check that a new test in crates/athena-data/src/defaults.rs parses the real defaults.toml and asserts both new ids exist with the key phrases (exact, never auto-floated, ambient). The test fails on the base tree, where the entries are absent, and passes with the change. The same test also checks the rendered reader prompt contains both entries, so the property is checked for the class and not for one job.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: the reader prompt-budget test (run_pin_tests.rs) and the context budget tests pass, which shows the reader set fits its raised budget. Recorded fmt, clippy (-D warnings) and test checks pass on the final tree.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Outcome check: feeding the p806 request text through the defaults rendering shows the pin stance in the block the reader sees, so the reader can settle it without a question. This is checked by the new test's assertion on the rendered text.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "defaults.toml",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-data/src/defaults.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Patch-tolerant version acceptance in claude.rs and xtask claude_accepts, wiring.rs, live.rs, README.md (job 20261016-005805-p806 candidate): dropped.",
+    "An xtask repin command that rewrites athena.toml: the default names the command; building it is a separate job.",
+    "cargo-nextest adoption, athena.toml [tools] pins, ci.yml, checks.rs, gh.rs, config.rs, run.rs (job 20261025-183644-t67q): separate job.",
+    "Editing athena.toml, workflows or other prompt files."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.4,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1800.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.751219512195122,
+      "p_verification_passes": 0.6428571428571429,
+      "p_user_intervenes": 0.10909090909090909,
+      "cost_usd": {
+        "p10": 0.010386615429732727,
+        "p50": 0.5133741848495793,
+        "p90": 1.1356127734902188
+      },
+      "wall_time_s": {
+        "p10": 334.7532235819704,
+        "p50": 810.7119091393979,
+        "p90": 2769.336537527952
+      }
+    }
+  },
+  "departures": null,
+  "urgent_reason": "Stops repeated planning stops: two jobs ended with a policy question or a refused, unstarted producer because the defaults were silent."
+}

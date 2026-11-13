@@ -5223,3 +5223,36 @@ should replace those estimates with its figures.
   the_reader_brief_requires_a_field_meaning_assumption_for_a_reused_field`, `the_planner_brief_requires_a_reused_field_to_quote_its_meaning_and_check_the_live_config`
   and the moved pins in `the_reader_brief_names_each_reading_rule_in_one_short_line` read the rendered briefs. Not
   measured: whether the reader and the planner follow the rule.
+
+## D181 · The defaults state the pin and ambient-tool policy, so the reader settles it without a question
+
+- **Case:** Job 20261016-005805-p806 asked about a pin deadlock and job 20261025-183644-t67q about a check that leaned
+  on ambient tools. Each request stated the problem, not the policy, and the reader had no written stance to apply, so
+  it had to ask. Introspections 20261016-142800-y4vb and 20261025-183726-fqgr recorded the same cause; the failure
+  class is design-policy-choice-unspecified-needs-user-answer (20261016-142810-vhs2).
+- **Decision:** Root cause: `defaults.toml` was silent on pin and ambient-tool policy. Add two entries, each with its
+  stance and scope in the first sentence, because the reader loads only that sentence. `version-pins`: tool version
+  pins in `athena.toml` stay exact, are never auto-floated, and only the person running Athena bumps one through one
+  explicit command that sets the pin to the installed version; the Claude Code pin already has that command
+  (`cargo run -p xtask -- repin`, D154), and Cargo requirements and `Cargo.lock` are outside the default.
+  `hermetic-checks`: a check run by Athena's check runner never depends on inherited environment or ambient tools,
+  the runner passes every path a check needs explicitly, and a preferred-versus-fallback choice is recorded in the
+  check output; unit tests that start git or cargo are outside it. Both apply to code, config and build. The reader
+  budget rises from 2000 to 2200: the measured reader set is 2163 tokens with the entries, and 2200 is the next
+  multiple of 50. This is a deliberate exception to D170's rule that a budget never rises to fit a set, on the D93
+  precedent: the reader prompt has no removable text left. `version` stays 1, a departure from defaults-loop.md
+  section 8.2: a bump would break the proposals tests, which build a fixture from the real file and expect 1 to 2,
+  and any pending proposal built on version 1; the four earlier direct additions did not bump either. The reading
+  digest hashes the file bytes, so stored readings are still re-read. No new repin command is built here.
+- **Alternatives:** Bump `version` to 2: breaks the proposals tests and pending proposals. Leave the scope out of the
+  first sentence: the reader would never see it. Pay for the lines with removals from `reader.md`: it holds
+  schema-bound rules only.
+- **Tradeoff:** The reader prompt grows by about 165 tokens on every request, and the rendered header still says
+  version 1. Whether a live reader judges applicability well is not measured.
+- **Reversal cost:** Low; delete the two entries, restore the budget and the system-facts line, and drop the tests.
+- **Provenance:** Read: `defaults.toml`, `crates/athena-data/src/defaults.rs` (`render`, `first_sentence`),
+  `crates/athena-context/src/lib.rs` (`BudgetSet`), `crates/athena-core/src/reading.rs` (`reader_system_prompt`) and
+  `docs/design/defaults-loop.md` section 8.2. Measured: `cargo test -p athena-cli --test budgets` read a reader set of
+  2163 tokens. Tests: `pin_and_ambient_tool_stances_are_written_defaults_the_reader_sees` and
+  `the_reader_system_prompt_carries_the_pin_and_hermetic_check_defaults`. The stale hand-written figure in
+  `docs/design/context-engineer.md` is left.

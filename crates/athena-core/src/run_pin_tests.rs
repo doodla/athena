@@ -1622,7 +1622,7 @@ fn the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets(
     );
     assert!(brief.contains(&verifier), "{brief}");
     let reader = format!(
-        "- reader: composes contract, frame.reader, defaults, catalog; {} of 2000 tokens used",
+        "- reader: composes contract, frame.reader, defaults, catalog; {} of {} tokens used",
         athena_context::compose(&[
             athena_context::CONTRACT.into(),
             athena_context::READER_FRAME.into(),
@@ -1639,9 +1639,47 @@ fn the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets(
                 athena_context::briefs::render_catalog(&[PinningStudy.card()])
             ),
         ])
-        .estimated_tokens()
+        .estimated_tokens(),
+        athena_context::BudgetSet::Reader.budget()
     );
     assert!(brief.contains(&reader), "{brief}");
+}
+
+#[test]
+fn the_reader_system_prompt_carries_the_pin_and_hermetic_check_defaults() {
+    let (dir, _git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let prompts = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let seen_prompts = prompts.clone();
+    let tweak: Tweak = Arc::new(move |spec, _| {
+        if spec.role == Role::Reader {
+            seen_prompts
+                .lock()
+                .unwrap()
+                .push((spec.system_prompt.clone(), spec.user_prompt.clone()));
+        }
+    });
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        tweak,
+    );
+    let request =
+        "The pinned Claude Code version no longer matches the installed one, so every job stops.";
+    athena.ask(request, &Quiet).unwrap();
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    let (system, brief) = &prompts[0];
+    for line in [
+        "- version-pins [code, config, build]: Tool version pins in athena.toml stay exact and are never auto-floated",
+        "- hermetic-checks [code, config, build]: A check run by Athena's check runner never depends on inherited environment or ambient tools",
+        "do not ask the user about them unless the request says otherwise",
+    ] {
+        assert!(system.contains(line), "missing {line}");
+    }
+    assert!(brief.contains(request), "{brief}");
 }
 
 #[test]

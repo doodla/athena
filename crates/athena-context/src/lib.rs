@@ -173,7 +173,9 @@ impl BudgetSet {
     pub fn budget(self) -> u64 {
         match self {
             BudgetSet::Contract => 350,
-            BudgetSet::Reader => 2_000,
+            // Raised from 2_000 (D181): the pin and hermetic-check defaults stand in for a user question and
+            // had no removable text left. The one exception to the rule stated below.
+            BudgetSet::Reader => 2_200,
             // Producer (measured against the producer set and the planner) and verifier (the verifier set and
             // the critic) budgets stay near their largest set. A budget never rises to fit a set; a set that
             // outgrows it pays for the addition with a removal.
