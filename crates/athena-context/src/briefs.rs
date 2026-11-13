@@ -3587,7 +3587,7 @@ mod tests {
         );
     }
 
-    /// The size of the reader's reading rules section before the real-records rule line was added.
+    /// The size of the reader's reading rules section before the field-meaning rule line was added.
     const READING_RULES_BASELINE_BYTES: usize = 3045;
 
     /// The size of the planner brief's Report section with empty inputs before the real-records rule was
@@ -3614,14 +3614,55 @@ mod tests {
         ] {
             assert!(REAL_RECORDS_RULE.contains(needle), "{needle}");
         }
-        // The Report grew by the rule and its paragraph break and nothing else.
+        // The Report grew by the two rules and their paragraph breaks and nothing else.
         assert!(
-            report.len() <= PLANNER_REPORT_BASE_BYTES + REAL_RECORDS_RULE.len() + 4,
-            "{} > {} + {} + 4",
+            report.len()
+                <= PLANNER_REPORT_BASE_BYTES
+                    + REAL_RECORDS_RULE.len()
+                    + 4
+                    + super::planner::FIELD_MEANING_RULE.len()
+                    + 2,
+            "{} > {} + {} + 4 + {} + 2",
             report.len(),
             PLANNER_REPORT_BASE_BYTES,
-            REAL_RECORDS_RULE.len()
+            REAL_RECORDS_RULE.len(),
+            super::planner::FIELD_MEANING_RULE.len()
         );
+    }
+
+    #[test]
+    fn the_planner_brief_requires_a_reused_field_to_quote_its_meaning_and_check_the_live_config() {
+        use super::planner::{FIELD_MEANING_RULE, REAL_RECORDS_RULE};
+        let brief = planner_brief(&planner_inputs(None));
+        let report = brief.split("## Report").nth(1).expect("report section");
+        assert_eq!(report.matches(FIELD_MEANING_RULE).count(), 1, "{report}");
+        assert!(!FIELD_MEANING_RULE.contains('\n'));
+        let real = report.find(REAL_RECORDS_RULE).expect("real records rule");
+        let field = report.find(FIELD_MEANING_RULE).unwrap();
+        assert!(field > real, "the field-meaning rule comes after");
+        for phrase in [
+            "struct field",
+            "CLI argument",
+            "record key",
+            "config key",
+            "documented meaning",
+            "crates/",
+            "path:line",
+            "live athena.toml value",
+            "each role",
+            "new field",
+        ] {
+            assert!(report.contains(phrase), "{phrase} missing: {report}");
+        }
+        // Generic: it names no field from the jobs that showed the gap.
+        assert!(
+            !FIELD_MEANING_RULE
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|t| t.eq_ignore_ascii_case("via"))
+        );
+        let lower = FIELD_MEANING_RULE.to_lowercase();
+        assert!(!lower.contains("hard_producer"));
+        assert!(!lower.contains("restart"));
     }
 
     #[test]
@@ -3650,7 +3691,7 @@ mod tests {
         ] {
             assert!(section.contains(check), "no rule for {check}:\n{section}");
         }
-        assert_eq!(READING_RULES.len(), 12);
+        assert_eq!(READING_RULES.len(), 13);
         // Exactly one line states the real-records rule: a records-computed measure, real records, an
         // expected range and an independent source.
         let records_lines: Vec<&&str> = lines
@@ -3701,18 +3742,65 @@ mod tests {
                     && l.contains("`check_design_existing_code`")),
             "no rule line names Existing code: and its check:\n{section}"
         );
-        // The section adds little to the brief: twelve rule lines and the code survey guide paragraph. The
+        // The section adds little to the brief: thirteen rule lines and the code survey guide paragraph. The
         // section was about 2540 bytes with eight rules, measured 2718 with the ninth and 3045 with the
-        // eleventh. The twelfth (the real-records rule) replaced wording in the other lines, so the section
-        // does not grow past the 3045 bytes measured before it. The bound below is this section's own limit
-        // of 3150 bytes, not the reader's prompt budget set: `BudgetSet` in `lib.rs` composes only the
-        // contract, frames, defaults and catalog, so the brief text sits outside it.
-        assert!(section.len() < 3150, "{} bytes", section.len());
+        // twelfth. The thirteenth (the field-meaning rule) adds its own line and nothing else, so the section
+        // grows by that line and its newline over the 3045 bytes measured before it. The bound below is this
+        // section's own limit of 3300 bytes, not the reader's prompt budget set: `BudgetSet` in `lib.rs`
+        // composes only the contract, frames, defaults and catalog, so the brief text sits outside it.
+        assert!(section.len() < 3300, "{} bytes", section.len());
+        let field_line = lines
+            .iter()
+            .find(|l| l.contains("`Field meaning:`"))
+            .expect("a rule line for `Field meaning:`");
         assert!(
-            section.len() <= READING_RULES_BASELINE_BYTES,
-            "the reading rules section grew past its baseline: {} > {READING_RULES_BASELINE_BYTES} bytes",
-            section.len()
+            section.len() <= READING_RULES_BASELINE_BYTES + field_line.len() + 1,
+            "the reading rules section grew past its baseline and the field-meaning line: {} > {READING_RULES_BASELINE_BYTES} + {} + 1 bytes",
+            section.len(),
+            field_line.len()
         );
+        // The field-meaning rule is prose only and generic: it names no check and no field from the jobs
+        // that showed the gap.
+        assert!(field_line.ends_with("(prose only)."), "{field_line}");
+        assert!(
+            !field_line
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|t| t.eq_ignore_ascii_case("via")),
+            "{field_line}"
+        );
+        let lower = field_line.to_lowercase();
+        assert!(!lower.contains("restart"), "{field_line}");
+        assert!(!lower.contains("hard_producer"), "{field_line}");
+        assert!(!lower.contains("check_"), "{field_line}");
+    }
+
+    #[test]
+    fn the_reader_brief_requires_a_field_meaning_assumption_for_a_reused_field() {
+        let brief = reader_brief(&reader_inputs(&reading()));
+        let (_, section) = brief.split_once(READING_RULES_HEADING).unwrap();
+        let section = section.split("\n# ").next().unwrap();
+        let line = section
+            .lines()
+            .find(|l| l.starts_with("- ") && l.contains("`Field meaning:`"))
+            .expect("no rendered rule line asks for a `Field meaning:` assumption");
+        assert!(READING_RULES.iter().any(|r| *line == format!("- {r}")));
+        for phrase in [
+            "Field meaning:",
+            "CLI argument",
+            "record key",
+            "config key",
+            "documented meaning",
+            "crates/",
+            "path:line",
+            "why it fits",
+            "athena.toml",
+            "live athena.toml value",
+            "new field",
+            "quote",
+        ] {
+            assert!(line.contains(phrase), "{phrase} missing: {line}");
+        }
+        assert!(line.to_lowercase().contains("reused field"), "{line}");
     }
 
     #[test]
@@ -3979,8 +4067,8 @@ mod tests {
             "{changelog}"
         );
         assert!(changelog.contains("Scope limit rule above"), "{changelog}");
-        // No new reading-rule line: the rule list and its size stay as they were.
-        assert_eq!(READING_RULES.len(), 12);
+        // One line was added, the field-meaning rule: the list holds thirteen rules.
+        assert_eq!(READING_RULES.len(), 13);
         assert!(
             section.lines().all(|line| !line.starts_with("# ")),
             "{section}"

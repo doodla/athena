@@ -5194,3 +5194,32 @@ should replace those estimates with its figures.
   read the recorded planner model and effort per round; `cargo test -p athena-data planner_revision` and
   `cargo test -p athena-cli --test drain planner_revision` read the real `athena.toml`. Prior job 20261113-194336-scfc.
   Not measured: whether a stronger revision call produces a better plan or its extra cost.
+
+## D180 · The reader and the planner are told to read a reused field's documented meaning
+
+- **Case:** A reading or plan maps a requirement onto an existing struct field, CLI argument, record key or config key
+  by its name. Job 20261030-013421-tfwf read a restart's `via` as "fixed in Athena" although its doc says what the new
+  context read to resume; job 20261113-194336-scfc read the `hard_producer_*` keys as a planner upgrade without reading
+  the live `athena.toml`. Both failed in planning.
+- **Decision:** Root cause: neither the reader's brief nor the planner's brief told the stage to read a reused field's
+  documented meaning before mapping a requirement to it. Give that information in two places. The reader brief's
+  Reading rules gain one `(prose only)` line in `READING_RULES`: a reused field, CLI argument, record key or config
+  key needs a `Field meaning:` assumption quoting the documented meaning with a path:line, why it fits and, for a
+  config key, the live `athena.toml` value, or a new field. The planner brief's Report gains `FIELD_MEANING_RULE`
+  with the same instruction. Both texts are generic and name no field from the two jobs. No refusal check is added and
+  nothing in `crates/athena-core` changes, so the expected share of past accepted readings newly refused is 0%.
+  `prompts/planner.md` and `prompts/critic.md` are unchanged because an edit would move the computed budget line in
+  `docs/system-facts.md`; the reader prompt has 2 tokens left, so the rule is in the brief, not the prompt.
+- **Alternatives:** A reading check in `crates/athena-core` that refuses a reading with no `Field meaning:` text: it
+  could match only the words, not whether the meaning fits, so it would refuse readings without catching the fault.
+  The rule in `prompts/reader.md` or `prompts/planner.md`: over or near budget, and it moves a computed line.
+- **Tradeoff:** A prose rule does not stop a stage from skipping it; the meaning of a field cannot be judged by code.
+  The reader line and the Report paragraph add about 220 and 340 bytes to briefs read on every request.
+- **Reversal cost:** Low; delete the reader line, the constant and the tests that pin them.
+- **Provenance:** Read: `crates/athena-context/src/briefs/reader.rs` (`READING_RULES`),
+  `crates/athena-context/src/briefs/planner.rs` (the Report rules), `crates/athena-cli/src/main.rs` (the doc of the
+  restart `via`), `crates/athena-data/src/config.rs` and `athena.toml` (the `hard_producer_*` keys), and the pins in
+  `crates/athena-context/src/briefs.rs`. Measured: `cargo test -p athena-context
+  the_reader_brief_requires_a_field_meaning_assumption_for_a_reused_field`, `the_planner_brief_requires_a_reused_field_to_quote_its_meaning_and_check_the_live_config`
+  and the moved pins in `the_reader_brief_names_each_reading_rule_in_one_short_line` read the rendered briefs. Not
+  measured: whether the reader and the planner follow the rule.

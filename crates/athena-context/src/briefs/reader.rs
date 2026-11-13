@@ -284,7 +284,7 @@ pub const READING_RULES_HEADING: &str = "# Reading rules";
 /// Each rule a reading must pass, one short line each. A line gives the check that enforces it; a reading
 /// that breaks a checked rule is refused and read again once, with the refusal as a correction. A line
 /// ending `(prose only)` has no check and causes no refusal.
-pub const READING_RULES: [&str; 12] = [
+pub const READING_RULES: [&str; 13] = [
     "Previous result: a retry or follow-up names each earlier job, how its result is addressed, deliverables, out_of_scope, and each changed file kept or excluded (`check_prior_result_and_scope`).",
     "Criteria evidence: each criterion rests on a command, Grep or file the verifier can check, not the producer's report (`check_criteria_evidence`).",
     "Governance files: when the request names one or a deliverable implies it, list it and name it in a criterion, or in out_of_scope (`check_governance_coverage`).",
@@ -297,6 +297,10 @@ pub const READING_RULES: [&str; 12] = [
     "Valid reading: class, capability and producer model from closed lists; a decline gives a reason; a capability needs a criterion; valid forecasts (`build_reading`).",
     "Test placement: put each test where it can import the code; xtask has no library, so use `xtask/tests/` or unit tests in `xtask/src/` (prose only).",
     "Enabled roles: brief content targets only roles under Enabled roles (prose only).",
+    // Root cause: the reader was never told to read a reused field's documented meaning before mapping a
+    // requirement onto it, so two readings matched a field by name (jobs 20261030-013421-tfwf and
+    // 20261113-194336-scfc). The meaning of a field cannot be judged by code, so this is information only.
+    "Reused field, CLI argument, record key or config key needs `Field meaning:` assumption: quote documented meaning (crates/ or config path:line), why it fits, config: live athena.toml value; or a new field (prose only).",
 ];
 
 /// The heading of the section that states the rules that judge a criterion once it is written.
