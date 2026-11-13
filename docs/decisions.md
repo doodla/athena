@@ -5059,3 +5059,34 @@ should replace those estimates with its figures.
   Measured: the new brief test, the pin test against the enforcing text and the drift-helper test. Not measured:
   whether readings stop producing these criteria; the class stays in the introspection sweep. No reading rule
   changed, so no readings are newly refused.
+
+## D175 · Context compression is measured as tokens loaded per landed job, by class of work
+
+- **Case:** Requirement OLY-B-A13-01 asks Athena to measure tokens loaded per class of work and whether outcomes
+  held. It had mechanism `none` and was a spec gap. The records already hold every invocation's token usage, every
+  job's class and outcome, and every mistake with the job it names.
+- **Decision:** `ContextLoad::compute` in `crates/athena-core/src/context_load.rs` reads existing records only. A
+  job's loaded tokens are the sum over its invocations of input, cache-read and cache-write tokens (best value or
+  lower bound, as the job's spend is); output tokens are left out. A class's figure is the mean over its landed
+  jobs that have a token record, and a class needs three such jobs or it gets no figure. Outcomes are shown as the
+  landed share of the class's closed jobs and the mistakes whose `job` is one of those closed jobs, so numerator and
+  denominator cover one set of jobs. A mistake with no job, or on a job outside a shown class, is counted in a
+  separate note and not folded into a class. `athena status` prints the result as the `context` line; the spec
+  entry's measure ends `status: context`. No record type, data file or drain code is added or changed.
+- **Alternatives:** The prompt token estimate recorded on each invocation: it covers only the always-loaded prompt,
+  not what a role reads during its turns. Counting output tokens: they are generated, not loaded, and would hide a
+  drop in input behind a change in answer length. Reusing `mistake_report` by class: it groups by the
+  intervention's own class label and counts mistakes with no job, so its set differs from the closed-job set. A
+  median per class: with a three-job floor it adds little, and the mean equals total loaded tokens over landed jobs,
+  which can be checked by hand.
+- **Tradeoff:** One mean is a point-in-time figure; a drop over time is read by comparing runs of `athena status`,
+  and no trend is computed. A pending token quantity counts as its lower bound or zero, so an old record can lower a
+  mean; a landed job with no token value at all is kept out of the mean and named in a note.
+- **Reversal cost:** Low; remove the module, its `StatusView` field, the label, the print block and the tests, and
+  put the spec entry back to mechanism `none`. No record schema or config key was added.
+- **Provenance:** Read: `crates/athena-core/src/class_trend.rs`, `crates/athena-core/src/store.rs`,
+  `crates/athena-core/src/status.rs` (`mistake_report`, `STATUS_MEASURE_LABELS`), `crates/athena-data/src/records.rs`
+  (`Invocation`, `Tokens`, `Intervention::is_mistake`). Measured: the new test file with hand-summed token counts
+  across two classes, the thin-class case and the mistake scoping, and the display test over seeded records. Not
+  measured: any real records, because the producer's copy holds none; whether the figures fall once roles load less
+  context. No reading rule changed, so no readings are newly refused.

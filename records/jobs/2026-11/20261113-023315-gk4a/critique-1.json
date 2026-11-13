@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-023315-gk4a",
+  "round": 1,
+  "at": "2026-11-13T02:41:55.433084823Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The landed-share denominator counts every Closed(_) state, including Declined, Dropped, Stale, Abandoned and Closed. Those are not attempts whose outcome failed to hold.",
+      "evidence": "JobRecords::state returns JobState::Closed(outcome.state) for any outcome except Blocked. OutcomeState includes Declined, Dropped, Stale, Abandoned and Closed (the bootstrap's own outcome). A job the owner dropped, or one declined at reading but still carrying a class, would lower 'landed share' and widen the job set that mistakes are counted over. That makes 'whether outcomes held' look worse than the attempts show. Fix: State which closed outcomes count as attempts (for example Landed, Rejected, Failed, TimedOut) and leave out Declined, Dropped, Stale, Abandoned and Closed, or name them in a note. Add one Dropped or Declined job to the exact-figure test so the choice is pinned. Record the definition in D175.",
+      "location": "Plan Decision 2 / Step 2 (closed set for landed share); store.rs:119-139; records.rs:98-113",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A landed job counts toward the mean when at least one invocation has a token value. Its other invocations with no value then add zero without any note, so the mean is too low.",
+      "evidence": "Quantity::best_lower returns value.or(lower).unwrap_or(0.0) (quantity.rs:181). Under the plan's rule, a job with three invocations of which one has pending tokens is in the mean with a partial sum. Fix: Put a job in the 'no token record' note when any of its invocations has neither a value nor a lower bound for the loaded fields. Otherwise label the figure a lower bound. Add a test case with a mix of known and pending invocations.",
+      "location": "Plan Risks bullet 3 / Step 2 (landed_without_tokens)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Adding cache_read across turns counts the same cached prefix once per turn. The figure therefore moves with turn count as well as with how much context is loaded.",
+      "evidence": "Invocation.tokens (records.rs:729) holds per-call usage totals. cache_read counts the prefix read again on every turn. A role that loads less context but takes more turns could show no drop. Fix: Keep the definition, which is reasonable and matches billed input. Say in the doc comment and in D175 that it measures tokens processed as input, which scales with turns, so the owner reads a drop correctly. Optionally show turns per landed job next to it.",
+      "location": "Plan Decision 1 (input + cache_read + cache_write summed over invocations)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "One passing run of `cargo test -p athena-cli --test drain` cannot show that an intermittent, scheduling-dependent failure is gone. The original failure happened under the full test check and was never reproduced alone.",
+      "evidence": "drain.rs:8071-8105 checks the start order of stubbed parallel items (run_with(&shared, bound, 20.0), starts()[..3]). The reading says the earlier failure was not reproduced. A single run that passes is weak evidence either way. Fix: Run the drain test several times in a row (for example 10 runs, or `-- parallel::a_group_of_urgent_items` in a loop) and also as part of `cargo test --locked`. Report the pass count. If any run fails, keep the failing assertion text in the report as the investigation's starting point.",
+      "location": "Plan Step 8 / Risks bullet 1 / Criterion 4 demonstration (drain test)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The test that lib.rs contains `pub mod context_load;` only shows that the line exists.",
+      "evidence": "The integration test file imports athena_core::context_load and would not compile without the registration, so the text check adds nothing. Fix: Drop the source-text test and rely on the import that compiles.",
+      "location": "Plan Criterion 2 demonstration (source-text test on lib.rs)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The copied bootstrap uses the repository's own athena.toml instead of the test config that Fixture uses, so the test depends on the live config.",
+      "evidence": "tests/common/mod.rs:127-131 builds Fixture with test_config(), which replaces the checks and adds `[disk] min_free_gb = 0`. The plan uses include_str!(\"../../../athena.toml\"). status() tolerates a bad config (JobConfig::at(..).ok()), but later config changes could still change what status reads. Fix: Write a minimal athena.toml in the temp repo (or reuse the parts of test_config that status needs) so the test does not track the live config.",
+      "location": "Plan Step 6 / Criterion 4 seam (display.rs unit test bootstrap)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot using Read and Grep only, and the code supports it. Everything it names exists where it says: STATUS_MEASURE_LABELS (status.rs:305), the only StatusView construction (status.rs:1285), mistake_report (status.rs:595), the label-to-field/printed-line test (status.rs:1689), measure_problem (hestia.rs:1219), JobRecords::class and spent_usd/best_lower (store.rs:165,173), Records::load_dir (store.rs:364), Intervention.job: Option<JobId> and is_mistake (records.rs:1038,209), Tokens {input, output, cache_read, cache_write} (records.rs:421), make_athena (test_support.rs:893), and athena-cli's test-support dev dependency (Cargo.toml:31). class_trend.rs is a fair model to copy. No other code builds a StatusView. OLY-B-A13-01 is named nowhere outside spec.toml. xtask/tests/spec.rs only needs a non-empty mechanism, an owner and `status:`. The shard-timings line and D175 (the next free number after D174) are correct. Each behavior criterion has a demonstration through a real entry point: the loader, ContextLoad::compute, Athena::status plus display::status, and spec_gaps on the real spec. Each would fail without the change. The dependents list covers the readers I found. Six problems remain, all minor or nit: (1) the landed-share denominator includes outcomes that are not attempts; (2) jobs with only some token values recorded are quietly undercounted; (3) the cache_read sum grows with turn count, which D175 should say; (4) one drain run cannot show that an intermittent failure is gone; (5) one source-text test only checks that a line exists; (6) the copied bootstrap should use the shared test config, not the repository's athena.toml. None of these leaves a criterion undemonstrated."
+}
