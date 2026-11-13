@@ -15,6 +15,9 @@
 //!   checks content against the source; run before verification and by the repo tests;
 //! - [`automation`]: the automation register (OLY-B-A9-01): entries with cost, measured savings and source, and
 //!   the rule that lists those costing more than they save for retirement; not wired into any gate;
+//! - [`critique_ledger`]: the strict parser for `docs/critique-ledger.toml` (OLY-B-S6-01): entries of kind
+//!   critique, improvement or open question, with unknown keys, kinds, statuses and duplicate ids refused; not
+//!   wired into any gate;
 //! - [`reading`], [`run`], [`manage`]: the commands;
 //! - [`records_import`]: the importer that copies `records/` at a commit onto the `athena/records` branch and
 //!   checks the copy; not wired into any command;
@@ -109,6 +112,7 @@ pub mod class_trend;
 pub mod code_health;
 pub mod commits;
 pub mod context_load;
+pub mod critique_ledger;
 pub mod design_surface;
 pub mod disk;
 pub mod divergence;
