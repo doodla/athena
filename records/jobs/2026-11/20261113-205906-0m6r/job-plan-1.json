@@ -1,0 +1,256 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261113-205906-0m6r",
+  "round": 1,
+  "at": "2026-11-13T22:15:16.936778379Z",
+  "invocation_seq": 3,
+  "approach": "Root cause: the reader and the planner were never told that a reused struct field, CLI argument, record key or config key must be read for its documented meaning before it is mapped to a requirement. Jobs 20261030-013421-tfwf (restart `via` read as \"fixed in Athena\") and 20261113-194336-scfc (`hard_producer_*` read as a planner upgrade) matched by name. The fix gives both stages that information as text, with no new check in athena-core. (1) Add a 13th line to `READING_RULES` in reader.rs, ending `(prose only).` and 211 bytes long, so `- {rule}` is 213 bytes against the 220 cap at briefs.rs:3636. It requires a `Field meaning:` assumption that quotes the documented meaning with a crates/ path:line and says why it fits, or a new field when it does not. (2) Add `FIELD_MEANING_RULE` to planner.rs and print it in the Report section after `REAL_RECORDS_RULE`. It requires a plan that reuses a field to quote the documented meaning, say why it matches, check the live athena.toml value for each role it affects, and plan a new field when the meaning differs. Both texts are generic and name no field from the two jobs. (3) Update the pins in the existing test module of briefs.rs that the new text moves, and add two tests. (4) Add a CHANGELOG entry and an appended D180. Answers to the round 1 findings: findings 1 and 2: the criterion 7 demonstration now sets `fails_without` and `seam`. Finding 3: briefs.rs is not a listed deliverable, but it cannot be left out. The reader and planner modules have no tests; the rule-count pins (briefs.rs:3653, 3983), the byte pins (3591, 3595, 3619, 3710-3715) and the fixtures `reader_inputs` and `planner_inputs` all sit in its `mod tests` (briefs.rs:1449). Adding a 13th rule fails those pins unless they move. briefs.rs is under the request's `Files: crates/` scope, and the plan limits the edit to those pins plus two new tests. planner.md and critic.md are listed deliverables, and this plan still leaves them unchanged (see decisions).",
+  "decisions": [
+    {
+      "choice": "Give the reader the rule as one `(prose only)` line in READING_RULES, and give the planner the rule as a `FIELD_MEANING_RULE` constant in the Report section of the planner brief.",
+      "reason": "The failing stages lacked information. READING_RULES (reader.rs:284-300) is the list the reader sees on every request, and `(prose only)` is its form for a rule with no check (reader.rs:284-286). The planner brief prints its rules as constants in the Report section (planner.rs:52-73, 141). The meaning of a field cannot be judged by code, so a prose rule is the right form. The request prefers information over refusal.",
+      "rejected": [
+        {
+          "option": "A refusal check in athena-core (a new reading check or an extension of `check_code_survey`) that refuses a reading reusing a field without a quoted meaning",
+          "why": "Out of scope. It could only match the words `Field meaning:`, not whether the quoted meaning fits the requirement, so it would refuse past readings without catching the real fault. The change adds no refusal, so the expected share of past accepted readings newly refused is 0%."
+        },
+        {
+          "option": "Put the rule in prompts/reader.md",
+          "why": "Out of scope, and the reader prompt has 2 tokens of headroom (`budget reader: 1998 of 2000`)."
+        },
+        {
+          "option": "Replace or shorten an existing reading-rule line so the list stays at 12",
+          "why": "Those lines carry check names that tests pin (briefs.rs:3639-3652). Dropping one removes information the reader needs. Raising the pins is simpler."
+        }
+      ]
+    },
+    {
+      "choice": "Leave prompts/planner.md and prompts/critic.md unchanged, although the reading lists them as deliverables. The planner rule goes in the brief (planner.rs), which the planner reads in full on every planning job.",
+      "reason": "planner.md is in the planner's always-loaded set and critic.md in the critic's (lib.rs:60, 66). An edit to either changes the computed `budget planner` or `budget critic` line, and `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs:125-129) fails until docs/system-facts.md is edited. That file is neither a listed deliverable nor under crates/, so editing it widens the scope. The brief constants sit outside the budget sets, as docs/system-facts.md states, so criterion 6 holds with 0 tokens added. Criterion 2 accepts the planner prompt or brief. D180 records this choice.",
+      "rejected": [
+        {
+          "option": "Add a short sentence to planner.md and update the `budget planner` line in docs/system-facts.md",
+          "why": "It edits a file outside the deliverables, and the line moves with every later edit to planner.md. The brief constant gives the planner the same information at no budget cost."
+        },
+        {
+          "option": "Also edit critic.md or the critic brief so the critic checks a plan's field reuse",
+          "why": "The acceptance criteria name only the reader and the planner. A critic change adds a second place to keep in step. The planner now quotes the meaning in the plan, so a critic reading the plan already sees it."
+        }
+      ]
+    },
+    {
+      "choice": "Raise only the pins the new text moves, and derive the new bounds from the new text. Change `READING_RULES: [&str; 12]` to 13 and update the two `READING_RULES.len()` asserts (briefs.rs:3653, 3983). Keep READING_RULES_BASELINE_BYTES at 3045 as the pre-change size and assert `section.len() <= READING_RULES_BASELINE_BYTES + field_meaning_line.len() + 1`. Raise the hard bound `< 3150` (briefs.rs:3710) to `< 3300`. Add `FIELD_MEANING_RULE.len() + 2` to the planner Report bound (briefs.rs:3619).",
+      "reason": "The existing assertion `section.len() <= 3045` passes today, so 3045 is a true upper bound on the old section. Deriving the new bound from the added line means the test still catches any other growth. 3045 + 213 + 1 = 3259 is under 3300. The Report bound keeps `REAL_RECORDS_RULE.len() + 4` and adds the new rule and its paragraph break, so the real-records test still measures only the growth it allows.",
+      "rejected": [
+        {
+          "option": "Hard-code a new baseline measured from a failing run",
+          "why": "It loosens the pin by any slack in the old number and goes stale at the next edit. The derived form measures the added line."
+        },
+        {
+          "option": "Shorten the rule to fit under the old 3045 bytes",
+          "why": "The section is at or near 3045, so no useful line fits."
+        }
+      ]
+    },
+    {
+      "choice": "Record the decision as D180, appended after D179 (docs/decisions.md:5168-5196), with Case, Decision, Alternatives, Tradeoff, Reversal cost and a Provenance bullet.",
+      "reason": "The request asks for a new appended entry. docs/decisions.md is append-only, and the decision-entries rule in crates/athena-cli/src/decisions.rs:210-235 needs a `## D<n> · ` heading, a unique increasing id and a Provenance bullet. No other file lists decision ids (a grep for D17x in crates finds nothing, and D179 appears only in decisions.md and CHANGELOG.md).",
+      "rejected": [
+        {
+          "option": "Amend D179, which cites job 20261113-194336-scfc",
+          "why": "The file is append-only, so an edit to an existing line is refused."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs/reader.rs",
+      "action": "modify",
+      "purpose": "Add the 13th READING_RULES line (generic field-meaning rule, ending `(prose only).`, 211 bytes). Put a `//` comment above it naming the root cause and jobs 20261030-013421-tfwf and 20261113-194336-scfc. Change the array type to `[&str; 13]`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs/planner.rs",
+      "action": "modify",
+      "purpose": "Add the `pub(super) const FIELD_MEANING_RULE`, with a doc comment naming the root cause and the two jobs, and print it in the Report section after REAL_RECORDS_RULE (planner.rs:141).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable, but unavoidable: this file holds the only tests and fixtures for the two briefs, including the pins the new text moves (rule count at 3653 and 3983, byte baseline and bound at 3591 and 3710-3715, Report bound at 3619). Edit only those pins and add the two new tests and the extra `Field meaning` assertions.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under [Unreleased] / Added naming the root cause (the reader and planner were never told to verify a reused field's documented meaning) and citing jobs 20261030-013421-tfwf and 20261113-194336-scfc; says expected 0% newly refused readings.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D180 after D179 with Case, Decision, Alternatives, Tradeoff, Reversal cost and a Provenance bullet.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-context/src/briefs/reader.rs lines 284-300. Change `READING_RULES: [&str; 12]` to `[&str; 13]`. Append, before the closing bracket and after the `Enabled roles` line, a `//` comment naming the root cause and jobs 20261030-013421-tfwf and 20261113-194336-scfc, then this element: \"Field meaning: a reused struct field, CLI argument, record key or config key needs a `Field meaning:` assumption quoting its documented meaning (crates/ path:line) and why it fits; else a new field (prose only).\" Check it is at most 218 bytes, and that it names no field and no `check_` name.",
+    "In crates/athena-context/src/briefs/planner.rs add `pub(super) const FIELD_MEANING_RULE: &str` after REAL_RECORDS_RULE (line 73), with a doc comment naming the root cause and the two jobs. Text: \"A plan that reuses an existing struct field, CLI argument, record key or config key must quote its documented meaning from the code (crates/ path:line) and say why it matches what the requirement needs. For a config key, check the live athena.toml value for each role it affects. When the meaning differs, plan a new field instead.\" The text has no newline and names no field from the two jobs. Append `\\n\\n{FIELD_MEANING_RULE}` after `{REAL_RECORDS_RULE}` in the Report format string (planner.rs:141).",
+    "In crates/athena-context/src/briefs.rs update the pins the new text moves. (a) Change both `READING_RULES.len()` asserts, 12 to 13 (briefs.rs:3653 and 3983), and replace the stale comment at 3982 with one that says the field-meaning line was added. (b) In `the_reader_brief_names_each_reading_rule_in_one_short_line`, keep READING_RULES_BASELINE_BYTES at 3045 and rename its doc comment to say it is the size before the field-meaning line. Change the baseline assert to `section.len() <= READING_RULES_BASELINE_BYTES + field_line.len() + 1`, where `field_line` is the rendered line containing `` `Field meaning:` ``. Change `section.len() < 3150` to `< 3300`, and update the 3704-3710 comment. (c) In `the_planner_brief_states_the_real_records_rule_once_within_its_bound` add `+ FIELD_MEANING_RULE.len() + 2` to the Report bound and update its comment.",
+    "Extend `the_reader_brief_names_each_reading_rule_in_one_short_line` with the criterion 3 assertions: the `Field meaning` line ends `(prose only).`, and contains none of `restart`, `hard_producer`, the word `via`, or a `check_` name.",
+    "Add the two new tests to briefs.rs, each rendering the real brief and asserting literal phrases on the rendered text: `the_reader_brief_requires_a_field_meaning_assumption_for_a_reused_field` (criterion 1, next to briefs.rs:3628) and `the_planner_brief_requires_a_reused_field_to_quote_its_meaning_and_check_the_live_config` (criterion 2, next to briefs.rs:3598). Import FIELD_MEANING_RULE with `use super::planner::FIELD_MEANING_RULE;` inside the test, as briefs.rs:3599 does for REAL_RECORDS_RULE.",
+    "Append D180 to docs/decisions.md after D179 (its last line is 5196), in the existing layout: Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance. The Decision states the root cause, the two places the rule is given, that no refusal check is added (expected 0% of past accepted readings newly refused), and that planner.md and critic.md are unchanged because an edit would move a computed budget line in docs/system-facts.md. The Provenance bullet lists Read (reader.rs READING_RULES, planner.rs report rules, crates/athena-cli/src/main.rs:450 for the restart `via` doc, athena.toml `hard_producer_*`, briefs.rs pins), Measured (the two new tests and the moved pins) and Not measured (whether the reader and planner comply). Then add the CHANGELOG entry under [Unreleased] / Added: root cause, jobs 20261030-013421-tfwf and 20261113-194336-scfc, the two places changed, the tests, and 0% newly refused readings.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix any pin the new text moves. Confirm `git diff --stat` shows no crates/athena-core, prompts/*.md, docs/system-facts.md, athena.toml or defaults.toml change."
+  ],
+  "risks": [
+    {
+      "risk": "The new reader rule line exceeds the 220-byte line cap (briefs.rs:3636) or pushes the rules section past its bounds.",
+      "mitigation": "The planned text is 211 bytes (213 with `- `), counted segment by segment: `Field meaning: a reused struct field, CLI argument, record key or config key needs a `Field meaning:` assumption quoting its documented meaning (crates/ path:line) and why it fits; else a new field (prose only).` The new bound 3045 + 213 + 1 = 3259 is under the raised hard bound 3300. The producer re-counts with `cargo test -p athena-context`, which prints the measured size on failure."
+    },
+    {
+      "risk": "planner.md and critic.md are listed deliverables and are left unchanged, so the always-loaded planner prompt does not carry the rule; only the planner brief does.",
+      "mitigation": "The planner reads the brief in full on every planning job, as it reads the other planner rules (planner.rs:52-73, 141). Editing a prompt would move a `budget` line in docs/system-facts.md, which is outside the deliverables and crates/. D180 records the choice, and the plan's description states it."
+    },
+    {
+      "risk": "briefs.rs is outside the reading's deliverables, so the edit may be read as widening scope.",
+      "mitigation": "The edit is limited to the pins that the new lines move and the two new tests. Without it `cargo test --locked` fails, so criterion 7 cannot hold. The path is under the request's `Files: crates/`. The plan says so in its files list."
+    },
+    {
+      "risk": "A prose rule may not stop a reader or planner from reusing a field without checking it. The effect on future readings is not measured.",
+      "mitigation": "This is the stated approach: a check could only match the words, not the meaning, and the request prefers information. D180 and the CHANGELOG entry say what was measured (the rendered brief text) and what was not (whether the stages comply). The rule sits in the section read for every request."
+    },
+    {
+      "risk": "The new test's assertion that the rule names no field from the two jobs could fail on an incidental substring, such as `via` in another word.",
+      "mitigation": "The test matches `via` as a whole word, and `hard_producer` and `restart` as substrings. Neither planned text contains any of them."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "READING_RULES list length and the byte size of the Reading rules section",
+      "dependent": "crates/athena-context/src/briefs.rs test `the_reader_brief_names_each_reading_rule_in_one_short_line` (briefs.rs:3628-3716), which pins `READING_RULES.len() == 12`, the 3045-byte baseline and the `< 3150` bound",
+      "kind": "code",
+      "test": "cargo test -p athena-context the_reader_brief_names_each_reading_rule_in_one_short_line, with the pins updated in step 3 and the new `Field meaning` assertions added.",
+      "reason": null
+    },
+    {
+      "name": "READING_RULES list length",
+      "dependent": "crates/athena-context/src/briefs.rs, the criteria-rules section test whose last assert is `READING_RULES.len() == 12` (briefs.rs:3983, comment at 3982)",
+      "kind": "code",
+      "test": "The same test, with the assert changed to 13 and its comment changed to say one reading-rule line was added. Run: cargo test -p athena-context.",
+      "reason": null
+    },
+    {
+      "name": "Planner brief Report section size",
+      "dependent": "crates/athena-context/src/briefs.rs `the_planner_brief_states_the_real_records_rule_once_within_its_bound` (briefs.rs:3598-3625) and PLANNER_REPORT_BASE_BYTES (briefs.rs:3595)",
+      "kind": "code",
+      "test": "The same test. Its bound gains `FIELD_MEANING_RULE.len() + 2` and its comment is updated. The REAL_RECORDS_RULE assertions are unchanged. Run: cargo test -p athena-context the_planner_brief_states_the_real_records_rule_once_within_its_bound",
+      "reason": null
+    },
+    {
+      "name": "READING_RULES (the reader brief's rule list)",
+      "dependent": "crates/athena-core/src/hestia.rs `READING_RULES_CHECK_ID` (hestia.rs:667, used at 312, 606, 684, 719)",
+      "kind": "code",
+      "test": null,
+      "reason": "Its check id is a string for a sweep over past reading refusals. It does not import READING_RULES; a grep for READING_RULES in crates finds only athena-context and that id string. A `(prose only)` line has no check and causes no refusal (reader.rs:284-286), so the sweep's counts do not change."
+    },
+    {
+      "name": "Rendered text of the reader and planner briefs",
+      "dependent": "crates/athena-core/src/reading.rs:607 (`reader_brief` call) and crates/athena-core/src/run/planning.rs:129 (`planner_brief` call), the only callers outside athena-context",
+      "kind": "code",
+      "test": "cargo test --locked, which runs both callers' tests.",
+      "reason": "The change only adds text. The `# Reading rules` and `## Report` headings are unchanged, and neither caller parses the rule lines. A grep for `brief.len()` and similar size assertions across crates finds only briefs.rs:3413 (the verifier replay cap, unrelated) and the section bound at 3710 that step 3 updates."
+    },
+    {
+      "name": "Prompt-set token budgets",
+      "dependent": "crates/athena-cli/tests/budgets.rs `system_facts_budgets_match_computed` (budgets.rs:125) and the budget lines in docs/system-facts.md",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets system_facts_budgets_match_computed. It passes unchanged because prompts/*.md are not edited and the brief constants sit outside the budget sets.",
+      "reason": null
+    },
+    {
+      "name": "docs/decisions.md new entry D180",
+      "dependent": "crates/athena-cli/src/decisions.rs:210-235 (the decision-entries rule: append-only, `## D<n> · ` heading, increasing unique id, Provenance bullet) and the append-only phrase `DECISIONS_APPEND_ONLY_PHRASE` (reader.rs:333)",
+      "kind": "rule",
+      "test": "cargo test --locked. D180 is appended after D179 in the existing layout and no existing line is edited. docs/decision-links.toml has no entry mentioning briefs, reader.rs, planner.rs or athena-context, so no governed-code reconciliation applies.",
+      "reason": null
+    },
+    {
+      "name": "Refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (it names prompts/planner.md at line 233)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No refusal or matching rule is added or changed: the rule is prose in the brief, so no input forms need mapping to corpus cases. The corpus names the path of planner.md, and planner.md is not edited."
+    },
+    {
+      "name": "Changelog entry",
+      "dependent": "CHANGELOG.md (the default-written deliverable, DEFAULT_WRITTEN_REASON, reader.rs:347)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The entry is added under `[Unreleased]` and is only text. No test parses its wording."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new unit test in crates/athena-context/src/briefs.rs, next to `the_reader_brief_names_each_reading_rule_in_one_short_line` (briefs.rs:3628). It renders the reader brief, splits at READING_RULES_HEADING and cuts at the next `\\n# ` (as briefs.rs:3630-3631 does). From the rendered section, not from the constant, it picks the line that contains `` `Field meaning:` ``. It asserts that line is a bullet of the Reading rules section and equals `- {rule}` for an entry of READING_RULES. It then asserts the phrases `Field meaning:`, `struct field`, `CLI argument`, `record key`, `config key`, `documented meaning`, `crates/`, `path:line`, `why it fits` and `new field`.",
+      "command": "cargo test -p athena-context the_reader_brief_requires_a_field_meaning_assumption_for_a_reused_field",
+      "observes": "One line in the rendered Reading rules section requires, for each reused struct field, CLI argument, record key or config key, a `Field meaning:` assumption that quotes the documented meaning with a crates/ path:line and says why it fits, or a new field. The test passes with 13 rule lines.",
+      "fails_without": "On the code before the change the section has no line containing `Field meaning:`, so the lookup `expect` and every phrase assertion fail. If the rule were in READING_RULES but not printed, the check on the rendered brief fails.",
+      "seam": "Production entry point: `reader_brief(&ReaderInputs)` (crates/athena-context/src/briefs/reader.rs:367). Fixture: the existing test helpers `reader_inputs(&reading())` (briefs.rs:3543, `reading()` at 1458) and the constant READING_RULES_HEADING. Both exist today, and nothing is injected. The test adds no double, and the text under test is the real rendered brief."
+    },
+    {
+      "criterion": 2,
+      "method": "A new unit test in briefs.rs, next to `the_planner_brief_states_the_real_records_rule_once_within_its_bound` (briefs.rs:3598). It renders `planner_brief(&planner_inputs(None))` and takes the text after `## Report`, as briefs.rs:3601 does. It asserts the Report holds `FIELD_MEANING_RULE` exactly once, after `REAL_RECORDS_RULE`, and that the rule has no newline. It also asserts literal phrases on the rendered report, so the test does not pass by echoing the constant: `struct field`, `CLI argument`, `record key`, `config key`, `documented meaning`, `crates/`, `path:line`, `live athena.toml`, `each role` and `new field`. It asserts the rule names none of `via` (as a whole word), `hard_producer` or `restart`.",
+      "command": "cargo test -p athena-context the_planner_brief_requires_a_reused_field_to_quote_its_meaning_and_check_the_live_config",
+      "observes": "The planner brief's Report tells the planner that a plan reusing a field must quote its documented meaning with a crates/ path:line, say why it matches, check the live athena.toml value for each role affected, and plan a new field when the meaning differs.",
+      "fails_without": "Without the const and its line in the Report, the literal-phrase assertions on the rendered report fail, and the test does not compile against the missing const. If the line were printed twice or not at all, the `matches(..).count() == 1` assertion fails.",
+      "seam": "Production entry point: `planner_brief(&PlannerInputs)` (crates/athena-context/src/briefs/planner.rs:78). Fixture: the existing `planner_inputs(None)` (briefs.rs:2500), which needs no injection. `FIELD_MEANING_RULE` is declared `pub(super)` like `REAL_RECORDS_RULE` (planner.rs:73), which the existing test already imports as `super::planner::REAL_RECORDS_RULE` (briefs.rs:3599). Step 2 adds the const, and the fixture exists."
+    },
+    {
+      "criterion": 3,
+      "method": "Extend the existing test. It already checks that each rendered line equals `- {rule}`, that each line is at most 220 bytes, and that the prose-only lines end `(prose only).` (briefs.rs:3673-3684). Add: the line containing `` `Field meaning:` `` ends with `(prose only).`, and it contains none of `restart`, `hard_producer` or the word `via`, and no `check_` name. Read the diff with `git diff crates/athena-context/src/briefs/reader.rs`.",
+      "command": "cargo test -p athena-context the_reader_brief_names_each_reading_rule_in_one_short_line",
+      "observes": "The diff of reader.rs adds exactly one element to the READING_RULES list, a generic rule marked `(prose only).`, and changes the array type from 12 to 13. The test passes with 13 lines, each under 220 bytes.",
+      "fails_without": "Without the line the new `Field meaning` assertions fail. With a line that carries a `check_` name the prose-only assertion fails, and with a line over 220 bytes the length assertion fails.",
+      "seam": "Production entry point: `reader_brief` (reader.rs:367) through the existing test `the_reader_brief_names_each_reading_rule_in_one_short_line` (briefs.rs:3628). Fixture: the existing `reader_inputs(&reading())`. It exists, and nothing is injected."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff stat and file list. The changed paths are reader.rs, planner.rs and briefs.rs in crates/athena-context, CHANGELOG.md and docs/decisions.md. Run `git diff --stat` and confirm no path under crates/athena-core appears and that prompts/*.md, docs/system-facts.md, athena.toml and defaults.toml are not in it.",
+      "command": "git diff --stat",
+      "observes": "No new check or refusal rule is added in athena-core, and the reading checks (`check_code_survey` and the others) are unchanged. So no past accepted reading is newly refused: expected 0%.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff. CHANGELOG.md gets one entry under `[Unreleased]` / `### Added` (line 8). It names the root cause: the reader and the planner were never told to verify a reused field's documented meaning before mapping a requirement to it. It cites jobs 20261030-013421-tfwf and 20261113-194336-scfc, states that no refusal rule is added so expected newly refused readings are 0%, and names the tests. docs/decisions.md gets D180 appended after D179 with a Provenance bullet, and no existing line is changed.",
+      "command": "git diff CHANGELOG.md docs/decisions.md",
+      "observes": "The entry text, and an append-only diff of docs/decisions.md. The full `cargo test --locked` run covers the decision-entries rule (crates/athena-cli/src/decisions.rs:210-235) and the append-only mirror check.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the full suite, including `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs:125) and the other budget tests. Also run `git diff --stat` to confirm prompts/planner.md, prompts/critic.md and prompts/reader.md are unchanged. Planner.md growth is 0 tokens, within the 95 left, and the reader prompt is untouched.",
+      "command": "cargo test --locked",
+      "observes": "The suite passes and the lines `budget planner: 1105 of 1200`, `budget critic: 1002 of 1300` and `budget reader: 1998 of 2000` in docs/system-facts.md stay true, because no prompt file changes.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run Athena's three recorded checks on the final tree, each as its own whole command: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. A passing record Athena made on the same final tree counts as a run (D115). `cargo test --locked` includes the two new tests and every pin step 3 moves.",
+      "command": "cargo test --locked",
+      "observes": "All three checks exit 0 on the final tree.",
+      "fails_without": "Without step 3 the existing tests fail on the new text: `the_reader_brief_names_each_reading_rule_in_one_short_line` fails on `READING_RULES.len() == 12` (briefs.rs:3653) and on the 3045-byte baseline (briefs.rs:3712), the criteria-rules test fails on its `len() == 12` assert (briefs.rs:3983), and `the_planner_brief_states_the_real_records_rule_once_within_its_bound` fails on the Report bound (briefs.rs:3619). Without the rule the two new tests fail. A new line left unformatted fails `cargo fmt --all --check`.",
+      "seam": "Production entry points are the three cargo commands that Athena runs as its recorded checks on the candidate tree (`Checks Athena will run on the result`: fmt, clippy, test). Fixture: the final candidate tree itself, with the test modules of athena-context and the budget tests of athena-cli. Athena injects nothing, because it runs the commands in the working tree. The seam exists today."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "ca69eec48c65d6907a7f7ef82ba7568a60091c3a83584e61f483c35b214f50f4"
+}

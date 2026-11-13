@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-194336-scfc",
+  "round": 1,
+  "at": "2026-11-13T20:58:31.011470217Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The 'escalation' can lower the planner's effort or model.",
+      "evidence": "Step 1 returns `hard_producer_effort` unconditionally when it is set. The planner's ordinary effort is `verifier_effort` (config.rs:834-835), while `hard_producer_effort` is documented as 'the producer effort for a hard job' (config.rs:329). No validation orders the two. A config with `verifier_effort = \"xhigh\"` and `hard_producer_effort = \"high\"` makes a revised plan run at a lower effort than round 1. The model has the same gap: `hard_producer_model` only has to be in `producer_allowed`, and the config tests set it to haiku (config.rs:1408-1409). A reading that chose sonnet would then be downgraded on revision. The request is 'increase intelligence', so this is a rule that misfires in configs the code accepts. Fix: Make the effort the stronger of the ordinary and hard efforts, ranked by `EFFORT_LEVELS` (config.rs:337). Add a unit-test case where `hard_producer_effort` is weaker than the ordinary effort and the ordinary effort is kept. For the model, either keep the reading's model when the hard model is not stronger (for example, compare positions in `producer_allowed` or treat the reading's model as the floor), or state the downgrade case in the doc comment, the CHANGELOG and D179, and name it as a User question.",
+      "location": "Plan decision 1 and step 1 (`Models::planner_revision_setting`); crates/athena-data/src/config.rs:329-331, 830-836",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan misstates the effect in this repository: the change does nothing here, not 'model only for haiku readings'.",
+      "evidence": "athena.toml sets `[job_plan] mode = \"hard\"` (line 211), so `JobPlanConfig::plans` plans only hard readings (config.rs:238-240). A hard reading's `producer_model` already comes from `producer_setting(.., true)` (reading.rs:869-871), which is `hard_producer_model = claude-sonnet-5-5`. So the planner already runs at the hard model on round 1, and `hard_producer_effort = high` equals `verifier_effort = high`. A revised plan changes neither model nor effort in this repository. The plan's open question says the model changes 'for a reading that asked for haiku', but such a reading is never planned under mode = hard. Because `hard_producer_model` must be in `producer_allowed` (config.rs:598), the planner can also never reach a model above the strongest producer model, whatever the owner sets. Fix: Correct the open question and the risk: under the repository's config the change has no effect. The only lever is raising `hard_producer_effort`, which also raises every hard job's producer, and the model cannot go beyond `producer_allowed`. Say this plainly in the CHANGELOG entry and D179, so the owner does not read the change as a fix for thrash in this repository. Put a precise User question asking whether that is acceptable or whether a separate job should add a planner-specific setting.",
+      "location": "Plan Open questions, Risks (first bullet), Dependents ('[models] hard_producer_*'); athena.toml:209-216 and 20-26; crates/athena-core/src/reading.rs:866-871",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion asks for model and effort 'from Models::producer_setting(.., true)'; the plan takes only the model from it.",
+      "evidence": "Decision 1 justifies the deviation: `producer_setting(.., true)` falls back to `producer_effort` (config.rs:354-356), which differs from the planner's `verifier_effort`. The justification is sound, but the verifier will compare the diff against the criterion's literal wording. Fix: In the criterion 1 demonstration, quote the reason the effort deliberately does not come from `producer_setting` when no hard effort is set. Point to the criterion 3 test that would fail if it did, so the verifier can accept the deviation.",
+      "location": "Plan Demonstrations, criterion 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The request says 'Improve the model instead'. The reading maps this to the existing `hard_producer_model`/`hard_producer_effort` keys and rules out config changes. In this repository, `[job_plan] mode = \"hard\"` (athena.toml:211) plans only hard readings, and those already get `hard_producer_model` as their `producer_model` (reading.rs:869-871). `hard_producer_effort` (\"high\") also equals the planner's `verifier_effort` (\"high\"). So under the accepted reading the planner's model is not improved here at all. Because the hard model must be in `producer_allowed`, the planner can never move above the strongest producer model. The owner accepted the reading, but its premise that the hard setting is 'a stronger model' for the planner does not hold for this repository's config. The plan should surface this rather than plan around it.",
+  "summary": "The plan is mostly well grounded. `planning_round` (planning.rs:138-155), `agent_spec` setting the effort from `effort_for(role)` (reading.rs:443), `effort_for` mapping the planner to `verifier_effort` (config.rs:830-836), `producer_setting` (config.rs:346-358), the test helpers (`planning_script`, `repo_with_config`, `bad_plan`, `good_plan`, the critique fixtures, `Scenario.critiques`) and D178 as the last decision all exist as the plan says. The demonstrations exercise `Athena::go` through the fake agent, and each would fail without the change. A search for other readers of the planner line or of planner `effort`/`model` found none beyond those the plan lists. Two soundness problems remain. First, the new rule sets the planner's effort to `hard_producer_effort` whenever that key is set, but that key is tuned against the producer's effort, not the planner's `verifier_effort`. A config with `verifier_effort` above `hard_producer_effort` would lower the planner's effort on a revision, the opposite of the request. The same can happen with the model, since `hard_producer_model` may name a weaker allowed model. Second, the plan's claim about the effect in this repository is wrong. `[job_plan] mode = \"hard\"` (athena.toml:211) plans only hard readings, and a hard reading's `producer_model` is already `hard_producer_model` (reading.rs:869-871). With `hard_producer_effort = \"high\"` equal to `verifier_effort = \"high\"`, the change does nothing at all here, which the owner should be told plainly."
+}

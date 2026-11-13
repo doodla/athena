@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-205925-c3n6",
+  "round": 3,
+  "at": "2026-11-13T21:13:03.586025124Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The new athena.toml comment above producer_allowed is limited only for `key = ` text. Two existing tests also match literal model strings in athena.toml.",
+      "evidence": "`a_copy_without_haiku_is_refused_by_the_loader` runs `text.replacen(\"\\\"claude-haiku-5-5\\\", \", \"\", 1)` on athena.toml and expects ModelFamily(\"haiku\"). If the new 'weakest first' comment above producer_allowed quotes the list (for example `[\"claude-haiku-5-5\", \"claude-sonnet-5-5\"]`), the replacement hits the comment, not the key, and the test fails. The config.rs family tests use `edited()` with the full `producer_allowed = [...]` literal, so a comment copying that line has the same risk. Dependents names model_roster.rs only as a rule entry with no test. Fix: In step 5, say the new comments name no model id in quotes and do not copy the producer_allowed line. Add model_roster.rs (`cargo test -p athena-core --test model_roster`) to Dependents with that test.",
+      "location": "Step 5 / Decision 7; crates/athena-core/tests/model_roster.rs:38-43; crates/athena-data/src/config.rs:1386, 1404 (edited() patterns)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Dependents leaves out other tests that load the real athena.toml and would now pick up the new keys.",
+      "evidence": "crates/athena-core/src/run_pin_tests.rs:81 builds its config from include_str!(athena.toml) and strips only [job_plan] and repo lines; its comment says one test appends its own [job_plan]. admission.rs:1083, invocation.rs:378 and introspect.rs:2246 also parse athena.toml. A grep found no assertion on the planner's model or effort and no parse of the planner UI line, so breakage is unlikely. The list still omits these readers. Fix: Add run_pin_tests.rs and the other include_str!(athena.toml) readers to Dependents, covered by `cargo test -p athena-core`, with the reason that none asserts planner model or effort.",
+      "location": "Dependents: 'test repository config copied from athena.toml'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The criterion 1 test 'overrides' the reader's model to claude-haiku-5-5, but base_script already returns that model.",
+      "evidence": "base_script's reader output already has \"producer_model\": \"claude-haiku-5-5\". Fix: Drop the override in that test, or assert the round-1 model comes from the reading, so the test does not depend on a needless mutation.",
+      "location": "Demonstrations, Criterion 1; crates/athena-core/src/run/tests.rs:232",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read planning.rs, config.rs (Models, validate, reading_inputs, effort_for and the effort and family tests), reading.rs (agent_spec at line 443, producer_setting use at 869-871), run/mod.rs:1087-1092, athena.toml, run/tests.rs (the helpers it names), the drain.rs effort tests, model_roster.rs and the CLI test_config. The plan's code claims hold. The planner takes ctx.reading.producer_model and effort_for(Planner), which is verifier_effort, high here. producer.rs:340 already overrides spec.effort after agent_spec. Invocation records copy spec.model and spec.effort. The repo runs [job_plan] mode = \"hard\", so the two planned cases are right: a hard reading goes from sonnet/high to sonnet/xhigh, and an unmarked fails-without reading with a haiku pick goes to sonnet/xhigh. The trigger `round > 1 || mechanical_passes > 0` matches the plan_round loop (lines 41-72), and a seeded first call stays unchanged. Putting the membership check after the family loop keeps every existing family test's expected error, including `roles_with_all_three_families_load...`, which only renames the verifier. Clearing the keys in reading_inputs keeps stored digests valid. Each demonstration runs the real seam (Athena::go with the fake driver and Lines, or Config::parse) and would fail without the change. Ranking models by producer_allowed order is a convention the reading accepted, and the plan documents it and pins it with tests. Remaining issues are minor. A new athena.toml comment could break model_roster's literal haiku replace. Some readers of athena.toml are missing from Dependents. One test override is redundant. No blocker or major finding."
+}

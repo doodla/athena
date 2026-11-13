@@ -297,6 +297,13 @@ mod produce_and_verify_order_tests {
 
     /// The test repository with `extra` appended to its `athena.toml`.
     fn repo_with_config(extra: &str) -> tempfile::TempDir {
+        repo_with_config_and_models("", extra)
+    }
+
+    /// `repo_with_config` with `models_lines` inserted right after the `[models]` header. The repository's own
+    /// `planner_revision_*` lines are always dropped, so a test sets them itself through `models_lines` and
+    /// every other test runs with the revision setting unset.
+    fn repo_with_config_and_models(models_lines: &str, extra: &str) -> tempfile::TempDir {
         // Without `[job_plan]` (a job with no planning round) and without a pinned repository, unless
         // `extra` adds them.
         let raw = include_str!("../../../../athena.toml");
@@ -308,9 +315,13 @@ mod produce_and_verify_order_tests {
                 if key.starts_with('[') {
                     in_job_plan = key.trim_end() == "[job_plan]";
                 }
-                !(in_job_plan || key.starts_with("repo_url") || key.starts_with("repo_ref"))
+                !(in_job_plan
+                    || key.starts_with("repo_url")
+                    || key.starts_with("repo_ref")
+                    || key.starts_with("planner_revision_"))
             })
             .collect();
+        let config = config.replacen("[models]\n", &format!("[models]\n{models_lines}"), 1);
         let config = format!("{config}{extra}");
         let dir = tempfile::tempdir().unwrap();
         let git = Git::at(dir.path());
@@ -1300,6 +1311,268 @@ mod produce_and_verify_order_tests {
             .filter(|(r, _)| *r == role)
             .map(|(_, p)| p.as_str())
             .collect()
+    }
+
+    /// The test repository with planning on for every job and these `[models] planner_revision_*` keys
+    /// (a `None` leaves the key out).
+    fn repo_with_revision_keys(
+        max_rounds: u32,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> tempfile::TempDir {
+        let mut lines = String::new();
+        if let Some(m) = model {
+            lines.push_str(&format!("planner_revision_model = \"{m}\"\n"));
+        }
+        if let Some(e) = effort {
+            lines.push_str(&format!("planner_revision_effort = \"{e}\"\n"));
+        }
+        repo_with_config_and_models(
+            &lines,
+            &format!(
+                "\n[job_plan]\nenabled = true\nmode = \"all\"\nplanner_usd = 0.75\ncritic_usd = 0.75\n\
+                 planner_timeout_s = 600\ncritic_timeout_s = 600\nmax_rounds = {max_rounds}\n"
+            ),
+        )
+    }
+
+    /// The model and effort of each agent call, as the invocation records and the UI show them.
+    struct RevisionRun {
+        finished: Box<Finished>,
+        /// `(role, model, effort)` of every call, as the agent was started.
+        calls: Vec<(Role, String, String)>,
+        /// The Planner invocation records, in order: `(model, effort)`.
+        records: Vec<(String, Option<String>)>,
+        /// The `planner    ` lines, in order.
+        planner_lines: Vec<String>,
+    }
+
+    impl RevisionRun {
+        /// The `(model, effort)` of each planner call, as started.
+        fn planner(&self) -> Vec<(&str, &str)> {
+            self.of(Role::Planner)
+        }
+
+        fn of(&self, role: Role) -> Vec<(&str, &str)> {
+            self.calls
+                .iter()
+                .filter(|(r, _, _)| *r == role)
+                .map(|(_, m, e)| (m.as_str(), e.as_str()))
+                .collect()
+        }
+    }
+
+    /// Runs a planned job over `repo` whose reading picks `reader_model` as the producer, with these planner
+    /// and critic answers.
+    fn run_for_revision(
+        repo: &tempfile::TempDir,
+        reader_model: &str,
+        planner: Vec<serde_json::Value>,
+        critic: Vec<serde_json::Value>,
+    ) -> RevisionRun {
+        let state = tempfile::tempdir().unwrap();
+        let seen: Arc<Mutex<Vec<(Role, String, String)>>> = Arc::default();
+        let inner = planning_script(planner, critic, Calls::default());
+        let (record, reader_model) = (seen.clone(), reader_model.to_string());
+        let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
+            record
+                .lock()
+                .unwrap()
+                .push((spec.role, spec.model.clone(), spec.effort.clone()));
+            let mut turn = inner(spec);
+            if spec.role == Role::Reader
+                && let Some(reading) = turn.structured.as_mut()
+            {
+                reading["producer_model"] = reader_model.clone().into();
+            }
+            turn
+        });
+        let athena = athena_with(
+            repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let GoResult::Finished(finished) = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+            .unwrap()
+        else {
+            panic!("expected the job to finish");
+        };
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let mut planner: Vec<_> = records.jobs[proposal.job.as_str()]
+            .invocations
+            .iter()
+            .filter(|i| i.role == Role::Planner)
+            .collect();
+        planner.sort_by_key(|i| i.seq);
+        let records = planner
+            .iter()
+            .map(|i| (i.model.clone(), i.effort.clone()))
+            .collect();
+        let planner_lines =
+            ui.0.lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l.starts_with("planner    "))
+                .cloned()
+                .collect();
+        let calls = seen.lock().unwrap().clone();
+        RevisionRun {
+            finished,
+            calls,
+            records,
+            planner_lines,
+        }
+    }
+
+    const HAIKU: &str = "claude-haiku-5-5";
+    const SONNET: &str = "claude-sonnet-5-5";
+
+    #[test]
+    fn a_critic_revise_sends_the_next_planner_call_at_the_revision_model_and_effort() {
+        let repo = repo_with_revision_keys(3, Some(SONNET), Some("xhigh"));
+        let run = run_for_revision(
+            &repo,
+            HAIKU,
+            vec![good_plan()],
+            vec![revising_critique(), accepting_critique()],
+        );
+        assert_eq!(
+            run.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            run.finished.reason
+        );
+        // Round 1 runs at the ordinary planner model and effort; the call after the critic's revise at the
+        // revision model and effort.
+        assert_eq!(run.planner(), [(HAIKU, "high"), (SONNET, "xhigh")]);
+        assert_eq!(
+            run.records,
+            [
+                (HAIKU.to_string(), Some("high".to_string())),
+                (SONNET.to_string(), Some("xhigh".to_string()))
+            ]
+        );
+        // The owner sees the setting of each round on the planner line.
+        assert_eq!(run.planner_lines.len(), 2, "{:#?}", run.planner_lines);
+        assert!(
+            run.planner_lines[0].starts_with(&format!("planner    {HAIKU} · high · ")),
+            "{:#?}",
+            run.planner_lines
+        );
+        assert!(
+            run.planner_lines[1].starts_with(&format!("planner    {SONNET} · xhigh · ")),
+            "{:#?}",
+            run.planner_lines
+        );
+        // The critic keeps its own setting in both rounds.
+        let critic = run.of(Role::Critic);
+        assert_eq!(critic.len(), 2);
+        assert_eq!(critic[0], critic[1]);
+    }
+
+    #[test]
+    fn planner_revision_applies_after_a_mechanical_plan_rule_revision() {
+        let repo = repo_with_revision_keys(3, Some(SONNET), Some("xhigh"));
+        let run = run_for_revision(
+            &repo,
+            HAIKU,
+            vec![bad_plan(), good_plan()],
+            vec![accepting_critique()],
+        );
+        assert_eq!(
+            run.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            run.finished.reason
+        );
+        let roles: Vec<Role> = run.calls.iter().map(|(r, _, _)| *r).collect();
+        assert_eq!(
+            roles,
+            [
+                Role::Reader,
+                Role::Planner,
+                Role::Planner,
+                Role::Critic,
+                Role::Producer,
+                Role::Verifier
+            ]
+        );
+        // No critic call sits between the two planner calls, and the second still runs at the revision setting.
+        assert_eq!(run.planner(), [(HAIKU, "high"), (SONNET, "xhigh")]);
+        assert_eq!(run.records[1].0, SONNET);
+        assert_eq!(run.records[1].1.as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn planner_revision_ignores_a_key_weaker_than_the_planner_setting() {
+        // The planner already runs on Sonnet at high. A Haiku model key and a medium effort key are weaker.
+        let repo = repo_with_revision_keys(3, Some(HAIKU), Some("medium"));
+        let run = run_for_revision(
+            &repo,
+            SONNET,
+            vec![good_plan()],
+            vec![revising_critique(), accepting_critique()],
+        );
+        assert_eq!(
+            run.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            run.finished.reason
+        );
+        assert_eq!(run.planner(), [(SONNET, "high"), (SONNET, "high")]);
+        assert_eq!(run.records[1].0, SONNET);
+        assert_eq!(run.records[1].1.as_deref(), Some("high"));
+        // A weaker model key with a stronger effort key: only the effort part applies.
+        let repo = repo_with_revision_keys(3, Some(HAIKU), Some("xhigh"));
+        let run = run_for_revision(
+            &repo,
+            SONNET,
+            vec![good_plan()],
+            vec![revising_critique(), accepting_critique()],
+        );
+        assert_eq!(run.planner(), [(SONNET, "high"), (SONNET, "xhigh")]);
+    }
+
+    #[test]
+    fn planner_revision_unset_keeps_every_round_at_the_same_setting() {
+        let repo = repo_with_revision_keys(3, None, None);
+        let run = run_for_revision(
+            &repo,
+            HAIKU,
+            vec![bad_plan(), good_plan()],
+            vec![
+                revising_critique(),
+                revising_critique(),
+                accepting_critique(),
+            ],
+        );
+        assert_eq!(
+            run.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            run.finished.reason
+        );
+        // A mechanical pass in round 1, then rounds 2 and 3 after critic revises: four planner calls.
+        assert_eq!(run.planner(), [(HAIKU, "high"); 4]);
+        assert!(
+            run.records
+                .iter()
+                .all(|r| r == &(HAIKU.to_string(), Some("high".to_string()))),
+            "{:?}",
+            run.records
+        );
+        assert!(
+            run.planner_lines
+                .iter()
+                .all(|l| l.starts_with(&format!("planner    {HAIKU} · high · "))),
+            "{:#?}",
+            run.planner_lines
+        );
     }
 
     #[test]
