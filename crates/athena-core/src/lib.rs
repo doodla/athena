@@ -13,6 +13,8 @@
 //! - [`mirrors`]: the registry of files kept by hand as mirrors of a governing source (shard timings, the
 //!   decision log, the CI cache key against the build paths, the ontology), each with a comparison rule that
 //!   checks content against the source; run before verification and by the repo tests;
+//! - [`automation`]: the automation register (OLY-B-A9-01): entries with cost, measured savings and source, and
+//!   the rule that lists those costing more than they save for retirement; not wired into any gate;
 //! - [`reading`], [`run`], [`manage`]: the commands;
 //! - [`records_import`]: the importer that copies `records/` at a commit onto the `athena/records` branch and
 //!   checks the copy; not wired into any command;
@@ -89,6 +91,7 @@
 pub mod admission;
 pub mod audience;
 pub mod auditor;
+pub mod automation;
 pub mod capability;
 pub mod chain;
 pub mod checks;
