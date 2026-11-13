@@ -1,0 +1,175 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261113-000055-2fae",
+  "n": 1,
+  "at": "2026-11-13T00:01:49.354606748Z",
+  "invocation_seq": 2,
+  "base_commit": "7cde3c66a1c382775e79b012a0f1aed811f86817",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add a verification status line with a working false-positive count",
+  "summary": "Retry of job 20261030-033225-g36k: give OLY-B-A7-04 a mechanism by adding a `verification` line to `athena status` (verifier cost, rejections caught, false positives, escapes), where false positives reuse gate_counts' landed-retry/same-change overrule detection instead of impossible Fail+Landed conditions. Audience: Apollo and the owner reading status.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Behavior criterion compares the printed count with an independent count from history.json."
+    },
+    {
+      "id": "no-empty-success",
+      "how": "Empty records print `none yet`."
+    },
+    {
+      "id": "tested",
+      "how": "Unit and CLI tests plus fmt, clippy, test criterion."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261030-033225-g36k (rejected, final verdict fail) is retried from the base; its candidate is dropped and rebuilt. Findings addressed: (1 blocker) false-positive count was always 0 because it tested Fail-with-final-Pass and rejected-then-landed, both impossible (verify.rs pass needs agent Pass; landing bails unless final Pass) - fixed by counting a rejection as a false positive when a landed retry ('try again on <job>') with the same change exists, via logic factored out of crates/athena-core/src/gate_counts.rs (same_change and the landed-retry scan) and shared; (2 minor) CHANGELOG and docs text described the impossible definition - rewritten to the retry-overrule definition; (3 minor) planning.rs was changed only to widen visibility of LaterCause/later_causes - kept as a deliverable (visibility-only change, no behavior change); (4 nit) the line prints false positives as 'of which' a subset of caught.",
+    "Code survey: read crates/athena-core/src/gate_counts.rs (gate_counts, same_change at line 93, which already detects a landed 'try again on' retry with the same change), crates/athena-core/src/status.rs (STATUS_MEASURE_LABELS, StatusView, tests using 'try again on'), crates/athena-core/src/status/planning.rs (later_causes) and throughput.rs. Entry point is the status view build in status.rs, rendered by crates/athena-cli/src/display.rs. No new record or data file under crates/ is added, so check_record_file/AnyRecord is not touched.",
+    "Existing code: crates/athena-core/src/gate_counts.rs (overrule detection, reused and factored for sharing), crates/athena-core/src/status/planning.rs (later-harm citation reused for escapes), crates/athena-core/src/status.rs (label registry), crates/athena-cli/src/display.rs.",
+    "Environment: the status replay reads the real records snapshot via `athena status --snapshot <evidence directory>` (read-only, local files: history.json, verification and request records); expected counts come from history.json and git log of the local repository (read-only, no push, no CI).",
+    "Moving the gate_counts helper must not change gate_counts output; its existing tests must still pass.",
+    "Governance: docs/spec.toml is a deliverable; athena.toml, defaults.toml and workflows need no change."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "docs/spec.toml OLY-B-A7-04 has a `mechanism` naming the verification report in crates/athena-core/src/status/verification.rs (not none), keeps owner Apollo, and a `measure` ending with `status: verification`. Check with Grep.",
+      "kind": "content"
+    },
+    {
+      "text": "STATUS_MEASURE_LABELS in crates/athena-core/src/status.rs maps the label `verification` to a new StatusView field, and crates/athena-cli/src/display.rs prints a line starting with `verification` from it. Check with Grep.",
+      "kind": "content"
+    },
+    {
+      "text": "verification.rs computes false positives by calling the overrule detection shared with crates/athena-core/src/gate_counts.rs (landed retry with same change), not by testing Fail+Landed combinations; Grep shows the shared function used by both modules.",
+      "kind": "content"
+    },
+    {
+      "text": "A unit test in crates/athena-core builds Records in the shape the real writers produce: rejected and passed verifications, job totals, a rejected job later retried ('try again on <job>') with the same change that landed, and a landed job later reverted. It asserts verifier cost, caught, false positives (1) and escapes. It fails with the computation stubbed and passes with it. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Real records: run `cargo run -p athena-cli -- status --snapshot <evidence directory>`; the verification line's false-positive count equals the number of rejected jobs in history.json that have a landed 'try again on' retry with the same change (counted independently from history.json and git log commit times, expected range: non-zero, since the real records hold hundreds of retry requests), and caught is at least that number; the unchanged status lines are identical before and after.",
+      "kind": "behavior"
+    },
+    {
+      "text": "With empty Records a test asserts the verification line contains `none yet` and shows no zero counts as success. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test in crates/athena-cli/tests/introspection.rs renders athena_cli::display::status and asserts a line starting with `verification` showing cost, caught, false positives and escaped counts. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The xtask spec test accepts the new measure marker and label, and existing gate_counts tests still pass. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "fmt, clippy and test pass: `cargo fmt --check`, `cargo clippy --all-targets`, `cargo test` (recorded on the final tree).",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an added entry using the retry-overrule false-positive definition; docs/enforcement.md gets an M35 row; no existing entry of docs/decisions.md or anything under records/ is edited.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/status/verification.rs",
+      "action": "create",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/gate_counts.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/status/planning.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/enforcement.md",
+      "action": "modify",
+      "p": 0.85
+    }
+  ],
+  "out_of_scope": [
+    "Changing verifier behavior, verdict rules or gates",
+    "Editing existing records/ or docs/decisions.md entries",
+    "Other spec requirements",
+    "Building the generic replay check for all status measures (the class-level prevention); only this measure is replayed on real records"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2200.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6749116607773852,
+      "p_user_intervenes": 0.06548956661316212,
+      "cost_usd": {
+        "p10": 0.5534393,
+        "p50": 1.4780460000000002,
+        "p90": 5.221521
+      },
+      "wall_time_s": {
+        "p10": 603.115876214076,
+        "p50": 2155.226456717016,
+        "p90": 4388.383949498235
+      }
+    }
+  },
+  "departures": "Slightly higher cost than reference: real-records replay and a refactor of gate_counts; prior attempt failed once.",
+  "hard_reason": "Adds a measure computed from Athena's records that is shown in status, and the earlier attempt gave wrong figures on real records.",
+  "producer_effort": "high"
+}
