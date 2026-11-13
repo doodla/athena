@@ -1510,3 +1510,208 @@ fn status_has_no_gate_section_when_no_gate_has_ended_a_job() {
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(json.get("gate_counts").is_none(), "{json}");
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// The kill switch: an introspection is deferred while it is on, and `athena start` runs it.
+
+/// Commits a rejected job (records only) and returns its id.
+fn committed_rejected_job(fx: &Fixture, n: u32) -> JobId {
+    let job = chain_job(n);
+    commit_records(
+        fx,
+        &[
+            chain_request(&job, "Add a thing", n),
+            chain_candidate(&job, 'b', "src/thing.rs", 7),
+            chain_outcome(&job, OutcomeState::Rejected, n),
+        ],
+    );
+    job
+}
+
+fn lines_of(ui: &Lines) -> Vec<String> {
+    ui.0.lock().unwrap().clone()
+}
+
+#[test]
+fn an_introspection_triggered_while_the_kill_switch_is_on_is_left_pending() {
+    let model = Model::default();
+    model.say(reply("new", "The job was rejected.", "A check failed."));
+    let (fx, athena) = setup(Scenario::default(), &model);
+    let job = committed_rejected_job(&fx, 1);
+    athena.stop().unwrap();
+
+    let ui = Lines::default();
+    assert!(athena.introspect_job(&job, &ui).is_none());
+    // Triggering it again does not queue it twice.
+    assert!(athena.introspect_job(&job, &ui).is_none());
+
+    assert!(
+        model.prompts.lock().unwrap().is_empty(),
+        "the model was not invoked"
+    );
+    assert_eq!(
+        model.replies.lock().unwrap().len(),
+        1,
+        "the reply is unused"
+    );
+    assert!(
+        introspections(&fx).is_empty(),
+        "no record, and in particular no failed one: {:?}",
+        introspections(&fx)
+    );
+    let pending = athena.pending_introspections();
+    let [event] = pending.as_slice() else {
+        panic!("one pending event, got {pending:?}")
+    };
+    assert_eq!(event.job.as_ref(), Some(&job));
+    assert_eq!(event.trigger, IntrospectionTrigger::Rejection);
+    assert!(
+        lines_of(&ui).iter().any(|l| l.contains("deferred")),
+        "{:?}",
+        lines_of(&ui)
+    );
+}
+
+#[test]
+fn a_pending_introspection_runs_once_when_start_turns_the_switch_off() {
+    let model = Model::default();
+    model.say(reply("new", "The job was rejected.", "A check failed."));
+    let (fx, athena) = setup(Scenario::default(), &model);
+    let job = committed_rejected_job(&fx, 1);
+    athena.stop().unwrap();
+    assert!(athena.introspect_job(&job, &Lines::default()).is_none());
+    assert_eq!(athena.pending_introspections().len(), 1);
+
+    let ui = Lines::default();
+    assert!(athena.start_with(&ui).unwrap(), "the switch was on");
+    let records = introspections(&fx);
+    let [record] = records.as_slice() else {
+        panic!("exactly one introspection, got {records:?}")
+    };
+    assert_eq!(record.status, IntrospectionStatus::Recorded, "{record:?}");
+    assert_eq!(record.job.as_ref(), Some(&job));
+    assert_eq!(record.trigger, IntrospectionTrigger::Rejection);
+    assert_eq!(model.prompts.lock().unwrap().len(), 1);
+    assert!(athena.pending_introspections().is_empty(), "queue is empty");
+    assert!(
+        lines_of(&ui).iter().any(|l| l.contains("recorded")),
+        "{:?}",
+        lines_of(&ui)
+    );
+
+    // Another start, in process and as the command, runs nothing again.
+    assert!(!athena.start().unwrap());
+    let out = athena_bin(&fx).arg("start").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("already off"), "{text}");
+    assert_eq!(introspections(&fx).len(), 1);
+    assert_eq!(model.prompts.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn an_intervention_introspection_is_deferred_run_on_start_and_not_run_twice() {
+    let model = Model::default();
+    model.say(reply("new", "The README was edited by hand.", "No check."));
+    let (fx, athena) = setup(Scenario::default(), &model);
+    athena.stop().unwrap();
+
+    let id = intervene(&athena, "Edited the README by hand");
+    assert!(introspections(&fx).is_empty(), "no failed record");
+    assert!(model.prompts.lock().unwrap().is_empty());
+    let pending = athena.pending_introspections();
+    let [event] = pending.as_slice() else {
+        panic!("one pending event, got {pending:?}")
+    };
+    assert_eq!(event.intervention.as_ref(), Some(&id));
+
+    assert!(athena.start_with(&Lines::default()).unwrap());
+    let records = introspections(&fx);
+    let [record] = records.as_slice() else {
+        panic!("exactly one introspection, got {records:?}")
+    };
+    assert_eq!(record.status, IntrospectionStatus::Recorded, "{record:?}");
+    assert_eq!(record.intervention.as_ref(), Some(&id));
+    assert_eq!(record.trigger, IntrospectionTrigger::Intervention);
+    assert!(athena.pending_introspections().is_empty());
+
+    assert!(!athena.start().unwrap(), "the switch was already off");
+    assert_eq!(introspections(&fx).len(), 1);
+    assert_eq!(model.prompts.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_kill_switch_failed_introspection_is_requeued_by_start_and_rerun_once() {
+    let model = Model::default();
+    model.say(reply("new", "The job was rejected.", "A check failed."));
+    let (fx, athena) = setup(Scenario::default(), &model);
+    let (stopped_job, other_job) = (chain_job(1), chain_job(3));
+    let mut records = Vec::new();
+    for (job, n) in [(&stopped_job, 1), (&other_job, 3)] {
+        records.push(chain_request(job, "Add a thing", n));
+        records.push(chain_candidate(job, 'b', "src/thing.rs", 7));
+        records.push(chain_outcome(job, OutcomeState::Rejected, n));
+    }
+    let failed = |id: &str, job: &JobId, failure: &str| {
+        AnyRecord::Introspection(Box::new(IntrospectionRecord {
+            id: RecordId::parse(id).unwrap(),
+            at: chain_at(10),
+            trigger: IntrospectionTrigger::Rejection,
+            job: Some(job.clone()),
+            intervention: None,
+            class_of_work: "unknown".into(),
+            category: "rejected".into(),
+            what_happened: None,
+            failure_class: None,
+            new_class: false,
+            earlier_cases: vec![],
+            decisions_matched: vec![],
+            cause: None,
+            other_causes: vec![],
+            open_hypotheses: vec![],
+            contradictions: vec![],
+            prevention_kind: None,
+            prevention: None,
+            proposed_request: None,
+            evidence: None,
+            status: IntrospectionStatus::Failed,
+            failure: Some(failure.into()),
+            flags: vec![],
+            dropped_ids: vec![],
+            planning_stopped: false,
+            from_jev: false,
+            jev: None,
+        }))
+    };
+    records.push(failed(
+        "20261001-120000-aaaa",
+        &stopped_job,
+        "the model could not run: the kill switch is on (`athena start` turns it off)",
+    ));
+    records.push(failed(
+        "20261001-120001-bbbb",
+        &other_job,
+        "the model could not run: model unavailable",
+    ));
+    commit_records(&fx, &records);
+    assert_eq!(introspections(&fx).len(), 2);
+
+    assert!(!athena.start_with(&Lines::default()).unwrap());
+    let after = introspections(&fx);
+    assert_eq!(after.len(), 3, "only the kill switch failure is rerun");
+    let rerun: Vec<_> = after
+        .iter()
+        .filter(|r| r.status == IntrospectionStatus::Recorded)
+        .collect();
+    let [rerun] = rerun.as_slice() else {
+        panic!("one recorded introspection, got {after:?}")
+    };
+    assert_eq!(rerun.job.as_ref(), Some(&stopped_job));
+    assert_eq!(model.prompts.lock().unwrap().len(), 1);
+    assert!(athena.pending_introspections().is_empty());
+
+    // The event now has a recorded introspection, so a second start finds nothing to rerun.
+    athena.start().unwrap();
+    assert_eq!(introspections(&fx).len(), 3);
+    assert_eq!(model.prompts.lock().unwrap().len(), 1);
+}

@@ -801,7 +801,7 @@ pub fn validate_citations(
 // ---------------------------------------------------------------------------------------------------------
 
 /// The stored fields of the event that started an introspection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub trigger: IntrospectionTrigger,
     pub job: Option<JobId>,
@@ -814,6 +814,26 @@ pub struct Event {
     pub at: Timestamp,
     /// True for a job that failed in planning, before any code was written.
     pub planning_stopped: bool,
+}
+
+/// The words a failed introspection carries when the kill switch stopped the model (`DriverError::Stopped`).
+const KILL_SWITCH_TEXT: &str = "the kill switch is on";
+
+/// The name of an event in the pending queue: one per job for a rejection or failure, one per intervention
+/// otherwise. None when the event lacks the id its trigger needs.
+fn event_key(
+    trigger: IntrospectionTrigger,
+    job: &Option<JobId>,
+    intervention: &Option<RecordId>,
+) -> Option<String> {
+    match trigger {
+        IntrospectionTrigger::Rejection | IntrospectionTrigger::Failure => {
+            job.as_ref().map(|job| format!("job-{job}"))
+        }
+        IntrospectionTrigger::Correction | IntrospectionTrigger::Intervention => {
+            intervention.as_ref().map(|id| format!("intervention-{id}"))
+        }
+    }
 }
 
 /// Decisions whose fired, valid signal cites the intervention `intervention`. The citation must be later than
@@ -1271,7 +1291,7 @@ impl Athena {
     /// returns an error: a problem is a line to the user, since an introspection never blocks a job.
     pub fn introspect_job(&self, job: &JobId, ui: &dyn Ui) -> Option<IntrospectionRecord> {
         let result = self.event_of_job(job).and_then(|event| match event {
-            Some(event) => self.introspect(event, ui).map(Some),
+            Some(event) => self.run_or_defer(event, ui),
             None => Ok(None),
         });
         self.settle(result, ui)
@@ -1285,8 +1305,155 @@ impl Athena {
     ) -> Option<IntrospectionRecord> {
         let result = self
             .event_of_intervention(id)
-            .and_then(|event| self.introspect(event, ui).map(Some));
+            .and_then(|event| self.run_or_defer(event, ui));
         self.settle(result, ui)
+    }
+
+    /// Runs the introspection, unless the kill switch is on. The switch is read before the model can be
+    /// reached: with it on, the event is kept in the pending queue (no record, no failed status) and `None` is
+    /// returned. `athena start` runs the queue ([`Athena::run_pending_introspections`]).
+    fn run_or_defer(&self, event: Event, ui: &dyn Ui) -> Result<Option<IntrospectionRecord>> {
+        if self.state.registry().stopped() {
+            self.defer(&event, ui)?;
+            return Ok(None);
+        }
+        self.introspect(event, ui).map(Some)
+    }
+
+    /// Keeps `event` in the pending queue. An event already queued is not queued twice.
+    fn defer(&self, event: &Event, ui: &dyn Ui) -> Result<()> {
+        let Some(key) = event_key(event.trigger, &event.job, &event.intervention) else {
+            return Ok(());
+        };
+        let dir = self.state.introspect_pending_dir();
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{key}.json"));
+        if path.exists() {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec_pretty(event)?;
+        std::fs::write(&path, bytes).context("keeping a deferred introspection")?;
+        ui.line(&format!(
+            "introspection of {key} deferred: the kill switch is on; it runs after `athena start`"
+        ));
+        Ok(())
+    }
+
+    /// The pending events with the files that hold them, oldest name first. A file that cannot be read is
+    /// left out.
+    fn pending_files(&self) -> Vec<(PathBuf, Event)> {
+        let Ok(entries) = std::fs::read_dir(self.state.introspect_pending_dir()) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(PathBuf, Event)> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let bytes = std::fs::read(entry.path()).ok()?;
+                let event = serde_json::from_slice::<Event>(&bytes).ok()?;
+                Some((entry.path(), event))
+            })
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
+    }
+
+    /// The introspection events waiting for `athena start`.
+    pub fn pending_introspections(&self) -> Vec<Event> {
+        self.pending_files()
+            .into_iter()
+            .map(|(_, event)| event)
+            .collect()
+    }
+
+    /// Queues every event whose only introspections failed with the kill switch on: they never reached the
+    /// model, and nothing else records a diagnosis for the event. An event that has a recorded introspection,
+    /// or a failure for another reason, is left alone, as is one already pending. Returns the number queued.
+    fn requeue_kill_switch_failures(&self) -> Result<usize> {
+        let Ok(head) = self.head() else {
+            return Ok(0);
+        };
+        let records = GitRecords::load(&self.git, &head)?;
+        let key_of = |r: &IntrospectionRecord| event_key(r.trigger, &r.job, &r.intervention);
+        let not_kill_switch = |r: &IntrospectionRecord| {
+            r.status != IntrospectionStatus::Failed
+                || !r
+                    .failure
+                    .as_deref()
+                    .is_some_and(|f| f.contains(KILL_SWITCH_TEXT))
+        };
+        let mut queued = BTreeSet::new();
+        let mut count = 0;
+        for failed in records
+            .introspections
+            .iter()
+            .filter(|r| !not_kill_switch(r))
+        {
+            let Some(key) = key_of(failed) else { continue };
+            let other_cause = records
+                .introspections
+                .iter()
+                .any(|r| key_of(r).as_deref() == Some(key.as_str()) && not_kill_switch(r));
+            if other_cause || !queued.insert(key.clone()) {
+                continue;
+            }
+            if self
+                .state
+                .introspect_pending_dir()
+                .join(format!("{key}.json"))
+                .exists()
+            {
+                continue;
+            }
+            let event = match failed.trigger {
+                IntrospectionTrigger::Rejection | IntrospectionTrigger::Failure => {
+                    match failed.job.as_ref().map(|job| self.event_of_job(job)) {
+                        Some(Ok(Some(event))) => event,
+                        _ => continue,
+                    }
+                }
+                _ => match failed
+                    .intervention
+                    .as_ref()
+                    .map(|id| self.event_of_intervention(id))
+                {
+                    Some(Ok(event)) => event,
+                    _ => continue,
+                },
+            };
+            self.defer(&event, &crate::Quiet)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Runs the pending introspections, oldest first, once the kill switch is off. First queues the events
+    /// whose introspection failed only because the switch was on. Each queue file is removed after its record
+    /// is committed; an event whose run fails stays recorded as failed and is not queued again. Does nothing in
+    /// a nested run, and stops when the switch is on again. Returns the number run. Never fails: a problem is
+    /// a line to the user.
+    pub fn run_pending_introspections(&self, ui: &dyn Ui) -> usize {
+        if self.nested.is_some() {
+            return 0;
+        }
+        if let Err(error) = self.requeue_kill_switch_failures() {
+            ui.line(&format!(
+                "could not look for introspections that need a rerun: {error:#}"
+            ));
+        }
+        let mut ran = 0;
+        for (path, event) in self.pending_files() {
+            if self.state.registry().stopped() {
+                break;
+            }
+            match self.introspect(event, ui) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&path);
+                    ran += 1;
+                }
+                Err(error) => ui.line(&format!("introspection could not be recorded: {error:#}")),
+            }
+        }
+        ran
     }
 
     fn settle(

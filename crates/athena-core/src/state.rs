@@ -84,6 +84,12 @@ impl StateDir {
         Registry::new(&self.root)
     }
 
+    /// Where introspection events wait while the kill switch is on: one JSON file per event. `athena start`
+    /// runs them. It lies outside the repository, so it is not a record.
+    pub fn introspect_pending_dir(&self) -> PathBuf {
+        self.root.join("introspect-pending")
+    }
+
     /// The job's own directory: snapshots, live records, build directories.
     pub fn job_dir(&self, job: &JobId) -> PathBuf {
         self.root.join("jobs").join(job.as_str())
