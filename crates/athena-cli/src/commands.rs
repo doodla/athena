@@ -648,7 +648,7 @@ pub(crate) fn stop() -> Result<u8> {
 
 pub(crate) fn start() -> Result<u8> {
     let athena = open(false)?;
-    let was = athena.start()?;
+    let was = athena.start_with(&Terminal)?;
     println!(
         "{}",
         if was {

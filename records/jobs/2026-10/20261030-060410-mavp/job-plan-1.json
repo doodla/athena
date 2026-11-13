@@ -1,0 +1,340 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-060410-mavp",
+  "round": 1,
+  "at": "2026-11-13T07:14:35.854686682Z",
+  "invocation_seq": 3,
+  "approach": "Add a pending-introspection queue as JSON files under the state directory (`<state>/introspect-pending/`), following the `steward-pending` precedent (steward.rs:1163). `introspect_job` and `introspect_intervention` build the event as today, then call a new `run_or_defer(event, ui)`. It checks `self.state.registry().stopped()` before `introspect` can reach `driver.invoke` (introspect.rs:1433). When the switch is on it writes one file per event and returns None; otherwise it runs `introspect`, which is unchanged, so a model failure is still a failed record. A new `Athena::start_with(ui)` turns the switch off and then drains. `Athena::start()` (manage.rs:504) keeps `Result<bool>` and calls `start_with(&Quiet)`, so `the_kill_switch_blocks_new_work` (lifecycle.rs:1719) compiles unchanged. The drain first queues each kill-switch failure by rule (a failed introspection whose `failure` contains `the kill switch is on`, with no other introspection for the same job or intervention and not already pending). That reaches the two named jobs without editing records/. It then runs each pending event through `introspect`, oldest first, and deletes the file once the record is committed. The CLI `start()` in commands.rs calls `start_with`. No record, status, schema, athena.toml or gate change. Revision: the demonstration for criterion 7 now sets `fails_without` and `seam`. The rest of the plan is as accepted in round 1.",
+  "decisions": [
+    {
+      "choice": "Queue deferred events as files in the state directory, not as a new record status or record type.",
+      "reason": "The brief forbids a new status or schema change. State-directory files leave `AnyRecord`, `check_record_file`, the records allow-list and the round-trip test untouched. `steward-pending` (steward.rs:1163-1196) is the same pattern. Pending is local machine state and needs no history.",
+      "rejected": [
+        {
+          "option": "Add `IntrospectionStatus::Pending`",
+          "why": "Changes the record schema (athena-data introspection.rs) and every reader and test that matches the status; out of scope."
+        },
+        {
+          "option": "Commit a placeholder record and later a second one",
+          "why": "Two records per event would break the 'one per triggering event' rule (introspection.rs:181-182) and the history checks."
+        }
+      ]
+    },
+    {
+      "choice": "Check `stopped()` in a new `run_or_defer` called by `introspect_job` and `introspect_intervention`; `introspect` is unchanged and is also what the drain calls.",
+      "reason": "One check before the model is reachable. Both entry points and their three callers (run/mod.rs:421, reading.rs:1374, manage.rs:400) get the deferral with no per-caller edit. The drain calls `introspect` and is not re-deferred.",
+      "rejected": [
+        {
+          "option": "Put the check at the top of `introspect` and return Option",
+          "why": "The drain would need a bypass flag; `introspect` is `pub` and its signature need not change."
+        },
+        {
+          "option": "Check the switch in each of the three callers",
+          "why": "Three copies; a new caller would forget it."
+        }
+      ]
+    },
+    {
+      "choice": "`Athena::start()` keeps its signature (Result<bool>) and delegates to a new `start_with(ui)`.",
+      "reason": "lifecycle.rs:1725 and commands.rs:651 call `start()`; criterion 6 requires the existing test to pass unchanged. `Quiet` already exists in athena-core.",
+      "rejected": [
+        {
+          "option": "Change `start` to take a Ui and return a report",
+          "why": "Breaks `the_kill_switch_blocks_new_work`."
+        }
+      ]
+    },
+    {
+      "choice": "The drain runs on every `athena start`, whether or not the switch was on; it is skipped for a nested run (`self.nested.is_some()`) and stops if the switch is back on.",
+      "reason": "The two old failures must be rerun by the owner's `athena start` after this lands, when the switch may already be off. Drain errors become ui lines and never fail `start`. The nested skip matches hestia.rs:2527 and 3241.",
+      "rejected": [
+        {
+          "option": "Drain only when the switch was on (the accepted reading)",
+          "why": "Would not rerun the two old failed introspections when the switch is already off. This is a small, stated deviation, recorded in D177."
+        },
+        {
+          "option": "A new `athena` subcommand to enqueue the two events",
+          "why": "main.rs is not a listed deliverable, and a rule serves any such failure, not two hard-coded ids."
+        }
+      ]
+    },
+    {
+      "choice": "Requeue old failures by rule (failed record, failure text contains `the kill switch is on`, no other introspection for the same job or intervention), not by a hard-coded id list.",
+      "reason": "Matches the user's reading of the two records. After the rerun a second record exists for the event, so the rule cannot select it again. The rule matches record text, not an input parser or reading check. crates/athena-core/tests/refusal_corpus.rs concerns reading and request checks (its introspection mentions at lines 285, 1267-1346, 1406-1411, 1523, 1730 are fixtures for those checks), and the plan changes no parser, stem list, stop list or reading check, so no corpus case is added. The rule's input forms (old kill-switch text matches; 'model unavailable' does not) are covered by the requeue test.",
+      "rejected": [
+        {
+          "option": "Hard-code the ids 20261029-142858-5c0p and 20261017-155259-7mjc",
+          "why": "Ids in product code; the rule covers them and is testable."
+        }
+      ]
+    },
+    {
+      "choice": "Do not put the retry work of the two jobs in this change.",
+      "reason": "20261029-142858-5c0p produced no candidate, and the seven CI-routing files of 20261017-155259-7mjc are out of scope; only their introspections are rerun.",
+      "rejected": [
+        {
+          "option": "Redo the build work of either job",
+          "why": "Out of scope per the brief."
+        }
+      ]
+    },
+    {
+      "choice": "Record the design as a new appended decision (D177, or the next free number after the last `## D` heading) with a Provenance bullet.",
+      "reason": "The queue and the drain-on-every-start rule are a design choice; criterion 8 allows only an append.",
+      "rejected": [
+        {
+          "option": "No decision",
+          "why": "The deviation from 'only when the switch was on' should be on record."
+        }
+      ]
+    },
+    {
+      "choice": "Criterion 7 is shown by running the three checks Athena runs on the final tree, with the new tests as part of `cargo test`.",
+      "reason": "The checks are the production gate (fmt, clippy `-D warnings`, test). Each fails on a concrete defect the change could introduce: unformatted code, a dead helper or needless clone, or a failing test.",
+      "rejected": [
+        {
+          "option": "Treat criterion 7 as content only",
+          "why": "The brief tags it behavior, so it needs a seam and a failure case."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Derive Serialize/Deserialize on `Event`; add `run_or_defer` (stopped check before `introspect`), `defer`, `pending_introspections`, `requeue_kill_switch_failures`, `run_pending_introspections`; `introspect_job` and `introspect_intervention` call `run_or_defer`. `introspect` unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "purpose": "`start()` delegates to new `start_with(ui)`, which removes the switch and then drains (skipped for a nested run; errors are ui lines).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "purpose": "Add `StateDir::introspect_pending_dir()` returning `<root>/introspect-pending`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Only if a new item needs exporting; keep `Quiet` and the existing exports unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/commands.rs",
+      "action": "modify",
+      "purpose": "`start()` calls `athena.start_with(&Terminal)` and prints the same two messages as before, plus the drain's lines.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "purpose": "Add tests: job deferral then start, intervention deferral then start then second start, and requeue of a kill-switch-failed introspection with a negative case. Existing tests unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet under Unreleased / Added.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D177 (queue in the state directory, drain on every start, requeue rule) with a Provenance bullet, after D176 (line 5094).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/src/introspect.rs:803-817 (Event), 1269-1290 and 1372-1504, then `Quiet` in crates/athena-core/src/lib.rs, and `steward-pending` in steward.rs:1163-1196 as the model for a state-directory queue.",
+    "In state.rs add `pub fn introspect_pending_dir(&self) -> PathBuf { self.root.join(\"introspect-pending\") }`.",
+    "In introspect.rs derive `Serialize, Deserialize` on `Event`. Add a private `event_key(&Event) -> String` (`job-<id>` for Rejection/Failure triggers, `intervention-<id>` otherwise), `defer(&self, event, ui) -> Result<()>` (create the directory, write `<key>.json`, skip if it exists, print a line saying the introspection is deferred until `athena start`), and `pub fn pending_introspections(&self) -> Vec<Event>` (read the directory, ignore unreadable files, sort by file name).",
+    "In introspect.rs add `fn run_or_defer(&self, event, ui) -> Result<Option<IntrospectionRecord>>`: if `self.state.registry().stopped()`, call `defer` and return `Ok(None)`; otherwise `self.introspect(event, ui).map(Some)`. Change `introspect_job` (1273-1276) and `introspect_intervention` (1286-1288) to call it. Leave `introspect` unchanged.",
+    "In introspect.rs add `requeue_kill_switch_failures(&self) -> Result<usize>`: load `GitRecords` at `self.head()?`; for each introspection with status Failed and `failure` containing `the kill switch is on`, compute its event key from `trigger`, `job` and `intervention`; skip it when any other introspection has the same key or the key is pending; rebuild the event with `event_of_job` or `event_of_intervention` (skip on None or Err) and `defer` it quietly. Add `pub fn run_pending_introspections(&self, ui) -> usize`: return 0 when `self.nested.is_some()`; call the requeue scan (errors become ui lines); then for each pending file, stop if `stopped()`, call `introspect`, delete the file on Ok, print the error and keep the file on Err. Return the number run. In manage.rs change `start` to `self.start_with(&crate::Quiet)` and add `pub fn start_with(&self, ui: &dyn Ui) -> Result<bool>`: `let was = self.state.registry().start()?; self.run_pending_introspections(ui); Ok(was)`.",
+    "In crates/athena-cli/src/commands.rs call `athena.start_with(&Terminal)` and print the same two messages as before.",
+    "In crates/athena-cli/tests/introspection.rs add the tests of the demonstrations, reusing `setup`, `Model`, `chain_request`, `chain_candidate`, `chain_outcome`, `commit_records`, `intervene`, `introspections` and `athena_bin`. For the requeue test, seed a failed `IntrospectionRecord` (built as the existing record literal near line 1091 does) with failure `the model could not run: the kill switch is on (`athena start` turns it off)` for a rejected chain job, and a second with failure `model unavailable` for another job. Assert that `start` reruns only the first (one new Recorded record, `model.prompts` length 1) and that a second `start` adds none.",
+    "Add the CHANGELOG.md bullet under Unreleased / Added and append decision D177 to docs/decisions.md (next free number), with Case, Decision, Alternatives, Tradeoff, Reversal cost and a Provenance bullet naming the files read and the tests run.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix anything they report. Do not touch records/, athena.toml, defaults.toml or workflows. After the change lands, the owner runs `athena start` once; the requeue scan then finds the failed introspections of jobs 20261029-142858-5c0p and 20261017-155259-7mjc and reruns them with the real model. That step needs a Claude model and cannot be run by the producer."
+  ],
+  "risks": [
+    {
+      "risk": "The requeue rule matches more failed records than the two named, so one `athena start` could spend several model calls.",
+      "mitigation": "The rule needs the exact phrase 'the kill switch is on' and no other introspection for the event. Each rerun adds a record, so an event is rerun at most once. The CHANGELOG entry and D177 state the cost."
+    },
+    {
+      "risk": "Two `athena start` processes drain at the same moment and run the same pending event twice.",
+      "mitigation": "Unlikely for a manual command; the drain deletes each file after the commit, so a later start finds none, and the requeue rule excludes an event that already has a second introspection. Not claimed race-free; D177 notes it."
+    },
+    {
+      "risk": "The drain runs on every `athena start` and adds a records load to a command that did not read records before; a repository without commits or with an unreadable head would fail it.",
+      "mitigation": "Drain errors become ui lines and never fail `start`. The scan runs only when `self.head()` succeeds, and the drain returns early when nothing is pending and the scan finds nothing."
+    },
+    {
+      "risk": "If `introspect` returns Err (a commit failure), the file stays and is retried on every start.",
+      "mitigation": "The error is shown as a ui line each time. Only a commit failure leaves a file; a model failure commits a failed record, deletes the file and is not requeued."
+    },
+    {
+      "risk": "The switch is turned on again during the drain.",
+      "mitigation": "The drain checks `stopped()` before each event and stops, leaving the rest pending. A switch set between the check and the model call gives a failed record with the kill-switch text, which the next start requeues by the same rule."
+    },
+    {
+      "risk": "D177 may collide with a decision number added by another job.",
+      "mitigation": "The producer takes the next free number after the last `## D` heading in docs/decisions.md when it appends."
+    },
+    {
+      "risk": "The criterion 7 checks fail late because of formatting or an unused helper.",
+      "mitigation": "The producer runs `cargo fmt --all` and the clippy and test commands before finishing, and keeps every new helper used by `run_or_defer` or the drain."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "introspect_job deferral while the switch is on",
+      "dependent": "crates/athena-core/src/run/mod.rs:421 (`go_with_stages` calls `introspect_job` after a rejected or failed job)",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/introspection.rs `a_failed_job_is_introspected`, `a_rejected_job_is_introspected_and_the_class_is_proposed_by_code`, `a_failed_introspection_is_recorded_never_blocks_and_is_not_introspected` (switch off, behavior unchanged) and the new deferral tests. A job run with the switch on is refused earlier by `go_job` (run/mod.rs:438), so deferral applies only when the switch is turned on during the run.",
+      "reason": null
+    },
+    {
+      "name": "introspect_intervention deferral",
+      "dependent": "crates/athena-core/src/reading.rs:1374 (`correct`) and crates/athena-core/src/manage.rs:400 (`intervene`)",
+      "kind": "code",
+      "test": "New `an_intervention_introspection_is_deferred_run_on_start_and_not_run_twice`; existing `a_correction_is_introspected_with_its_intervention` (introspection.rs:885) and `any_other_intervention_is_introspected` (912) with the switch off. `correct` calls `refuse_if_stopped` (reading.rs:1246), so its deferral is reachable only if the switch is set mid-call.",
+      "reason": null
+    },
+    {
+      "name": "Athena::start signature and result",
+      "dependent": "crates/athena-cli/tests/lifecycle.rs:1719 `the_kill_switch_blocks_new_work` and crates/athena-cli/src/commands.rs:651 (callers of `Athena::start`, defined at manage.rs:504)",
+      "kind": "code",
+      "test": "`start()` keeps `Result<bool>` and now also drains; the lifecycle test calls it with an empty queue and an empty records set, and runs unchanged in `cargo test --locked`. The CLI wiring is covered by the `athena start` command check in the criterion 2 test.",
+      "reason": null
+    },
+    {
+      "name": "Event gains Serialize and Deserialize derives",
+      "dependent": "crates/athena-core/src/introspect.rs `Event` and tests that build `Event` literals (crates/athena-cli/tests/introspection.rs imports `Event`, line 9)",
+      "kind": "code",
+      "test": null,
+      "reason": "Adding derives changes neither construction nor fields; its members (IntrospectionTrigger, JobId, RecordId, jiff Timestamp) already derive serde in athena-data. `cargo test --locked` compiles every user."
+    },
+    {
+      "name": "The kill switch state and its readers",
+      "dependent": "crates/athena-core/src/status.rs:1191-1194 (shows 'athena start # the kill switch is on') and hestia.rs:2527, 3241 (skip work while stopped)",
+      "kind": "code",
+      "test": null,
+      "reason": "The switch file, `Registry::stopped` and `Registry::start` (athena-agent/src/procs.rs:369, 442) are not modified. Only introspection reads the switch in a new place. Hestia and status keep their own checks."
+    },
+    {
+      "name": "Record schema and records branch",
+      "dependent": "records allow-list, `check_record_file`, `AnyRecord` round trip, `athena check --history` and the records gate (athena-gate, athena-data)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No record type, status or field is added and the change writes no file under records/. The pending files live in `<state>/introspect-pending/`, outside the repository, so no gate rule or history check sees them. Reruns commit ordinary `athena.introspection/1` records through the unchanged `introspect` and `commit_records` (introspect.rs:1497)."
+    },
+    {
+      "name": "New directory `<state>/introspect-pending`",
+      "dependent": "`StateDir::clean_job`, `job_ids` (state.rs:239-250) and test_support readers of `state/jobs` and `state/kept`",
+      "kind": "code",
+      "test": null,
+      "reason": "These read only `jobs/` and `kept/`; no code lists the state root generically (searched `read_dir` over crates). The directory is separate from a job's directory, so job cleanup does not remove a pending event."
+    },
+    {
+      "name": "'Introspected at once' wording",
+      "dependent": "docs/design/defaults-loop.md section 3.1 and the `go` doc comment (run/mod.rs:400-401), which say a rejected or failed job is introspected at once",
+      "kind": "rule",
+      "test": null,
+      "reason": "Prose only. The rule stays true with the switch off; with it on, the introspection is deferred, recorded in D177 and the CHANGELOG. No check reads that prose."
+    },
+    {
+      "name": "The drain commits records from `start`",
+      "dependent": "Concurrent `athena start` processes and the drain's call to `introspect` (repository commit lock inside `commit_records`, commits.rs:131)",
+      "kind": "code",
+      "test": null,
+      "reason": "The drain reuses `introspect`'s commit path, which already holds the repository lock for other commands. Two simultaneous starts could each run the same pending event; this is a stated risk, not covered by a test."
+    },
+    {
+      "name": "Refusal and matching rules (none changed)",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (cases for reading and request checks, introspection fixtures at lines 285, 1267-1346, 1406-1411, 1523, 1730)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan changes no parser, stem list, stop list or reading check; the requeue rule matches a record's failure text only. The corpus cases use introspection records as input data and are not affected by the new queue."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test `an_introspection_triggered_while_the_kill_switch_is_on_is_left_pending` in crates/athena-cli/tests/introspection.rs. Set up with `setup(Scenario::default(), &model)` after `model.say(reply(...))`. Commit a rejected job's records with the existing `chain_request`, `chain_candidate` and `chain_outcome(.., Rejected, ..)` through `commit_records`. Call `athena.stop()`, then `athena.introspect_job(&job, &Lines::default())`. Assert: result is None; `introspections(&fx)` is empty (none with status failed); `model.prompts` is empty and the queued reply is unused; `athena.pending_introspections()` has length 1; the `Lines` output has a 'deferred' line.",
+      "command": "cargo test --locked -p athena-cli --test introspection an_introspection_triggered_while_the_kill_switch_is_on_is_left_pending",
+      "observes": "The test passes: no record is committed, the scripted model saw no prompt, and exactly one event is pending.",
+      "fails_without": "Without the deferral `introspect` runs: the fake driver returns `DriverError::Stopped` (fake.rs:92) and a failed record 'the model could not run: the kill switch is on' is committed (introspect.rs:1434), so the empty-records and one-pending asserts fail.",
+      "seam": "Production entry point `Athena::introspect_job` (introspect.rs:1272), with the switch set by the real `Athena::stop` (manage.rs:499) through the registry file. The `Model` scripted driver and `Fixture` exist (introspection.rs:37-105) and are injected through `fx.athena(model.script(..))` with `FakeAgentDriver::with_registry` (common/mod.rs:179-182); exists. The accessor `pending_introspections` is added by step 3. The guard (`stopped()`) and the queue are production code; the double supplies only the model reply."
+    },
+    {
+      "criterion": 2,
+      "method": "Second test `a_pending_introspection_runs_once_when_start_turns_the_switch_off`. After the deferral, call `athena.start_with(&ui)` (the real start path; `athena.start()` is the same with `Quiet`). Assert: it returns true; `introspections(&fx)` has exactly one record, status Recorded, with `job` equal to the rejected job and trigger Rejection; `model.prompts` has length 1; the pending list is empty. Then `athena.start()` again: record count still 1. Also run `athena_bin(&fx).args([\"start\"])` (introspection.rs:292) once against the same state to cover the command wiring in commands.rs.",
+      "command": "cargo test --locked -p athena-cli --test introspection a_pending_introspection_runs_once_when_start_turns_the_switch_off",
+      "observes": "After start the single record is Recorded and the queue is empty. A second start adds nothing.",
+      "fails_without": "Without the drain, start only removes the stop file: the record count stays 0 and the pending list stays at 1, so the Recorded and empty-queue asserts fail.",
+      "seam": "Production entry points `Athena::start_with` / `Athena::start` (step 5) and, in the CLI check, `athena start` (commands.rs:649, wired in step 6). The same `Model`/`Fixture` seam as criterion 1 (exists); the scripted model replies once. `start_with` is added by step 5."
+    },
+    {
+      "criterion": 3,
+      "method": "New test `an_intervention_introspection_is_deferred_run_on_start_and_not_run_twice`. Call `athena.stop()`, then the existing helper `intervene(&athena, \"...\")` (introspection.rs:122), which commits the intervention and calls `introspect_intervention` (manage.rs:400). Assert: the intervention is committed, no introspection record, one pending, `model.prompts` empty. Call `athena.start_with(&ui)`: one record, status Recorded, `intervention` equal to the returned id, trigger Intervention, queue empty. Call `athena.start()` again: it returns false, the record count is still 1 and `model.prompts` has length 1.",
+      "command": "cargo test --locked -p athena-cli --test introspection an_intervention_introspection_is_deferred_run_on_start_and_not_run_twice",
+      "observes": "Deferred while stopped, recorded once on start, and a second start does not rerun it.",
+      "fails_without": "Without deferral the intervention gets a failed record while stopped (zero pending, one failed record). Without file deletion after the commit, the second start calls the model again and `model.prompts` is 2.",
+      "seam": "Production entry points `Athena::intervene` (manage.rs) leading to `introspect_intervention`, then `Athena::start_with` / `start`. Fixture, scripted model and `intervene` helper exist (introspection.rs:101-138); the pending accessor and `start_with` are added by steps 3 and 5."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff: `run_or_defer` in introspect.rs calls `self.state.registry().stopped()` before the call to `introspect`, so before `driver.invoke` (introspect.rs:1433). The queue is `StateDir::introspect_pending_dir` plus `defer`, `pending_introspections` and `run_pending_introspections`. `start_with` in manage.rs calls the drain after `registry().start()`, and `start()` in commands.rs calls `start_with`. The test `a_kill_switch_failed_introspection_is_requeued_by_start_and_rerun_once` seeds a failed record with the old kill-switch text and one with 'model unavailable', and shows that only the first is rerun.",
+      "command": "git diff crates/athena-core/src/introspect.rs crates/athena-core/src/manage.rs crates/athena-core/src/state.rs crates/athena-cli/src/commands.rs",
+      "observes": "The stopped check sits before the model call in `run_or_defer`; a queue directory and a drain are present; `start_with` calls the drain. The behavior is shown by the tests of criteria 1-3 and by the requeue test (cargo test --locked -p athena-cli --test introspection a_kill_switch_failed_introspection_is_requeued_by_start_and_rerun_once).",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read CHANGELOG.md under `## [Unreleased]` / `### Added`: one new bullet saying introspections are deferred while the kill switch is on and run after `athena start`, that `athena start` also reruns an introspection that failed with 'the kill switch is on' and has no other introspection (the cases of jobs 20261029-142858-5c0p and 20261017-155259-7mjc), and that no record schema changed.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "A single added bullet in Unreleased naming the deferral and `athena start`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the whole suite. The existing tests in introspection.rs, lifecycle.rs (`the_kill_switch_blocks_new_work`, 1719) and the other crates must pass unchanged. `a_failed_introspection_is_recorded_never_blocks_and_is_not_introspected` (introspection.rs:1032) runs with the switch off, so it still gets a failed record from 'model unavailable'. The diff of existing test bodies is empty; only new tests are added.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass.",
+      "fails_without": "A changed `start` signature would fail to compile at lifecycle.rs:1725; a deferral that also applied with the switch off would fail the failed-introspection test.",
+      "seam": "Existing tests; no seam added. `Athena::start()` keeps its signature (step 5), so lifecycle.rs:1725 compiles unchanged. Exists."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three checks Athena runs on the final tree, in this order: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. The command given is the test run, which includes the three new behavior tests and the requeue test; the verifier also runs the other two as separate whole commands. The producer runs `cargo fmt --all` first.",
+      "command": "cargo test --locked",
+      "observes": "fmt prints nothing and exits 0; clippy prints no warning and exits 0; test shows every test passing, including the new deferral, start-drain, intervention and requeue tests and the unchanged `the_kill_switch_blocks_new_work`.",
+      "fails_without": "Each check fails on a defect this change could carry. fmt fails on an unformatted file in the touched crates. Clippy `-D warnings` fails on an unused helper (for example `pending_introspections` or `defer` left unused) or a needless clone. `cargo test` fails if any new test is red: with no deferral, the criterion 1 and 3 tests see a failed record and zero pending; with no drain, the criterion 2 test sees zero records after start. It also fails if `start` changed signature, because lifecycle.rs:1725 would not compile.",
+      "seam": "The production gate commands Athena runs (cargo fmt, cargo clippy, cargo test over the workspace) run in the producer's working tree. No fake is injected by the command itself. The behavior under test is driven by the `Model` scripted driver and `Fixture` in crates/athena-cli/tests/introspection.rs (exists, lines 37-105), injected through `fx.athena(model.script(..))` with `FakeAgentDriver::with_registry` (common/mod.rs:179-182). The tests of criteria 1-3 are added by step 7; the fixture exists."
+    },
+    {
+      "criterion": 8,
+      "method": "Inspect the diff and status: no path under records/, no athena.toml, no defaults.toml, no workflow. docs/decisions.md changes only by lines added after the last decision (D176 at line 5094), with a Provenance bullet.",
+      "command": "git status",
+      "observes": "Modified paths are only the listed deliverables (introspect.rs, manage.rs, state.rs, commands.rs, tests/introspection.rs, CHANGELOG.md, docs/decisions.md). `git diff docs/decisions.md` shows only added lines at the end.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: the requeue rule selects every failed introspection whose failure says 'the kill switch is on' and that has no other introspection for the same event, not only the two named jobs. The producer's copy has no records/, so the count of such records cannot be read here. If other jobs match, the first `athena start` after this lands runs the model once for each. Should the rerun be limited to the two named jobs?"
+  ],
+  "producer_section_sha256": "f730c2d93d8e61feb9ac452397dd89ab9e33f9facee1ee87c988e3f31d698484"
+}

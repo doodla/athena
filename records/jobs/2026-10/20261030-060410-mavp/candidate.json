@@ -1,0 +1,162 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261030-060410-mavp",
+  "base_commit": "8238eadfd32f66d8dc04c6419a9ac064732b6b37",
+  "base_fingerprint": "sha256:181c81b0c46099ace1479b1e9500095189ea1a71b87b0c38a72d16ff795c7a63",
+  "previous_job": "20261030-044531-ncyj",
+  "candidate_commit": "1cb91434285ab39bbfd06636b94360bf8d032440",
+  "candidate_tree": "8d8279ffb98df38ee44b62bc327b97b2affaacfa",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 447025
+    },
+    {
+      "path": "crates/athena-cli/src/commands.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21356
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 63553
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 117420
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26504
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 39151
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 435255
+    }
+  ],
+  "fingerprint": "sha256:d428622e4f35e365cb6e5d4b2463880d30f673d7ddfc020849022d657ef0f7bf",
+  "violations": [],
+  "producer_report": {
+    "summary": "An introspection triggered while the kill switch is on is now deferred instead of recorded as failed. `run_or_defer` in introspect.rs reads `Registry::stopped()` before the model can be reached. With the switch on, it writes the event to `<state>/introspect-pending/<key>.json` (one file per job or intervention, not queued twice) and makes no record. A new `Athena::start_with(ui)` turns the switch off and then runs `run_pending_introspections`. That drain first queues any event whose introspections all failed with 'the kill switch is on', which reaches the two named jobs without editing records/. It then runs each pending event through the unchanged `introspect` and deletes the file once the record is committed. A run that fails stays a failed record and is not queued again. `Athena::start()` keeps its signature, and the CLI `athena start` calls `start_with(&Terminal)`. `Event` gained Serialize/Deserialize derives. No record type, status or schema changed. Four new tests in introspection.rs cover the job deferral, the run on start, the intervention case, and the requeue with a negative case. CHANGELOG has a new bullet and docs/decisions.md has a new appended D177 with a Provenance bullet. fmt, clippy, the policy scan, the mirrors test and the full `cargo test --locked` all pass on the final tree. The scratch log file is deleted, and `git status` lists only the seven intended files. The rerun of the two old failures needs a real model, so the owner has to run `athena start` after this lands.",
+    "files": [
+      "crates/athena-core/src/introspect.rs",
+      "crates/athena-core/src/manage.rs",
+      "crates/athena-core/src/state.rs",
+      "crates/athena-cli/src/commands.rs",
+      "crates/athena-cli/tests/introspection.rs",
+      "CHANGELOG.md",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "no output"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "finished with no warnings"
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test introspection",
+        "result": "pass",
+        "note": "35 passed, including the four new tests"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "22 passed"
+      },
+      {
+        "command": "cargo test -p athena-cli --test mirrors",
+        "result": "pass",
+        "note": "4 passed"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Full workspace run on the final tree completed with exit code 0. An earlier run was cut off at the timeout and its result was not confirmed; this rerun settles it. The log file was deleted afterwards."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-cli/tests/introspection.rs triggers `introspect_job` (a rejected or failed job) while the kill switch is on. It asserts that the fake driver was not invoked, no introspection record was committed with status failed, and one event is pending. Evidence: `cargo test` shows it passing.",
+        "status": "met",
+        "evidence": "`an_introspection_triggered_while_the_kill_switch_is_on_is_left_pending` commits a rejected job, calls `athena.stop()`, then `introspect_job` twice. It asserts a None result, `model.prompts` empty with the scripted reply unused, `introspections(&fx)` empty, exactly one pending Rejection event for the job, and a line containing 'deferred'. `cargo test --locked -p athena-cli --test introspection` passes (35 tests)."
+      },
+      {
+        "criterion": "The same test, or a second one, turns the switch off through the real `start` path (`Athena::start` or the `athena start` command). It asserts that the pending event now yields exactly one committed introspection record with status recorded, and that the queue is then empty. Evidence: `cargo test`.",
+        "status": "met",
+        "evidence": "`a_pending_introspection_runs_once_when_start_turns_the_switch_off` calls `athena.start_with(&ui)`, which returns true. It asserts exactly one record with status Recorded, the job and trigger Rejection, one model prompt, and an empty pending list. It then calls `athena.start()` and the real `athena start` binary, and the record count stays 1. The test passes in `cargo test --locked -p athena-cli --test introspection`."
+      },
+      {
+        "criterion": "A test covers an intervention-triggered introspection while the switch is on. It is deferred and then run on start, and a second `athena start` does not run it again. Evidence: `cargo test`.",
+        "status": "met",
+        "evidence": "`an_intervention_introspection_is_deferred_run_on_start_and_not_run_twice` asserts no record and one pending event while stopped. After `start_with` it asserts one Recorded record (trigger Intervention) and an empty queue. A second `start()` returns false and the count and prompts stay at 1. It passes. `a_kill_switch_failed_introspection_is_requeued_by_start_and_rerun_once` also passes."
+      },
+      {
+        "criterion": "The diff to crates/athena-core/src/introspect.rs (and the `start` path in crates/athena-core/src/manage.rs or crates/athena-cli/src/commands.rs) shows the stopped check happening before `driver.invoke`, with a queue of pending events and a drain run when the switch is turned off.",
+        "status": "met",
+        "evidence": "In introspect.rs, `run_or_defer` calls `self.state.registry().stopped()` and defers before `introspect` (which holds `driver.invoke`) is reached. The queue is `StateDir::introspect_pending_dir` in state.rs, with `defer`, `pending_files` and `pending_introspections`. The drain is `run_pending_introspections`, plus `requeue_kill_switch_failures`. In manage.rs, `start_with` calls `registry().start()` and then the drain. `start()` delegates to it, and commands.rs `start` calls `start_with(&Terminal)`. All visible in `git diff`."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry saying that introspections are deferred while the kill switch is on and run after `athena start`.",
+        "status": "met",
+        "evidence": "A new first bullet under `## [Unreleased]` / `### Added` in CHANGELOG.md says this, and names the rerun of earlier kill-switch failures. See `git diff CHANGELOG.md`."
+      },
+      {
+        "criterion": "No unrelated behavior changes. The existing tests in crates/athena-cli/tests/introspection.rs and the other crates pass unchanged, and `the_kill_switch_blocks_new_work` still passes. Evidence: `cargo test`.",
+        "status": "met",
+        "evidence": "No existing test body was edited; tests were only appended. `Athena::start()` keeps `Result<bool>`. The full `cargo test --locked` run on the final tree completed with exit code 0, so `the_kill_switch_blocks_new_work` and the other crates' tests pass unchanged. The original 31 introspection tests also pass."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy` (with -D warnings as configured) and `cargo test` pass, as recorded by Athena on the final tree.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; all passed (the full test run exited 0)."
+      },
+      {
+        "criterion": "The change does not edit anything under records/, docs/decisions.md or athena.toml. If a decision is recorded, it is a new appended decision with a Provenance bullet.",
+        "status": "met",
+        "evidence": "`git status --short` lists only CHANGELOG.md, commands.rs, tests/introspection.rs, introspect.rs, manage.rs, state.rs and docs/decisions.md. Nothing under records/, and no athena.toml, defaults.toml or workflow. docs/decisions.md only gained a new section D177 after D176, ending in a Provenance bullet. The `mirrors` test passes."
+      }
+    ],
+    "open_issues": [
+      "Departure from the accepted reading: the drain runs on every `athena start`, not only when the switch was on, so the first `athena start` after this lands reruns the two old failures. The accepted plan chose this and D177 records it.",
+      "The requeue rule picks up every event whose only introspections failed with 'the kill switch is on', not only the two named jobs. I could not count them because the working copy has no records/. The first `athena start` after this lands will spend one model call for each match. Limiting the rerun to the two named jobs is the user's call.",
+      "The rerun of the two failed introspections needs a real model and cannot be done by the producer. The owner runs `athena start` once after the change lands.",
+      "Two `athena start` commands at the same moment could run one pending event twice. This is not guarded or tested, and D177 says so.",
+      "The `athena start` command prints the drain's lines before its 'kill switch off' message."
+    ],
+    "mistakes": [
+      "I first told the user the full suite passed after reading a partial log of a run that was still going, then deleted the log. A rerun on the final tree later completed with exit code 0, so the claim now holds, but it was not supported when I made it.",
+      "I first named the closure `blocked` in `requeue_kill_switch_failures`, which read backwards. I renamed it to `not_kill_switch` before running any test."
+    ],
+    "learnings": [
+      "The Bash hook only allows cargo, chmod, git status/diff/log/show, ls, mv and rm. grep, tail, sed, echo and printf are refused, and git add is refused.",
+      "The fake driver returns `DriverError::Stopped` through the shared registry file, so `athena.stop()` in a test is enough to make the kill switch real for `introspect`.",
+      "`steward-pending` in steward.rs is the existing precedent for a queue of files in the state directory.",
+      "A full `cargo test --locked` takes longer than the 20-minute foreground limit here and gets moved to the background."
+    ],
+    "desires": [
+      "A way to read the evidence snapshot's introspection records to count how many failed with 'the kill switch is on', so the cost of the first `athena start` could be stated exactly.",
+      "A way to wait for a background command to finish inside the same turn."
+    ]
+  }
+}

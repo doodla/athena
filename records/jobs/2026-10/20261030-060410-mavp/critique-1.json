@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060410-mavp",
+  "round": 1,
+  "at": "2026-11-13T07:16:46.277937161Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The requeue rule looks for the substring 'the kill switch is on' in a failure message, though the driver returns a distinct error for this case that the code can check exactly. The same text check is also the only cover for the race between the switch check and the model call.",
+      "evidence": "introspect.rs:1434 writes `format!(\"the model could not run: {error}\")`, and athena-agent/src/lib.rs:131 gives DriverError::Stopped the text 'the kill switch is on (`athena start` turns it off)'. The failure field also takes `output.detail` (introspect.rs:1444-1447), which comes from the model run and could contain the phrase. claude.rs:517-518 and 544-545 return DriverError::Stopped, which `introspect` can match before building a failed record. Fix: In `introspect`, match `Err(DriverError::Stopped)` and defer the event instead of committing a failed record; this closes the race at its source. In the requeue scan, match the failure exactly against `format!(\"the model could not run: {}\", DriverError::Stopped)` instead of a substring, so old records are found by the driver's own text.",
+      "location": "Decision 5 / Step 5 (requeue_kill_switch_failures) and Risks (switch set between the check and the model call)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan rejects placeholder records because of the 'one per triggering event' rule, yet every rerun adds a second introspection for the same event. The dependents list does not mention that rule.",
+      "evidence": "athena-data/src/records/introspection.rs:181-182 says 'One per triggering event.' A requeued event ends with a failed record plus a new recorded one. The readers I checked cope with several: status.rs:819 lists all introspections for a job, reading/retry.rs:91 takes the newest recorded one, and labeled.rs:189 lists every introspection that has no label. Fix: State the exception in D177 (a kill-switch failure may be followed by one rerun record), add the rule at introspection.rs:181-182 to the dependents list, and update that doc comment if the producer may touch athena-data, or record that it is left stale.",
+      "location": "Decision 1 (rejected placeholder) vs Decision 5 / Dependents",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An unreadable queue file is skipped silently: it never runs, is never deleted, and nothing reports it.",
+      "evidence": "Step 3 says `pending_introspections` will 'ignore unreadable files'. A file half-written when the process dies (`defer` writes it in place) would sit in `introspect-pending/` forever, and the user would never see that an introspection was lost. Fix: Write each queue file to a temporary name and rename it into place. In the drain, print a ui line naming any file that cannot be read, so a lost event is visible.",
+      "location": "Step 3 (defer / pending_introspections)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test runs `athena start` as a command only after the queue is empty, so it shows nothing about the drain through the command, and it cannot safely be seeded.",
+      "evidence": "athena_bin (introspection.rs:292-299) runs the real binary, and wiring.rs:211 builds a DeferredDriver that calls the real Claude model. With an event queued, the command would try to run the real model. With the queue empty, a commands.rs that never drained would still pass, especially since `start()` itself delegates to `start_with(&Quiet)`. Fix: Drop the claim that this check covers the command's drain wiring, or only assert the command's printed output. Rely on the in-process `start` / `start_with` tests for the drain.",
+      "location": "Demonstration for criterion 2 (athena_bin start)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "`athena start` used to return at once; it now waits for one model call per queued event and loads the records on every run.",
+      "evidence": "manage.rs:504-506 now only removes the stop file; under the plan, `start_with` runs `introspect`, which calls the model, synchronously for each queued event. Fix: Say in the CHANGELOG bullet and in D177 that `athena start` may take as long as one model call per queued introspection, and print a line before each one runs.",
+      "location": "Step 5 / CHANGELOG entry",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read introspect.rs (Event at 805, introspect_job/introspect_intervention at 1272-1290, introspect with driver.invoke at 1433), manage.rs (intervene at 400, stop/start at 499-506), commands.rs start (649-661), wiring.rs open (nested marker set even when writes=false), lib.rs refuse_if_stopped, the agent driver's Stopped error, steward.rs pending_dir, state.rs and the existing tests. The plan's claims hold. The kill-switch check sits in one function that both entry points share, before the model can be reached. The queue follows the existing steward-pending pattern, so no record type or schema changes. `start()` keeps its signature, and its only callers are commands.rs:651 and lifecycle.rs:1725, so the dependents list is complete. `intervene` does not refuse while the switch is on, so the criterion 3 test can create its event as planned. The nested-run skip works because `athena start` opens Athena with `nested` set. The demonstrations run the real entry points with the real kill-switch file; only the model reply is faked. Draining on every start departs from the accepted reading, but it is justified (it reaches the two old failures) and recorded in D177. The remaining issues are minor: the requeue rule matches failure text by substring when an exact check is available, reruns contradict the plan's own one-record-per-event argument, unreadable queue files are dropped silently, and the command-line `athena start` check covers nothing."
+}

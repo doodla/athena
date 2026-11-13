@@ -500,9 +500,18 @@ impl Athena {
         Ok(self.state.registry().stop_all()?.len())
     }
 
-    /// `athena start`: turns the kill switch off. Returns whether it was on.
+    /// `athena start`: turns the kill switch off and runs the introspections deferred while it was on, silently.
+    /// Returns whether it was on.
     pub fn start(&self) -> Result<bool> {
-        Ok(self.state.registry().start()?)
+        self.start_with(&crate::Quiet)
+    }
+
+    /// `athena start` with a Ui for the lines of the introspections it runs
+    /// ([`Athena::run_pending_introspections`]). A problem with those never fails the start.
+    pub fn start_with(&self, ui: &dyn Ui) -> Result<bool> {
+        let was_on = self.state.registry().start()?;
+        self.run_pending_introspections(ui);
+        Ok(was_on)
     }
 
     /// `athena check`: every record, reconciliation, and resolution at `HEAD`, plus the gate over staged
