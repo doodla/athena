@@ -1112,6 +1112,23 @@ fn trend_section(trend: &athena_core::class_trend::ClassTrend) -> String {
     out
 }
 
+/// The `context` line of `athena status`: tokens loaded per landed job for each class of work, beside the share
+/// of its jobs that landed and its mistakes. Empty when no class has enough landed jobs.
+fn context_section(load: Option<&athena_core::context_load::ContextLoad>) -> String {
+    let mut out = String::new();
+    let Some(load) = load else {
+        return out;
+    };
+    for (i, line) in load.lines().iter().enumerate() {
+        if i == 0 {
+            let _ = writeln!(out, "context     {line}");
+        } else {
+            let _ = writeln!(out, "           {line}");
+        }
+    }
+    out
+}
+
 fn repeated_causes_section(causes: &[athena_core::hestia::RepeatedCause]) -> String {
     let mut out = String::new();
     for (i, c) in causes.iter().enumerate() {
@@ -1353,6 +1370,7 @@ pub fn status(v: &StatusView) -> String {
     if let Some(trend) = &v.class_trend {
         out.push_str(&trend_section(trend));
     }
+    out.push_str(&context_section(v.context_load.as_ref()));
     if let Some(need) = v.role_need.as_ref()
         && let Some(line) = need.line()
     {
@@ -2303,6 +2321,35 @@ mod tests {
             text.contains("worse: code 10.0 to 22.0 min over 6 jobs; the rise followed landed job 20261027-080000-aaaa"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_context_line_is_printed_with_its_figures() {
+        use athena_core::context_load::{ClassLoad, ContextLoad};
+        let text = context_section(Some(&ContextLoad {
+            classes: vec![ClassLoad {
+                class: "docs".into(),
+                closed_jobs: 4,
+                landed_jobs: 3,
+                tokens: 3600.0,
+                tokens_per_landed_job: 1200.0,
+                landed_percent: 75.0,
+                mistakes: 2,
+                mistakes_per_closed_job: 0.5,
+            }],
+        }));
+        assert!(text.starts_with("context     1 class(es)"), "{text}");
+        assert!(
+            text.contains(
+                "docs: 1200 tokens per landed job · 3 of 4 closed jobs landed (75%) · 2 mistake(s) recorded, 0.50 per closed job"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn no_context_line_without_data() {
+        assert_eq!(context_section(None), "");
     }
 
     #[test]

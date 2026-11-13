@@ -99,6 +99,7 @@ pub mod ci_result;
 pub mod class_trend;
 pub mod code_health;
 pub mod commits;
+pub mod context_load;
 pub mod design_surface;
 pub mod disk;
 pub mod evidence_labels;

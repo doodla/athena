@@ -5059,3 +5059,47 @@ should replace those estimates with its figures.
   Measured: the new brief test, the pin test against the enforcing text and the drift-helper test. Not measured:
   whether readings stop producing these criteria; the class stays in the introspection sweep. No reading rule
   changed, so no readings are newly refused.
+
+## D175 · Context compression is measured as tokens loaded per landed job, per class of work, beside the landed share and mistakes
+
+- **Case:** OLY-B-A13-01 (context compression is an explicit goal; Athena measures tokens loaded per class of work
+  and whether outcomes held) was active with no mechanism. `athena status` showed minutes per landed job per class
+  (the `trend` line) but nothing about the context a class loads, so a cut in tokens that cost outcomes could not
+  be seen.
+- **Decision:** `crates/athena-core/src/context_load.rs` computes, for each class of work with at least 3 landed
+  jobs, the tokens loaded per landed job. `athena status` prints it as the `context` line (`StatusView.context_load`,
+  `context` in `STATUS_MEASURE_LABELS`), and the OLY-B-A13-01 measure ends `status: context`.
+  - Numerator: the tokens of all the class's closed request jobs (landed, rejected, failed, timed out), so work that
+    failed is charged to the landed jobs. Denominator: the class's landed jobs. A closed job with no recorded
+    invocation is left out.
+  - Tokens loaded: `input + cache_read + cache_write` of each invocation, each by `Quantity::best_lower` (the value,
+    else the lower bound, else zero). A killed invocation with only a lower bound counts as the least it loaded.
+    Output tokens are not counted.
+  - Counted invocation kinds: reader, planner, critic, producer and verifier runs of a closed request job. Not
+    counted: steward, audience and auditor runs. Each carries its own generated job id and is stored apart from the
+    request jobs, so no class of work owns it.
+  - Outcomes held: the share of the class's closed jobs that landed, its recorded mistakes (the source of the
+    `mistakes` line, which includes mistakes with no job) and the mistakes per closed job. Tokens, landed share and
+    the rate cover closed request jobs; the raw count covers every recorded mistake of the class.
+  - A class with fewer than 3 landed jobs prints nothing, and with no class left there is no `context` line.
+  - Tests: `crates/athena-core/tests/context_compression.rs` (exact figures through `Records::load_dir`, the thin
+    class, the spec entry), unit tests in `context_load.rs`, `status.rs` and `display.rs`.
+- **Alternatives:** Mean tokens of landed jobs only, which hides the cost of failed attempts, so a cheaper class that
+  fails more would look better. `context.prompt_tokens`, the fixed prompt set per role, which the budgets test
+  already holds and which says nothing about what a class loaded. Counting output tokens, which are written, not
+  loaded. Input tokens only, which understates the load because most of it shows as cache read or write. A new
+  per-class quality score, which is outside the requirement. Joining auditor cost to the audited job: not needed
+  here, and a follow-up if wanted.
+- **Tradeoff:** A mean over 3 jobs of different sizes can be dominated by one large job; it is exact and explainable,
+  which a median would not be, because it would hide the failed jobs' tokens. Lower-bound quantities make a figure
+  understate the load. The mistake count is wider in scope than the tokens beside it. The figure says nothing about
+  whether a smaller context would hold outcomes; it only shows tokens and outcomes side by side.
+- **Reversal cost:** Low; remove the module, its `lib.rs` line, the `StatusView` field, the label, the printed line,
+  the tests, the timings line and restore the spec entry. No record schema, config key or prompt changed.
+- **Provenance:** Read: `crates/athena-core/src/class_trend.rs`, `crates/athena-core/src/status.rs`,
+  `crates/athena-core/src/store.rs`, `crates/athena-core/src/hestia.rs` (spec review),
+  `crates/athena-core/tests/learnings_recorded.rs`, `crates/athena-cli/src/display.rs`. Measured: the new tests, on
+  fixtures written as record files and loaded with `Records::load_dir`. Not measured: figures on the real records;
+  as a follow-up, compare each class's `context` figure in `athena status` with a hand sum of its closed jobs'
+  recorded invocation tokens. Whether a smaller context holds outcomes is not measured. No reading rule changed, so
+  no readings are newly refused.
