@@ -7979,6 +7979,36 @@ fn a_hard_reading_gets_the_stronger_producer_setting_with_its_reason_and_an_ordi
     }
 }
 
+/// The repository's own `athena.toml` sets the planner revision keys, so a planned job's revision calls run
+/// stronger than round 1: a hard reading differs in effort only, and an unmarked reading planned for a
+/// fails-without criterion that picked the cheaper allowed model also moves up a model.
+#[test]
+fn planner_revision_takes_effect_in_the_repository_config() {
+    let config = athena_data::Config::parse(&common::test_config()).unwrap();
+    let planner_effort = config.effort_for(athena_data::records::Role::Planner);
+    let hard_model = config
+        .models
+        .hard_producer_model
+        .clone()
+        .expect("athena.toml names a hard producer model");
+    // A hard reading: the planner runs on the hard producer model, at the planner's own effort in round 1.
+    let (model, effort) = config
+        .models
+        .planner_revision_setting(&hard_model, planner_effort);
+    assert_eq!(model, "claude-sonnet-5-5");
+    assert_eq!(effort, "xhigh");
+    assert_eq!(model, hard_model, "a hard reading's planner model is kept");
+    assert_ne!(effort, planner_effort, "the revision effort is stronger");
+    // An unmarked reading planned for a fails-without criterion, on the cheaper allowed model.
+    let (model, effort) = config
+        .models
+        .planner_revision_setting("claude-haiku-5-5", planner_effort);
+    assert_eq!(
+        (model.as_str(), effort.as_str()),
+        ("claude-sonnet-5-5", "xhigh")
+    );
+}
+
 #[test]
 fn every_role_runs_at_its_configured_model_and_effort_and_the_record_names_both() {
     let config = athena_data::Config::parse(&common::test_config()).unwrap();

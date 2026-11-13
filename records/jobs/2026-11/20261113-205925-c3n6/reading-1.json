@@ -1,0 +1,166 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261113-205925-c3n6",
+  "n": 1,
+  "at": "2026-11-13T20:59:52.560290921Z",
+  "invocation_seq": 1,
+  "base_commit": "bdcb6bc4a60496dd2211d5357b95af469d5a85ae",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Escalate planner model and effort on revision rounds via new keys",
+  "summary": "Retry of job 20261113-194336-scfc, following the introspection's proposed request. Add optional [models] planner_revision_model and planner_revision_effort. After a critic revise or mechanical plan-rule revision, the planner uses them only if set and not weaker than the current planner setting. Do not reuse hard_producer_*. Round 1 is unchanged. The owner who runs Athena can check this in tests.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the planner's recorded model and effort per round, not that keys exist."
+    },
+    {
+      "id": "tested",
+      "how": "New unit and integration tests, plus fmt, clippy and test."
+    },
+    {
+      "id": "mechanism",
+      "how": "The no-weaker rule is enforced in code and tested."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Prior job 20261113-194336-scfc: it failed in planning with no candidate, so nothing is kept. Its findings are addressed as follows. (a) Reusing hard_producer_* was a no-op here and could lower the setting: new dedicated keys are used and a weaker value is ignored. (b) The effect in this repo was misstated: the plan and CHANGELOG must state the effective planner model and effort with and without the change. (c) The criterion 1 wording about producer_setting no longer applies, because producer_setting is not used. Its out_of_scope items 'no new config keys' and 'no athena.toml change' are superseded by this request, which names new keys and an athena.toml entry. Its other out_of_scope items stay.",
+    "Code survey: read crates/athena-data/src/config.rs. Models has hard_producer_effort at line 331. producer_setting is at line 346. effort_for is at line 830, and it maps the planner to verifier_effort. Key validation is around line 669. Not read in this session, taken from the earlier job's findings: crates/athena-core/src/run/planning.rs (planning_round, lines 138-155), crates/athena-core/src/reading.rs (agent_spec, line 443), and the fake-agent helpers in crates/athena-core/src/run/tests.rs. The entry is Athena::go. No new record or data file is added, so check_record_file and AnyRecord are not involved. The property is measured by the recorded planner invocation model and effort per round.",
+    "Existing code: crates/athena-data/src/config.rs (Models, validation, effort_for), crates/athena-core/src/run/planning.rs (planning_round), docs/decisions.md and docs/spec.toml are extended.",
+    "Consumers: planner_revision_* are read only by planning_round in crates/athena-core/src/run/planning.rs and validated in crates/athena-data/src/config.rs. The athena.toml entry is the only user-set value.",
+    "Assumption: 'not weaker' is judged for effort by position in EFFORT_LEVELS (config.rs:337). For the model, it is judged by position in producer_allowed, which is assumed to be ordered weakest to strongest. The producer reads this ordering and states it in a doc comment. A key that would lower either value is ignored, and only that part falls back.",
+    "Assumption: both keys must be in the allowed lists when set (model in producer_allowed, effort in EFFORT_LEVELS), matching how the hard_producer_* keys are validated. Unset keys leave behavior unchanged.",
+    "Assumption: athena.toml gets a commented or actual entry for the new keys. The producer picks values stronger than the current planner settings so the change takes effect here, and the CHANGELOG says what the keys do in this repo."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-core/src/run/tests.rs drives Athena::go with the fake agent and a critic revise. It shows that the first planner invocation records the ordinary model and effort, and that the next one records planner_revision_model and planner_revision_effort. Run `cargo test -p athena-core` and cite the test name.",
+      "kind": "behavior"
+    },
+    {
+      "text": "New tests show that a mechanical plan-rule revision also escalates the next planner call. They also show that a key weaker than the current planner model or effort is ignored, and that with both keys unset every round keeps the same model and effort. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "New config.rs unit tests show that the keys parse as optional, that a value outside the allowed lists is rejected, and that an existing config without the keys still loads. Run `cargo test -p athena-data`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In crates/athena-data/src/config.rs, Models has optional planner_revision_model and planner_revision_effort. They are not derived from hard_producer_model or hard_producer_effort. Grep planning.rs for a diff showing no use of producer_setting or hard_producer_* in the planner path.",
+      "kind": "content"
+    },
+    {
+      "text": "The owner can see the escalation. The planner line printed by planning_round, or the invocation record, shows the model used on the revision round. A test in crates/athena-cli/tests/drain.rs or in the core tests asserts it. Run `cargo test -p athena-cli` if drain.rs is changed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "athena.toml has the new planner_revision_* entry under [models]. CHANGELOG.md has an entry that states the effective planner model and effort in this repo with and without the change, and what the keys do. docs/spec.toml, where it describes planning, mentions the revision setting.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md gets a new appended decision with a Provenance bullet that records why dedicated keys were chosen over hard_producer_*. No existing entry is edited.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --workspace --all-targets` and `cargo test --workspace` pass. Each is named as its own simple command, or cited from the Athena-recorded passing checks on the final tree.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Escalating the critic, reader or verifier.",
+    "Changing defaults.toml or any governance file other than the athena.toml [models] entry.",
+    "Changing crates/athena-core/src/status/planning.rs or any records measure.",
+    "Changing max_rounds or MAX_MECHANICAL_PASSES, or adding new retry limits.",
+    "Adding a repair round for mechanical findings in planning.",
+    "Reusing hard_producer_model or hard_producer_effort for the planner."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2200.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6753022452504318,
+      "p_user_intervenes": 0.06365054602184086,
+      "cost_usd": {
+        "p10": 0.5455711493099281,
+        "p50": 1.4791114,
+        "p90": 5.584448794384898
+      },
+      "wall_time_s": {
+        "p10": 604.9010394791464,
+        "p50": 2151.233744606,
+        "p90": 4389.899110529174
+      }
+    }
+  },
+  "departures": "Slightly above the reference. The change spans config, planning and the pipeline tests, and the previous attempt failed in planning.",
+  "urgent_reason": "Planning thrash causes failed rounds and wasted planning spend. A stronger planner on revision cuts these failed attempts.",
+  "hard_reason": "It changes the run pipeline: how the planning round picks the planner's model and effort on revision.",
+  "producer_effort": "high"
+}
