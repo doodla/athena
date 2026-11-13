@@ -45,6 +45,8 @@
 //! - [`divergence`]: reconciling observed behavior against claims in prompts and docs (OLY-B-S3-02): each
 //!   mismatch, unobserved claim and undocumented observation becomes a `Divergence` finding; a pure function,
 //!   not wired into any command;
+//! - [`mechanism_explanation`]: the check that each mechanism explanation cites a prompt, code and run source,
+//!   and, for Athena, its own records (OLY-B-S4-01); a pure function, not wired into any command;
 //! - [`labeled`]: the labeled set of reviewed introspections and the scoring of Jev's recorded shadow answers
 //!   against it, read-only;
 //! - [`evidence_labels`]: class labels derived from what happened after an introspection (the retry that
@@ -126,6 +128,7 @@ pub mod labeled;
 pub mod land;
 pub mod learning;
 pub mod manage;
+pub mod mechanism_explanation;
 pub mod method_experiment;
 pub mod mirrors;
 pub mod nested;
