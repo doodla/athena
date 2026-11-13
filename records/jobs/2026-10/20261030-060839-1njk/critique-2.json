@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060839-1njk",
+  "round": 2,
+  "at": "2026-11-13T11:11:21.439273769Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The stem rule keeps 3-letter function words, so 'the', 'and' and 'for' count as shared stems and coverage becomes almost free",
+      "evidence": "The plan keeps words of 3 or more letters and removes only `COMMON_WORDS` and `PART_FILLER`. Every one of the 30 `COMMON_WORDS` has 4 or more letters (topics.rs:157-161), because the list was written for `topic_words`, which keeps only words of 4+ letters (topics.rs:170). So 'the', 'and', 'for', 'not', 'add', 'one', 'all', 'can' and 'use' all survive as stems. With 3-character prefix matching they also match 'format', 'note', 'user' and 'added'. The plan's own worked example drops 'the' from the part '(2) Document the flag in the guide' ({docume, flag, guide}), but under the stated rule 'the' is a stem. The rule as written gives a different count from the one the plan reasoned with. Most parts and criteria share 'the', so the min(2, n) threshold in effect becomes 1 real word, and the 'narrowed to a vague criterion' case cannot be told apart reliably. Fix: Add a short stop list of function words (the, and, for, not, with, are, its, can, all, any, one, add, use, new, via, per, but, has, how, out). Allow prefix matching only when the shorter stem has 4 or more characters, or keep 3-letter stems for exact matches only. Recompute the worked examples under the rule exactly as stated.",
+      "location": "Plan Decision 6 and Step 2 (`part_stems`, `stems_match`); crates/athena-core/src/reading/topics.rs:157-161",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Parts of one request share a subject, so a criterion written for part (1) or (2) 'covers' the dropped part (3); the main demonstration and the sza7 case may not refuse",
+      "evidence": "Coverage is any criterion sharing min(2, n) stems with a part, and one criterion can cover several parts. In the plan's own fixture all three parts name the flag: '(1) Add the --json flag to status', '(2) Document the flag in the guide', '(3) Cover the flag with a timeout test'. A natural criterion for part 2, such as 'the guide documents the flag', shares {the, flag} with part 3 and so covers it, and `refuser_for` returns None for variant (a). The sza7 parts are all about status durations and check timeouts, so they share stems the same way. Step 9's instruction to 'repair the case text, not the threshold' would hide this by tuning fixtures until they pass. The failure class (a sibling part that goes missing) would then be measured only on hand-picked wording. Fix: Count only stems that are distinctive to the part: drop stems that occur in every other part of the same request, or weight stems by how many parts contain them. Alternatively, assign each criterion to the one part it best matches, so a criterion covers at most one part. Keep the fixture's three parts sharing 'flag' on purpose, so the demonstration exercises this.",
+      "location": "Decision 6 (b), Demonstration of criterion 2 variant (a), Criterion 6 sza7 case",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A criterion that only cites the marker counts as coverage, so the re-read after a refusal can defer the part again inside a criterion",
+      "evidence": "A criterion that cites '(3)', 'part 3' or 'item 3' covers the part unless it holds a `DEFER_PHRASES` phrase. That list leaves out 'out of scope', 'deferred' (only 'deferred to' is in it), 'not done', 'skipped' and 'later'. The refusal text tells the reader to 'cover it with a deliverable and a criterion'. On its one re-read (reading.rs:738-759), a reader that wants to defer part 3 can write 'Part (3) is out of scope for this job' or 'Item 3 is deferred' as a criterion, and the reading is accepted. That re-read path is exactly the failure class this check exists to close. Fix: Use a broader negation list on the criterion side only. There, a false hit costs just one cover, not a required part. It should include out of scope, deferred, defer, not done, skip, later, follow-up and not in this job. Also require a marker-citing criterion to share at least one distinctive stem with the part. Add a corpus case: 'Part (3) is out of scope' as a criterion, expected Refuse.",
+      "location": "Decision 4 and Decision 6 (a); Step 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The blast-radius claim understates the reach: every steward, hestia and code_health request has an `Acceptance:` section, so the replay window is mostly bullet requests",
+      "evidence": "`StewardRequest::new` always writes 'Acceptance:\\n' followed by `- ` bullets (steward.rs:581-584), and `root_cause_request` and `gate_request` build their text through it (hestia.rs:1051). So the bullet rule applies to nearly every generated request in the replay of the newest 50 accepted readings (replay.rs:9, 142-157). The replay holds a candidate whose newly refused share exceeds the declared share plus the margin (replay.rs:295-305). The plan has a two-way tension it does not name: a stricter matcher (needed for the two findings above) raises false refusals of reworded bullets; a looser one misses dropped parts. The 10% figure has no basis in the plan. Fix: State the tension in the plan. Consider matching acceptance bullets more leniently than enumerated parts (for example, one distinctive stem), because bullets are reworded often. As a local proxy for the replay, run the check over every generated-request corpus case (`root_cause_request`, `generated_root_cause_request`) with a typical reading.",
+      "location": "Risks 2 and 'gate result for requests with dash bullets' dependent; Criterion 5 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The dependents list omits the `read_for` call in run/pin.rs",
+      "evidence": "crates/athena-core/src/run/pin.rs:167 calls `self.read_for(...)`, so a pinned job's re-read also passes through the new gate step. The dependents list names only reading.rs:720, steward.rs:424 and drain.rs:121. `cargo test --locked` would run its tests, but the plan names no test for it. Fix: Add run/pin.rs:167 to the dependents list and name `cargo test -p athena-core run::` (the pin tests, run_pin_tests.rs) as its test.",
+      "location": "Dependents, `refusing_check` entry",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`generated_root_cause_request` cannot build the quoted-proposal case as the plan describes it",
+      "evidence": "The function hardcodes both preventions ('Add a ladder check for every layer; a tier list is wrong.' and 'Name each rung of the ladder in the reading.', refusal_corpus.rs:1328-1333) and takes only an extra first-paragraph sentence. There is no way to pass a prevention that holds '(1) ... (2) ... (3)'. Fix: Have the plan add a parameter or a sibling helper that takes the prevention text, still built through `athena_core::hestia::root_cause_request`, so the case uses the real line format.",
+      "location": "Demonstration of criterion 3, case `request-parts-quoted-proposal-enumeration-ignored`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The base code's root-cause policy prefers giving the stage information over adding a refusal rule; the plan does not say why information alone cannot prevent this failure",
+      "evidence": "The current root-cause template says: 'change the code so that information is given to it: in its brief, in the system facts it is shown, or in the inputs its reader receives. Prefer this over any rule that refuses work. A refusal rule is allowed only when giving the stage that information cannot prevent the failure.' The accepted reading asks for a refusal check, so that choice stands. The plan's only reason against giving information is the 2-token headroom in the reader prompt. It does not consider the reader's inputs, such as listing the parsed request parts in the reader brief built in code. Fix: In the doc comment and the CHANGELOG entry, say why giving the reader information is not enough (the reader already sees the request and deferred part (3) anyway). Optionally, name passing the parsed parts to the reader as a follow-up.",
+      "location": "Approach and Decision 7; crates/athena-core/src/hestia.rs:1017-1022",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the fix where the fault starts: a new `check_request_parts` step, last in `refusing_check` (checks.rs:520-551), backed by a separate parser so `request_text_acceptance`/`is_bullet` and their callers stay unchanged. Its handling of quoted-evidence lines (hestia.rs:1025-1041), the narrow list of deferral phrases, and the ordering argument are sound. The coverage matcher is not, and that matcher is the core of the fix. First, the stems keep 3-letter function words that `COMMON_WORDS` cannot remove, because that list was built for words of 4 or more letters. With 3-character prefix matching, 'the' and 'and' count as shared stems, and the plan's own worked example leaves 'the' out, so it does not follow the stated rule. Second, sibling parts share a subject ('flag' in the plan's fixture, timeouts in sza7), so a criterion for part 1 or 2 covers the dropped part 3, and the main demonstration may not refuse. Third, a criterion that only cites the marker counts as coverage, and the criterion-side negation list leaves out 'out of scope' and 'deferred'. On the re-read after a refusal, a reader can defer the part again inside a criterion. That is the failure class itself. Minor issues: the plan understates how many generated requests have `Acceptance:` sections, which matters for the replay share; run/pin.rs `read_for` is missing from the dependents; one corpus helper cannot build the quoted-proposal case; and the plan does not engage the base code's preference for giving the stage information over refusal rules. Verdict: revise. The matcher needs distinctive stems, a real stop list, and a stricter rule for marker-cited criteria."
+}

@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060839-1njk",
+  "round": 1,
+  "at": "2026-11-13T11:06:59.811786376Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The deferral word list matches common words, so real parts are wrongly exempted and good criteria are thrown out",
+      "evidence": "DEFER_PHRASES = later, follow-up, follow up, separately, separate job, next job, future, for now, not now, afterwards, not in this job, out of scope, defer. has_phrase (surveys.rs:39) matches whole words only. Ordinary parts such as '(2) Reject future timestamps', '(1) List each file separately' or '(3) Defer the flush until exit' would count as deferred by the request and skip the check, so a dropped part gets through. On the criterion side, 'Later retries reuse the cache' or 'future runs skip it' would stop counting as coverage, and a good reading would be refused. This reading's own criterion 4 contains 'later' and 'follow-up'. 'defer' also misses 'deferred', because the 'r' after it is a letter. This is a rule that matches common words. Fix: Use only phrases that defer to other work: 'follow-up job', 'in a follow-up', 'separate job', 'next job', 'later job', 'not in this job', 'deferred to', 'can wait'. Drop bare later/future/for now/separately/defer. Apply the criterion-side test only to those job-scope phrases, or drop it. Add corpus cases: '(2) Reject future timestamps' dropped → Refuse, and a covering criterion containing 'later retries' → Accept.",
+      "location": "Plan step 2 (DEFER_PHRASES) and step 3 (a criterion that itself defers does not cover); Decision 4",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Enumerations inside quoted introspection evidence are read as request parts",
+      "evidence": "Generated root-cause requests quote each introspection's proposal inline: 'Introspection … prevention it proposed: …', and the same for 'Cause:' (see this request, and root_cause_request at refusal_corpus.rs:280-297). When a proposal enumerates '(1) add a check, (2) edit the reader prompt, (3) …' with text after each marker, it passes the plan's sequence rule. The gate would then require the reading to cover a proposal the root-cause default lets the reader reject. This reading itself rejects 'edit the prompt'. The marker-list-without-text guard handles only '(1), (2) and (3)' with no text after the markers. The quoted lines are also cut off with '...', so a final part can be partial text. Fix: Do not take parts from quoted-evidence lines: lines starting 'Introspection ', 'Cause:', 'Failure class:', or holding 'prevention it proposed:'. Simpler still, read inline sequences only from the request's own instruction paragraphs. Add a corpus case: a root-cause request whose quoted proposal lists (1)(2)(3) with text, and a reading that fixes the cause another way → Accept.",
+      "location": "Plan step 2 (inline (1)..(2).. sequences read anywhere); Risks item 3",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Callers that reuse stored readings through check_reading_text are missing from the dependents",
+      "evidence": "crates/athena-core/src/steward.rs:424 (queued_work) runs crate::reading::check_reading_text on a proposed job's latest stored reading to decide whether to reuse it. crates/athena-cli/src/drain.rs:121 documents the same reuse rule. After the change, a stored reading that fails check_request_parts is re-read by a model instead of reused. The dependents name only replay.rs and athena check-reading for check_reading_text. They omit this path and its tests: steward.rs:2755 a_stored_reading_that_fails_a_reading_check_is_left_for_a_person, the REREAD_REQUEST fixtures at steward.rs:2585-2639, and athena-cli/tests/drain.rs:4407-4451. Fix: Add a dependents entry: 'stored-reading reuse in steward queued_work (steward.rs:424) and drain (athena-cli/src/drain.rs:121)'. Tests: cargo test -p athena-core steward::tests and cargo test -p athena-cli --test drain. Note that REREAD_REQUEST's bullet 'the greeting prints' is copied verbatim into the stored criterion, so it stays accepted.",
+      "location": "Dependents list",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A deferral written elsewhere in the request is missed",
+      "evidence": "Criterion 4 says 'unless the request text itself defers it'. The plan checks only the part's own text. A request with '(1) … (2) … (3) …' followed by 'Part 3 can wait for a follow-up job.' is still refused when the reading defers (3), which is a wrong refusal of a reading that follows the request. Fix: Also treat a part as deferred when a request sentence outside the parts has a job-scope deferral phrase and names the part's marker ('(3)', 'part 3', 'item 3', '3)'). Add a corpus Accept case for it.",
+      "location": "Plan step 3 / Decision 4 (part_defers on the part's own text only) vs criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The coverage threshold wrongly refuses natural rewordings",
+      "evidence": "Part '(2) Document the flag in the guide' gives stems {docume, flag, guide}. A natural criterion '[content] docs/guide.md describes --json' shares only 'guide' ('docs' falls under 4 letters once its s is dropped), and the deliverable path docs/guide.md shares only 'guide'. Each scores 1 < 2, so the reading is refused. The reader gets one re-read (reading.rs:738-759). A second refusal fails the reading, and the extra refusals count against the 10% declared share, held only above 15% (replay.rs:13,161). Fix: Count a criterion as covering a part when it cites the part's marker ('(2)', 'part 2'). Also count stems pooled from one criterion plus the deliverable paths it names. Add a corpus Accept case for the reworded shape above.",
+      "location": "Decision 4 (two shared stems inside a single criterion or a single deliverable path)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Line references to the helpers are wrong",
+      "evidence": "governed_reading is at reading.rs:4635, not 7292. Line 7293 is terms_reading, which wraps governed_reading. refuser_for at 7288 is correct. Fix: Fix the references so the producer finds the helpers: governed_reading at reading.rs:4635, terms_reading at 7293.",
+      "location": "Demonstrations for criteria 2 and 4 (fixture line references)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes the cause where it starts: a new check_request_parts step placed last in refusing_check, a separate parser that leaves is_bullet/request_text_acceptance alone, and corpus cases tied to the self-check every_acceptance_check_has_a_refusing_corpus_case. I confirmed the 13 step! lines (checks.rs:534-549), is_bullet/request_text_acceptance (topics.rs:266-282), has_phrase (surveys.rs:39), the corpus function_body/acceptance_check_names mechanism, and that no parts parser exists yet. The design has three major problems. (1) The deferral word list (later, future, for now, separately, defer, out of scope) is made of common words. It is matched against both parts and criteria, so real parts are wrongly exempted and good covering criteria are thrown out. (2) Inline (1)..(2).. sequences are read anywhere, including the introspection proposals that every generated root-cause request quotes as evidence. The gate would then force readings to cover a proposal the reader may rightly reject. (3) The dependents list leaves out the steward and drain paths that reuse stored readings through check_reading_text (steward.rs:424). Smaller points: a deferral written outside the part's own line is missed, the coverage threshold of two shared stems inside one criterion wrongly refuses natural rewordings, and some line references are off."
+}

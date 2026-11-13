@@ -5145,3 +5145,22 @@ should replace those estimates with its figures.
   records it once and empties the queue; an intervention is deferred, run on start and not run by a second start; a
   failed record with the kill switch text is rerun once and one with another failure is not. Not measured: a real
   model call, the number of old records the rule matches, and two simultaneous starts.
+
+## D178 · Landing is designed as one commit built on fetched main, not through the long-lived local branch
+
+- **Case:** Throughput review 20261113-190159-mapn found landing and rebuild at 2310.0 of the 2342.1 median minutes
+  per landed job, caused by one long-lived local landing branch from which every pull request carries earlier
+  unlanded jobs' commits.
+- **Decision:** Write `docs/design/direct-main-single-commit-landing.md`: fetch host main, build one commit by
+  `Git::merge_tree` from the base `Verified::base()` gives, push it as the job's own pull request, and keep the local
+  branch as a follower of main so the preconditions of `plan` (dispatch branch checked out, base an ancestor of the
+  head) hold. Proposed only; no code changes. A change implementing it must cite the review id in its request text.
+  The prediction is 5.0 minutes saved, an estimate, scored as the `THROUGHPUT.md` median after the change against
+  2337.1.
+- **Alternatives:** Deduping landing records; resetting the local branch after each merge; rebasing in a working copy;
+  batching jobs into one pull request. Each is rejected in the note.
+- **Tradeoff:** More conflicts when main moves fast, and jobs on the old branch at migration may go stale.
+- **Reversal cost:** Low; delete the note. Nothing is built.
+- **Provenance:** Read: `crates/athena-core/src/land.rs` (`plan`, `dispatched_from`, `refuse_detached`),
+  `crates/athena-git/src/lib.rs` (`merge_tree`, `commit_tree`), `docs/design/direct-main-merge-tree-landing.md`, and
+  the record of review 20261113-190159-mapn. Not measured: the saving, which is the review's expected figure.

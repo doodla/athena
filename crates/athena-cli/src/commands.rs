@@ -260,6 +260,28 @@ pub(crate) fn priority(job: String, level: String, json: bool) -> Result<u8> {
     Ok(0)
 }
 
+pub(crate) fn hold(job: String, json: bool) -> Result<u8> {
+    let athena = open(true)?;
+    let id = athena.set_hold(&job)?;
+    if json {
+        print_json(&serde_json::json!({ "job": id.as_str(), "on_hold": true }))?;
+    } else {
+        println!("{id} is now on hold; `athena release {id}` lifts it");
+    }
+    Ok(0)
+}
+
+pub(crate) fn release(job: String, json: bool) -> Result<u8> {
+    let athena = open(true)?;
+    let id = athena.release_hold(&job)?;
+    if json {
+        print_json(&serde_json::json!({ "job": id.as_str(), "on_hold": false }))?;
+    } else {
+        println!("{id} is released");
+    }
+    Ok(0)
+}
+
 pub(crate) fn focus(text: Option<String>, json: bool) -> Result<u8> {
     let athena = open(true)?;
     let current = match text {

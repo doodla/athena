@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-112906-kjvt",
+  "round": 2,
+  "at": "2026-11-13T11:42:33.513148658Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The replay rule contradicts the plan's own forecast. Following it reverts the work and fails the job with no candidate.",
+      "evidence": "The plan says every past code reading with a behavior criterion lacks the new labels, so all of them are newly refused, and the real share is 'likely above 35%'. Nothing short of loosening the check can lower that share, so the condition 'feedback cannot be acted on without loosening' is always true. Step 10 then tells the producer to stop with `no_change: blocked`. The system facts say a `no_change` outcome goes with a run that leaves the tree unchanged and fails the job. So the producer would have to undo every change: no candidate, the same result as job 20261030-060843-f4s2. The plan also never says what the loop does in the other branch. producer.rs:487-518 adds `replay_problem` as a send-back problem whenever `loop_replay.run.held` is true, so a producer that finishes and reports is sent back on every round until the round limit. replay.rs:9 shows the replay covers the newest 50 accepted readings (REPLAY_WINDOW), most of which are likely code readings with behavior criteria. Fix: Pick one path and state it. Recommended: the producer finishes the change, does not loosen anything, and in every report gives the measured share and the newly refused job ids. The plan states that the loop will send the held replay back each round until the limit, and that the job is then held at verification for a person to decide; that hold is the expected outcome. Drop the `no_change: blocked` branch for a held replay, or limit it to the case where the replay could not run at all. Add a labelled estimate of the share, for example the share of recent jobs in HISTORY.txt that change crates/ code, so the expected hold is stated rather than discovered.",
+      "location": "Decision 13; Step 10; Risks (first entry); Demonstration for criterion 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The routine-criterion word list fails the most common real form, a cargo command with a crate flag.",
+      "evidence": "`clause_words` (verify.rs:1368) turns 'cargo test -p athena-core passes' into [cargo, test, p, athena, core, passes]. 'p' and 'core' are not in the closed list, so the criterion is not routine and needs a ritual Direct check. Criteria in this very reading have the same shape ('Run `cargo test -p athena-core`'). Each such refusal also adds to the replay share. Fix: Before the word test, remove `-p <crate>`, `--test <name>`, other flags and backticked command text, or recognise '<cargo command> passes' directly. Add 'cargo test -p athena-cli passes' and 'Run `cargo test -p athena-core`; existing tests pass' as accepted fixtures.",
+      "location": "Decision 9 (`is_routine_criterion`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The skip-identifier rule refuses `no_change`, a common Athena term.",
+      "evidence": "A lowercase identifier whose first part is `no` counts as a skip switch. `no_change` is the producer outcome field (see the system facts, `no_change_reason` in run/candidate.rs), so 'criterion 4 asserts the producer reports `no_change`' would be refused unless reworded. The plan states this limit but has no fixture for it. Fix: Either keep a short exemption list of known record and field names (`no_change` and the like), or require a skip identifier to name a gate or entry-point word (for example `skip_probe` when `probe` is in Gate order). Add a fixture for the chosen behavior.",
+      "location": "Decision 10, identifier form (2)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Listing a name under `Reuses:` exempts it from the skip-switch rule, so a reader can hide a skip switch there.",
+      "evidence": "'Reuses: `skip_probe`' plus 'Direct check: criterion 2 counts calls to `run_job` with `skip_probe` set' would be accepted. That is exactly the measurement through a skip switch that criterion 3 asks the check to refuse. Fix: Exempt only names in Entry point and Gate order, or exempt a Reuses name only when the Direct check also names a gate. Add a refusing fixture for the Reuses case.",
+      "location": "Decision 10 ('A name that appears in Entry point, Gate order or Reuses is never refused')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Negation scope breaks at commas and full stops because segments come from `split_clauses`.",
+      "evidence": "`split_clauses` splits on `; : . ,` (verify.rs:1351). In 'not a skip switch, `skip_probe` or ATHENA_NO_PROBE' the identifiers fall into a segment with no negator and are refused. Splitting on '.' and ':' also cuts tokens such as `athena.failure-class/1` and `a::b` inside a Direct check. Fix: For the negation test, split Direct check clauses only on ';' and sentence ends (a full stop followed by whitespace), or carry a leading negator across a comma-separated list. Add a fixture with a comma list of negated identifiers.",
+      "location": "Decision 10 (segments from `split_clauses`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Some brief test pins may be removed while the guide is reworded.",
+      "evidence": "The pins 'order in which resolution and probing run', 'allow-list' and 'measured directly' (briefs.rs:3728-3733) will likely go when the 'Cover:' sentence is replaced. The plan allows dropping them but does not say which pins replace them. Fix: List the new pins: each label in `SURVEY_LABELS` and `check_behavior_test_design`. Note that `guide_labels_match_the_parser` covers the labels from athena-core.",
+      "location": "Step 2 (phrase pins in `the_reader_brief_tells_the_reader_to_write_a_code_survey`)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's claims against the snapshot using Read and Grep; nothing was run. Most claims hold. The new step goes directly after `step!(check_code_survey(reading));` at checks.rs:539. verify.rs has `split_clauses`, `clause_words` and `is_negator` at lines 1337, 1368 and 1378. AnyRecord has 37 serde tags and HistoryRecord has 6. The CLI fixture uses class 'feature' (main.rs:1234). The reading-rules section is pinned at ≤3045 and <3150 bytes (briefs.rs:3710-3715). `INPUT_FORMS` is `[&str; 63]`. The plan lists every caller of `check_reading_text`: main.rs, steward.rs, drain.rs tests, run/tests.rs and replay.rs. Fixtures that go through the whole gate with a short survey exist only in reading.rs and refusal_corpus.rs. One major problem remains: how the plan handles the replay hold. The plan itself predicts the real newly refused share will be above 35%. Its rule for that case is to stop with `no_change: blocked` when the feedback \"cannot be acted on without loosening\", and by the plan's own reasoning that is always true. `no_change` means an empty tree, so following the rule throws away the work and fails the job with no candidate, as the earlier job did. Separately, the producer loop sends a held replay back on every round. The smaller findings are about lexical rules that will refuse common real forms: routine criteria that name a crate, and `no_change` as an identifier."
+}

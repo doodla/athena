@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060843-f4s2",
+  "round": 5,
+  "at": "2026-11-13T11:28:25.572711636Z",
+  "invocation_seq": 11,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/verify.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/verify.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out the `athena check-reading` command, which calls check_reading_text and is the binary the replay runs.",
+      "evidence": "Grep found that crates/athena-cli/src/main.rs `check_reading_command` calls `athena_core::reading::check_reading_text`, and replay.rs:112 runs `cmd.arg(\"check-reading\")` on the base and candidate builds. The CLI tests check_reading_prints_accept_for_a_reading_the_rules_accept and check_reading_prints_refuse_... run real readings through it. The dependents list names run/mod.rs replays and replay.rs:54 but not this command or its tests. Its test (`design_check_does_not_apply_outside_its_gate`) does not exercise the CLI path. The fixture in main.rs:1234 uses class 'feature', so the new step probably does not change those tests, but the plan does not say so or test it. Fix: Add a dependents entry for crates/athena-cli/src/main.rs `check_reading_command` (`athena check-reading`, the binary the replay runs) with Test: `cargo test -p athena-cli check_reading`. Say that its fixture reading has class 'feature', so the new step does not apply. Optionally add one CLI case: a code reading with a short survey prints `refuse:` and names `check_behavior_test_design`.",
+      "location": "Dependents: 'reading acceptance gate order' entry; crates/athena-cli/src/main.rs:683-712 and the tests at 1265-1425",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan says no step can measure the real newly refused share, but the in-loop replay measures it during the producer run and sends it back. The plan does not say what the producer does with that result.",
+      "evidence": "run/mod.rs:2275-2334 (`loop_replay`) runs replay_cases on the host records after each parsed report when the change touches crates/, and it sends the list and the share back to the producer. Labels like `Entry point:` are new, so nearly every past code reading with a behavior criterion will be newly refused, and the producer will get a send-back above the 25% limit. Decision 11 says not to loosen the check, but no step says what the producer should do when that feedback arrives. Fix: Fix the risk text: the in-loop replay measures the real share. Add an instruction to step 10: if the in-loop replay reports a share above 25%, do not change the markers. Report the measured share and the newly refused job ids in the report, or stop with `no_change: blocked` if the open question has no answer.",
+      "location": "Risks, first item; Decision 11; Step 10",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The skip-switch and internal-helper check only catches readings that use those literal English words. A real skip switch or helper read written as an identifier passes.",
+      "evidence": "clause_words (verify.rs:1368-1376) keeps `_` inside words, so `skip_probe` or `ATHENA_SKIP_X` is one token and never matches the phrase 'skip switch'. A direct check such as 'criterion 2 sets `ATHENA_NO_PROBE=1` and asserts the count is 0', or 'asserts `names_record_evidence` returns true', contains a measurement verb and none of the listed phrases, so it is accepted. These are the failures the introspections describe. Fix: Add a structural test that uses the labels the check already parses. A `Direct check:` clause must name the entry point, a gate from `Gate order:`, or a planner, producer or model call. An identifier containing `skip`, `no_`, `disable` or `bypass`, or an all-caps environment-variable token, is refused as a skip switch unless the clause negates it. Keep the phrase list as well. If this is out of scope for this round, state the limit in the doc comment and the CHANGELOG.",
+      "location": "Decision 9; Criterion 3 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The rule asks for a `Direct check:` clause for every behavior criterion, including routine ones such as 'fmt, clippy and test pass', which forces boilerplate.",
+      "evidence": "The accepted reading's own criteria 5 and 7 are behavior criteria that only say existing tests and fmt, clippy and test pass. The request asks for 'a direct check for each claimed property'. A regression criterion of the form 'cargo X passes' claims no new property. Under decision 8 every reading would need clauses like 'criterion 7 asserts cargo test passes', which is ritual text and adds to the replay refusals. Fix: Exempt a behavior criterion whose text only names cargo fmt, clippy or test passing, or 'existing tests pass' (reuse an existing matcher if there is one), and add a fixture. Or keep the rule, give the reason in decision 8, and show the form for such criteria in the guide example.",
+      "location": "Decision 8",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The record-tag probe parses serde's error text even though the enums already have schema accessors.",
+      "evidence": "AnyRecord::schema (records.rs:1407) and HistoryRecord::schema (history.rs:417) map each variant to its tag, but they need a value of the type, so they cannot list the tags. The plan's alternative (parsing serde's 'expected one of' message, pinned by an include_str! test against the source) works. Its own rejected option, a public tag list in athena-data, would be cleaner but is outside the deliverables. Fix: No change needed now. Mention a follow-up: a `pub const SCHEMA_TAGS` in athena-data next to `schema()`, so this check does not depend on serde's message format.",
+      "location": "Decision 7",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read surveys.rs, verify.rs, checks.rs, replay.rs, run/mod.rs, both record enums, the reader guide and its briefs tests, and the athena-cli entry points. Most of the plan matches the code. The helpers it names exist at the cited lines: code_surveys, names_record_evidence, changes_code_with_behavior_criterion, existing_code_assumptions, and split_clauses, clause_words and is_negator in verify.rs. AnyRecord and HistoryRecord are both `#[serde(tag = \"schema\")]` with the tag lists the plan describes. CODE_SURVEY_GUIDE is public in athena-context. INPUT_FORMS has length 63, and the section bounds are 3045 and 3150. One finding is major. The dependents list leaves out the `athena check-reading` command in athena-cli/src/main.rs (check_reading_command and its tests). That command calls check_reading_text, and the refusal-rule replay runs it on both builds (replay.rs:112), so criterion 4 depends on it. The other findings are minor. The plan says no step can measure the real replay share, but the in-loop replay (run/mod.rs:2275-2334) measures it during the producer run and sends it back, and the plan does not tell the producer what to do then. The skip-switch and internal-helper rule only catches readings that use those literal English words. The rule asks for a `Direct check:` clause even on routine criteria such as 'fmt, clippy and test pass'. The verdict is revise, because the major finding needs only a dependents entry and a test command."
+}
