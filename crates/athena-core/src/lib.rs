@@ -73,6 +73,8 @@
 //! - [`code_health`]: file and function sizes of Athena's own sources, measured with `syn` after every landing;
 //!   a request is queued for each file over a threshold, and a design review every ten landings, counted from a
 //!   baseline record;
+//! - [`context_load`]: tokens loaded per landed job by class of work, with the landed share and the mistakes of
+//!   the same jobs (OLY-B-A13-01); read from existing records and shown as the `context` line of `athena status`;
 //! - [`design_surface`]: a model-free inventory of Athena's design surface at a commit (commands and flags,
 //!   `athena.toml` sections and keys, record schemas, roles, crates), the diff of two inventories, and the
 //!   `athena.design-surface/1` record that keeps one for later comparison;
@@ -99,6 +101,7 @@ pub mod ci_result;
 pub mod class_trend;
 pub mod code_health;
 pub mod commits;
+pub mod context_load;
 pub mod design_surface;
 pub mod disk;
 pub mod evidence_labels;

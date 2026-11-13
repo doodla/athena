@@ -305,6 +305,7 @@ fn empty_row(rule: &str) -> RuleRefusals {
 pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
     ("throughput", "throughput"),
     ("trend", "class_trend"),
+    ("context", "context_load"),
     ("role need", "role_need"),
     ("checks", "check_durations"),
     ("planning", "planning_cost"),
@@ -460,6 +461,10 @@ pub struct StatusView {
     /// with the job after which a rising class got worse; absent until a class has enough landed jobs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub class_trend: Option<crate::class_trend::ClassTrend>,
+    /// Tokens loaded per landed job by class of work, with the landed share and the mistakes of the same
+    /// closed jobs (requirement OLY-B-A13-01); absent until a class has enough landed jobs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_load: Option<crate::context_load::ContextLoad>,
     /// Which roles ran in the newest jobs that did model work (requirement OLY-9-11), read from every source of
     /// invocations; absent until enough jobs ran a model. `athena status` prints it only when a role is a
     /// retire candidate.
@@ -1315,6 +1320,7 @@ impl Athena {
                 &crate::proposals::current(&records.proposals),
             )),
             class_trend: crate::class_trend::ClassTrend::compute(&records),
+            context_load: crate::context_load::ContextLoad::compute(&records),
             role_need: crate::role_need::RoleNeed::compute(&records),
             interventions_by_category: by_category,
             interventions_by_class: by_class,

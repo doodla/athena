@@ -1112,6 +1112,19 @@ fn trend_section(trend: &athena_core::class_trend::ClassTrend) -> String {
     out
 }
 
+/// The `context` line of `athena status`: tokens loaded per landed job by class of work.
+fn context_section(context: &athena_core::context_load::ContextLoad) -> String {
+    let mut out = String::new();
+    for (i, line) in context.lines().iter().enumerate() {
+        if i == 0 {
+            let _ = writeln!(out, "context     {line}");
+        } else {
+            let _ = writeln!(out, "            {line}");
+        }
+    }
+    out
+}
+
 fn repeated_causes_section(causes: &[athena_core::hestia::RepeatedCause]) -> String {
     let mut out = String::new();
     for (i, c) in causes.iter().enumerate() {
@@ -1352,6 +1365,9 @@ pub fn status(v: &StatusView) -> String {
     let _ = writeln!(out, "{}", v.improvement_cycle);
     if let Some(trend) = &v.class_trend {
         out.push_str(&trend_section(trend));
+    }
+    if let Some(context) = &v.context_load {
+        out.push_str(&context_section(context));
     }
     if let Some(need) = v.role_need.as_ref()
         && let Some(line) = need.line()
@@ -2816,5 +2832,244 @@ mod tests {
         assert_eq!(duration(240.0), "4m");
         assert_eq!(duration(365.0), "6m05s");
         assert_eq!(duration(3900.0), "1h05m");
+    }
+}
+
+/// End to end: records are committed in a temporary repository, `Athena::status` builds the view from them
+/// through the real loader, and `status` prints it. Nothing is hand-built.
+#[cfg(test)]
+mod context_status_tests {
+    use super::*;
+    use athena_agent::fake::Script;
+    use athena_data::records::{
+        AnyRecord, Build, DriverInfo, Intervention, InterventionCategory, InterventionSource,
+        Invocation, InvocationCaps, InvocationContext, InvocationOutcome, Job, JobKind, Outcome,
+        OutcomeState, Owner, Role, Tokens, Totals,
+    };
+    use athena_data::{JobId, Quantity, RecordId, Unit};
+    use athena_git::Git;
+    use std::collections::BTreeMap;
+
+    fn job_id(n: u32) -> JobId {
+        JobId::parse(&format!("202611{n:02}-120000-k{n:03}")).unwrap()
+    }
+
+    fn tokens(v: f64) -> Quantity {
+        Quantity::measured(v, Unit::Tokens, "result.usage")
+    }
+
+    /// A closed job of `class` that loaded `loaded` tokens (all as input) and ended as `state`.
+    fn closed_job(n: u32, class: &str, loaded: f64, state: OutcomeState) -> Vec<AnyRecord> {
+        let id = job_id(n);
+        let job = Job {
+            id: id.clone(),
+            kind: JobKind::Request,
+            title: "A job".into(),
+            class_of_work: Some(class.into()),
+            capability: None,
+            accepted_reading: None,
+            accepted_by: None,
+            owner: Owner {
+                role: "athena".into(),
+                capability: None,
+                model: None,
+                note: None,
+            },
+            verifier_model: None,
+            caps: None,
+            base_commit: None,
+            config_sha256: None,
+            defaults_sha256: None,
+            athena: None,
+            driver: None,
+            brief_sha256: None,
+            dispatched_at: None,
+            request_path: None,
+            request_sha256: None,
+            cost: None,
+            tokens: None,
+            note: None,
+            pin: None,
+            dispatch_branch: None,
+            allowed_paths: None,
+        };
+        let invocation = Invocation {
+            job: id.clone(),
+            seq: 1,
+            role: Role::Producer,
+            driver: DriverInfo {
+                name: "claude-code".into(),
+                version: "2.1.299".into(),
+            },
+            athena: Build {
+                version: "0.1.0".into(),
+                source_commit: "0".repeat(40),
+                dirty: false,
+            },
+            model: "m".into(),
+            effort: None,
+            context: InvocationContext {
+                components: vec![],
+                prompt_sha256: "0".repeat(64),
+                prompt_tokens: tokens(1.0),
+                host_baseline: tokens(600.0),
+                tools: vec![],
+            },
+            caps: InvocationCaps {
+                max_budget_usd: 1.0,
+                timeout_s: 600,
+            },
+            started_at: "2026-11-01T12:00:00Z".parse().unwrap(),
+            ended_at: "2026-11-01T12:05:00Z".parse().unwrap(),
+            wall_time: Quantity::measured(60.0, Unit::Seconds, "athena clock"),
+            tokens: Tokens {
+                input: tokens(loaded),
+                output: tokens(7777.0),
+                cache_read: tokens(0.0),
+                cache_write: tokens(0.0),
+            },
+            models_used: BTreeMap::new(),
+            cost: Quantity::reported(0.5, Unit::Usd, "Claude Code total_cost_usd"),
+            outcome: InvocationOutcome::Success,
+            detail: None,
+            turns: None,
+            commands_run: vec![],
+            policy_denials: vec![],
+            reading_attempt: None,
+        };
+        let outcome = Outcome {
+            job: id,
+            state,
+            reason: "r".into(),
+            at: "2026-11-10T12:00:00Z".parse().unwrap(),
+            totals: Some(Totals {
+                cost_all: Quantity::reported(1.5, Unit::Usd, "Claude Code total_cost_usd"),
+                cost_execution: Quantity::reported(1.0, Unit::Usd, "Claude Code total_cost_usd"),
+                wall_time_execution: None,
+                tokens: BTreeMap::new(),
+                invocations: 1,
+            }),
+            branch: None,
+            base_commit: None,
+            candidate_commit: None,
+            after_blocked: false,
+            through_commit: None,
+        };
+        vec![
+            AnyRecord::Job(Box::new(job)),
+            AnyRecord::Invocation(Box::new(invocation)),
+            AnyRecord::Outcome(Box::new(outcome)),
+        ]
+    }
+
+    fn mistake_on(n: u32, class: &str, job: u32) -> AnyRecord {
+        AnyRecord::Intervention(Intervention {
+            id: RecordId::parse(&format!("20261105-1200{n:02}-1abc")).unwrap(),
+            at: "2026-11-05T12:00:00Z".parse().unwrap(),
+            what: "what".into(),
+            why: "why".into(),
+            class_of_work: class.into(),
+            category: InterventionCategory::Mistake,
+            job: Some(job_id(job)),
+            source: InterventionSource::User,
+            with_staged_changes: false,
+        })
+    }
+
+    fn commit_records(git: &Git, root: &std::path::Path, records: &[AnyRecord]) {
+        for r in records {
+            let path = root.join(r.canonical_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, r.to_json()).unwrap();
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "Add fixture records"])
+            .unwrap();
+    }
+
+    fn context_lines(text: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut inside = false;
+        for line in text.lines() {
+            if line.starts_with("context ") {
+                inside = true;
+                found.push(line.to_string());
+            } else if inside && line.starts_with("            ") {
+                found.push(line.to_string());
+            } else {
+                inside = false;
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn status_prints_the_context_line_from_seeded_records_and_not_without_them() {
+        let repo = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let git = Git::at(repo.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        for (key, value) in [
+            ("user.name", "Test User"),
+            ("user.email", "noreply@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            git.run(["config", key, value]).unwrap();
+        }
+        for (path, content) in [
+            ("athena.toml", include_str!("../../../athena.toml")),
+            ("defaults.toml", include_str!("../../../defaults.toml")),
+            ("README.md", "# Demo\n"),
+        ] {
+            std::fs::write(repo.path().join(path), content).unwrap();
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run([
+            "commit",
+            "-q",
+            "-m",
+            "Start a demo repository\n\nAthena-Job: bootstrap",
+        ])
+        .unwrap();
+        // Status runs no agent: the script must never be called.
+        let script: Script = Box::new(|_| panic!("status runs no agent"));
+        let athena = athena_core::test_support::make_athena(
+            &git,
+            &state.path().join("repo"),
+            vec![],
+            script,
+        );
+        let shown =
+            |athena: &athena_core::Athena| context_lines(&status(&athena.status().unwrap()));
+
+        // No records: no context line.
+        assert_eq!(shown(&athena), Vec::<String>::new());
+
+        // Two landed jobs per class: below the floor, still no line.
+        let mut thin = Vec::new();
+        thin.extend(closed_job(1, "code", 1000.0, OutcomeState::Landed));
+        thin.extend(closed_job(2, "code", 2000.0, OutcomeState::Landed));
+        thin.extend(closed_job(5, "docs", 500.0, OutcomeState::Landed));
+        thin.extend(closed_job(6, "docs", 1500.0, OutcomeState::Landed));
+        commit_records(&git, repo.path(), &thin);
+        assert_eq!(shown(&athena), Vec::<String>::new());
+
+        // A third landed job in each class, one failed code job, and two mistakes on code jobs.
+        let mut more = Vec::new();
+        more.extend(closed_job(3, "code", 3000.0, OutcomeState::Landed));
+        more.extend(closed_job(4, "code", 9000.0, OutcomeState::Failed));
+        more.extend(closed_job(7, "docs", 1000.0, OutcomeState::Landed));
+        more.push(mistake_on(1, "code", 1));
+        more.push(mistake_on(2, "code", 4));
+        commit_records(&git, repo.path(), &more);
+        assert_eq!(
+            shown(&athena),
+            vec![
+                "context     mean input, cache-read and cache-write tokens loaded per landed job, by class of work, with the landed share and the mistakes of the same closed jobs".to_string(),
+                "            code: 2000 tokens per landed job over 3 landed jobs · landed 3 of 4 closed (75%) · 2 mistakes in those 4 jobs".to_string(),
+                "            docs: 1000 tokens per landed job over 3 landed jobs · landed 3 of 3 closed (100%) · 0 mistakes in those 3 jobs".to_string(),
+            ]
+        );
     }
 }
