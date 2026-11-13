@@ -1,0 +1,40 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261113-181330-z030",
+  "at": "2026-11-13T18:13:30.092860512Z",
+  "trigger": "intervention",
+  "job": null,
+  "intervention": "20261113-181318-b2je",
+  "class_of_work": "other",
+  "category": "mistake",
+  "what_happened": "The the person running Athena (the agent running Athena by hand) re-queued two lost planner requests with `athena retry`, then ran `athena go` on one of them (20261113-181007-baf1) in a foreground call with a 110 s timeout, while a batch was running. `go` runs the whole job itself, so the timeout killed it mid-run. The job was left marked running with no process behind it. No job work was judged.",
+  "failure_class": "20261102-005323-42yz",
+  "new_class": false,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "The the person running Athena acts on shared state without Athena showing or guarding it. The command name `go` hides that it runs the whole job in the foreground. Nothing warns that it is long-running, and nothing blocks it or flags it when a batch is already running. Nothing marks a killed run as interrupted, so the job is left \"running\" with no process. Safe use depends on the the person running Athena remembering their own notes.",
+  "other_causes": [
+    "Athena does not detect a running job whose process has died, so the stale 'running' state persists.",
+    "The the person running Athena's own rule against running jobs beside a batch lives only in notes, not in a check."
+  ],
+  "open_hypotheses": [
+    "Whether the stranded job can be retried or closed cleanly, or whether it hits the stuck-job state where both are refused."
+  ],
+  "contradictions": [
+    "The registry class describes `approve-work`; this event involved `go`, a different command with the same hidden long-run behavior."
+  ],
+  "prevention_kind": "code-check",
+  "prevention": "Add a code check in `athena go` (and any other command that runs a whole job). It should refuse to start while a batch or drain is running, unless explicitly forced. It should print up front that the command runs the job in the foreground and takes minutes, and point to a tracked or detached run mode. It should also record the process id and let `athena status` mark a job whose process is gone as interrupted and retryable. With that in place, a foreground timeout cannot leave a silent running-with-no-process job.",
+  "proposed_request": "Make `athena go` safe to run beside a batch. (1) If a drain or batch is running, `go` refuses to start and says so, unless `--force` is given. (2) At start, `go` prints that it runs the whole job in the foreground and can take many minutes, and names the detached or tracked way to run it. (3) The job records its process id, and `athena status` and `athena retry` treat a job marked running whose process is gone as interrupted and retryable, without needing a manual close. Acceptance: a test starts `go` while a fake batch lock is held and sees the refusal. A second test kills a job's process and sees the job shown as interrupted and accepted by retry. Add a CHANGELOG.md entry.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.126318,
+    "input_tokens": 2,
+    "output_tokens": 1119
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}

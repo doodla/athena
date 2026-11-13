@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060410-ez1z",
+  "round": 3,
+  "at": "2026-11-13T08:43:49.810839323Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/hestia.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/hestia.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new record type is left out of the record reference, docs/records.md",
+      "evidence": "docs/records.md is the reference for record files. It lists `priority-<n>.json  athena.priority/1` in the job-directory layout (line 34) and has a schema row for it (line 92). The plan adds `athena.hold/1` at `<job>/hold-<n>.json` and deliberately skips this file because it is not a listed deliverable and no test reads it (I confirmed by grep that no test reads it). Under the 'strangers' default, an outside reader looking up the files in a job directory would not find hold-<n>.json. Fix: Add one layout line and one schema row for `athena.hold/1` next to the priority entries, or say in the report that the reference is knowingly left incomplete. The cost is two lines; there is no test to update.",
+      "location": "Decision 7; docs/records.md:34 and :92",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Dependents of an on-hold job that is running are not held",
+      "evidence": "`Plan::build_with` counts a dependency outside the entries as met unless the history shows it failed (plan.rs:712-715). A job started on purpose with `athena go` while on hold is Dispatched and running. `interrupted_work` leaves running jobs out, so the job is not among the entries, and an item that depends on it can be dispatched while it is still on hold. This is how any running dependency is treated today, so the plan does not make it worse. Fix: Add one sentence to the CHANGELOG or the `HoldRecord` doc: dependents are held only while the on-hold job is in drain's queue. No code change is needed.",
+      "location": "Risks (running job); plan.rs:709-716",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Verdict: accept. I checked the plan's main claims against the snapshot (Read, Grep and Glob only) and found no blocker or major finding. Drain dispatches only `batches_for` groups and leaves out every id in `plan.refused` (drain.rs:3034-3064). Every plan builder ends in `Plan::build_with` (plan.rs:788, 845, 899). The approval step (drain.rs:2119) works on proposals, not on jobs. `entry_of` returns an entry for every job that has records, so an on-hold item cannot slip through as an item without a plan entry. Keeping an on-hold entry in `pending` and seeding the held list with it reuses the existing dependents loop (plan.rs:700-726). `backfill_step` (hestia.rs:1815-1871) has a clean place for the skip, before both the Requeue and the Reprioritise decisions. I found no other automatic close outside tests, and no other automatic dispatch: `go` always takes a job id. Readers of `AnyRecord` in athena-gate (jobs.rs) end in wildcard arms, and the gate has no list of record paths or types. `job_of` (store.rs:335) needs the new arm, and the plan names it. `PlanEntry` and `JobLine` only serialize, never deserialize, and most `PlanEntry` literals use `..PlanEntry::bare`. Widening the hold to Proposed and Dispatched jobs is justified, because `state()` turns Queued into Proposed once a job is read (store.rs:133-139). Each demonstration runs the real drain, plan, binary or backfill entry point; the Stub only supplies entries. Athena's own finding about hestia.rs being outside the deliverables is answered by Decision 6. Two small findings remain: the record reference docs/records.md is not updated, and dependents of an on-hold job that is already running are not held, which matches how running dependencies behave today."
+}

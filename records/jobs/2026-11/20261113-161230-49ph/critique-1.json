@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-161230-49ph",
+  "round": 1,
+  "at": "2026-11-13T16:50:20.248569515Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The run tests hard-code the effort sequences while also reading the base effort from athena.toml",
+      "evidence": "repo_with_config (tests.rs:299-314) builds the test config from include_str!(\"../../../../athena.toml\"), whose verifier_effort is \"high\" (athena.toml:21). The tests expect the literal sequences [high, xhigh], [high, xhigh, max] and [high, xhigh, max, max]. If an operator later raises verifier_effort to \"xhigh\", these tests fail even though the behavior is correct. At \"max\", the 'strictly higher' assertion of criterion 2 cannot hold at all. Appending an override to the config does not work, because a duplicate TOML key is a parse error. Fix: Build the expected sequence from the configured base by its position in EFFORT_LEVELS (base index + k, capped at the last entry), not from literals. Also assert that the base is below \"max\" with a message saying the test needs headroom. Alternatively, have repo_with_config replace the verifier_effort line with a fixed value.",
+      "location": "Plan step 5 and the Demonstrations for criteria 2 and 3 (crates/athena-core/src/run/tests.rs)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The wrapper design meets criterion 4's intent but not its literal wording",
+      "evidence": "Criterion 4 says 'the diff of agent_spec ... adds an optional effort override and every other caller passes None'. In the plan, agent_spec keeps its signature, and the seven other callers (producer.rs:322, verification.rs:215, auditor.rs:367, pin.rs:447, audience.rs:253, steward.rs:1276, hestia.rs:2840) pass nothing explicitly. A verifier reading the criterion literally could judge that no caller 'passes None'. Fix: Have the criterion 4 demonstration state the mapping in so many words: the agent_spec wrapper passes None for every existing caller. Have D178 or the agent_spec doc comment say the same, so the verifier sees that the criterion's intent is met.",
+      "location": "Decision 2 and the Demonstration for criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Other wording in D178 could create a backtest hit that has no matching link",
+      "evidence": "backtest.rs:143-160 counts every occurrence of 'amends', 'supersedes' or 'superseded by' that is followed by an id, on any line of the entry. The plan adds a link only for the 'Amends D136' line. If the Alternatives or Tradeoff bullets also name D136 after such a phrase, that is a second hit with no confirmed link. Fix: Tell the producer to use the words amends, supersedes and superseded by only on the single 'Amends D136' line of D178.",
+      "location": "Plan step 7 (docs/decisions.md D178)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot with Read and Grep; I ran nothing. Everything it relies on exists where it says: the planner call in planning.rs at lines 140-155 with the UI line at 175 and new_invocations.push at 179; agent_spec in reading.rs at 394-461, with the effort set at 443; EFFORT_LEVELS at config.rs:337 and effort_for at config.rs:830; and the nine other agent_spec callers it lists. The only caller of plan_round (run/mod.rs:1337-1347) creates a fresh Closing, so counting the Planner records in closing.new_invocations does count the earlier planner calls of this run, and that count does not reset between rounds the way mechanical_passes does. The tests use the repository's athena.toml (repo_with_config uses include_str! on it), where verifier_effort is \"high\", so the expected sequences are right. Example: in test (c), round 1 runs bad_plan at high (mechanical pass), then good_plan at xhigh (critic revises); round 2 runs at max; round 3 runs at max and stops with PLANNING_CAP_REASON. The fake script records the spec's effort, and the tests read it from committed records, so they test the real production path and not a test double. The dependents list matches the readers I found: no other reader of Invocation.effort or effort_for exists outside status/planning.rs (producer only), drain.rs (reader, verifier and producer only) and invocation.rs. The 'Amends D136' phrase plus its decision-links entry fits the backtest parser (backtest.rs:136-175), and D178 is the next free id. The design is sound and matches the accepted reading. I found only minor issues."
+}

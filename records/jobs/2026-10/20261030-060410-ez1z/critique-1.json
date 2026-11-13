@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060410-ez1z",
+  "round": 1,
+  "at": "2026-11-13T08:31:52.043910824Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "docs/records.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/records.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "A hold applies only to jobs in state Queued, but drain also lists and dispatches read (Proposed) items. After `athena plan` reads an item, the operator can no longer hold it, and drain runs it.",
+      "evidence": "I read these files. `steward::queued_work` (crates/athena-core/src/steward.rs:411) keeps jobs in `JobState::Queued | JobState::Proposed`. `approved_work` (steward.rs:487-511) lists only Proposed jobs. `RealSteps::queue` (drain.rs:4490-4500) feeds both to drain. `JobRecords::state()` (store.rs:133-139) returns Proposed as soon as any reading or invocation exists. `drain::plan`, the code behind `athena plan` (drain.rs:3438-3449), calls `Drain::prepare`, which reads every unread item whose plan is incomplete (drain.rs:2243-2266). So an operator who runs `athena plan`, sees a dependent item and then runs `athena hold` gets 'only a queued request can be held'. The next drain dispatches that item. Items made from approved steward proposals can never be held. The request asks that drain never dispatch a held item. That is the queue drain works, not the narrower JobState::Queued. The plan's own Decision 3 notes that drain works proposed items. Fix: Allow hold and release for any job that drain's queue lists: Queued, and Proposed whether read by drain or by approval. Consider an interrupted Dispatched job too. Make `on_hold()` true when the latest hold record is `held` and the job is still open (not closed or running). Have `release_hold` check the latest hold record rather than the job state. Add a real-steps test that reads an item (for example through `drain::plan`), holds it, and shows drain does not dispatch it until it is released. In criterion 4, change the refused case from a proposed job to a closed job.",
+      "location": "Decision 3; Steps 3 and 4 (`JobRecords::on_hold`, `set_hold`); Criterion 4 demonstration (a hold on a proposed job is refused)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Under the plan, a hold silently stops counting once the job is read (`athena go`, or a read-ahead started before the hold). The operator gets no message, and status drops the mark.",
+      "evidence": "`on_hold()` needs `state() == Queued` (plan step 3). Once a reading exists, the job becomes Proposed (store.rs:133-139) and the hold record is ignored. Drain then works the Proposed item (steward.rs:411-431). Release would then fail with 'is not on hold', even though the latest record says held. Fix: Fixing the major finding mostly removes this. If some state change must still end a hold, say so when it happens (a drain note or status line), and test it.",
+      "location": "Decision 3; Risks (fourth bullet)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Criteria 7 and 9 are shown with `git diff`, which is not a test. It is fine as a reviewer step, but the reason a check would fail should be stated as a diff check.",
+      "evidence": "The criterion 7 run line is `cargo test ... && git diff -- crates/athena-cli/src/main.rs ...`. The help test covers the subcommands, but the dispatch to `Athena::set_hold` is shown only by reading the diff. Fix: Rely on the binary test for criterion 4: it reaches `set_hold` and `release_hold` through the dispatch. Cite that test as the behavior evidence for criterion 7.",
+      "location": "Demonstrations, criteria 7 and 9",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code by reading it; I ran nothing. Most of the design holds. Enforcing the hold in `Plan::build_with` via `PlanEntry.on_hold` is the right place. Every drain plan goes through `build_improving`, then `build_capped`, then `build_with`. `batches_for` (drain.rs:3034-3064) drops every item in `plan.refused`. The existing dependency loop (plan.rs:700-726) holds dependents. `display::plan` already prints a refusal with an empty `missing` as a `held` line (display.rs:738-740). The new record type follows the `PriorityRecord` pattern, and `job_of` needs the new arm the plan names. The other `AnyRecord` matches in athena-gate and xtask are non-exhaustive. The new struct fields are caught by the compiler, and `PlanEntry` and `JobLine` only implement Serialize. Commit shape: hold and release write the same one-commit records shape as `set_priority`, so the plan's choice not to give a commit-shape table is fine. The one real gap is Decision 3. The plan reads 'queued' as `JobState::Queued`. But drain's queue also holds read (Proposed) items, and `athena plan` itself reads incomplete items, which turns them into Proposed jobs. Those items cannot be held under this plan, so drain can still dispatch an item the operator wanted held. That undercuts the request's core rule. The planner can fix it by widening which states a hold applies to and adding a test. Athena's own finding on docs/records.md is not repeated."
+}

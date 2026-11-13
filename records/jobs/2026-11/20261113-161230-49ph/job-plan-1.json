@@ -1,0 +1,331 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261113-161230-49ph",
+  "round": 1,
+  "at": "2026-11-13T16:48:40.019504914Z",
+  "invocation_seq": 2,
+  "approach": "Add a pure function `escalated_effort(base, steps)` beside EFFORT_LEVELS in crates/athena-data/src/config.rs: it returns the level `steps` places above `base`, stops at the last level (\"max\"), and returns an unknown base unchanged. In `planning_round` (planning.rs), the planner's effort is `escalated_effort(config.effort_for(Role::Planner), n)`. Here n is the number of Planner invocations already in `closing.new_invocations` for this run, and n is used only when `revision` is Some (a re-call). So the first call runs at the configured effort (\"high\" in athena.toml). A critic revise or a mechanical revision pass then gives xhigh, then max. The count covers every earlier planner call in the job, mechanical and critic-driven, so effort keeps rising across rounds. `agent_spec` in reading.rs gains a sibling `agent_spec_with_effort(.., effort: Option<&str>)` that holds the body. `agent_spec` becomes a one-line wrapper that passes None, so the other eight callers need no edit. The critic call is untouched. The invocation record already stores `spec.effort` (invocation.rs:202), so the escalation is recorded with no schema change. The planner UI line also shows the effort. Docs, a new decision entry (D178, with an `amended` link for D136), a spec mechanism line and a CHANGELOG bullet record it.",
+  "decisions": [
+    {
+      "choice": "The step count is the number of Planner invocations already made in this run (`closing.new_invocations`), applied only when `revision` is Some. Each step is one level, capped at max.",
+      "reason": "The count covers critic revisions and mechanical passes alike, which matches 'thrash' as the planner being called again for the same job. The first call, and a seeded retry's first call (revision Some, zero prior calls), stay at the configured effort. It needs no new field on `PlanRevision` (briefs/planner.rs:23) or `Attempt` (planning.rs:490). `plan_round` has one caller (run/mod.rs:1347), and that caller passes a fresh `Closing::new()`.",
+      "rejected": [
+        {
+          "option": "Derive steps from `Attempt` as `round - 1 + mechanical_passes`",
+          "why": "`mechanical_passes` resets each round (planning.rs:42), so passes in earlier rounds would be lost and effort could fall."
+        },
+        {
+          "option": "Add a `step` field to `PlanRevision` or `Attempt`",
+          "why": "It changes a struct in athena-context and every constructor (planning.rs:240, 475, run/mod.rs:1341, briefs.rs:2577, 2604) for a number the closing already holds."
+        },
+        {
+          "option": "Jump straight to max on the first revision",
+          "why": "A step per revision spends the extra cost only on jobs that keep thrashing, and the reading accepted by the user says 'one step per revision up to max'."
+        }
+      ]
+    },
+    {
+      "choice": "Add `agent_spec_with_effort(.., effort: Option<&str>)` with the body of `agent_spec`. `agent_spec` calls it with None. Only planning.rs calls the new method, for the planner.",
+      "reason": "Criterion 4's intent is an optional override with every other caller unchanged. A wrapper gives that without editing producer.rs, verification.rs, auditor.rs, pin.rs, audience.rs, steward.rs and hestia.rs, none of which is a deliverable. Those callers pass None through the wrapper. Only the one direct call at reading.rs:651 stays as it is.",
+      "rejected": [
+        {
+          "option": "Add an `effort` parameter to `agent_spec` and edit all nine callers",
+          "why": "It touches seven files outside the deliverables for no behavior gain."
+        },
+        {
+          "option": "Mutate `spec.effort` after `agent_spec` returns, as producer.rs:338-340 does for hard jobs",
+          "why": "It works, but it does not match criterion 4's described agent_spec override, and it leaves the field set twice."
+        }
+      ]
+    },
+    {
+      "choice": "The escalation is a free pure function in athena-data next to `EFFORT_LEVELS`, with no new athena.toml key. An unknown base is returned unchanged.",
+      "reason": "One tested place defines the order, and the cap is the last entry of the closed list. `Config::validate` already rejects unknown efforts at parse time (config.rs:668-672), so an unknown base can only come from a hand-built config. No key means athena.toml, defaults.toml and the workflows stay untouched, as criterion 6 requires.",
+      "rejected": [
+        {
+          "option": "A `[job_plan] effort_step` or `max_effort` key",
+          "why": "It needs a schema field, validation and an athena.toml edit, which the brief puts out of scope."
+        },
+        {
+          "option": "Escalate the critic as well",
+          "why": "The request is about the planner thrashing. The brief's criterion 2 requires the critic's effort to stay unchanged."
+        }
+      ]
+    },
+    {
+      "choice": "Show the effort on the planner's UI line: `planner    {model} · {effort} · {wall}s · {cost}`.",
+      "reason": "Operators reading drain output can see the rise without opening records. The only planner line in the repository is planning.rs:175, and no test asserts its text (searched all *.rs and *.md).",
+      "rejected": [
+        {
+          "option": "Leave the UI line alone",
+          "why": "The audience is operators reading drain output as well as records."
+        }
+      ]
+    },
+    {
+      "choice": "Record the design in a new appended entry D178 that says 'Amends D136 in prose only' on one line, with an `amended` [[link]] in docs/decision-links.toml whose `line` is that line.",
+      "reason": "D136 alternative (a) says the planner and critic run at the verifier's setting, and this change makes the planner's setting rise on revision. The backtest reads the phrase 'amends' (backtest.rs:78-81) and compares it with decision-links.toml, so the link is needed. Appending leaves the line numbers of the existing links unchanged.",
+      "rejected": [
+        {
+          "option": "Do not name D136",
+          "why": "The log would contradict itself, and an unlinked 'amends' phrase is a backtest finding."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add `pub fn escalated_effort(base: &str, steps: u32) -> String` after `EFFORT_LEVELS` (config.rs:337), with a doc comment, and unit tests `escalated_effort_*` in the test module (near config.rs:1036-1094).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Move the body of `agent_spec` (reading.rs:394-461) into `agent_spec_with_effort` with an extra `effort: Option<&str>` (keep `#[allow(clippy::too_many_arguments)]`). Make `agent_spec` a wrapper that passes None. The record's effort is the override, or `config.effort_for(role)` when it is None.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "In `planning_round`, compute `steps` as the number of Planner records in `closing.new_invocations`, used only when `revision` is Some, and `effort = escalated_effort(jc.config.effort_for(Role::Planner), steps)`. Call `agent_spec_with_effort(.., Some(&effort))` for the planner. Add the effort to the planner UI line. Update the `plan_round` doc comment. `critic_round` is unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add `run_planned_records` (like `run_planned`, but returns the job's recorded invocations from `Records::load`) and the tests for criteria 2 and 3: `planner_effort_rises_after_a_critic_revise`, `planner_effort_rises_across_mechanical_passes` with its stop and cross-round variants.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "purpose": "Add an 'Effort on revision (design)' paragraph in section 3 after 'Rounds and cost (design)' (job-planning.md:117-122), and a line in the step-4 'Built as' note (job-planning.md:256-264). Leave the ontology marker text unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append `## D178 · The planner's effort rises one level on each revision, up to max` after D177. It has the Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance bullets, and one line 'Amends D136 in prose only: ...'. No existing entry is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Append one [[link]] (older D136, newer D178, status amended) whose `line` is the line of the 'Amends D136' sentence in docs/decisions.md. The producer finds it with `Grep -n`. No other link changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "In requirement OLY-8-09 (spec.toml:1349-1359, 'Every loop has bounded effort...'), extend the `mechanism` sentence to name the planner's effort escalation on revision beside the round limit. The measure and the quote are unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add one bullet at the top of `### Added` under `## [Unreleased]`, in the style of the entries at CHANGELOG.md:12-14.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "config.rs: add `pub fn escalated_effort(base: &str, steps: u32) -> String` after EFFORT_LEVELS (config.rs:337). It finds `base` in EFFORT_LEVELS and returns the entry at `min(index + steps, last)`. If `base` is not in the list it returns `base` unchanged. Add unit tests for criterion 1 in the config.rs test module: one step per level, 2 steps from high is max, the cap at max for 1 and 5 steps, 0 steps, an unknown base for 0 and 3 steps, and a loop over EFFORT_LEVELS.",
+    "reading.rs: rename the body of `agent_spec` to `pub(crate) fn agent_spec_with_effort(.., schema, effort: Option<&str>)`, with `#[allow(clippy::too_many_arguments)]`. Its AgentInvocation `effort` is `effort.map_or_else(|| jc.config.effort_for(role).to_string(), str::to_string)`. Rewrite `agent_spec` with its current signature as a call to `agent_spec_with_effort(.., None)`. Do not edit any other `agent_spec` caller.",
+    "planning.rs `planning_round`: before building the spec, compute `let prior = closing.new_invocations.iter().filter(|i| i.role == Role::Planner).count() as u32;`, `let steps = if revision.is_some() { prior } else { 0 };` (take this before `revision` is moved into `PlannerInputs`) and `let effort = athena_data::config::escalated_effort(jc.config.effort_for(Role::Planner), steps);`. Call `agent_spec_with_effort(.., plan_schema(), Some(&effort))` for the planner only. Change the UI line to include `{effort}` after the model. Add a sentence to the `plan_round` doc comment about the escalation. Leave `critic_round` as it is.",
+    "tests.rs: add `run_planned_records(repo, planner, critic) -> (Box<Finished>, Vec<Invocation>)`. It builds the state dir and `athena_with(.. planning_script(..))` like `run_planned`, runs `finished_job`, then `Records::load(&athena.git, &athena.head().unwrap())` and returns `records.jobs[id].invocations` sorted by seq. Add a helper `efforts_of(&[Invocation], Role) -> Vec<String>` and a rank function over `athena_data::config::EFFORT_LEVELS`.",
+    "tests.rs: add `planner_effort_rises_after_a_critic_revise` (criterion 2), then the criterion 3 tests. (a) `bad_plan, good_plan` with an accepting critic, expecting [high, xhigh]. (b) `bad_plan` repeated with an empty critic queue, expecting [high, xhigh, max], Failed, the 'after 2 mechanical revisions' reason and no critic or producer record. (c) `bad_plan, good_plan` with a repeating revising critic at `repo_with_planning(3)`, expecting [high, xhigh, max, max] and the cap reason. Assert the critic records equal the configured `verifier_effort`, and the first planner record equals `Config::parse(include_str!(\"../../../../athena.toml\")).effort_for(Role::Planner)`.",
+    "Docs: in job-planning.md add 'Effort on revision (design)' after 'Rounds and cost' (when it applies, one level per earlier planner call, the cap at max, critic and first call unchanged, effort in each invocation record, no new key) and a sentence in the step-4 'Built as' note.",
+    "decisions.md: append D178 after D177 with a one-line 'Amends D136 in prose only: ...' sentence, noting that D136 alternative (a) said the planner runs at the verifier's setting. Include a Provenance bullet that lists what was read (planning.rs, reading.rs `agent_spec`, config.rs `effort_for` and EFFORT_LEVELS, producer.rs:338) and what was measured (the new tests). State that no real agent was run. Find the sentence's line with `Grep -n 'Amends D136' docs/decisions.md` and append the matching [[link]] to docs/decision-links.toml.",
+    "spec.toml: edit the OLY-8-09 `mechanism` string only. CHANGELOG.md: add the bullet at the top of `### Added`. Do not touch athena.toml, defaults.toml, the workflows, records/ or any existing decisions.md entry.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. In particular run `cargo test -p athena-data`, `cargo test -p athena-core run::tests`, `cargo test -p athena-cli --test job_plan --test drain --test backtest --test ontology --test budgets` and `cargo test -p xtask --test spec`. This plan adds or changes no refusal or matching rule, so `refusal_corpus` has no new case. It still runs inside `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "A higher effort makes each planner call cost more and take longer. A call at xhigh or max could reach `planner_usd` or `planner_timeout_s` and stop the job in a way a base-effort call would not.",
+      "mitigation": "`planner_usd` stays 0.75 (out of scope). A planner that hits its cap stops with the existing 'the planner did not complete' reason (planning.rs:180-188), and the invocation record shows its effort, so operators can see the cause. This plan has no cost figure and gives no estimate of the change. It spends more only on jobs that already thrash."
+    },
+    {
+      "risk": "The pinned Claude Code might reject an effort such as `max` for the planner model.",
+      "mitigation": "`EFFORT_LEVELS` is documented as the flag's levels (config.rs:336) and `producer_effort` already takes the same set. Nothing real is run here. The unverified fact is whether the pinned Claude Code version accepts `xhigh` and `max`, as D136 noted for `--effort` in general. The first real thrashing job's planner record and failure reason would show it."
+    },
+    {
+      "risk": "A job interrupted and re-run from round 1 starts at the configured effort again, and a seeded retry's first call does too, even though the earlier job thrashed.",
+      "mitigation": "This is by design: the count is of planner calls in this run, so a resume starts from a fresh `Closing`. The plan documents it in job-planning.md and in D178's Tradeoff."
+    },
+    {
+      "risk": "The `line` in the decision-links.toml link must match the line of 'Amends D136' in decisions.md. A wrong number is a backtest finding.",
+      "mitigation": "The producer takes the line from `Grep -n` after writing the entry, and `cargo test -p athena-cli --test backtest` fails if it is wrong."
+    },
+    {
+      "risk": "The tests load records for a job that fails in planning, and `Records::load` on a failed job's closing commit is not exercised by the existing planning tests, which read only the fake driver's calls.",
+      "mitigation": "One shared helper (`run_planned_records`) plus the three assertions per test are added and kept small. A failed job's records are written by the same close path used elsewhere (run/mod.rs:1349 `close_dispatched`). The producer runs the tests to confirm the failed-job records load."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "agent_spec (signature and the effort it sets)",
+      "dependent": "crates/athena-core/src/run/producer.rs:322, verification.rs:215, pin.rs:447, auditor.rs:367, audience.rs:253, steward.rs:1276, hestia.rs:2840 and reading.rs:651 (every other `agent_spec` caller)",
+      "kind": "code",
+      "test": null,
+      "reason": "`agent_spec` keeps its signature and forwards `effort: None` to `agent_spec_with_effort`, so the effort is still `config.effort_for(role)`. The producer's own hard-job override at producer.rs:338-340 still runs after the call and is unaffected."
+    },
+    {
+      "name": "the effort recorded on each planner invocation",
+      "dependent": "crates/athena-core/src/invocation.rs:202, 244, 290 (writes `spec.effort` into the invocation record)",
+      "kind": "code",
+      "test": "The new tests in crates/athena-core/src/run/tests.rs read `Invocation.effort` from the loaded records and assert the planner sequence. The existing invocation.rs test `the_record_names_the_model_and_effort_the_invocation_ran_with` still passes.",
+      "reason": null
+    },
+    {
+      "name": "the effort value sent for the planner",
+      "dependent": "crates/athena-agent/src/claude.rs:139 (passes `--effort` to Claude Code)",
+      "kind": "code",
+      "test": null,
+      "reason": "It passes `spec.effort` through. `xhigh` and `max` are in `EFFORT_LEVELS`, documented in config.rs:336 as levels the flag accepts. The fake driver does not check them. D136 recorded that the pinned version's acceptance of `--effort` was not checked with a real run, and this plan does not run a real agent."
+    },
+    {
+      "name": "effort field of invocation records",
+      "dependent": "crates/athena-core/src/status/planning.rs:394-412 (`producer_settings` groups by the first Producer invocation's effort)",
+      "kind": "code",
+      "test": null,
+      "reason": "It looks only at `Role::Producer` records, so a planner record at a higher effort changes no bucket."
+    },
+    {
+      "name": "configured effort values and `effort_for`",
+      "dependent": "crates/athena-data/src/config.rs:664-672 (effort validation) and `effort_for` at config.rs:830",
+      "kind": "code",
+      "test": "`an_unknown_effort_value_is_rejected_and_a_known_one_is_accepted` in config.rs still passes. The new unit tests cover an unknown base.",
+      "reason": "Both are unchanged. The new function only reads `EFFORT_LEVELS`, and an unknown base never reaches it because `Config::parse` rejects it."
+    },
+    {
+      "name": "plan_round / planning_round behavior on re-call",
+      "dependent": "crates/athena-core/src/run/mod.rs:1333-1347 (the only caller of `plan_round`; seeds a retry's revision; creates `Closing::new()`)",
+      "kind": "code",
+      "test": "`cargo test -p athena-cli --test job_plan` (the accept, revise and stop paths through the real lifecycle) and the existing planning tests at run/tests.rs:1306, 1349, 1392 and 1450.",
+      "reason": "The count is taken from the closing that `plan_round` is given. A seeded retry has Some(seed) with zero earlier planner records, so its first call stays at the configured effort. A job resumed from a kept candidate (run/mod.rs:1333) never enters `plan_round`."
+    },
+    {
+      "name": "mechanical revision and its stop",
+      "dependent": "crates/athena-core/src/run/planning.rs:230-248 and `stop_on_mechanical_limit` (mechanical stop path)",
+      "kind": "code",
+      "test": "The new test (b) for criterion 3 asserts the same Failed outcome and reasons as `a_plan_that_still_breaks_a_rule_after_two_mechanical_passes_stops_without_the_critic` (run/tests.rs:1450).",
+      "reason": null
+    },
+    {
+      "name": "per-role configured effort recorded",
+      "dependent": "crates/athena-cli/tests/drain.rs:7983 (`every_role_runs_at_its_configured_model_and_effort...`) and drain.rs:7925-7979",
+      "kind": "code",
+      "test": "`cargo test -p athena-cli --test drain` still passes.",
+      "reason": "These jobs run the reader, producer and verifier with planning off, so no planner record exists. Their effort comes from `agent_spec`, which is unchanged for those roles."
+    },
+    {
+      "name": "planner UI line text",
+      "dependent": "The planner UI line (planning.rs:175), the one place that prints a planner line",
+      "kind": "code",
+      "test": null,
+      "reason": "A search of every *.rs and *.md file for the line text found only the source. No test or doc asserts it, and the format only gains an effort field."
+    },
+    {
+      "name": "text of docs/design/job-planning.md",
+      "dependent": "docs/ontology.toml:36-41 (term sources and markers inside docs/design/job-planning.md)",
+      "kind": "rule",
+      "test": "`cargo test -p athena-cli --test ontology` (the ontology test compares each term with its sources).",
+      "reason": "The edit only adds a paragraph. The marker strings 'a planner and a critic before the producer', 'planning is turned off' and 'planning for hard jobs only' are not edited."
+    },
+    {
+      "name": "docs/decisions.md and docs/decision-links.toml",
+      "dependent": "crates/athena-cli/src/backtest.rs:78-81 and :144 (phrase scan 'amends', 'supersedes', 'superseded by') against docs/decision-links.toml; crates/athena-cli/src/decisions.rs (log guard); `DecisionEntries` in crates/athena-core/src/mirrors.rs (D162)",
+      "kind": "rule",
+      "test": "`cargo test -p athena-cli --test backtest` and `cargo test -p athena-core mirrors`.",
+      "reason": "The new entry is appended with id D178 (one more than D177), has a Provenance bullet, and uses the phrase 'Amends D136' on one line that the new link names. No existing line moves, so the other links' `line` values stay valid. The [[governs]] list names only D08, whose paths (snapshot.rs, candidate.rs) are not touched."
+    },
+    {
+      "name": "spec requirement text",
+      "dependent": "docs/spec.toml OLY-8-09 `mechanism` (checked by xtask/tests/spec.rs and read by the Hestia sweep `spec_gaps` in hestia.rs)",
+      "kind": "rule",
+      "test": "`cargo test -p xtask --test spec` and `cargo test -p athena-core hestia` (spec gap tests).",
+      "reason": "Only the mechanism sentence changes. It stays non-empty, and the `measure` label 'status: throughput' is unchanged."
+    },
+    {
+      "name": "always-loaded prompt sets",
+      "dependent": "System facts budgets (docs/system-facts.md; test `system_facts_budgets_match_computed`; crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": "`cargo test -p athena-cli --test budgets` (also in the full run).",
+      "reason": "No prompt file, brief or system-facts line changes, so the computed sizes do not move."
+    },
+    {
+      "name": "configuration keys",
+      "dependent": "athena.toml [models] and [job_plan]; defaults.toml; workflows",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No key is added or changed. `verifier_effort = \"high\"` stays the base. `planner_usd`, `critic_usd` and `max_rounds` are untouched."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in the config.rs test module call `escalated_effort` directly. They check low→medium, medium→high, high→xhigh, xhigh→max for one step. They check high with 2 steps is max, high with 5 steps and max with 1 step stay max, and 0 steps returns the base. An unknown base such as \"turbo\" returns \"turbo\" for 0 and 3 steps. A loop over EFFORT_LEVELS asserts that with 1 step each result is the next entry, or the last one at the cap.",
+      "command": "cargo test -p athena-data escalated_effort",
+      "observes": "Each assertion holds and the test run reports ok. The whole `cargo test -p athena-data` run also passes.",
+      "fails_without": "If `escalated_effort` returned its base unchanged, did not cap at max, or changed an unknown base, the step and cap assertions fail. With no function the test does not compile.",
+      "seam": "The production entry point is `athena_data::config::escalated_effort(&str, u32)`, a pure function with no guards or state. The fixture is the literal `EFFORT_LEVELS`. Plan step 1 adds it."
+    },
+    {
+      "criterion": 2,
+      "method": "In crates/athena-core/src/run/tests.rs, the new helper `run_planned_records` builds `athena_with(...)` and `planning_script` the way `run_planned` does (tests.rs:1227-1244). After `finished_job` it calls `Records::load(&athena.git, &athena.head().unwrap())` as at tests.rs:1116 and returns the job's invocations sorted by seq. The test uses `repo_with_planning(3)`, planner `[good_plan()]` repeated, and critic `[revising_critique(), accepting_critique()]`. It reads the configured effort from `Config::parse(include_str!(\"../../../../athena.toml\"))`. The check is on the recorded `Invocation.effort` of each Planner and Critic record.",
+      "command": "cargo test -p athena-core planner_effort_rises_after_a_critic_revise",
+      "observes": "The planner records are [configured effort (\"high\"), \"xhigh\"], so the second index is strictly higher. Both critic records equal `verifier_effort`. The job lands.",
+      "fails_without": "If planning.rs still used `effort_for(Role::Planner)` on re-calls, the second planner record would be \"high\", and the assertion that it ranks strictly above the first in EFFORT_LEVELS would fail. If the critic's effort were escalated, the critic equality assertion would fail.",
+      "seam": "The production entry point is `Athena::go`, through `plan_round` and `planning_round` in run/planning.rs. The guards are `[job_plan]` enabled with mode all, the reader's hard-job gate bypassed by that mode, and the preflight budget (the fake turns cost 0.01). The fake driver (`FakeAgentDriver::new(script)`) is injected through `athena_with` and answers the planner and critic from queues. The escalation logic is not in the script. The script only returns canned JSON, and the effort under test is read from the committed records. `athena_with`, `planning_script`, `Records::load` and the fixtures exist (tests.rs:190, 1193, 1116). The helper `run_planned_records` is added in plan step 5."
+    },
+    {
+      "criterion": 3,
+      "method": "Three tests in the same module use `run_planned_records`. (a) `bad_plan()` then `good_plan()` with an accepting critic: the planner records are [high, xhigh], the critic is called once, and the job lands. (b) `bad_plan()` repeated with an empty critic queue (as at tests.rs:1450-1471): the three planner records are [high, xhigh, max], the job state is Failed, the reason starts with `PLANNING_STOPPED_PREFIX` and contains 'after 2 mechanical revisions', and there is no critic, producer or verifier record. (c) `bad_plan()`, `good_plan()` and a repeating revising critic with `repo_with_planning(3)`: the planner records are [high, xhigh, max, max], which shows the count carries across rounds and holds at the cap, and the job stops with `PLANNING_CAP_REASON`.",
+      "command": "cargo test -p athena-core planner_effort_rises_across_mechanical_passes",
+      "observes": "The recorded planner efforts are exactly the sequences above and the failure reasons are unchanged from today's tests.",
+      "fails_without": "If the mechanical branch (planning.rs:234-247) kept re-calling at the base effort, the first test's second record would be \"high\" and the strictly-higher assertion would fail. If the cap were not enforced, or the effort fell on the next round, the sequence assertions would fail. If the mechanical stop changed, the stop-reason assertions would fail.",
+      "seam": "The production entry point is `Athena::go` into `plan_round`, `planning_round` and `stop_on_mechanical_limit`. The guards are `MAX_MECHANICAL_PASSES` = 2 and `max_rounds`. The fake driver and the queue script are the same as in criterion 2, with `bad_plan` and `good_plan` fixtures that exist (tests.rs:1135-1142). The helper is added in plan step 5. The existing tests at 1306, 1392 and 1450 stay as they are and must still pass."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff. planning.rs computes the escalated effort only inside an `if revision.is_some()` guard. That guard reads the count of Planner records in `closing.new_invocations` and otherwise uses `effort_for(Role::Planner)`. The planner call goes through `agent_spec_with_effort(.., Some(&effort))`. The critic call in `critic_round` still calls `agent_spec`. In reading.rs, `agent_spec_with_effort` takes `effort: Option<&str>` and sets `effort: effort.map_or_else(|| jc.config.effort_for(role).to_string(), str::to_string)`. `agent_spec` only forwards None.",
+      "command": "git diff -- crates/athena-core/src/run/planning.rs crates/athena-core/src/reading.rs",
+      "observes": "No other file has an `agent_spec(` call changed. The diff shows no edit to producer.rs, verification.rs, auditor.rs, pin.rs, audience.rs, steward.rs or hestia.rs, because they reach the override only through the None wrapper.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "The diff of job-planning.md adds a paragraph in section 3 after 'Rounds and cost (design)' (job-planning.md:117-122). It says when the escalation applies (every planner re-call, mechanical or after a critic revise), the step (one EFFORT_LEVELS entry per earlier planner call), the cap at max, that the first call and the critic keep the configured effort, and that the effort is in each invocation record. The text around the markers in docs/ontology.toml:39-41 is not changed. The decisions.md diff has only added lines, appended after D177 (which ends at line 5147 in the base). It adds `## D178 · ...` with Case, Decision (a line starting 'Amends D136 in prose only: ...'), Alternatives, Tradeoff, Reversal cost and a Provenance bullet. The spec.toml diff changes only OLY-8-09's `mechanism` text, to add the effort escalation beside the round limit. The decision-links.toml diff adds one [[link]] with line = the line of 'Amends D136', older = D136, newer = D178, status = amended.",
+      "command": "git diff -- docs/design/job-planning.md docs/decisions.md docs/decision-links.toml docs/spec.toml && cargo test -p athena-cli --test backtest && cargo test -p xtask --test spec",
+      "observes": "The decisions.md diff has no removed or edited lines. The backtest test (condition (a), the phrase against the link list) and the xtask spec test pass.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff. CHANGELOG.md gets one bullet at the top of `### Added` under `## [Unreleased]`. It names `escalated_effort`, `planning_round`, the one-level step to max, the first call and critic unchanged, the planner UI line, D178, and the tests that show it.",
+      "command": "git status && git diff -- CHANGELOG.md athena.toml defaults.toml .github",
+      "observes": "The CHANGELOG diff has the new bullet. The diff of athena.toml, defaults.toml and .github is empty.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three Athena checks on the final tree. Athena's recorded check output counts.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The suites that touch changed behavior or documents pass: athena-data config, athena-core run tests, `cargo test -p athena-cli --test job_plan`, `--test drain`, `--test backtest` and `--test budgets`, and xtask `spec`.",
+      "fails_without": "If the escalated-effort tests were missing or wrong, `cargo test --locked` would fail. If the new helper or the wrapper broke clippy (for example an unused import, or a missing `#[allow(clippy::too_many_arguments)]` on `agent_spec_with_effort`), clippy would fail.",
+      "seam": "The Athena checks run on the whole tree. The fake driver already used by tests is the only seam. No new test seam is needed beyond those of criteria 1 to 3."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "9a1cd130cbb6befc2b93a01a4a1feb727affe9c3200b6e24c6cc6277f45531c8"
+}

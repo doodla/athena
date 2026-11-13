@@ -101,6 +101,13 @@ pub struct JobLine {
     /// ([`crate::reading::retries_by_job`]); absent otherwise. `athena retry` refuses such a job.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retried_as: Option<String>,
+    /// True when the user put the job on hold (`athena hold`) and has not released it: drain does not
+    /// dispatch it, whatever its priority. This is not [`JobLine::hold`], the disk-space hold. Status reads
+    /// the same records as the priority shown on this line (the `athena/records` worktree when it exists, else
+    /// the tree at `HEAD`), while `athena hold`, `athena release` and drain read `HEAD`, as `athena priority`
+    /// does.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub on_hold: bool,
 }
 
 /// How job planning ended for one job: the round of the last critique and whether it let the job go on.
@@ -909,6 +916,7 @@ fn job_line(job: &JobRecords, state: &str) -> JobLine {
         priority: job.priority(),
         hold: None,
         retried_as: None,
+        on_hold: job.on_hold(),
     }
 }
 

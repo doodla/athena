@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060843-f4s2",
+  "round": 3,
+  "at": "2026-11-13T11:17:36.241701261Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Part (c) guesses where the code could be read: it accepts any made-up schema tag and the bare word `AnyRecord` as an accepted record kind.",
+      "evidence": "Decision 6 passes the Output clause when `names_schema_tag` finds any token `athena.<x>/<digits>`, or when `names_record_evidence` matches. `names_record_evidence` (surveys.rs:164-175) accepts the bare token `AnyRecord`, so 'Output: `AnyRecord`' names no kind and passes, and so does 'Output: athena.madeup/1'. The plan says the check 'cannot confirm that a named kind exists without a repository'. That is wrong: athena-core depends on athena-data (system facts, crate core), and the accepted tags are compiled into `AnyRecord`'s `#[serde(tag = \"schema\")]` renames (records.rs:1121-1154). The request asks for 'a record kind that the records check already accepts', and criterion 3 asks that a reading contradicting the code be refused. Fix: Check each schema tag in the Output clause against athena-data when the check runs. For example, deserialize `{\"schema\": tag}` as `AnyRecord` and treat an 'unknown variant' error as not accepted. Better, add a small helper in surveys.rs that turns serde's expected-variant list into a set, with no records.rs edit. Refuse an unknown tag as a contradiction. Do not let a bare `AnyRecord` with no variant or tag count as a kind; require `AnyRecord::<Variant>`, a known tag or `check_record_file`. Add one refusing and one accepting fixture, and correct the limit stated in the doc comment.",
+      "location": "Decision 6 ((c) Output clause); Files: surveys.rs `names_schema_tag`; Risks bullet 2",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out `steward::queued_work` and the drain, both of which call `check_reading_text` on stored readings. After the change, proposed code readings already accepted under the old rules silently drop out of the batch.",
+      "evidence": "steward.rs:423-428 runs `crate::reading::check_reading_text(latest, &request.text)` and returns None (leaves the job out) unless the result is Accept. drain.rs:121 documents the same rule, and athena-cli/tests/drain.rs:4405-4453 tests it. Neither `steward.rs` nor `drain.rs` appears in the dependents. The dependents entry names only checks.rs, replay.rs:54 and run/mod.rs. I grepped for code-survey text in the repository: no drain or steward fixture holds a `Code survey:`, so the existing tests still pass. Even so, the live effect (stored proposed code readings held until a person runs `athena go`) is neither stated nor tested. Fix: Add a dependents entry for `steward::queued_work` (steward.rs:405-430) and the drain batch. State that a proposed code reading whose stored survey lacks the labels is left out until `athena go`, and that this is intended. Name `cargo test -p athena-cli --test drain` as its test, and say in CHANGELOG.md that queued proposed readings may need a re-read.",
+      "location": "Dependents (reading acceptance gate order entry)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "`check_code_survey`'s refusal text still tells the reader to write the old unlabelled survey, so a reader that follows it on its only retry is refused by the new step and the job fails.",
+      "evidence": "surveys.rs:208-214: the missing-survey error says to name 'the entry point and the order of resolution and probing, what the records validation allow-list accepts, and how the property is measured directly'. It has no labels and no example. reading.rs:505-507: after a refusal the reader runs once more, and a second refusal fails the job. The plan's own reason for rewriting the guide (decision 2) is first-attempt compliance, yet the dependents entry only notes that this error 'names the guide's old topics', and no step changes it. Fix: In step 4, change `check_code_survey`'s missing-survey error so it asks for the six labels and prints `survey_example()`. The existing asserts on '`Code survey:`', 'crates/' and 'was refused' still hold. Add a test that a reading built from that error's template passes both steps.",
+      "location": "Decision 2 / Step 1-2; Dependents entry 'CODE_SURVEY_GUIDE wording' (surveys.rs:209-214)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan predicts that criterion 4 will fail at the host replay but still sends the work to the producer.",
+      "evidence": "The plan expects that most of the newest 50 accepted code readings carry an unlabelled survey and will be newly refused, 'probably well above 25%'. Then `replay` holds the job (replay.rs:159-165), and the fixture test proves only the arithmetic. Fix: Mark the open question as blocking before the producer runs, or ask Athena to re-read with a declared share and a reason sentence (`because` plus `refuse`). A producer run should not be spent on a job the plan expects to be held.",
+      "location": "Risks bullet 1; Open questions; Demonstration for criterion 4 part (2)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Padding the existing check_code_survey tests with the complete survey weakens what they pin.",
+      "evidence": "`code_survey_missing_is_refused_and_present_is_accepted` accepts '  code SURVEY: crates/athena-core/src/reading.rs' through the full `accept()`. `code_survey_new_record_file_needs_named_evidence` accepts single-line evidence surveys the same way. The plan rewrites them to `[SURVEY, evidence]`, so these tests no longer show that `check_code_survey` alone accepts a minimal survey or bare evidence. Fix: Point the acceptance halves of these tests at `check_code_survey(&reading)` directly. Keep the full `accept()` path for the new step's tests.",
+      "location": "Step 5 (reading.rs fixtures ~7079-7085, 7094, 7147-7157, 7178-7199)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The two-criteria cap is an arbitrary number, and the guide example's wording is likely to be copied as boilerplate.",
+      "evidence": "Citing two criteria is allowed and citing three is refused, although both state one measurement. The example's 'criterion 1 counts planner, producer or model calls on the fake' satisfies the verb test for any criterion, so readers will likely paste it under criteria such as 'cargo test passes'. Fix: Prefer one criterion number per `Direct check:` clause (simpler and matches 'a direct check for each claimed property'). Make the example measure something specific to its own example criterion rather than restate the request's phrase.",
+      "location": "Decision 7 (at most two criteria per clause); Step 1 guide example",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Step numbers in the demonstrations do not match the steps.",
+      "evidence": "The demonstrations say 'Step 1 adds survey_example and the clause parser', 'step 4 makes SURVEY the complete survey', 'step 7 adds the test' and 'as set by step 9'. In the steps, the helpers are step 3, SURVEY is step 5, the replay test is step 8 and the bounds are step 2. Fix: Renumber the references in the demonstrations to match the steps.",
+      "location": "Demonstrations (test seam lines) vs Steps",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read surveys.rs, checks.rs (the step! list), replay.rs, the reader guide and its tests in briefs.rs, the record-evidence fixtures in reading.rs, the corpus header and every caller of the reading gate. The plan's named functions, line numbers, the 12-line pin and the 3045/3150 constants all match the code. One step! line after check_code_survey (checks.rs:539) is the right seam, and the plan correctly reuses changes_code_with_behavior_criterion and names_record_evidence. The labelled-clause design answers the earlier rounds. Three problems remain. (1) Part (c) accepts any `athena.x/N` tag and the bare word `AnyRecord` as \"a record kind the records check already accepts\". The plan says this cannot be verified without a repository, but athena-core links athena-data, so `AnyRecord`'s serde tags can be checked when the code runs. (2) The dependents list leaves out `steward::queued_work`. It runs `check_reading_text` on stored readings (steward.rs:424), so after this change proposed code readings would silently drop out of the drain. (3) The refusal text of `check_code_survey` (surveys.rs:209-214) still teaches the old unlabelled survey. A reader that follows it on its only retry is refused by the new step, which fails the job (reading.rs:505-507). Smaller issues: criterion 4 is predicted to fail, existing check_code_survey tests lose their intent, the two-criteria cap is arbitrary, and the step numbers are inconsistent."
+}

@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-112836-b7sx",
+  "round": 2,
+  "at": "2026-11-13T11:40:48.085125981Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The person's own corrections never count as a deferral, so the check fights the user",
+      "evidence": "Read from the code. `athena correct` (reading.rs:1323) stores a one-line correction and reads again. The corrections go to the reader as history (reading.rs:1402-1414), but `read_for` calls `refusing_check(&reading, &request.text, attempt, ...)` (reading.rs:720-726) with the request text alone. A retried job's corrections are carried in `EarlierAttempt.corrections` (retry.rs:808-810; test at reading.rs:2457-2490), but `request_with_retried_parts` adds only `attempt.request`. Counterexample: the request lists (1)-(3) and the user runs `athena correct \"leave (3) for a follow-up, it is done elsewhere\"`. The reader follows it and puts (3) in out_of_scope. `check_request_parts` refuses and tells the reader to 'cover it with a deliverable and a criterion', which contradicts the user. A correction on the retried job is ignored the same way. The plan's only escape is a deferral sentence in the request text, which the user cannot edit after admission. Fix: Treat corrections as request-side text for the deferral scan (decision 8): `attempt.corrections` in `request_with_retried_parts`, and the current job's corrections from the reading history `read_for` already holds. Pass them to the step without changing the other checks' `request`, for example by appending them to the shadowed text with a marker line the parser skips. Add corpus or unit cases: a correction that defers (3) is accepted, and a correction that only mentions (3) is still refused. Name the dependent `athena correct` / `read_with_correction` in the dependents list.",
+      "location": "Decision 2 / Decision 8 (sources of request-side deferral); crates/athena-core/src/reading.rs:1402-1424 and retry.rs:808-810",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The replay can never see the retry path the plan adds, but the plan counts on it to find retry false refusals",
+      "evidence": "Read from the code. `replay_cases` (replay.rs:142-157) carries only `request.text` and the reading. `BinaryChecker` runs `check-reading --request --reading` (replay.rs:101-129), and `check_reading_text` passes `attempt = None` (replay.rs:54-65; its doc comment says 'There are no earlier attempts'). `loop_replay` (run/mod.rs:2316) uses `replay_cases`. A recorded retry therefore replays as the bare text 'try again on <job>', which yields no parts and is always accepted. Decision 10 and step 12 still list 'a retried request' as a kind of refusal to classify. The retry path, which reads a whole earlier request that may hold scope the earlier job already landed or the user agreed to narrow, is the riskiest new path, and the measured share says nothing about it. Retries also pad the denominator as automatic accepts. Fix: State in decision 10, the doc comment and the report that the replay covers no retries, because it runs without `attempt`. Remove 'a retried request' from the replay classification. Add a retry proxy: in refusal_corpus.rs, rebuild several recorded retry shapes (this job, sza7, a retry whose earlier job landed part of the work) with `Case.attempt` set. Or name 'replay retries with their earlier attempt' as a follow-up. Do not let the measured share stand for retries.",
+      "location": "Decision 10, Step 12, Criterion 8 demonstration, Risks (retry)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The refusal does not tell the reader the one repair that is sure to work: cite the marker",
+      "evidence": "From reading the plan: rule (c) covers an Enumerated part when a criterion cites its marker and shares one distinctive stem. The error text only says 'cover it with a deliverable and a criterion'. The reader gets one re-read (reading.rs:738-759). If it rewords the criterion without enough distinctive stems, it is refused again. This job's own accepted criteria cite '(request part 1)', '(part 2)' and so on, which shows that citing the marker is the natural, unambiguous repair. Fix: Add to the error for Enumerated parts: 'or cite its marker, for example \"part (3)\", in a criterion that names its subject'. Check the wording in `request_parts_error_names_the_part_and_the_repair`.",
+      "location": "Decision 6 / Step 4 (error text)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The word lists for criterion text and for paths are stated inconsistently",
+      "evidence": "Decision 5 lists PATH_CRATE_WORDS as 'crates, src, core, lib, mod, bin, rs, md, toml, json_ext is NOT listed: only the extensions rs, md, toml, yml, yaml, lock, txt'. PATH_WORDS for paths adds tests, test and json. Step 3 names both PATH_CRATE_WORDS and PATH_WORDS. Criterion 3 says 'tests' is ignored when matching, but the plan keeps 'test' as a stem in criterion and part text (a reasoned departure that is not called out as one). Garbled lists are what made earlier rounds fail. Fix: Write the two final lists exactly once, as in code. State that 'test'/'tests' is ignored only in paths, as a departure from criterion 3's wording, with the reason already given. Pin both lists in `request_parts_path_words_are_ignored`.",
+      "location": "Decision 5 (PATH_CRATE_WORDS text)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan may not fit one producer run",
+      "evidence": "An estimate from reading the plan: over 60 named corpus cases, more than 20 unit tests, a parser with three states, grouping, two deferral scanners, a stem matcher with five word lists, a new test module in replay.rs, and a classification loop over the replay. The earlier attempt of this request failed in planning after 5 rounds. Fix: Keep one case per demonstrated behaviour and fold variant tests into table-driven tests (one test over the a-n variants, one over the headings). Name which cases can be dropped if the run runs short, without dropping a criterion's demonstration.",
+      "location": "Files / Steps 7-9 (size)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the request and the reading. The code it names exists: `refusing_check` is at checks.rs:520-551 with an `attempt` parameter, `plain_request_prose` is at terms.rs:189-208, COMMON_WORDS (which holds 'athena') is at topics.rs:157, `EarlierAttempt.request` carries the retried job's redacted request (retry.rs:815), `earlier()` and `Case.attempt` exist in the corpus, and the self-check anchor is at refusal_corpus.rs:2927. Putting the step last keeps every existing refusal's check name. The `let request = ...` shadow line does not break `acceptance_check_names` or `no_check_bypasses_refusing_check`. Round 1's six findings are answered in the design. Two design gaps are still major. (1) The step reads only the request text and the retried request. A person's own narrowing through `athena correct`, and the corrections carried on a retried attempt, are never read. So when the user tells the reader to leave a part out, the check refuses the reading and tells the reader to put the part back. (2) The replay never passes an earlier attempt, because `replay_cases` and `check_reading_text` use the request text only. The retry path added for F1, which is where the false-refusal risk sits, is never measured. Yet decision 10 and step 12 count 'a retried request' among the replay's refusals. Two smaller points follow: the error could tell the reader to cite the part's marker, and the plan is very large for one producer run."
+}

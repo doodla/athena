@@ -44,10 +44,10 @@ use athena_context::{CONTRACT, Component, Composed, READER_FRAME, compose};
 use athena_data::records::{
     AnyRecord, Correction, CorrectionKind, Criterion, CriterionKind, CritiqueVerdict,
     DefaultApplied, Deliverable, DeliverableAction, Finding, FocusRecord, Forecast, Forecasts,
-    Intervention, InterventionCategory, InterventionSource, IntrospectionRecord,
-    IntrospectionStatus, IntrospectionTrigger, Invocation, OTHER_READING_RULE, OutcomeState,
-    PreventionKind, PriorityRecord, Quantiles, Reading, ReadingAttempt, ReadingRefusal, Replay,
-    ReplayRefusal, Request, Role,
+    HoldRecord, HoldState, Intervention, InterventionCategory, InterventionSource,
+    IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger, Invocation, OTHER_READING_RULE,
+    OutcomeState, PreventionKind, PriorityRecord, Quantiles, Reading, ReadingAttempt,
+    ReadingRefusal, Replay, ReplayRefusal, Request, Role,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::redact::Redactor;
@@ -1026,6 +1026,85 @@ impl Athena {
             ),
         )?;
         Ok((job_id, priority))
+    }
+
+    /// `athena hold <job>`: appends a hold record for an open request, so `athena drain` does not dispatch it
+    /// whatever its priority, until `athena release`. The request record is not touched. The job must be
+    /// queued, read (proposed) or interrupted, must not be running, and must not already be on hold; all of
+    /// that is checked before anything is committed. Like [`Athena::set_priority`], it reads the records at
+    /// `HEAD`.
+    pub fn set_hold(&self, job_ref: &str) -> Result<JobId> {
+        let head = self.head()?;
+        let records = crate::store::Records::load(&self.git, &head)?;
+        let job_id = records.resolve(job_ref)?;
+        let job = records.jobs.get(job_id.as_str()).expect("resolved");
+        if !matches!(
+            job.state(),
+            JobState::Queued | JobState::Proposed | JobState::Dispatched
+        ) {
+            bail!(
+                "job {job_id} is {}; only an open request can be held",
+                job.state().name()
+            );
+        }
+        if self.running(job_id.as_str()) {
+            bail!("job {job_id} is running now; it can be held once it stops");
+        }
+        if job
+            .latest_hold()
+            .is_some_and(|h| h.state == HoldState::OnHold)
+        {
+            bail!("job {job_id} is already on hold; `athena release {job_id}` lifts it");
+        }
+        self.append_hold(&job_id, job, HoldState::OnHold)?;
+        Ok(job_id)
+    }
+
+    /// `athena release <job>`: appends a later hold record that lifts the job's hold, so drain works it in its
+    /// priority order again. Only the job's latest hold record is looked at, so a hold is released whatever
+    /// state the job is in; a job that is not on hold is refused before anything is committed.
+    pub fn release_hold(&self, job_ref: &str) -> Result<JobId> {
+        let head = self.head()?;
+        let records = crate::store::Records::load(&self.git, &head)?;
+        let job_id = records.resolve(job_ref)?;
+        let job = records.jobs.get(job_id.as_str()).expect("resolved");
+        if !job
+            .latest_hold()
+            .is_some_and(|h| h.state == HoldState::OnHold)
+        {
+            bail!("job {job_id} is not on hold");
+        }
+        self.append_hold(&job_id, job, HoldState::Released)?;
+        Ok(job_id)
+    }
+
+    /// Commits the next hold record of `job` with `state`, as one records-only commit.
+    fn append_hold(&self, job_id: &JobId, job: &JobRecords, state: HoldState) -> Result<()> {
+        let n = job.holds.iter().map(|h| h.n).max().unwrap_or(0) + 1;
+        let (subject, body) = match state {
+            HoldState::OnHold => (
+                format!("Hold: {job_id}"),
+                "A hold record for an open request. The request is unchanged; drain does not dispatch a job whose latest hold record puts it on hold.",
+            ),
+            HoldState::Released => (
+                format!("Release: {job_id}"),
+                "A later hold record that lifts the hold. The request is unchanged; drain works the job in its priority order again.",
+            ),
+        };
+        self.commit_records(
+            &[NewFile::record(&AnyRecord::Hold(HoldRecord {
+                job: job_id.clone(),
+                n,
+                at: crate::now(),
+                state,
+            }))],
+            &message(
+                &subject,
+                body,
+                &[("Athena-Job", job_id.as_str().to_string())],
+            ),
+        )?;
+        Ok(())
     }
 
     /// `athena focus <text>`: appends a focus record, what the user wants worked on now. The text and the git

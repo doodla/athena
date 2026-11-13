@@ -1,0 +1,164 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261113-181007-baf1",
+  "n": 1,
+  "at": "2026-11-13T18:10:34.802586806Z",
+  "invocation_seq": 1,
+  "base_commit": "92e21d6a5c17599786df0d911f6ffc422a0fc2c7",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Raise planner effort after planning thrash via [job_plan] thrash_effort",
+  "summary": "Retry of job 20261113-151949-mjpz (\"when the plan thrashing, increase intelligence\"): after a critic revise (round > 1) or a mechanical re-plan, the next planner call runs at the higher of its configured effort and a new `[job_plan] thrash_effort` key (default xhigh). The first planner call and the critic are unchanged. The goal is fewer planning stops for the operator reading invocation records.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Behavior criteria check the effort recorded on each planner invocation, not that the config key exists."
+    },
+    {
+      "id": "tested",
+      "how": "New tests in config.rs and tests.rs; fmt, clippy and test must pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "The escalation is enforced in planning.rs code and tested, not left as prose."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261113-151949-mjpz was dispatched, never verified, and recorded no findings. This retry redoes the same feature from the base, so there are no findings to fix. Its 7 changed files are all kept as deliverables below, and the work is redone from scratch.",
+    "Dropped from the earlier deliverables: crates/athena-core/src/reading.rs. The earlier candidate did not change it, and nothing here needs it.",
+    "Code survey: crates/athena-core/src/run/planning.rs (the planning loop calls self.agent_spec at about lines 140 and 343; the Attempt struct holds round and mechanical_passes; MAX_MECHANICAL_PASSES = 2), crates/athena-core/src/run/producer.rs (line 339 shows the existing pattern of overriding spec.effort), crates/athena-data/src/config.rs (JobPlanConfig, which is Copy and has deny_unknown_fields, so effort needs a small Copy enum), crates/athena-core/src/run/tests.rs (existing mechanical-pass test near line 1450). The change adds no record or data file, so check_record_file, AnyRecord and the round-trip test are not touched. Effort is measured directly from the effort recorded on each planner invocation.",
+    "Terms: thrash means a critic revise (round > 1) or a mechanical re-plan (mechanical_passes > 0) in planning. The raise is the higher of the configured effort and thrash_effort, so it never lowers an effort such as max.",
+    "Consumers: JobPlanConfig is read by crates/athena-core/src/run/planning.rs and set in athena.toml. No other reader of the new key was found.",
+    "The change adds a default, not a refusal rule, except that config validation refuses an unknown effort value. Config files that currently load without the key keep loading.",
+    "Audience: the operator who reads invocation records and judges whether planning stops less often."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-data/src/config.rs: JobPlanConfig gains a `thrash_effort` field that defaults to xhigh when absent, and an unknown value is refused when the config loads. A unit test in that file covers the default, an explicit value and the refusal.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-core/src/run/planning.rs: the planner spec's effort is raised to the higher of the configured effort and thrash_effort when round > 1 or mechanical_passes > 0. It is left unchanged on the first attempt of round 1. The critic's spec is not touched.",
+      "kind": "content"
+    },
+    {
+      "text": "A test in crates/athena-core/src/run/tests.rs drives a job whose first plan gets a critic `revise` and then an accept. It asserts the first planner invocation record has the configured effort and the second has the thrash effort. Run `cargo test -p athena-core`; it passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second test in crates/athena-core/src/run/tests.rs drives a plan that breaks Athena's own plan rules once, so there is a mechanical re-plan in round 1. It asserts the re-planned call runs at the thrash effort. Run `cargo test -p athena-core`; it passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows a plan accepted in one pass records every planner invocation, and the critic, at the unchanged configured effort. Another shows a configured effort above thrash_effort is not lowered. Run `cargo test -p athena-core`; both pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-data`; the config tests pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "athena.toml [job_plan] sets `thrash_effort` with a comment saying what triggers it. CHANGELOG.md records the change. docs/design/job-planning.md describes the escalation under the planning loop. docs/decisions.md gets a new appended decision with a Provenance bullet, and no existing entry is edited.",
+      "kind": "content"
+    },
+    {
+      "text": "The diff changes no producer or verifier effort, max_rounds, planner or critic budgets or timeouts, MAX_MECHANICAL_PASSES, or models; the deliverables and CHANGELOG.md are the only changed files.",
+      "kind": "content"
+    },
+    {
+      "text": "Athena's recorded `cargo fmt --check`, `cargo clippy` and `cargo test` runs pass on the final tree (D115).",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Changing the producer or verifier effort, or the hard-job escalation of the producer.",
+    "Changing max_rounds, the planner or critic budgets or timeouts, or MAX_MECHANICAL_PASSES.",
+    "Escalating the model, because the verifier's model may not produce.",
+    "Editing existing records or decision entries.",
+    "crates/athena-core/src/reading.rs: the earlier reading listed it, but its candidate did not change it, so this retry drops it."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6753022452504318,
+      "p_user_intervenes": 0.06394984326018809,
+      "cost_usd": {
+        "p10": 0.5453754293351256,
+        "p50": 1.4780460000000002,
+        "p90": 5.410344997678954
+      },
+      "wall_time_s": {
+        "p10": 605.4943596419997,
+        "p50": 2153.684957172999,
+        "p90": 4390.909508502001
+      }
+    }
+  },
+  "departures": "Cost and time sit a little above the reference. It is a hard job with seven files, tests and docs, and the earlier attempt was never verified.",
+  "urgent_reason": "It cuts planning stops and failed planning rounds by giving the planner more effort once planning thrashes.",
+  "hard_reason": "It changes the run pipeline: how a job is planned, specifically the planning loop's planner settings after a revise or mechanical re-plan.",
+  "producer_effort": "high"
+}

@@ -547,6 +547,41 @@ impl PriorityRecord {
     }
 }
 
+/// Whether a job is on hold, as one [`HoldRecord`] states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldState {
+    /// Drain does not dispatch the job, whatever its priority.
+    OnHold,
+    /// The hold is lifted; the job is worked in its priority order again.
+    Released,
+}
+
+/// `athena.hold/1`: the user's choice to keep a queued request out of `athena drain`, at
+/// `<job>/hold-<n>.json`. The latest record (highest `n`) states whether the job is on hold now; a
+/// release is a later record, never an edit. The request record is never rewritten.
+///
+/// This is unrelated to the disk-space hold shown on a status line and to the dependency hold shown as
+/// a `held` line in `athena plan`, and it is independent of the job's priority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HoldRecord {
+    pub job: JobId,
+    /// 1 for the first hold record of the job, then counting up.
+    pub n: u32,
+    pub at: Timestamp,
+    pub state: HoldState,
+}
+
+impl HoldRecord {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.n == 0 {
+            return Err("a hold record is numbered from 1".into());
+        }
+        Ok(())
+    }
+}
+
 /// `athena.focus/1`: what the user wants worked on now, at `records/focus/focus-<n>.json`.
 /// Records are never rewritten; the latest one (highest `n`) is the current focus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1095,6 +1130,8 @@ pub enum AnyRecord {
     Correction(Correction),
     #[serde(rename = "athena.priority/1")]
     Priority(PriorityRecord),
+    #[serde(rename = "athena.hold/1")]
+    Hold(HoldRecord),
     #[serde(rename = "athena.focus/1")]
     Focus(FocusRecord),
     #[serde(rename = "athena.job/1")]
@@ -1188,6 +1225,7 @@ impl AnyRecord {
         match &record {
             AnyRecord::Reading(r) => r.validate().map_err(invalid)?,
             AnyRecord::Priority(p) => p.validate().map_err(invalid)?,
+            AnyRecord::Hold(h) => h.validate().map_err(invalid)?,
             AnyRecord::Focus(f) => f.validate().map_err(invalid)?,
             AnyRecord::Candidate(c) if c.base_fingerprint.is_some() || c.previous_job.is_some() => {
                 return Err(invalid(
@@ -1274,6 +1312,7 @@ impl AnyRecord {
             AnyRecord::Reading(r) => format!("{}/reading-{}.json", r.job.dir(), r.n),
             AnyRecord::Correction(r) => format!("{}/correction-{}.json", r.job.dir(), r.n),
             AnyRecord::Priority(r) => format!("{}/priority-{}.json", r.job.dir(), r.n),
+            AnyRecord::Hold(r) => format!("{}/hold-{}.json", r.job.dir(), r.n),
             AnyRecord::Focus(r) => format!("records/focus/focus-{}.json", r.n),
             AnyRecord::Job(r) => format!("{}/job.json", r.id.dir()),
             AnyRecord::Invocation(r) => {
@@ -1371,6 +1410,7 @@ impl AnyRecord {
             AnyRecord::Reading(_) => "athena.reading/1",
             AnyRecord::Correction(_) => "athena.correction/1",
             AnyRecord::Priority(_) => "athena.priority/1",
+            AnyRecord::Hold(_) => "athena.hold/1",
             AnyRecord::Focus(_) => "athena.focus/1",
             AnyRecord::Job(_) => "athena.job/1",
             AnyRecord::Invocation(_) => "athena.invocation/1",
@@ -1671,6 +1711,57 @@ mod tests {
                 refusal: None
             })
         );
+    }
+
+    fn hold(n: u32, state: HoldState) -> HoldRecord {
+        HoldRecord {
+            job: job(),
+            n,
+            at: ts(),
+            state,
+        }
+    }
+
+    #[test]
+    fn a_hold_record_has_a_path_a_schema_and_round_trips() {
+        for (state, word) in [
+            (HoldState::OnHold, "on_hold"),
+            (HoldState::Released, "released"),
+        ] {
+            let record = AnyRecord::Hold(hold(1, state));
+            assert_eq!(record.schema(), "athena.hold/1");
+            let path = format!("{}/hold-1.json", job().dir());
+            assert_eq!(record.canonical_path(), path);
+            let text = record.to_json();
+            assert!(text.contains("\"schema\": \"athena.hold/1\""));
+            assert!(text.contains(&format!("\"state\": \"{word}\"")));
+            assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), record);
+            assert_eq!(
+                check_record_file(&path, text.as_bytes()).unwrap(),
+                Some(record)
+            );
+            let wrong = format!("{}/hold-2.json", job().dir());
+            assert!(matches!(
+                check_record_file(&wrong, text.as_bytes()),
+                Err(RecordError::Misplaced { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_hold_record_numbered_zero_or_with_an_unknown_state_is_refused() {
+        let zero = AnyRecord::Hold(hold(0, HoldState::OnHold));
+        assert!(matches!(
+            check_record_file(&zero.canonical_path(), zero.to_json().as_bytes()),
+            Err(RecordError::Invalid { .. })
+        ));
+        let text = AnyRecord::Hold(hold(1, HoldState::OnHold))
+            .to_json()
+            .replace("on_hold", "held");
+        assert!(matches!(
+            AnyRecord::parse("x", text.as_bytes()),
+            Err(RecordError::Parse { .. })
+        ));
     }
 
     fn focus(n: u32, text: &str, set_by: &str) -> FocusRecord {

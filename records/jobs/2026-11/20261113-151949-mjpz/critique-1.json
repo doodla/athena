@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-151949-mjpz",
+  "round": 1,
+  "at": "2026-11-13T15:48:46.079993703Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The escalation can keep the planner's effort the same or lower it: the override replaces the effort instead of raising it",
+      "evidence": "Step 3 sets `spec.effort = cfg.thrash_effort.as_str().to_string()` whenever `round > 1 || mechanical_passes > 0`. The first call's effort comes from `effort_for(Planner)`, which is `verifier_effort` (config.rs:830, athena.toml:21, now `high`). Nothing orders the two values. If an operator sets `verifier_effort = \"max\"`, the default `thrash_effort = xhigh` makes every re-plan run below the first call, the opposite of the request ('increase intelligence') and of the reading ('runs at a higher effort than the first'). The plan's own risk note ('an operator can set `high` to turn escalation off') shows it treats this as a replacement, not a raise. Fix: Derive `PartialOrd, Ord` on `EffortLevel`, in the order low < medium < high < xhigh < max. Parse the base `spec.effort` into an `EffortLevel` and set the effort to the higher of the base and `thrash_effort`. Alternatively, have `validate()` refuse a `thrash_effort` below `verifier_effort`. Add a config or run test where `verifier_effort = \"max\"` and the re-planned call stays at `max`.",
+      "location": "Plan step 3 / Decision 2; crates/athena-core/src/run/planning.rs:140-155",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 6 'fails without' claim is wrong: the repository-config assertion passes even when athena.toml lacks the key",
+      "evidence": "The plan asserts that the repository config has `thrash_effort == Xhigh` and says that 'without the athena.toml key the repository-config assertion that it is set explicitly fails'. The serde default is also `Xhigh`, so `Config::parse(REPO_CONFIG)` gives `Xhigh` with or without the key, and the assertion cannot fail. Fix: Either assert on the text of the `[job_plan]` table of `REPO_CONFIG` (for example, that it contains a line starting `thrash_effort`), or set a value in athena.toml that differs from the default. Otherwise, call criterion 6 an inspection and drop the claim.",
+      "location": "Demonstrations, criterion 6; Plan step 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A second list of effort names can drift from EFFORT_LEVELS",
+      "evidence": "`EFFORT_LEVELS` (config.rs:337) validates the `[models]` efforts. The new `EffortLevel` enum hard-codes the same five names through serde `rename_all` and `as_str()`. If someone adds a level to one and not the other, the two accept different values. Fix: Add a unit test that the `as_str()` values of `EffortLevel`'s variants equal `EFFORT_LEVELS` in order. Alternatively, have `as_str` index into `EFFORT_LEVELS`.",
+      "location": "Decision 1 / Plan step 1; crates/athena-data/src/config.rs:337",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An unknown value fails in a different way from the other effort keys, which the reading said it would match",
+      "evidence": "The `[models]` efforts are refused in `validate()` with `ConfigError::Effort(name, value)` (config.rs:665-676). The enum is refused earlier, by serde, as `ConfigError::Parse`. The plan acknowledges this. The refusal still names the value and the key, because toml's error quotes the source line, so the `bad_job_plan_settings_are_refused_naming_the_field` row passes. Fix: Keep the enum, but state the difference in D178 and the CHANGELOG bullet. Also have the new test assert that the error names both `thrash_effort` and `extreme`.",
+      "location": "Risks, second bullet; Reading assumption 'Config validation refuses an unknown value, the same way as the other effort keys'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Text-based readers of athena.toml's [job_plan] table are left out of the dependents list",
+      "evidence": "hestia.rs asserts that athena.toml contains the exact text `[job_plan]\\nenabled = true\\nmode = \"hard\"\\n` and rewrites it. `repository_job_plan_config` copies the table from `[job_plan]` up to the next `[` line. Appending the key and its comment after `max_rounds` (step 4) keeps both working. A comment or the key placed between `[job_plan]` and `mode` would break the hestia assertion. Fix: Add both readers to the dependents list. In step 4, state that the comment and key go after `max_rounds = 5` and that the first three lines of the table stay unchanged. The tests are hestia's dormant-stage tests and `cargo test -p athena-cli --test job_plan`.",
+      "location": "Dependents, 'athena.toml [job_plan] section'; crates/athena-core/src/hestia.rs:3579-3583; crates/athena-cli/tests/job_plan.rs:1125-1134",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A seeded plan from an earlier job that stopped in planning is the clearest thrash signal, but it runs at base effort",
+      "evidence": "`resumed_from` (planning.rs:39-52) seeds round 1 with a kept plan from a job that has already used its rounds. Criterion 2 explicitly keeps the first attempt of round 1 at the configured effort, so the plan follows the reading. Fix: No change is required. Mention in D178 that escalating across jobs was considered and deferred, so a later job can widen the trigger on purpose.",
+      "location": "Decision 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly and changes the code at the right place. In `planning_round` (planning.rs:140-155) it overrides `spec.effort` after `agent_spec`, which is the same pattern as producer.rs:339-341. Both triggers are already in `Attempt`, and the critic spec and the first call are left alone. I read the code and confirmed the seams it names: `repo_with_planning`, `planning_script`, `bad_plan`/`good_plan`, `revising_critique`/`accepting_critique`, and `Records::load` at tests.rs:1116. I also confirmed that `invoke_and_record` copies `spec.effort` into the record (invocation.rs:202), and that the only struct literal of `JobPlanConfig` is its `Default`. I grepped for other readers of `job_plan` and of invocation effort and found none the change breaks. Two text-based readers of athena.toml, hestia.rs:3579 and cli job_plan.rs:1125, still work if the key is appended at the end of the table. One soundness problem remains. The override sets the planner's effort to `thrash_effort` unconditionally, so if `verifier_effort` is set at or above it (for example `max`), the \"escalation\" keeps the same effort or lowers it. That contradicts the reading's \"higher effort than the first\". The other findings are minor."
+}

@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261113-112836-b7sx",
+  "round": 4,
+  "at": "2026-11-13T11:57:40.766570022Z",
+  "invocation_seq": 9,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/steward.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/steward.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "`queued_work` would pass every stored correction, including one made on the latest reading itself, so a reading is checked against a correction that was written after it.",
+      "evidence": "`correct` stores a Correction with `n: previous.n` (the reading it corrected) and builds history so that each reading is followed by its correction (reading.rs:1386-1414). The reader therefore only ever sees corrections on readings older than the new one. If the re-read after a correction fails or is refused, the latest stored reading is the one that was corrected. Passing all corrections would then judge that reading under its own correction. The existing tests pass `corrected = &[1]` with one reading (steward.rs:2713-2724), and the plan's new test would copy that pattern. Fix: Build the corrections from `j.corrections` with `n < latest.n`, sorted by n. Write the steward test with two readings (n=1 and n=2, same config hash so `reread_changed_scope` does not fire) and a correction on n=1. State the rule in the `queued_work` doc bullet.",
+      "location": "Decision 3 / Step 7 (steward.rs queued_work)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`proposed_with` always uses `REREAD_REQUEST`, which has no parts, so the steward tests must also replace the request text. Step 7 only says to edit the correction text.",
+      "evidence": "steward.rs:2650-2655 sets `text: REREAD_REQUEST.into()`. REREAD_REQUEST (2585) is 'Add a greeting.\\n\\nAcceptance:\\n- the greeting prints...'. Step 7 says only 'Set the correction text through records.jobs.get_mut(REREAD_JOB).unwrap().corrections[0].text'. Without a request that holds '(1) .. (2) ..', both new tests would pass with or without the corrections path, so they would show nothing. Fix: In step 7, also set `records.jobs.get_mut(REREAD_JOB).unwrap().request.as_mut().unwrap().text` to the request with parts. Assert first, as the existing test at 2763-2769 does, that `check_reading_text` refuses the seeded reading, so the 'held without the correction' test is shown to bite.",
+      "location": "Step 7 / Criterion 4 demonstration (steward tests)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'for now', 'follow-up' and 'defer' in a sentence that cites a marker are read as deferral even when they mean a stopgap or name a thing, so a part the request wants done is silently skipped.",
+      "evidence": "REQUEST_DEFERRAL includes 'for now', 'follow-up', 'follow up' and 'defer'. Any sentence outside the part spans that cites '(3)' and holds one of them defers (3), with only a per-clause negator guard. Two counterexamples: 'For (3), hard-code the timeout for now.' and 'In (2), the follow-up prompt must quote the error.' Both would skip a required part, and the reading would be accepted while dropping it. That is a missed refusal of exactly the kind this job targets. The Risks entry covers 'later' and 'Parts 2 and 3', but not these words. Fix: Count 'for now' and 'follow-up' as deferral only when the clause also holds a scope or leave verb ('leave', 'out of scope', 'skip', 'later', 'separate', 'not in this') or a copula ('is/are … for now', 'can come in a follow-up'). Keep criterion 4's three Accept cases. Add the two examples as Refuse rows in request_parts_request_defers, and name the limit in the doc comment.",
+      "location": "Decision 9 (REQUEST_DEFERRAL on the request side and in corrections)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The deterministic fake reader is a reader of the gate result that the dependents list omits. Its single criterion cannot cover any part.",
+      "evidence": "athena-agent/src/fake.rs:299-313 `reader_turn` always emits one criterion, 'FAKE-CHANGE.md contains the request'. Any fake-agent end-to-end run whose request holds an Acceptance section or enumerated parts would now be refused by check_request_parts. I grepped `.ask(`/`.queue(` calls and athena-cli/run tests and found no such request today. Hestia tests queue 'Acceptance:' requests (hestia.rs:4852, 5124, 7448), but those are not read in the snippets I checked. athena-agent is not a deliverable. Fix: Add fake.rs reader_turn as a dependent. Give the reason that today's fake-run requests have no parts, and say the guard is cargo test --locked. State that a future fake run with a part-bearing request needs a scripted reading.",
+      "location": "Dependents / Risks",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Two doc comments will still say `queued_work` uses `check_reading_text`.",
+      "evidence": "terms.rs:271 says '[`crate::steward::queued_work`] re-checks its stored reading'. athena-cli/src/drain.rs:121 says 'passes the text-only reading checks (`check_reading_text`; ...'. After this change, `queued_work` calls `check_reading_text_with_corrections`. Fix: Update the terms.rs line, which is a deliverable. Name the drain.rs doc line in the report as left stale, or reword the steward doc so neither line becomes wrong.",
+      "location": "Decision 3 / Files (terms.rs:271, athena-cli drain.rs:121)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The extended test only checks that the new wrapper calls `refusing_check(`. It does not check that the wrapper calls no check directly.",
+      "evidence": "refusal_corpus.rs:3215-3219 asserts both '!inside.contains(\"check_\")' and 'contains(\"refusing_check(\")' for check_reading_acceptance. Step 9 extends only the second assertion to the new wrapper. Fix: Apply both assertions to the body of `check_reading_acceptance_with_corrections`.",
+      "location": "Step 9 (no_check_bypasses_refusing_check)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round-4 review, based on reading the snapshot with Read and Grep only. I checked the plan's three new fixes against the code and all three hold. F1: `the_wrapper_agrees_with_refusing_check_on_every_case` (refusal_corpus.rs:2800-2823) compares `check_reading_acceptance` with `run`. `no_check_bypasses_refusing_check` (3209-3220) splits on `pub fn check_reading_acceptance(`, which the new `check_reading_acceptance_with_corrections` name does not match. F2: `queued_work` (steward.rs:405-431) checks the stored reading with `check_reading_text` and no corrections, and `JobRecords.corrections` (store.rs:26) holds the texts it needs. F3: pin.rs:163-164 builds history with every correction set to None. The step-order scans cut the `refusing_check` body at the first unindented `}` and count step lines by position, so a new last step and a `let` shadow do not disturb them. `Case` is built in only two places (refusal_corpus.rs:249, 325), so the new `corrections` field is cheap to add. The callers of `refusing_check`, `check_reading_text` and `queued_work` all match the dependents list, except one fixture-side reader that is minor. What remains is minor: in `queued_work`, corrections should be limited to those made before the latest reading; the steward test must also swap in a request with parts; the request-side reading of 'for now' and 'follow-up' can drop a part the request wants done; and the fake reader is an unlisted dependent. No blocker or major finding, so I accept the plan."
+}
