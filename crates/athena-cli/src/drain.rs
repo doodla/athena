@@ -13,6 +13,11 @@
 //!   `[parallel] max_concurrency` (default 1, which is [`drain`]'s one job at a time, dispatching exactly in
 //!   plan order). The pass is
 //!   deterministic code and calls no model of its own; nothing is defaulted into a plan.
+//! - **A request on hold is never dispatched.** `athena hold <job>` puts an open request on hold (an
+//!   `athena.hold/1` record) and `athena release <job>` lifts it. [`Drain::prepare`] marks such an entry
+//!   ([`athena_core::plan::PlanEntry::on_hold`]), does not read it, and [`athena_core::plan::Plan::build_with`]
+//!   holds it back at any priority, with whatever depends on it, so `athena plan` lists it as `held` with the
+//!   reason "on hold". A lower priority alone holds nothing back.
 //! - **Athena's own requests get a guaranteed turn.** Requests from the Steward and from Hestia's reviews
 //!   ([`Steps::improvement`]) used to sort behind every request a person marked urgent or high. The plan now
 //!   gives them at least one dispatch in three while a ready one is queued
@@ -2207,7 +2212,11 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             if let Some((_, stored)) = carry.prepared.get(&entry.id)
                 && !entry.missing().is_empty()
             {
+                // The stored entry is from this run's earlier read; whether the user holds the item is read
+                // again each time.
+                let on_hold = entry.on_hold;
                 *entry = stored.clone();
+                entry.on_hold = on_hold;
             }
         }
         let mut forced: Vec<Refusal> = carry.forced.clone();
@@ -2243,7 +2252,8 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             let Some(pos) = view.plan.iter().position(|e| e.id == id) else {
                 continue;
             };
-            if view.plan[pos].missing().is_empty() {
+            // An item the user put on hold is not read or paid for: it is not worked until released.
+            if view.plan[pos].on_hold || view.plan[pos].missing().is_empty() {
                 continue;
             }
             if self.steps.stop_requested() {
@@ -4369,6 +4379,8 @@ impl<'a> RealSteps<'a> {
                 role_priority(records, &work.role),
             );
         }
+        // A request the user put on hold (`athena hold`) is never dispatched; the plan holds it back.
+        entry.on_hold = record.on_hold();
         Some(entry)
     }
 

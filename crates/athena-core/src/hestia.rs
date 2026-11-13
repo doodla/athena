@@ -1842,6 +1842,11 @@ fn backfill_step(
             state.name()
         ));
     }
+    // A request the user put on hold is left alone: requeueing it would close it and queue a copy with no
+    // hold, which drain would dispatch, and the closed original would count as a met dependency.
+    if old.on_hold() {
+        return skip(format!("request {id} is on hold; it is left alone"));
+    }
     let text = old.request.as_ref().map_or("", |r| r.text.as_str());
     let rebuilt = match rebuild_request(text, priority, cause) {
         Ok(rebuilt) => rebuilt,
@@ -5468,6 +5473,47 @@ mod tests {
         assert_eq!(
             records(&athena).jobs[job.as_str()].priority(),
             Priority::Urgent
+        );
+    }
+
+    #[test]
+    fn the_backfill_leaves_an_on_hold_request_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let existing = backlog(dir.path(), &athena);
+        athena.set_hold(existing.as_str()).unwrap();
+
+        let report = athena.error_review_backfill(&crate::Quiet).unwrap();
+
+        let held = line_of(&report, LIVE[1].0);
+        assert_eq!(held.action, BackfillAction::Skipped, "{}", report.render());
+        assert!(held.reason.contains("is on hold"), "{}", held.reason);
+        assert_eq!(report.count(BackfillAction::Requeued), 0);
+        assert_eq!(report.count(BackfillAction::Reprioritised), 0);
+        assert_eq!(report.count(BackfillAction::Queued), 6);
+        let known = records(&athena);
+        let old = &known.jobs[existing.as_str()];
+        assert_eq!(
+            old.state(),
+            JobState::Queued,
+            "the held request is not closed"
+        );
+        assert!(old.on_hold());
+        assert_eq!(
+            known.request_jobs().len(),
+            2 + 6,
+            "no replacement copy of the held request"
+        );
+
+        // Released, the same request is requeued as before.
+        athena.release_hold(existing.as_str()).unwrap();
+        let report = athena.error_review_backfill(&crate::Quiet).unwrap();
+        assert_eq!(
+            line_of(&report, LIVE[1].0).action,
+            BackfillAction::Requeued,
+            "{}",
+            report.render()
         );
     }
 
