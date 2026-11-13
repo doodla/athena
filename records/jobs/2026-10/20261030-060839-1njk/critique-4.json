@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060839-1njk",
+  "round": 4,
+  "at": "2026-11-13T11:21:23.629731857Z",
+  "invocation_seq": 10,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The new parser has its own skip list instead of reusing the classifier that already exists. It misses the copied sections and fenced code of approved-work requests, so quoted material would become required parts.",
+      "evidence": "terms.rs already has `is_generated_line` with the anchors ROOT_CAUSE_ANCHOR and APPROVAL_ANCHOR. Its doc (terms.rs:187-188) says it skips text 'Athena's generators wrote or copied (... and, in an approved-work request, everything from the `## Source` heading on), fenced code'. `approve_request` (work_decisions.rs:299-320) copies cited records into the request. `job_text` copies another job's whole request in a fence (`Request:\\n{fenced(...)}`), and that text usually holds 'Acceptance:\\n- ...'. `path_text` copies whole files in a fence, such as docs with '1. ' lists. With the plan's parser, a copied 'Acceptance:' line makes every later dash or `N.` line a required Bullet, and numbered lines in copied docs become Enumerated parts. `approve_work` (work_decisions.rs:340-345) sends this text through `self.ask`, which runs the reading gate, so approved proposals would be refused for not covering quoted evidence. The plan skips only five fixed prefixes. It does not mention fenced blocks or `## Source`. Fix: Build `request_parts` on the same generated-text rules as terms.rs. Reuse `is_generated_line` with ROOT_CAUSE_ANCHOR and APPROVAL_ANCHOR detection, skip fenced code, and skip everything from `## Source` on in an approved-work request. Better still, factor the line filter that terms.rs (~190-205) uses into one shared helper and call it from both checks. Add corpus cases: an approved-work request whose copied job request holds 'Acceptance:' bullets and a fenced '1. ' list, accepted with a typical reading.",
+      "location": "Decision 1 / Step 2 (`request_parts` skip list); crates/athena-core/src/reading/terms.rs:50-80, 187-202; crates/athena-core/src/work_decisions.rs:293-327, 181-190, 214-222",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out the approved-work request path, a producer of request text that goes through the changed gate.",
+      "evidence": "`work_decisions::approve_request` / `Athena::approve_work` (work_decisions.rs:293-345) build a request and read it through `self.ask`, so `refusing_check` runs on it. The list names steward, hestia, code_health, run/pin, drain and replay, but not work_decisions.rs or its tests. The corpus already holds an approved-work shape (refusal_corpus.rs:1430) that the plan does not mention. Fix: Add work_decisions.rs approve_request/approve_work to the dependents. Name the test that covers it: a corpus case built on the refusal_corpus.rs:1430 shape with copied sections that hold enumerations and an 'Acceptance:' section, expected Accept. Also list `cargo test -p athena-core work_decisions` in step 9.",
+      "location": "Dependents",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The prefix skips have no anchor, so a hand-written request line that starts 'Cause:' or 'Priority:' is dropped from parsing.",
+      "evidence": "`is_generated_line` (terms.rs:59-79) skips 'Cause: ', 'Failure class: ' and the title prefix only when ROOT_CAUSE_ANCHOR is present. Its doc says this is so that 'a hand-written line that starts the same way still counts'. The plan skips these prefixes in every request. Fix: Skip these prefixes only when the request holds ROOT_CAUSE_ANCHOR, as terms.rs does, by reusing that function.",
+      "location": "Decision 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The Acceptance section never ends, so dash bullets in a later section become required Bullet parts.",
+      "evidence": "Every `-`, `*` or `N.` line after a line equal to 'Acceptance:' is a Bullet. Requests can hold later sections, for example a 'Notes:' list or a copied block. StewardRequest puts 'Files:' after the bullets (steward.rs:581-585), but hand-written requests vary. Fix: End the Acceptance section at the first non-bullet heading line such as `Word:` or `## `, or at a blank line followed by a non-bullet line. Pin this with a parser test.",
+      "location": "Decision 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Word-list negation over criteria is fragile in a repository whose own subject is refusal and deferral.",
+      "evidence": "In this repository, criteria often describe refusal behaviour with words like 'deferred', 'out of scope' or 'as a follow-up'. This job's own criteria 2 and 3 do. Such a criterion is ignored for every part whose text lacks the phrase. The plan names the limit and shows ignored criteria in the error, but the replay hold (declared 10% + 5 points, replay.rs:161, 306) gives little margin for false refusals that cannot be measured locally. Fix: Count a CRITERION_NEGATION phrase only when it is in the same clause as the part's distinctive stems, or only in criteria that share stems with the part's own text. Alternatively, keep it as is but add a proxy corpus case built from this job's own reading, accepted.",
+      "location": "Decision 6",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the fix at the reading gate (`refusing_check`, checks.rs:520-549), adds the step last, and pins its decisions in detail: stems, distinctive stems, negation rules and request-side deferral. Its demonstrations go through real entry points (`refuser_for` at reading.rs:7288, corpus `run`, `reading_source`). They would fail without the step. Checked by reading the snapshot: the corpus anchors at refusal_corpus.rs:1879-1918, 2927 and 2946 exist, as does the hestia title line at 1050-1053. The main soundness gap is the parser. It reinvents a fixed, unanchored skip list. terms.rs already has an anchored classifier of generated and copied text (`is_generated_line`, ROOT_CAUSE_ANCHOR, APPROVAL_ANCHOR, skipping from `## Source` on and fenced code). The plan's list misses approved-work requests. Those requests come from `work_decisions::approve_request` and copy whole job requests (with 'Acceptance:' bullets) and file contents into the request text, and they go through the gate via `approve_work`. That path is also missing from the dependents list. Smaller issues: the Acceptance section never ends, the prefix skips have no anchor, and the negation word lists are fragile in a repository that is about refusals. Fixing these means reusing the existing classifier and adding one approved-work corpus case. Verdict: revise."
+}
