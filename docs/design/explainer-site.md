@@ -60,6 +60,13 @@ published to GitHub Pages from this repository and runs locally with one command
   `xtask/src/decisions.rs` fails if that fetch is missing or comes after the render. Without the branch the
   page says it is missing and lists no proposals.
 
+- Reading and access (OLY-B-D2-02): `finish()` in `xtask/src/site.rs` gives every page a skip link to `#main`,
+  a learning-path ordered list of links to each section, and a CSS-only track switch (a checkbox before
+  `<main>`): core is the default and sections marked `expert` (`EXPERT_SECTIONS`) show when it is ticked. The CSS
+  adds `:focus-visible` outlines and an `@media (prefers-reduced-motion:reduce)` rule beside the viewport meta,
+  the narrow-screen rule and the light and dark colour schemes. No script is used. Test:
+  `the_page_offers_accessibility_tracks_and_a_learning_path`; it checks the markup and CSS text, not a browser.
+
 ## Alternatives considered
 
 | Alternative | Why not |

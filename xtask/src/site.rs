@@ -647,11 +647,59 @@ fn finish(
         escape(sha)
     );
 
+    let (body, path) = learning_path(body);
+    let nav = format!(
+        "<nav aria-label=\"Reading options\"><label for=\"track-expert\" class=\"track\">\
+         Track: core by default; tick for the expert track</label>{path}</nav>"
+    );
+    // The reading options follow the page header, so the header still opens the page text.
+    let body = if body.contains("</header>") {
+        body.replacen("</header>", &format!("</header>{nav}"), 1)
+    } else {
+        format!("{nav}{body}")
+    };
     format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>Athena explains how {sys} handles work</title><style>{CSS}</style></head><body><main>{body}</main></body></html>\n",
+         <title>Athena explains how {sys} handles work</title><style>{CSS}</style></head><body>\
+         <a class=\"skip\" href=\"#main\">Skip to main content</a>\
+         <input type=\"checkbox\" id=\"track-expert\" class=\"track-input\">\
+         <main id=\"main\">{body}</main></body></html>\n",
         sys = escape(system)
+    )
+}
+
+/// Sections that only the expert track shows.
+const EXPERT_SECTIONS: [&str; 2] = ["Glossary", "Claims and sources"];
+
+/// Gives each plain `<section><h2>` an anchor, marks the expert sections, and returns the page body with
+/// the learning-path list (an ordered list of links to those sections).
+fn learning_path(body: &str) -> (String, String) {
+    const OPEN: &str = "<section><h2>";
+    let mut out = String::with_capacity(body.len() + 512);
+    let mut items = String::new();
+    let mut rest = body;
+    let mut n = 0;
+    while let Some(at) = rest.find(OPEN) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + OPEN.len()..];
+        let Some(end) = after.find("</h2>") else {
+            out.push_str(&rest[at..]);
+            rest = "";
+            break;
+        };
+        n += 1;
+        let title = &after[..end];
+        let expert = EXPERT_SECTIONS.contains(&title);
+        let class = if expert { " class=\"expert\"" } else { "" };
+        let _ = write!(out, "<section id=\"step-{n}\"{class}><h2>");
+        let _ = write!(items, "<li{class}><a href=\"#step-{n}\">{title}</a></li>");
+        rest = after;
+    }
+    out.push_str(rest);
+    (
+        out,
+        format!("<ol class=\"learning-path\" aria-label=\"Learning path\">{items}</ol>"),
     )
 }
 
@@ -908,6 +956,13 @@ dt{font-weight:600}dd{margin:0 0 .5rem}\
 .leadin{font-size:1.05rem}.summary{font-weight:600;margin:.3rem 0}\
 .deciders{margin:1rem 0}\
 .sources{color:var(--muted);font-size:.85rem}\
+.skip{position:absolute;left:-999px}.skip:focus{left:.5rem;top:.5rem;background:var(--card);padding:.4rem;z-index:1}\
+nav{margin:1rem 0}.track-input{position:absolute;opacity:0}\
+.track{cursor:pointer;color:var(--muted)}.learning-path{margin:.4rem 0;padding-left:1.4rem}\
+.expert{display:none}.track-input:checked~main .expert{display:block}\
+.track-input:checked~main li.expert{display:list-item}\
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}.track-input:focus-visible~main .track{outline:3px solid var(--accent)}\
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}}\
 @media (max-width:40rem){h1{font-size:1.5rem}main{padding:.6rem}}";
 
 #[cfg(test)]
@@ -1615,6 +1670,25 @@ mod tests {
         assert!(html.contains("name=\"viewport\""));
         assert!(html.contains("prefers-color-scheme:dark"));
         assert!(!html.contains("<link") && !html.contains("<script"));
+    }
+
+    #[test]
+    fn the_page_offers_accessibility_tracks_and_a_learning_path() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        assert!(html.contains("name=\"viewport\""));
+        assert!(html.contains("prefers-color-scheme:dark"));
+        assert!(html.contains("color-scheme:light dark"));
+        assert!(html.contains("<a class=\"skip\" href=\"#main\">"));
+        assert!(html.contains("<main id=\"main\">"));
+        assert!(html.contains("id=\"track-expert\""));
+        assert!(html.contains("<section id=\"step-1\">"));
+        assert!(html.contains(" class=\"expert\"><h2>Claims and sources</h2>"));
+        assert!(html.contains("<ol class=\"learning-path\""));
+        assert!(html.contains("<li><a href=\"#step-1\">Start here</a></li>"));
+        assert!(html.contains("@media (prefers-reduced-motion:reduce)"));
+        assert!(html.contains(":focus-visible{"));
+        assert!(html.contains(".expert{display:none}"));
     }
 
     #[test]
