@@ -59,6 +59,18 @@ published to GitHub Pages from this repository and runs locally with one command
   `git fetch` of `athena/records` into `refs/heads/athena/records`, before the render step; a test in
   `xtask/src/decisions.rs` fails if that fetch is missing or comes after the render. Without the branch the
   page says it is missing and lists no proposals.
+- Tracks and learning path (explainer page only, `xtask/src/site.rs`). A skip link leads to `<main id="main">`.
+  A checkbox before `<main>` switches tracks with CSS alone, with no script: by default the core track hides
+  sections marked `class="expert"` (Counters and Transitions); ticking "Show expert detail" shows them. Directly
+  under the header, a learning-path ordered list links every section in page order, those with an id included;
+  the job-evidence section is inserted after it. The claims, the glossary and the next steps are never
+  expert, because every claim citation and the header's "listed at the end" promise point at them.
+  Focus outlines use `:focus-visible`, and a `prefers-reduced-motion` rule turns off smooth scrolling and
+  motion.
+- No track has dead links: the unit test `no_track_has_a_dead_anchor_and_the_features_exist` renders the real
+  page, removes the expert elements to model the core track, and fails if an in-page `href="#..."` has no
+  target or the claims and glossary sections are hidden. The decisions page gets only the skip link and the
+  shared CSS rules, not tracks or the learning path.
 
 ## Alternatives considered
 
