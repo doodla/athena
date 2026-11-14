@@ -1064,6 +1064,98 @@ mod produce_and_verify_order_tests {
         assert!(!path.exists(), "the snapshot is cleaned with the job");
     }
 
+    /// The `## Time budget` section of a brief: from its heading to the next heading, or the end.
+    fn time_budget_of(text: &str) -> &str {
+        let start = text.find("## Time budget").expect("a time budget section");
+        let rest = &text[start..];
+        rest.find("\n## ").map_or(rest, |end| &rest[..end])
+    }
+
+    #[test]
+    fn the_producer_deadline_in_the_stored_brief_is_the_one_the_invocation_runs_under() {
+        let repo = repo();
+        // A limit that is neither the repository's value nor a constant in the code.
+        let config = std::fs::read_to_string(repo.path().join("athena.toml")).unwrap();
+        let changed = config.replacen("producer_timeout_s = 86400", "producer_timeout_s = 4321", 1);
+        assert_ne!(
+            changed, config,
+            "the repository sets producer_timeout_s = 86400"
+        );
+        commit_file(&repo, "athena.toml", &changed);
+        let state = tempfile::tempdir().unwrap();
+        let seen: Arc<Mutex<Option<(u64, String)>>> = Arc::new(Mutex::new(None));
+        let inner = base_script();
+        let script: athena_agent::fake::Script = {
+            let seen = seen.clone();
+            Box::new(move |spec: &AgentInvocation| {
+                if spec.role == Role::Producer {
+                    *seen.lock().unwrap() =
+                        Some((spec.timeout.as_secs(), spec.user_prompt.clone()));
+                }
+                inner(spec)
+            })
+        };
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let GoResult::Finished(finished) = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+            .unwrap()
+        else {
+            panic!("expected the job to finish");
+        };
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let (timeout_s, prompt) = seen.lock().unwrap().clone().expect("the producer ran");
+        let id = proposal.job.as_str();
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = records.jobs.get(id).expect("the job's records");
+
+        // The limit the invocation ran under, and the limits recorded for it, are the configured one.
+        assert_eq!(timeout_s, 4321);
+        let producer = job
+            .invocations
+            .iter()
+            .find(|i| i.role == Role::Producer)
+            .expect("the producer invocation record");
+        assert_eq!(producer.caps.timeout_s, 4321);
+        assert_eq!(
+            job.job
+                .as_ref()
+                .unwrap()
+                .caps
+                .as_ref()
+                .unwrap()
+                .producer_timeout_s,
+            4321
+        );
+
+        // The stored brief states that same number, and not the repository's value.
+        let stored = &job.briefs["brief-producer"];
+        assert!(time_budget_of(stored).contains("4321 seconds"), "{stored}");
+        assert!(!stored.contains("86400"), "{stored}");
+        // The prompt the producer received carries the same section, and is the stored brief with only
+        // the evidence placeholder replaced (plus a possible tail).
+        assert_eq!(time_budget_of(&prompt), time_budget_of(stored));
+        let placeholder = format!("<state>/jobs/{id}/evidence");
+        let real = state
+            .path()
+            .join("repo")
+            .join("jobs")
+            .join(id)
+            .join("evidence")
+            .display()
+            .to_string();
+        assert!(
+            prompt.starts_with(&stored.replace(&placeholder, &real)),
+            "the prompt is the stored brief with the evidence path filled in"
+        );
+    }
+
     #[test]
     fn a_fake_job_takes_its_baseline_before_the_producer_and_numbers_the_invocations_in_order() {
         let repo = repo();
