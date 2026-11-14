@@ -5001,7 +5001,7 @@ mod produce_and_verify_order_tests {
             .config
             .budget
             .check_timeout_s;
-        assert_eq!(limit, 1800);
+        assert_eq!(limit, 14400);
         let _seam = check_seam::install(std::rc::Rc::new(move |spec: &CheckSpec| {
             killed_at_the_deadline(spec, limit as f64 + 5.2, limit)
         }));
@@ -5026,15 +5026,12 @@ mod produce_and_verify_order_tests {
             "{}",
             done.reason
         );
-        assert!(
-            done.reason.contains("1805s of 1800s limit"),
-            "{}",
-            done.reason
-        );
+        let over = format!("{}s of {limit}s limit", limit + 5);
+        assert!(done.reason.contains(&over), "{}", done.reason);
         let said = ui.0.lock().unwrap().clone();
         assert!(
             said.iter()
-                .any(|l| l.starts_with("failed     ") && l.contains("1805s of 1800s limit")),
+                .any(|l| l.starts_with("failed     ") && l.contains(&over)),
             "{said:#?}"
         );
         // The verifier never ran: the stop came before it.
