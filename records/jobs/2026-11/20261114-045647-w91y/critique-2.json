@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045647-w91y",
+  "round": 2,
+  "at": "2026-11-14T20:21:49.65703212Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "At the live limit of 86400 s the brief states a number that gives the producer almost nothing to pace against; the 1800 s trigger of this failure class has already been removed by configuration.",
+      "evidence": "athena.toml:49-51: 'Stage time limits are 24 hours: they do not stop work', producer_timeout_s = 86400. CHANGELOG.md:12 raised every stage limit to 86400. The stall window would be 86400/3 = 28800 s (procs.rs:27-31 per the plan). The accepted reading still asks for the deadline in the brief, so this is not a misread. It only limits how much behaviour changes. Fix: Keep the design. In the CHANGELOG entry, say plainly that at today's limit the change is preventive: it keeps the producer's stated limit truthful if the value is lowered. Do not imply it will reduce deadline failures under the current configuration.",
+      "location": "Risks, first bullet; Decision 1 (live value 86400)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The wording overstates the consequence of a stop: a timed-out run's work is kept and resumed, so it need not already be a complete change. The sentence may push the producer away from necessary multi-file edits.",
+      "evidence": "producer.rs:388-398 calls keep_unfinished_work(..., Ended::Deadline, ...) on TimedOut, and mod.rs:1199-1206 builds a resume RetrySeed with the progress note and the candidate commit, so the next run continues from the partial tree. Fix: Reword to something like: 'A stopped run sends no report; Athena keeps what is on disk and a retry resumes from it, so after each step leave the tree building and the unfinished part easy to see.' Keep the criterion-1 phrase 'no half-edited file' that the test asserts.",
+      "location": "Step 2, section text: 'A stopped run sends no report, so what is on disk when it stops must already be a usable change.'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Time spent waiting for a build slot through the producer's cargo wrapper counts against the same wall-clock limit, and the brief does not say so.",
+      "evidence": "producer.rs:351-364 installs CargoShim on the producer's PATH; its `cargo build/test/clippy/check` take a build slot, and the deadline runs on wall-clock time from the start of the invocation (claude.rs:592 per the plan). Fix: Add one clause, e.g. 'Waiting for a build slot counts against this limit, so prefer few, targeted cargo runs.' It needs no new field.",
+      "location": "Step 2, pacing paragraph",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The design outline of the producer brief sections will not list the new section.",
+      "evidence": "§7.1 lists the brief's sections, but it already omits several existing ones (e.g. Checks before the verifier, If you leave the tree unchanged), so no test or reader depends on it being complete. Fix: Optional: add a '## Time budget' line to the outline, or leave it as is, consistent with the other omitted sections.",
+      "location": "docs/design/athena-v0.md:764-775 (§7.1 producer brief outline)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Accept: no blocker or major finding. The plan follows the accepted reading: it adds `ProducerInputs.deadline_s` and an unconditional `## Time budget` section in `producer_brief_with_evidence`. One accessor, `producer_deadline_s(jc)`, supplies both the invocation timeout (producer.rs:344) and the brief input (mod.rs:1178). Checked against the snapshot: (1) the 12 `ProducerInputs {` literals are exactly those listed. (2) `repo_with_config` copies the repository's athena.toml, so the replacen from 86400 to 4321 matches. (3) The producer prompt is the stored brief with the placeholder `<state>/jobs/{id}/evidence` replaced (mod.rs:1340), plus only an appended governing tail when planning is off (briefs.rs:1421), so the `starts_with` check holds. (4) The invocation record's `caps.timeout_s` comes from `spec.timeout` (invocation.rs:212). (5) The readers of the stored brief in gate, cli, data and core match the dependents list. (6) The section placement keeps the existing ordering tests intact. (7) The text avoids the strings the existing tests forbid, adds no refusal rule and adds no config field. Remaining points are minor: at the live 86400 s limit the stated number gives little to pace against; the sentence that the tree \"must already be a usable change\" overstates things, since a timed-out run's work is kept and resumed; and build-slot waits count against the limit without the brief saying so."
+}

@@ -1,0 +1,151 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-194517-c16g",
+  "n": 1,
+  "at": "2026-11-14T20:06:47.761040622Z",
+  "invocation_seq": 2,
+  "base_commit": "9739e934d57b9bd7152e282743d043250a25d58b",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Show per-stage durations and the main reason for each in status",
+  "summary": "Part 2 of Sri's request (follow-up to 20261114-184053-050s, which landed the 24-hour limits): extend the existing throughput figures in `athena status` so each job stage (reading, each planning round, producer, checks, verifier, landing, queue wait, disk wait) shows its duration and a main reason (model and effort, tokens, tool calls, check build/test time, retries, waits). The audience is Sri, who needs to see why slow stages were slow.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the printed durations and reasons on real records against git commit times."
+    },
+    {
+      "id": "tested",
+      "how": "New unit tests plus recorded fmt, clippy and test checks."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Status output is run on real records, not only fixtures."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Previous job 20261114-184053-050s (landed, verdict pass) is addressed so: its part 1 (athena.toml limits at 86400 s, check_timeout_s 14400 s, and edits to config.rs, run/tests.rs, CHANGELOG.md) is kept unchanged and not touched here. Its two findings do not apply to this job's goal: the check_reading_size side effect (the guard now almost never fires) and the stale 1800 figure for check_timeout_s in docs/design/agent-and-build-slots.md and the config.rs comment are out of scope; this job does not edit athena.toml, config.rs or run/tests.rs, so the changed files athena.toml, config.rs, run/tests.rs are excluded here. CHANGELOG.md gets a new entry.",
+    "Goal and audience: Sri, the owner, reads `athena status` output to explain slow stages; the reading is judged by whether a slow stage's reason is visible there.",
+    "Code survey: crates/athena-core/src/status/throughput.rs already derives stage durations (landing and rebuild, check_durations) from invocation, check and landing records; crates/athena-core/src/status.rs and crates/athena-cli/src/display.rs render it; crates/athena-cli/tests/status_snapshot.rs exercises `status --snapshot`. Entry point is the status command in crates/athena-cli/src/commands.rs and main.rs. Records are read, not changed, so no new record file is added and the records validation allow-list (check_record_file, AnyRecord) is not touched; if an existing record lacks a field (tokens, tool calls, queue or disk wait), the figure shows it as unrecorded rather than guessing. Durations are measured directly from record timestamps, not a stand-in.",
+    "Existing code: crates/athena-core/src/status/throughput.rs, crates/athena-core/src/status.rs, crates/athena-cli/src/display.rs, crates/athena-core/src/checks.rs and crates/athena-core/src/slots.rs and disk.rs (wait data) are extended, not replaced.",
+    "Environment: the verifier reads git history of the repository snapshot with `git log` (read-only, local) and the committed evidence directory used by `status --snapshot`; no push, no network, no records branch writes. Real records are those in that snapshot.",
+    "Consumers: none found for a config key; no config is changed, so athena.toml and defaults.toml are not deliverables.",
+    "This does not add or tighten any refusal rule, so no refusal-rate criterion applies. Landing time is a records-computed measure: the existing landing figure may be touched, so a real-records check is included.",
+    "Reasons are derived only from data already recorded; where a stage has no recorded reason the output says so."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-core/src/status/throughput.rs (or a new sibling module under crates/athena-core/src/status/) defines a per-stage breakdown covering reading, each planning round, producer, checks, verifier, landing, queue wait and disk wait, each with a duration and a reason field (model and effort, tokens, tool calls, build/test time, retries, waits), visible in the diff.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-cli/src/display.rs (or status.rs rendering) prints each stage's duration and its main reason, and prints an explicit 'not recorded' marker when a reason or wait is absent instead of a zero.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo run -p athena-cli -- status --snapshot <evidence directory>` on the real records in the committed snapshot: the output lists per-stage durations with reasons for recent jobs, and the landing time it prints lies within the expected range taken from commit times in `git log` (run as its own simple command) for the same landings, i.e. a few minutes per landing, not 0.1 or hundreds of minutes; the range comes from git commit times, which the change does not compute.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core` and `cargo test -p athena-cli`: new unit tests on fixture records show a slow planning round and a slow check each reported with their reason (e.g. tokens or retries; build versus test time), and tests cover a job missing a reason field.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Athena's recorded fmt, clippy and test checks pass on the final tree (cargo fmt --check, cargo clippy, cargo test), with no warnings.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry for per-stage timing and reasons, and docs/decisions.md gains a new appended decision with a Provenance bullet noting that time limits are dropped (24 h) and timing is measured instead; no existing decisions entry is edited.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/status/throughput.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-cli/tests/status_snapshot.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.6
+    }
+  ],
+  "out_of_scope": [
+    "Changing time limits, athena.toml, config.rs or run/tests.rs (done by 20261114-184053-050s and kept as landed)",
+    "Fixing the check_reading_size side effect or stale 1800 mentions in docs/design/agent-and-build-slots.md",
+    "Adding new record types or changing what records store",
+    "Prompt files",
+    "records/ and owner files",
+    "bash_default_timeout_ms and bash_max_timeout_ms"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.6,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2300.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.676271186440678,
+      "p_user_intervenes": 0.06210045662100456,
+      "cost_usd": {
+        "p10": 0.551185662938367,
+        "p50": 1.481907856463903,
+        "p90": 5.707760776970614
+      },
+      "wall_time_s": {
+        "p10": 605.8596641176966,
+        "p50": 2156.7690595889994,
+        "p90": 4406.389317891374
+      }
+    }
+  },
+  "departures": "Slightly higher cost and time than the reference: the change spans core and CLI and needs a real-records check."
+}

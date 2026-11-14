@@ -44,6 +44,12 @@ pub(super) struct Reported {
     pub(super) work: PathBuf,
 }
 
+/// The wall-clock limit, in seconds, of each producer run. The one source of the limit the producer's
+/// invocation runs under and of the limit its brief states, so the two cannot drift.
+pub(super) fn producer_deadline_s(jc: &JobConfig) -> u64 {
+    jc.config.budget.producer_timeout_s
+}
+
 /// The send-back problem a held replay adds: the count, the measured percent, the limit and the job ids
 /// (at most [`REPLAY_BRIEF_MAX_LISTED`] of them, then a count of the rest).
 fn replay_problem(replay: &LoopReplay) -> String {
@@ -341,7 +347,7 @@ impl Athena {
                 Side::Produce,
                 &capability_env,
                 jc.config.budget.producer_usd,
-                jc.config.budget.producer_timeout_s,
+                producer_deadline_s(jc),
                 producer_schema(),
             )?;
             // A hard job's reading carries the escalated effort; an ordinary one keeps the configured one.
