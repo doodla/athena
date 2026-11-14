@@ -386,8 +386,9 @@ fn check_minutes(job: &JobRecords) -> f64 {
     })
 }
 
-/// When the landing record for `job` was written: the newest `landings/` record with a job-landing commit
-/// of the job. None when there is none.
+/// When the landing record for `job` was written: the earliest `landings/` record with a job-landing commit
+/// of the job. None when there is none. The earliest, because on a stacked branch later landings carry
+/// earlier jobs' commits, and the newest would move the job's landing end later with every new landing.
 fn landing_record_time(records: &Records, job: &JobRecords) -> Option<jiff::Timestamp> {
     records
         .landings
@@ -399,7 +400,7 @@ fn landing_record_time(records: &Records, job: &JobRecords) -> Option<jiff::Time
             })
         })
         .map(|l| l.created_at)
-        .max()
+        .min()
 }
 
 /// The end of a landed job's landing and rebuild: the later of the landing outcome and the landing record.
