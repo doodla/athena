@@ -4582,6 +4582,22 @@ mod tests {
     }
 
     #[test]
+    fn a_criterion_resting_on_the_producers_transcript_or_log_is_refused() {
+        for text in [
+            "the producer's transcript shows the Grep",
+            "the producer\u{2019}s log lists the callers",
+            "a transcript from the producer names the files",
+            "the log of the producer says it passed",
+        ] {
+            let error = check_criteria_evidence(&reading_with_criterion(text))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("was refused"), "{text}: {error}");
+            assert!(error.contains("criterion 1"), "{text}: {error}");
+        }
+    }
+
+    #[test]
     fn every_refused_criterion_is_named_and_the_others_are_not() {
         let mut reading = reading_with_criterion("cargo test --locked passes");
         reading.acceptance_criteria.extend([
@@ -4618,6 +4634,9 @@ mod tests {
             "the producer model is on the allowed list",
             "the summary section of docs/design/requirements-map.md is unchanged",
             "the report page from `cargo run -p xtask -- site` contains the glossary",
+            "Grep over crates/ returns 0 hits",
+            "the producer login check is documented in docs/",
+            "the build log from `cargo test --locked` is clean",
         ] {
             check_criteria_evidence(&reading_with_criterion(text))
                 .unwrap_or_else(|e| panic!("{text}: {e}"));
