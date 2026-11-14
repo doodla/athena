@@ -1,0 +1,183 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-045625-aymy",
+  "n": 1,
+  "at": "2026-11-14T12:21:24.058911043Z",
+  "invocation_seq": 1,
+  "base_commit": "a8c1f5f06b8fbd25bd096081920c2af5e020f069",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Run Athena's checks in the producer loop and send failures back",
+  "summary": "Root cause: the producer is told only its own claims (criteria_check) are checked before the verdict, while Athena's recorded checks (fmt, clippy, test) run only at verification, so a failing gate or unmet command criterion is first seen by the verifier and costs the whole job. Give the producer that information in the loop: run the configured checks on the work tree before the verifier and put any failure (command, exit status, output tail) into the one existing send-back brief, with a stored event showing the check ran.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the failing-then-repaired behavior through a test, not wiring existence."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus fmt, clippy and test passing."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix placed in the producer loop where the missing information originates."
+    },
+    {
+      "id": "mechanism",
+      "how": "Enforced by code in the loop, with tests."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-core/src/run/producer.rs (the producer loop: unmet_criteria, change_list, loop_replay, the single send-back via PRODUCER_SEND_BACKS = 1 at run/mod.rs:1591), crates/athena-core/src/run/send_back.rs (unmet_criteria, left_to_athena, send_back_text_scoped), crates/athena-core/src/run/checks.rs and crates/athena-core/src/checks.rs (run_check, CheckContext, log_entry), run/format.rs (already runs cargo fmt in the producer stage via run_check), and crates/athena-context/src/briefs.rs and prompts/producer.md. The entry point is the producer loop; the formatter runs first, then unmet criteria, planned files, gate, mirror drift and replay are computed, then the loop breaks or sends back once. No new record or data file is added under crates/ (events reuse existing invocation detail), so check_record_file, AnyRecord and the round-trip test are not touched; if a new record field is needed, the round-trip test covers it. The property is measured directly: a producer-loop test through the real run path with a fake producer whose tree fails a configured check.",
+    "Audience: the producer agent (receives the send-back brief) and the verifier and maintainers (read the stored invocation detail). Goal: a failed check or unmet criterion is caught and repaired while the producer still has its working copy, not only at the final verdict.",
+    "Not a refusal rule: no reading is refused, so no replay share applies. The job adds information (check results in the send-back brief) and reuses the existing one send-back; no new loop or budget.",
+    "Prior-job handling: jobs 20261014-170031-2r9b, 20261014-172342-rqgb and 20261014-174937-hrzn were retries of a prompt-budget rework (reader budget 1,800 to 1,910/1,920, request_reading_mismatch counted major in judge()). Their findings (stale 1,800 mentions, over-wide doc lines) concern that candidate; this request addresses the cause of their failure class (no pre-verdict check), not their text. Their changed files (prompts reader/producer/verifier, athena-context/src/lib.rs, athena-core verify.rs, decisions.md, CHANGELOG.md, docs/design/*.md, docs/records.md) are not kept or redone here: out of scope, except CHANGELOG.md and docs/decisions.md, which this job appends to as new entries.",
+    "The configured checks run are the ones the pipeline already runs at verification (fmt, clippy, test from athena.toml); the pre-verdict run reuses run_check so deadline, kill switch and redaction behave the same. The producer is told in producer.md (157 tokens of headroom) and the producer brief that Athena runs them before the verifier and sends failures back once.",
+    "Existing code: crates/athena-core/src/run/producer.rs, crates/athena-core/src/run/send_back.rs, crates/athena-core/src/run/checks.rs, crates/athena-core/src/checks.rs, crates/athena-context/src/briefs.rs; the change extends the send-back problem list rather than adding a new loop."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The root cause is named in the new docs/decisions.md entry (appended, with a Provenance bullet) and CHANGELOG.md: Athena's recorded checks ran only at verification, so the producer could not see a failing gate before the verdict. The fix is in crates/athena-core/src/run/producer.rs where the send-back problems are built.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-core/src/run/producer.rs adds the configured check results (command, exit status, output tail) to the send-back problems and to send_back_text in crates/athena-core/src/run/send_back.rs; the stored invocation detail names the check failure, so the event shows the criterion check before the verdict.",
+      "kind": "content"
+    },
+    {
+      "text": "A new test in crates/athena-core/src/run/tests.rs drives the real producer loop with a fake producer whose tree fails a configured check on the first pass and passes after the send-back. Run `cargo test -p athena-core` and see it pass; it fails on the base tree because no send-back happens and the verifier gets the failing tree.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second test shows that when all checks pass on the first pass there is no extra send-back and the loop result is unchanged (no empty-success or extra cost). Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The send-back is still bounded by PRODUCER_SEND_BACKS in crates/athena-core/src/run/mod.rs (no new loop or limit), and a check still failing after the send-back is passed to the verifier as flagged, not hidden.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-context/prompts/producer.md and the producer brief in crates/athena-context/src/briefs.rs tell the producer that Athena runs the configured checks before the verifier and sends a failure back once, and a briefs.rs test asserts that text; prompt budgets in crates/athena-cli/tests/budgets.rs stay within their limits.",
+      "kind": "content"
+    },
+    {
+      "text": "No reading is newly refused (expected 0% of newly refused readings); the change only adds information to the producer's send-back. Run `cargo test` for the workspace.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets and cargo test pass on the final tree (Athena's recorded checks on the same tree, D115).",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "p": 0.75
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-context/prompts/producer.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-cli/tests/budgets.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Adding a new repair loop or raising PRODUCER_SEND_BACKS",
+    "Editing the reader, verifier prompts or the reader budget, or the stale 1,800 doc mentions from jobs 20261014-170031-2r9b, 20261014-172342-rqgb and 20261014-174937-hrzn (that work is dropped, not kept)",
+    "Changing athena.toml, defaults.toml or workflow files",
+    "Edits to records/ or past decision entries",
+    "Adding any rule that refuses a reading"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 1.2,
+        "p50": 3.2,
+        "p90": 8.0
+      },
+      "wall_time_s": {
+        "p10": 1500.0,
+        "p50": 3600.0,
+        "p90": 7500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6757215619694398,
+      "p_user_intervenes": 0.06229007633587786,
+      "cost_usd": {
+        "p10": 0.5504364917533153,
+        "p50": 1.4791114,
+        "p90": 5.687058881982814
+      },
+      "wall_time_s": {
+        "p10": 605.7683173420212,
+        "p50": 2153.684957172999,
+        "p90": 4393.835921536072
+      }
+    }
+  },
+  "departures": "Hard pipeline change in the producer loop with a run-path test; costlier and riskier than the reference median, and the cold-built cargo checks add time.",
+  "urgent_reason": "It cuts failed and rejected attempts: 43 jobs were rejected at final verification for a criterion or gate first seen by the verifier.",
+  "hard_reason": "It changes the run pipeline (the producer loop's send-back conditions and the checks run before the verifier), so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
