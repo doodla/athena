@@ -1,0 +1,122 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261107-231406-f1bx",
+  "n": 1,
+  "at": "2026-11-14T06:56:47.46020825Z",
+  "invocation_seq": 6,
+  "base_commit": "8dfd12f795be3a5c4e39935c0346af46c7247717",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Use earliest landing record for a job's landing and rebuild end",
+  "summary": "landing_record_time (now in crates/athena-core/src/status/throughput.rs, not status.rs) takes the newest landings/ record carrying a job's job_landing commit; change it to the earliest, so stacked later landings stop pushing the end later. Audience: the owner reading throughput reviews. A landing's created_at is its merge-time record; no separate main-merge field exists, so none is added.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check status output on real records against independent commit times."
+    },
+    {
+      "id": "tested",
+      "how": "Fixture test added; fmt, clippy and test required."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/status/throughput.rs (landing_record_time at ~391 uses .max() over records.landings filtered on JobLanding commits with job id; landing_end at ~407 takes outcome.max(record time); used by busy_intervals, ranked_landings and the landing figures) and crates/athena-data/src/history.rs (Landing has created_at, host_commit, commits: Vec<LandingCommit>; no main-merge timestamp field). No new record or data file under crates/ is added, so check_record_file/AnyRecord/round-trip are unaffected. The property is measured directly as the landing_end minus outcome time per landed job.",
+    "Field meaning: Landing.created_at is documented at crates/athena-data/src/history.rs:224 as 'When the landing was recorded', written after the merge; it is used as the main-merge time because no field records a separate merge time.",
+    "Environment: the verifier reads only the repository snapshot with cargo and git log/show, no network; the independent range comes from commit times of the five jobs' landings on main in git log of the snapshot, and GitHub CI push-run times quoted in the request (5 to 12 minutes after landed outcomes). The records directory used for status is the real records snapshot available to the verifier; if absent, the verifier reports it.",
+    "The request names status.rs but the function lives in status/throughput.rs; that file is changed. The 'landings/' path in the request is records data and is not edited (records are append-only).",
+    "Old and new landing medians in the changelog are measured by running athena status before and after the change on the real records; the old figure is the review's 1,327.8 minutes unless reproduced differently."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "In crates/athena-core/src/status/throughput.rs, landing_record_time selects the earliest (.min()) created_at among landings/ records carrying the job's job_landing commit, and its doc comment says earliest.",
+      "kind": "content"
+    },
+    {
+      "text": "A new unit test in crates/athena-core/src/status/throughput.rs (or its tests module) builds a fixture where one job's commit is carried by two landing records and asserts landing_end equals the first record's time, not the second.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-core` : the new fixture test and all existing tests pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo run -p athena-cli -- status --snapshot <records directory>` on the real records: for jobs npqp, pg2d, yp1e, abbg and 4z98 the landing duration printed is within 15 minutes of the outcome-to-main-push gap, the expected range being 5 to 12 minutes after the landed outcome (up to 27 minutes tolerance) taken from main-branch commit times in git log, an independent source the change does not compute; the landing median is far below 1,327.8 minutes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry stating the old landing median (1,327.8 minutes as reported, or as measured before) and the new landing median measured after the change, and that landing figures use the earliest landing record.",
+      "kind": "content"
+    },
+    {
+      "text": "No unrelated behavior changes: `git diff` touches only throughput.rs and CHANGELOG.md; cargo fmt --check, cargo clippy and cargo test pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/status/throughput.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Queuing or building a landing redesign",
+    "Editing anything under records/ or landings/",
+    "Adding a new main-merge timestamp field to landing records",
+    "Changing other throughput stages"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1800.0,
+        "p90": 4000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6774744027303754,
+      "p_user_intervenes": 0.06286594761171031,
+      "cost_usd": {
+        "p10": 0.548195082301745,
+        "p50": 1.481907856463903,
+        "p90": 5.67432249525414
+      },
+      "wall_time_s": {
+        "p10": 605.4943596419997,
+        "p50": 2153.684957172999,
+        "p90": 4390.909508502001
+      }
+    }
+  },
+  "departures": null
+}
