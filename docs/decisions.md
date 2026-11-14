@@ -5317,3 +5317,40 @@ should replace those estimates with its figures.
   `all_checks_passing_means_one_producer_call`, `a_file_the_producer_added_is_seen_by_the_in_loop_check`,
   `the_exposed_index_lists_new_files_and_is_restored_on_drop` and `an_error_in_the_in_loop_run`, which drive the real
   producer loop with a fake producer and real check processes. Not measured: the added wall time and the skip rate.
+
+## D183 · A design producer is told to use and extend the existing-code inventory
+
+- **Case:** A design doc was written from the request text and ignored code that already existed: job
+  20261026-043137-zc0v ignored the existing Jev client, its fake and `labeled.rs`; job 20261029-073414-yg89 treated a
+  cache as active that an earlier decision had removed. The class `design-ignores-existing-code-caught-only-at-final-verdict`
+  was recorded 13 times in 13 jobs.
+- **Decision:** Root cause: the reader already requires an `Existing code:` assumption and a reuse-or-extend criterion
+  for a design reading (`check_design_existing_code`, added 2026-11-01), and the producer brief prints both, but only as
+  one line of `Assumptions:`. The producer was never told to open that list, to search the repository for what it
+  leaves out, or to name the file and function behind each claim, and nothing compared the doc's components with the
+  repository. Nine of the 13 cases are in jobs after that check, so the list alone did not prevent the class. The
+  producer brief gains `existing_code_section` in `crates/athena-context/src/briefs.rs`, written only when the new
+  `AcceptedReading::class_of_work` is "design". It quotes each `Existing code:` assumption as the starting point and
+  asks the producer to open the paths, to search for each further component, cache, config or limit, to put an
+  "Existing code" section in the doc that names each path reused or extended and says whether each proposed component
+  exists, and to name the source of every claim about code and every number. The planner brief's Report gains
+  `DESIGN_PLAN_RULE` for design readings. No refusal check is added and `check_design_existing_code` is unchanged, so
+  the expected share of past accepted readings newly refused is 0%. This follows D180: give the stage the information
+  in a brief.
+- **Alternatives:** A check that refuses a design doc with no "Existing code" section: it would compare words, not
+  whether the doc matches the repository. Editing `prompts/producer.md`: it moves a computed budget line. Inferring the
+  class from the `Existing code:` label: a code reading may carry it, so other classes' briefs would change.
+- **Tradeoff:** A producer can still skip the section; a brief cannot force it, and the verifier still judges the doc
+  against the reader's reuse-or-extend criterion. Jobs whose class was not design (the introspection titles name
+  measurement and regression jobs) get no section; widening the gate is a separate change. The filter in `briefs.rs`
+  copies the one in `crates/athena-core/src/reading/surveys.rs` because the context crate cannot call core; the test
+  `the_producer_brief_filter_selects_what_the_design_check_reads` pins their equality. The section adds about 1.5 KB to
+  a design producer brief.
+- **Reversal cost:** Low; delete the section, the planner constant, the `class_of_work` field and the tests that pin them.
+- **Provenance:** Read: `crates/athena-context/src/briefs.rs` (`reading_sections`, `producer_brief_with_evidence`),
+  `briefs/planner.rs`, `crates/athena-core/src/reading/surveys.rs` (`check_design_existing_code`,
+  `existing_code_assumptions`) and D180. Measured: `cargo test -p athena-context
+  the_design_producer_brief_has_the_existing_code_section`, `other_classes_producer_briefs_have_no_existing_code_section`
+  and `the_planner_brief_carries_the_design_plan_rule_only_for_design_readings`, and `cargo test -p athena-core
+  the_producer_brief_filter_selects_what_the_design_check_reads`. Not measured: whether design producers follow the
+  section, and the class of each of the 13 recorded jobs.
