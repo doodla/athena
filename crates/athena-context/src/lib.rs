@@ -173,10 +173,12 @@ impl BudgetSet {
     pub fn budget(self) -> u64 {
         match self {
             BudgetSet::Contract => 350,
-            BudgetSet::Reader => 2_000,
+            // The reader budget alone has risen with its defaults model (D93, then for the `behavior-evidence`
+            // default, now D181).
+            BudgetSet::Reader => 2_200,
             // Producer (measured against the producer set and the planner) and verifier (the verifier set and
-            // the critic) budgets stay near their largest set. A budget never rises to fit a set; a set that
-            // outgrows it pays for the addition with a removal.
+            // the critic) budgets stay near their largest set. They never rise to fit a set; a set that
+            // outgrows one pays for the addition with a removal.
             BudgetSet::Producer => 1_200,
             BudgetSet::Verifier => 1_300,
             BudgetSet::Steward => 600,

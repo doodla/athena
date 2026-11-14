@@ -145,6 +145,43 @@ source = "s"
     }
 
     #[test]
+    fn pin_and_hermetic_check_defaults_reach_the_reader() {
+        let model = DefaultsModel::parse(REPO_DEFAULTS).unwrap();
+        let pins = model.get("version-pins").unwrap();
+        assert_eq!(pins.applies_to, vec!["code", "config", "build"]);
+        for phrase in [
+            "exact",
+            "never auto-floated",
+            "repin",
+            "Claude Code pin (`claude_version`)",
+            "Prose-only",
+        ] {
+            assert!(pins.statement.contains(phrase), "{phrase}");
+        }
+        let hermetic = model.get("hermetic-checks").unwrap();
+        assert_eq!(
+            hermetic.applies_to,
+            vec!["code", "config", "build", "tests"]
+        );
+        for phrase in [
+            "ambient",
+            "inherited environment",
+            "every path",
+            "preferred-versus-fallback",
+            "Prose-only",
+        ] {
+            assert!(hermetic.statement.contains(phrase), "{phrase}");
+        }
+        let out = model.render();
+        assert!(out.contains(
+            "- version-pins [code, config, build]: Version pins are exact and never auto-floated; only the person running Athena moves one, and the Claude Code pin (`claude_version`) moves through the existing `cargo run -p xtask -- repin` command.\n"
+        ));
+        assert!(out.contains(
+            "- hermetic-checks [code, config, build, tests]: A check never depends on inherited environment or ambient tools; the runner passes every path a check needs, and any preferred-versus-fallback tool choice is recorded in the check output.\n"
+        ));
+    }
+
+    #[test]
     fn an_explainer_page_request_gets_the_three_standing_defaults() {
         // An explainer page is class docs: select the defaults for docs the way the reader sees them.
         let model = DefaultsModel::parse(REPO_DEFAULTS).unwrap();

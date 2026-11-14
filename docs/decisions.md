@@ -5223,3 +5223,37 @@ should replace those estimates with its figures.
   the_reader_brief_requires_a_field_meaning_assumption_for_a_reused_field`, `the_planner_brief_requires_a_reused_field_to_quote_its_meaning_and_check_the_live_config`
   and the moved pins in `the_reader_brief_names_each_reading_rule_in_one_short_line` read the rendered briefs. Not
   measured: whether the reader and the planner follow the rule.
+
+## D181 · Defaults state version-pin and hermetic-check policy, and the reader budget rises from 2,000 to 2,200 tokens
+
+- **Case:** The reader asked the user about version pins in job 20261016-005805-p806 and about ambient tools in job
+  20261025-183644-t67q, and the retry 20261114-012353-pbvc stopped in planning on minor findings with no candidate.
+  Root cause: `defaults.toml` said nothing on version-pin policy or on checks that depend on ambient tools, so the
+  reader had no stated stance to cite and put the question to the user.
+- **Decision:** Add two prose-only entries to `defaults.toml`, `version-pins` and `hermetic-checks`. Each carries its
+  stance in the first sentence, because `DefaultsModel::render` shows only that sentence to the reader. The pins
+  sentence ties `cargo run -p xtask -- repin` to the Claude Code pin (`claude_version`), the one line that command
+  rewrites; D154 stands unchanged and no command is built. Raise `BudgetSet::Reader` from 2,000 to 2,200 and make the
+  reader row in `run_pin_tests.rs` read `BudgetSet::Reader.budget()` instead of a literal. The reader set is now 2156 of
+  2200 in `docs/system-facts.md`. This departs from D170's rule that budgets never rise to fit a set, with D93 as
+  precedent for a reader-only rise; producer and verifier budgets keep the rule. Known gap: the three actions in
+  `.github/workflows/pages.yml` use floating major tags (configure-pages v5, upload-pages-artifact v3, deploy-pages v4),
+  unlike `ci.yml`, whose actions are pinned by commit and checked by `every_action_is_pinned_by_a_full_commit_sha`.
+  Workflows are not changed here; a follow-up job should pin them to commits.
+- **Alternatives:** Remove text from `prompts/reader.md` or the catalog to stay within 2,000: D170 left 2 tokens of
+  headroom and the remaining text is schema-bound. Put the stance only in the producer and verifier briefs: the reader
+  decides whether to ask the user, so it must see it. Build patch-tolerant version acceptance or a command that moves
+  every pin. Edit `pages.yml` in this job.
+- **Tradeoff:** The reader prompt grows by about 158 tokens on every request, and 44 tokens of headroom remain. The
+  entries are prose-only: nothing stops a check from using an ambient tool or a pin from floating, and `pages.yml`
+  still does.
+- **Reversal cost:** Low; delete the two entries, restore 2,000 and the facts line, and trim the reader text to fit.
+- **Provenance:** Root cause: `defaults.toml` was silent on version-pin and ambient-tool policy (read, with
+  `crates/athena-data/src/defaults.rs` `render`, which cuts at the first full stop and space). Jobs
+  20261016-005805-p806 and 20261025-183644-t67q are the cases in which the reader asked the user; the retry is
+  20261114-012353-pbvc. Read: `xtask/src/main.rs` (`repin_at` rewrites only the `claude_version` line),
+  `.github/workflows/pages.yml`, `docs/decisions.md` (D93, D154, D170). Measured: `cargo test -p athena-cli --test
+  budgets system_facts_budgets_match_computed` computed the reader set as 2156 of 2200;
+  `cargo test -p athena-data pin_and_hermetic_check_defaults_reach_the_reader` reads the real file and the rendered
+  lines. This entry departs from D170's rule that budgets never rise to fit a set. Not measured: whether the reader now
+  stops asking the user about pins and ambient tools.
