@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045625-aymy",
+  "round": 2,
+  "at": "2026-11-14T12:47:43.809988672Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Several athena-cli tests whose check passes on the base and fails after the producer's edit are missing from the dependents list and from the targeted runs in step 10, so the claim that every failing check is covered is false.",
+      "evidence": "common/mod.rs:62 configures `test` as `test -f README.md && ...`, which passes on the base and fails once README.md is deleted. These tests delete README.md and expect Rejected, so the new in-loop check sees a new failure and adds one producer pass to each: retry.rs `setup` (103-110), used by the reject/two_cases tests; introspection.rs `rejecting` (94-99); steward.rs `after_two_failures` (150-151) and `the_fifth_finished_task_starts_the_steward_and_the_fourth_does_not` (187-188); code_health_hooks.rs `a_rejected_job_queues_nothing` (113-133); lifecycle.rs `try_again_on_a_job_rejected_by_a_check_carries_the_failed_checks_output` (588-638), whose retry brief reads the earlier job's producer report and check lines. retry.rs counts producers (lines 180-184, 464-471) and only compares before/after counts, so it probably still passes, but none of this is listed or run in step 10. Fix: Add a dependents entry for test_config jobs that delete README.md, naming these tests and why each still holds (outcome still Rejected; producer counts are only compared before/after; the introspection reply is routed by MARKER, not by order; the retry brief reads the last report). Add `cargo test -p athena-cli --test retry --test introspection --test steward --test code_health_hooks` to step 10, or simply `cargo test -p athena-cli`.",
+      "location": "Plan › Dependents (and the answer to finding 2: 'The dependents list now covers every non-PASSES check in the athena-core and athena-cli tests'); Step 10",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Checks that list git's tracked files cannot see files the producer added, because they are not tracked in its snapshot. A failure in a new file then passes in the loop and fails only at verification, which is the failure class this job is meant to prevent. The plan does not name this blind spot.",
+      "evidence": "xtask/tests/policy.rs:54 builds its file list with `git ls-files -z`. The producer's snapshot is a one-commit repository and leaves new files untracked. run_check clears the environment and sets only ctx.env (checks.rs:534-535), so nothing tells git about the work-tree state. The verifier's snapshot is built from the candidate commit, where those files are tracked. The tool-config skip in decision 4 covers only rustfmt, clippy and cargo configuration. Fix: Build a temporary index of the work tree (`git add -A` with GIT_INDEX_FILE pointing at a temp file, as Snapshot::work_tree_tree already does) and put GIT_INDEX_FILE in the check's environment for the in-loop run, so `git ls-files` sees new files and the producer's own index is untouched. Or name the gap in the Risks section and in D182.",
+      "location": "Decision 2/4 and Risks ('The producer's tree can differ from the verifier's snapshot')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The byte plan contradicts itself: it trims ' while you work' (15 bytes) to pay for the new bullet 9, but the proposed bullet 9 text still contains ' while you work'.",
+      "evidence": "Decision 8: bullet 9 becomes '- Run targeted tests (`cargo test -p <crate> <filter>`) while you work. Athena runs fmt, clippy and the suite on your tree before the verifier ...', then: 'Pay for it with trims such as ` while you work` (15)'. The phrase appears only in bullet 9 of producer.md (line 9). Fix: Give the exact final text of every changed producer.md line and the byte count of the whole file (target 1102), so the net-zero edit can be checked before the producer runs.",
+      "location": "Decision 8 / Step 6 (producer.md byte plan)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The lifecycle entry lists tests 54, 75, 129, 441, 864 and 905 but not lifecycle.rs:588, whose `test` check fails after the README is deleted. That job now gets a send-back before it is rejected, and the retry brief it checks is built from the second producer report.",
+      "evidence": "lifecycle.rs:588-638 asserts 'Producer approach (its own report', '> deleted README.md' and the check lines in the retry brief. The extra pass changes which report is last. Fix: Add lifecycle.rs:588 to the entry and say why its assertions still hold with two producer reports (the fake producer repeats the same edit and the same report).",
+      "location": "Dependents › 'Configured checks of the end-to-end fake-driver jobs' (lifecycle.rs)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The approach fits the request and the accepted reading. The producer is given the information it lacked: the results of Athena's configured checks on its work tree, sent through the one send-back that already exists, with a stored note showing the checks ran. The fix sits in producer_loop where the send-back problems are built. I read the code and the plan's main claims hold. producer_loop (producer.rs:272-643) has the structure described, including scope_slot_free at 571-573 and the 'redacted report: ' detail at 560. verify::is_pre_existing, checks::timed_out and admission::is_tool_config exist. check_and_verify filters the baseline by built.base, which is ctx.prediction (mod.rs:1790, 1845). Snapshot::work_tree_tree and restore_to exist (athena-git snapshot.rs:210, 227). run_check returns a failed CheckRun, not an error, when a command cannot start, so the lifecycle 'missing' command case is excused as already failing on the base. The baseline runs in job_dir/baseline (run/checks.rs:562), so the new MARKS_BASELINE_OUTSIDE guard works. The verifier prompt prints '- name: `cmd` failed' (briefs.rs:1336-1341). I found no byte-identical stored copy of the producer brief. The one major finding: the plan says its dependents list covers every failing check in the athena-cli tests, but it omits several tests (retry.rs, introspection.rs, steward.rs, code_health_hooks.rs and lifecycle.rs:588). In each, the producer deletes README.md, which fails the shared test config's `test` check on the candidate but not on the base, so each job now gets one extra producer pass. Step 10 does not run these test binaries; only step 11's workspace run would catch a break. Minor points: checks that list git's tracked files cannot see files the producer added, so a policy failure in a new file passes the in-loop run and fails at verification; the producer.md byte plan contradicts itself; and one lifecycle entry is incomplete. Verdict: revise, because of the dependents gap."
+}
