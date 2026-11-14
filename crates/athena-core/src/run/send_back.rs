@@ -266,6 +266,87 @@ pub(crate) fn append_missing_changelog(mut text: String, missing: bool) -> Strin
     text
 }
 
+/// The leading sentence of a send-back that lists configured checks which failed on the producer's work.
+const CHECK_FAILURE_SENTENCE: &str = "Athena ran the configured checks on your work before the verifier and one or more failed; \
+     this is a reason for this send-back whether or not criteria are listed. ";
+
+/// How many final bytes of a failed check's output the send-back keeps.
+const CHECK_FAILURE_TAIL_BYTES: usize = 3000;
+
+/// A configured check that failed on the producer's work before the verifier: what the send-back shows.
+#[derive(Debug, Clone)]
+pub(crate) struct CheckFailure {
+    pub(crate) name: String,
+    pub(crate) command: String,
+    pub(crate) exit: String,
+    pub(crate) tail: String,
+}
+
+impl CheckFailure {
+    /// The failure a run of a check records: its command as configured, how it ended, and the end of its
+    /// output (already redacted by the runner).
+    pub(crate) fn of(run: &athena_data::records::CheckRun) -> CheckFailure {
+        CheckFailure {
+            name: run.name.clone(),
+            command: run.command.join(" "),
+            exit: match (run.exit_code, run.note.as_deref()) {
+                (Some(code), _) => format!("exit code {code}"),
+                (None, Some(note)) => note.to_string(),
+                (None, None) => "no exit code".to_string(),
+            },
+            tail: crate::checks::tail(&run.output_tail, CHECK_FAILURE_TAIL_BYTES),
+        }
+    }
+
+    /// The one-line form for the problem list: name, command and how it ended.
+    pub(crate) fn problem(&self) -> String {
+        format!(
+            "check {} failed before the verifier: `{}` ({})",
+            self.name, self.command, self.exit
+        )
+    }
+}
+
+/// `text`, a send-back brief, with the configured checks that failed on the producer's work before the
+/// verifier. With no failures the text is returned unchanged. Otherwise one leading sentence goes in front
+/// of the intro, because the intro speaks of criteria, and a section after the lists gives each failed
+/// check's command, how it ended and the end of its output.
+///
+/// Root cause of the failure class: the recorded checks ran only at verification, so the producer could not
+/// see a failing gate before the verdict.
+pub(crate) fn append_check_failures(text: String, failures: &[CheckFailure]) -> String {
+    if failures.is_empty() {
+        return text;
+    }
+    const HEADING: &str = "## Sent back\n\n";
+    let mut text = match text.rfind(HEADING) {
+        Some(at) => {
+            let end = at + HEADING.len();
+            format!("{}{CHECK_FAILURE_SENTENCE}{}", &text[..end], &text[end..])
+        }
+        None => text,
+    };
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(
+        "\nChecks that failed on your work (fix each; the verifier runs them again):\n\n",
+    );
+    for f in failures {
+        text.push_str(&format!("- {}: {} ({})\n", f.name, f.command, f.exit));
+        if f.tail.trim().is_empty() {
+            text.push_str("    (no output)\n");
+        } else {
+            text.push_str("    ```\n");
+            for line in f.tail.lines() {
+                text.push_str(&format!("    {line}\n"));
+            }
+            text.push_str("    ```\n");
+        }
+    }
+    text
+}
+
 /// A criterion's text reduced for comparison: no leading number (`1.`, `2)`, `3:`), no leading `[kind]`
 /// tag, lowercase, single spaces, no trailing punctuation.
 fn criterion_key(text: &str) -> String {
@@ -287,6 +368,56 @@ fn criterion_key(text: &str) -> String {
         .trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '`' && c != ')')
         .trim_end()
         .to_lowercase()
+}
+
+#[cfg(test)]
+mod check_failure_tests {
+    use super::*;
+
+    fn failure() -> CheckFailure {
+        CheckFailure {
+            name: "probe".into(),
+            command: "sh -c test -f FIXED.txt".into(),
+            exit: "exit code 1".into(),
+            tail: "MISSING-FIXED-TXT\n".into(),
+        }
+    }
+
+    #[test]
+    fn no_failure_leaves_the_text_unchanged() {
+        let text = send_back_text("brief", &["c".to_string()], &[]);
+        assert_eq!(append_check_failures(text.clone(), &[]), text);
+    }
+
+    #[test]
+    fn the_send_back_names_the_failed_check() {
+        let out = append_check_failures(send_back_text("brief", &[], &[]), &[failure()]);
+        let sent = out.split("## Sent back\n\n").nth(1).unwrap();
+        assert!(sent.starts_with(CHECK_FAILURE_SENTENCE), "{out}");
+        assert!(sent.contains("Your previous report did not show every acceptance criterion"));
+        assert!(
+            out.contains("- probe: sh -c test -f FIXED.txt (exit code 1)\n"),
+            "{out}"
+        );
+        assert!(out.contains("    MISSING-FIXED-TXT\n"), "{out}");
+        assert!(out.contains("the verifier runs them again"), "{out}");
+    }
+
+    #[test]
+    fn a_failure_with_no_output_says_so() {
+        let mut f = failure();
+        f.tail = String::new();
+        let out = append_check_failures(send_back_text("brief", &[], &[]), &[f]);
+        assert!(out.ends_with("    (no output)\n"), "{out}");
+    }
+
+    #[test]
+    fn a_failure_is_one_problem_line() {
+        assert_eq!(
+            failure().problem(),
+            "check probe failed before the verifier: `sh -c test -f FIXED.txt` (exit code 1)"
+        );
+    }
 }
 
 #[cfg(test)]

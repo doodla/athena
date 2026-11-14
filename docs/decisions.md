@@ -5255,3 +5255,65 @@ should replace those estimates with its figures.
   and `cargo test -p athena-context request_misread`. Not measured: the full recorded texts of pbvc and sza7, which
   are not in the working copy (only their openings are replayed, mapped into the reason with the boolean false);
   whether the models set the boolean as the prompts ask.
+
+## D182 · Athena runs the configured checks on the producer's tree before the verifier and sends a failure back once
+
+- **Case:** A fmt, clippy or test failure was found only at verification, after the producer had finished, so one failed
+  check rejected a whole job that one repair pass could have fixed. Job 20261114-045625-aymy asked for the fix and died
+  in planning at the deadline with no code written; this entry records the narrow retry, job 20261114-125837-rzp4.
+- **Decision:** After each producer report, the formatter, the replay and the mirror check, `Athena::loop_check_failures`
+  (`crates/athena-core/src/run/checks.rs`) runs the capability's routed checks on the producer's work tree through the
+  verification executor, `SnapExec` and `run_check`. It differs from the verification run in five ways. It builds in the
+  producer's own directory (`target/produce`, a `Side::Produce` environment), so the job still holds one build; the
+  verification run removes that directory first, as before. It takes a build slot only if one is free
+  (`SlotQueue::try_acquire`) and never waits, so the slot waits that verification observes are unchanged. It reads no
+  test seam. It runs every non-skipped check, not only up to the first failure, so one repair pass can fix fmt, clippy and
+  test together. It counts a failure only if the check did not time out and did not already fail on the job's base
+  (`is_pre_existing`), the same exclusions the verdict makes. The run is skipped, with a
+  `producer   checks not run before the verifier: <why>` line, for low disk (the same disk gate, with the job's own
+  build kept), a busy slot, any error, and a change that holds check-tool configuration, which verification replaces
+  with the base's (`is_tool_config`); a nested run, a pinned run and an empty change skip it without a line. Only the
+  kill switch ends the job from this step, because an error in an advisory run must not discard finished work. A failure
+  adds one problem to the loop's problems. The command, exit status and output tail go into the one existing send-back
+  (`append_check_failures`), so `PRODUCER_SEND_BACKS` stays 1 and no loop is added. The same problem is kept in the
+  report problems, so the stored `self-check failed: ...` detail names it, and a check still failing after the send-back
+  reaches the verifier as a `producer-report-gaps` entry, flagged and not hidden. The verification run stays the verdict.
+  To let `git ls-files` in a check list the files the producer added, `ExposedIndex` builds the work tree's index in a
+  temporary file (`GIT_INDEX_FILE` set only for that one `git add -A`, the method of `Snapshot::work_tree_tree`), copies
+  it over the snapshot's `.git/index` for the length of the run, and puts the saved bytes back on drop. The variable is
+  never put in a check's environment. This departs from the literal wording of the request's first criterion
+  ("`GIT_INDEX_FILE` set to a temporary index of the work tree"): an exported variable would reach every git process a
+  check starts, and the tests of Athena's own repository make temporary repositories with git, which would then write
+  one shared index whose objects exist only in the producer's store. D115 (recorded checks on the same tree count as
+  evidence) and D156 (a problem found at the producer's step, not at the final verdict) stand; this entry applies the
+  same idea to the recorded checks and reverses nothing.
+- **Alternatives:** Keep the verification environment and link the slot's warm target: two full builds at once, the
+  failure the checks stage was built to prevent. Delete `target/produce` before the run: the producer's next pass would
+  build cold. Queue for the slot as `loop_replay` does: the wait would move into the producer stage and verification
+  would no longer see the waits its tests observe. Export `GIT_INDEX_FILE` to the checks: see the Decision. Stop at the
+  first failing check: one send-back would fix one fault. Send back every non-passing check: timeouts and base failures
+  are ignored by the verdict, so the producer would chase faults it cannot fix. Reuse a passing in-loop result at
+  verification: it needs the verification path, the baseline filter and a fingerprint rule, a second change.
+- **Tradeoff:** The job pays for the checks twice. Estimate, not measured for the in-loop run: about one check run per
+  pass, a median of 1107 s (range 953 to 1248 s, n = 6, fmt, clippy and test; `docs/design/warm-baseline-build.md`), so
+  about 18 minutes for a job that passes and 37 for one sent back once; less where `target/produce` is warm. Each check
+  keeps its `check_timeout_s` bound. A busy slot skips the early feedback. Estimate, not measured: 0% of attempts with one
+  job in flight, up to about half with two overlapping jobs on the one default slot, since the other job's check run
+  holds the slot for about the same 1100 s. The in-loop result is advisory and can differ from verification: the
+  producer tree keeps its own tool configuration, which is why a change to it skips the run. The in-loop check now
+  executes the configured command for real in the work tree, so a test that reads a mark made by the baseline run
+  guards it by directory (`MARKS_BASELINE_OUTSIDE`).
+- **Reversal cost:** Low to medium; delete the call in `producer_loop`, `loop_check_failures`, `ExposedIndex`,
+  `append_check_failures` and the `in_loop` flag of `SnapExec`, the brief section and the producer prompt wording, and
+  the tests that pin them. Follow-ups, each a separate change: reuse a passing in-loop result at verification when the
+  tree and the tool configuration are unchanged, and a queued slot wait for the in-loop run.
+- **Provenance:** Read: `crates/athena-core/src/run/producer.rs` (the loop and its send-back), `run/checks.rs`
+  (`SnapExec`), `run/send_back.rs`, `run/mod.rs` (`PRODUCER_SEND_BACKS`, the verification run, `free_producer_build`),
+  `crates/athena-core/src/slots.rs` (`try_acquire`), `disk.rs` (the gate), `routing.rs`, `verify.rs`
+  (`is_pre_existing`), `crates/athena-git/src/snapshot.rs` (`work_tree_tree`, `restore_to`), D115 and D156. Root
+  cause: Athena's recorded checks ran only at verification, so the producer could not see a failing gate before the
+  verdict. The temporary-index choice is described in the Decision. Measured: `cargo test -p athena-core
+  a_failing_check_is_sent_back`, `a_check_still_failing_after_the_send_back_is_flagged`,
+  `all_checks_passing_means_one_producer_call`, `a_file_the_producer_added_is_seen_by_the_in_loop_check`,
+  `the_exposed_index_lists_new_files_and_is_restored_on_drop` and `an_error_in_the_in_loop_run`, which drive the real
+  producer loop with a fake producer and real check processes. Not measured: the added wall time and the skip rate.

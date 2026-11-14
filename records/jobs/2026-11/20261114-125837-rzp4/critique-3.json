@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-125837-rzp4",
+  "round": 3,
+  "at": "2026-11-14T13:32:42.485564355Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The in-loop run executes MARKS_BASELINE_OUTSIDE for real and makes the CI-reuse 'runs nothing locally' tests fail",
+      "evidence": "`MARKS_BASELINE_OUTSIDE = [\"sh\",\"-c\",\"touch ../../baseline-ran\"]` (tests.rs:6837) is the configured check in `ci_reuse_run_with`. Those tests install a `check_seam` (6788), but the plan's in-loop `SnapExec` skips the seam (`in_loop = true`). Those jobs run the producer (they land), and `counting` edits README, so `changed` is not empty. The in-loop run therefore runs `touch ../../baseline-ran` in `<job_dir>/work`, which creates `<state>/jobs/baseline-ran`. That is the file `baseline_ran` checks (`job_dir(..).parent().join(\"baseline-ran\")`, 6814-6820). So `baseline_reused_from_the_landed_candidates_run_runs_nothing_locally` (6945), the tests at 6988 and 7041, and `baseline_waits_for_mains_in_progress_run_then_reuses_it` (7131) all fail on `assert!(!run.baseline_ran)`. The dependents list says the MARKS_BASELINE tests 'stop or run before any producer pass', which is wrong for 6837. Fix: Add these four tests to the dependents with a test. Keep the marker meaningful without weakening it: for example, make MARKS_BASELINE_OUTSIDE touch the file only when `$PWD` ends in `/baseline` (`case \"$PWD\" in */baseline) touch ../../baseline-ran;; esac`). Then audit every other test whose configured check command has side effects that seam-based assertions read, now that the in-loop path runs the real command.",
+      "location": "Dependents: 'extra producer pass … MARKS_BASELINE (4713, 6837)'; crates/athena-core/src/run/tests.rs:6837, 6814-6820, 6945, 6988, 7041, 7131",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Soundness: a slot grab that never waits makes the feature hit-or-miss in the default parallel setup, and how often it skips is not estimated",
+      "evidence": "`try_acquire` returns None whenever every slot is held or any ticket is queued (slots.rs:170-183). The defaults are `max_check_slots = 1` (athena-data config.rs:165) and `[parallel] max_concurrency = 2` (athena.toml:203-204). A second job's verification checks hold the only slot for the whole fmt/clippy/test run. While that happens, this job's in-loop run is skipped, and the producer gets no early feedback, which is the goal of the request. The producer's own cargo commands already queue for a slot through the shim (producer.rs:342-355), with `build_wait_s` and a hold. Fix: Either take the slot with the normal queued `acquire` (Class::Producer or Class::Check) and turn a `SlotWait` into the skip line, adjusting the slot-wait tests it touches. Or keep `try_acquire` but give an estimate (labelled as such) of how often it would skip under the default config, state it in D182's Tradeoff, and propose the queued wait as a follow-up.",
+      "location": "Decision 1 / Step 2 (`try_acquire`) and Risks: 'A busy slot … skips the in-loop run'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An advisory step can now abort the job with an error and discard the producer's finished work",
+      "evidence": "Only LowDisk, SlotWait and an ExposedIndex error become skips. An I/O error from `work_tree_tree`, `restore_to`, `try_acquire` or the registry propagates out of `producer_loop`. mod.rs:1820-1826 then returns `Err(e)` before `candidate_stage`, so no candidate is kept, even though verification would have judged the work. The plan calls the run advisory. Fix: Propagate only the kill-switch error (from `refuse_if_stopped`). Turn every other error from `loop_check_failures` into the `producer   checks not run before the verifier: <error>` skip line and continue. Add a unit test or a short reason for the choice.",
+      "location": "Step 4 (5): 'any other error propagates'; run/mod.rs:1815-1826",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In the common all-pass case, the full check suite now runs twice on the same tree, and the plan gives no estimate of the cost",
+      "evidence": "When the in-loop run passes on the last pass with no tool-config change, verification reruns the same fmt, clippy and `cargo test --locked` on an identical tree (mod.rs:2065-2074). D115 (cited by the reading) already treats recorded checks on the same tree as evidence. The plan says only 'Not measured'. Fix: Give a labelled estimate of the added wall time per job (for example, from recorded check durations in the job records the planner can read). In D182, name reusing a passing in-loop result at verification when the tree and tool config are unchanged as a proposed follow-up, kept out of this narrow change.",
+      "location": "Risks: 'Added wall time per job' / Decision 6",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Deliverables expected to stay unchanged must be listed with a reason in the report, or the existing loop sends the producer back",
+      "evidence": "`unchanged_planned_files(&raw, &planned, &changed)` (producer.rs:456) adds every expected deliverable left unchanged without a reason to the send-back problems. The plan expects decision-links.toml and budgets.rs to stay unchanged, and lifecycle.rs and retry.rs may too, but no step tells the producer to give reasons in `unchanged_planned_files`. Fix: In step 14, have the producer list each deliverable it left unchanged, with its reason, in `unchanged_planned_files` (decision-links.toml: D182 amends nothing; budgets.rs: producer.md stays 1102 bytes; lifecycle.rs and retry.rs: no assertion broke).",
+      "location": "Files: docs/decision-links.toml, crates/athena-cli/tests/budgets.rs, lifecycle.rs, retry.rs; Steps 11-14",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The cited size pins do not measure the producer brief",
+      "evidence": "briefs.rs:2811 pins `SYSTEM_FACTS.len() < 6_000`. At 3412-3413 the replay-section cap compares `brief` with `plain`, and both contain the new section. No `len()` pin bounds the producer brief. Fix: Drop the two line references, or say that no producer-brief size pin exists and only the section-order assertions (for example briefs.rs:1614) apply.",
+      "location": "Step 9 / Dependents 'the producer brief text' (briefs.rs:2811, 3412)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code. It is careful and nearly every claim holds: `producer_loop` matches its description (all-clear test at 489-496, `report_problems` cloned at 521, the brief chained at 639), `SlotQueue::try_acquire`, `admission::is_tool_config`, `checks::timed_out`, `checks::tail`, `verify::is_pre_existing`, `Snapshot::git` and `run_bytes` all exist, and the baseline is taken before the producer (mod.rs:1794), so the base-failure filter works inside the loop. I counted the producer.md edit by hand: net zero bytes, and the pointer phrase stays. The decision to set `GIT_INDEX_FILE` only for building the index, and swap that index into `.git/index`, is sound and is flagged as an open question.\n\nOne dependent is analysed wrongly, and that is a major finding. The in-loop run deliberately skips `check_seam`, so it runs the real configured command. In the CI-reuse tests, that command is `MARKS_BASELINE_OUTSIDE` (`touch ../../baseline-ran`). The producer's tree is `<job_dir>/work`, so the in-loop run creates `<state>/jobs/baseline-ran`. That is exactly the file `baseline_ran` reads (tests.rs:6814-6820), so the four tests asserting `!run.baseline_ran` would fail (6945, 6988, 7041, 7131). The plan says these tests \"stop or run before any producer pass\". The CI-reuse tests do run the producer.\n\nSmaller soundness points: a non-waiting slot grab under the default 1 slot and 2 concurrent jobs, infrastructure errors that abort the job instead of skipping, no estimate of the doubled check time, and unchanged deliverables that need reasons in the report."
+}

@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-125837-rzp4",
+  "round": 4,
+  "at": "2026-11-14T13:46:06.323430914Z",
+  "invocation_seq": 9,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The skip covers fewer files than verification replaces, so the claim that it 'can neither hide a real failure nor invent one' is false.",
+      "evidence": "verifier_snapshot calls apply_base_tool_config (verification.rs:472). That function also rewrites every changed manifest's [lints]/[workspace.lints] tables from the base and gives new manifests `[lints] workspace = true` (toolconfig.rs:22-67, 122-145, using admission::lints_tables). is_tool_config (admission.rs:56-60) matches only file names and .cargo/config. A producer change to a Cargo.toml lints table, or a new crate manifest, therefore runs in the loop under different lints than verification. Usually this means lost early feedback. With stricter candidate lints, it can flag a failure the verdict never sees. Fix: Base the skip on the same rule verification uses: also skip when a changed Cargo.toml's lints_tables differ from what lints_from_base would produce against the base (the producer snapshot has the base commit). Add a test for it. Otherwise, reword decision 2 and D182 so they do not claim equivalence.",
+      "location": "Decision 2 / Step 4(b)(2): tool-config skip via admission::is_tool_config",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The producer's tree differs from the verifier's in git (HEAD and index), not only in tool config. A repo test that reads HEAD behaves differently in the two places.",
+      "evidence": "Producer snapshot: SnapshotRepo::Base, so HEAD is the base and, with ExposedIndex, the changes are staged. Verifier snapshot: BaseAndCandidate (snapshot.rs:34, 92-96), so HEAD is the candidate and the tree is clean. mirrors::git_base reads files at \"HEAD\" (mirrors.rs:948-951), and the repo's mirrors test calls check_all(&root, &git_base(&root), None) (athena-cli/tests/mirrors.rs:24). Its base-comparing structure rules therefore compare against the base in the loop but are empty at verification. A test-check failure from that would enter report_problems and reach the verifier as a gap, which the current loop deliberately avoids for mirror drift (producer.rs:525-526). Fix: Name the HEAD/index difference in Risks and in D182's Tradeoff. Consider keeping an in-loop test failure that only duplicates mirror_drift out of report_problems, or state why flagging it is wanted.",
+      "location": "Risks ('The in-loop result can differ from the verification result') and D182 Tradeoff",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The producer is told to run the full workspace `cargo test --locked` after already running the full core and cli suites. This contradicts producer.md and adds risk against the producer deadline.",
+      "evidence": "producer.md:9 says 'run the suite at most once'. Steps 12, 13 and 14 run `cargo test -p athena-core`, `cargo test -p athena-cli` and then `cargo test --locked` for the whole workspace, plus clippy. The plan's own estimate is ~1107 s per check run, and producer_timeout_s is 5400 (athena.toml:50) for a 13-file change with about 14 new tests. Fix: Drop the workspace `cargo test --locked` from step 14 (Athena's checks run it, now twice), keeping fmt, clippy and the targeted runs. Or justify the extra run and the time it costs.",
+      "location": "Step 14 (and steps 12-13)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The claim that an in-loop slot link would show up as `target=…/target/verify` is wrong, and no test shows the in-loop run leaves the slot directory unlinked.",
+      "evidence": "link_slot_target creates the link at the env's CARGO_TARGET_DIR path (checks.rs:197-224). With Side::Produce that variable is always `<job>/target/produce`, so the marker's `target=` value is the same whether or not a link is made. Test 5023 reads links only through check_seam, which the in-loop run never calls. Fix: Have the marker also record `test -L \"$CARGO_TARGET_DIR\" && echo link || echo dir` and assert `dir` on the /work lines. Or assert that the slot target directory is untouched after an in-loop-only run. Remove the incorrect claim.",
+      "location": "Demonstration for criterion 2, 'Fails without the behavior' (slot link)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The argument that `two_jobs_with_one_build_slot_run_one_after_the_other` keeps `waits[1] > waits[0]` is reasoned but not checked against the real code.",
+      "evidence": "try_acquire takes a free slot whenever no one is waiting (slots.rs:172-183). In a two-thread test, job A's in-loop run can take the slot just before job B's verification enqueues. The plan argues the delay is only milliseconds, but the outcome depends on timing. Fix: In step 12, run this test and the 5237/5292 slot tests by name, repeatedly (for example 5 times), and report flakiness. If ordering flips, take the in-loop slot only when the queue file shows no other job past its producer stage.",
+      "location": "Dependents entry for the build-slot queue (tests.rs:4929)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The executor's `cleanup` list (files the checks wrote that were removed) is dropped silently in the loop.",
+      "evidence": "SnapExec::exec extends `cleanup` with restore_to's differences (checks.rs:140-142). Verification passes them on (mod.rs:2100), but the plan never reads them in the loop. Fix: Print a `producer   checks changed …, restored` line when the list is not empty, or note why it is dropped.",
+      "location": "Step 4(b)(4): the in-loop SnapExec",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the accepted reading: before the verifier, Athena runs the configured checks on the producer's tree and puts a failure into the existing single send-back. It adds no new loop and keeps PRODUCER_SEND_BACKS at 1. A failure still present at the limit is flagged to the verifier through report_gaps. Checked against the snapshot: SnapExec and the test seam match the plan (checks.rs:73-145); try_acquire never waits (slots.rs:172); report_problems → report_gaps flow at producer.rs:521/581; the baseline is taken before the producer (mod.rs:1794); is_tool_config, is_pre_existing, timed_out and tail all exist; run_local stops at the first failure; work_tree_tree builds a temporary index; the only [[governs]] entry is D08; the decision log ends at D181; producer.md's anchors and reference-doc pointer survive the planned edit. The fixes for the three round-one critique findings (on the previous job) are present: the extra producer pass for the athena-cli tests, new-file visibility through ExposedIndex, and the net-zero producer.md edit. The MARKS_BASELINE_OUTSIDE breakage is real (in <job>/work, `touch ../../baseline-ran` creates jobs/baseline-ran) and limiting it to */baseline is correct. Test 4369 stays pre-existing because the base fails it too. The demonstrations drive the real `go` → producer_loop with real `sh` checks and /work marker lines, so none only shows existence. The remaining issues are minor: the tool-config skip misses the Cargo.toml [lints] tables that verification also replaces; the HEAD/index difference between the two trees is not named; step 14 has the producer run the suite again, against producer.md; one 'fails without' claim about slot links is wrong and no test shows the in-loop run leaves the slot directory unlinked; and the slot-ordering test is argued but should be re-run. The departure from criterion 1's GIT_INDEX_FILE wording is reasoned and already put to the user as an open question."
+}

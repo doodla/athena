@@ -69,7 +69,7 @@ mod send_back;
 mod verification;
 
 use candidate::Admitted;
-use checks::SnapExec;
+use checks::{LoopWork, SnapExec, baseline_for};
 use producer::{Flow, Reported};
 use verification::Checked;
 
@@ -79,8 +79,9 @@ use verification::Checked;
 pub use checks::demo_seam::{Guard as DemoRunnerGuard, install as install_demo_runner};
 pub use close::{build_text, closing_subject};
 pub(crate) use send_back::{
-    append_mirror_drift, append_missing_changelog, left_to_athena, send_back_text,
-    send_back_text_full, send_back_text_scoped, send_back_text_with_replay, unmet_criteria,
+    CheckFailure, append_check_failures, append_mirror_drift, append_missing_changelog,
+    left_to_athena, send_back_text, send_back_text_full, send_back_text_scoped,
+    send_back_text_with_replay, unmet_criteria,
 };
 
 /// How `go` ended.
@@ -1587,7 +1588,9 @@ pub(crate) mod ci_seam {
     }
 }
 
-/// How many times a report with unmet criteria goes back to the producer before the verifier judges it.
+/// How many times a report with unmet criteria goes back to the producer before the verifier judges it. A
+/// configured check that fails on the work before the verifier ([`Athena::loop_check_failures`]) shares this
+/// one send-back: it adds no loop and no count.
 const PRODUCER_SEND_BACKS: u32 = 1;
 
 /// The paths the candidate is expected to change: the accepted plan's files (when the job was planned)
@@ -2051,6 +2054,7 @@ impl Athena {
                 slots: crate::slots::SlotQueue::from_config(&self.state, &pipeline),
                 job_dir: &job_dir,
                 slot_max_gb: pipeline.slot_max_gb,
+                in_loop: false,
             };
             // The candidate was pushed to the job's CI branch above: a GitHub origin gives its push run, read
             // up to `ci_wait_s`; any other repository gives no CI result, with one read and no wait. A green
@@ -2124,10 +2128,7 @@ impl Athena {
         }
         // A check that failed on this job's base commit and fails again is marked pre-existing. A baseline
         // taken on any other commit says nothing about this base.
-        let usable_baseline = closing
-            .baseline
-            .as_ref()
-            .filter(|b| b.base_commit == p.as_str());
+        let usable_baseline = baseline_for(closing.baseline.as_ref(), p.as_str());
         if !resumed_checks {
             let checks_line: Vec<String> =
                 check_runs.iter().map(crate::checks::log_entry).collect();

@@ -1001,9 +1001,13 @@ fn a_failed_check_retries_from_the_base() {
     let (_, again) = reject_then_ask_again(&athena, "add a greeting");
     run_retry(&athena, &again);
     let seen = seen.lock().unwrap().clone();
-    assert!(!seen[1].files.contains(&"greeting.txt".to_string()));
-    assert_eq!(seen[1].readme, "# Demo\n", "the base's README.md");
-    assert!(!seen[1].brief.contains("rejected candidate"));
+    // The failed check is sent back once, before the verifier (the first attempt's second producer run), so
+    // the retry's producer run is the third.
+    assert_eq!(seen.len(), 3, "first run, its send-back, and the retry");
+    assert!(seen[1].brief.contains("## Sent back"), "{}", seen[1].brief);
+    assert!(!seen[2].files.contains(&"greeting.txt".to_string()));
+    assert_eq!(seen[2].readme, "# Demo\n", "the base's README.md");
+    assert!(!seen[2].brief.contains("rejected candidate"));
 }
 
 #[test]
