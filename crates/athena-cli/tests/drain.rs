@@ -5468,6 +5468,43 @@ fn a_running_job_stays_out_of_the_queue() {
     assert!(queued.is_empty(), "{queued:?}");
 }
 
+#[test]
+fn followups_appear_in_queued_work_after_a_job_closes() {
+    let fx = Fixture::new();
+    let mut scenario = rated_scenario();
+    scenario.reading["out_of_scope"] = json!([
+        "Propose these as follow-up requests: queue order and the backlog hold",
+        "Plan critic memory runs as its own job",
+        "athena.toml, defaults.toml, workflows, docs/decisions.md and records/"
+    ]);
+    let athena = fx.athena(scenario.script());
+    let (job, _) = athena.queue(FIRST).unwrap();
+    athena.go(job.as_str(), AcceptedBy::Flag, &Quiet).unwrap();
+    assert_eq!(queued_ids(&fx), [job.as_str()], "read and waiting");
+    athena.go(job.as_str(), AcceptedBy::Flag, &Quiet).unwrap();
+
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert!(matches!(
+        records.jobs[job.as_str()].state(),
+        JobState::Closed(_)
+    ));
+    // The closed job is out of the queue; its two follow-up items are in it, as steward requests that cite it.
+    let queued = queued_ids(&fx);
+    assert_eq!(queued.len(), 2, "{queued:?}");
+    assert!(!queued.contains(&job.as_str().to_string()));
+    for id in &queued {
+        let request = records.jobs[id].request.as_ref().unwrap();
+        assert_eq!(request.channel, athena_core::steward::REQUEST_CHANNEL);
+        assert!(request.text.contains(job.as_str()), "{}", request.text);
+    }
+    // The drain's own pass over the records sees them too.
+    assert_eq!(athena_core::steward::improvement_requests(&records), {
+        let mut sorted = queued.clone();
+        sorted.sort();
+        sorted
+    });
+}
+
 // Jobs a restart interrupted.
 
 #[test]

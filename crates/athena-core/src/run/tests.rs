@@ -221,7 +221,22 @@ mod produce_and_verify_order_tests {
     /// The fake agents of this repository: a reader, a producer that edits the README, and a verifier that
     /// passes it.
     fn base_script() -> athena_agent::fake::Script {
-        Box::new(|spec: &AgentInvocation| {
+        script_with_out_of_scope(&["Other files"])
+    }
+
+    /// `base_script` whose every reading lists these out_of_scope items.
+    fn script_with_out_of_scope(items: &[&str]) -> athena_agent::fake::Script {
+        let items: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+        script_with_readings(move |_| items.clone())
+    }
+
+    /// `base_script` whose n-th reading (from 0, in the order the reader runs) lists the out_of_scope items
+    /// `items_for(n)` gives.
+    fn script_with_readings(
+        items_for: impl Fn(usize) -> Vec<String> + Send + Sync + 'static,
+    ) -> athena_agent::fake::Script {
+        let readings = std::sync::atomic::AtomicUsize::new(0);
+        Box::new(move |spec: &AgentInvocation| {
             let mut turn = match spec.role {
                 Role::Reader => FakeTurn::output(json!({
                     "title": "Describe the demo",
@@ -235,7 +250,9 @@ mod produce_and_verify_order_tests {
                     "question": null,
                     "acceptance_criteria": [{ "text": CRITERION, "kind": "content" }],
                     "deliverables": [{ "path": "README.md", "action": "modify", "p": 0.9 }],
-                    "out_of_scope": ["Other files"],
+                    "out_of_scope": items_for(
+                        readings.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    ),
                     "forecast": {
                         "p_reading_accepted": 0.8,
                         "p_verification_passes": 0.7,
@@ -8259,6 +8276,333 @@ mod produce_and_verify_order_tests {
                 .unwrap()
                 .text,
             format!("try again on {stopped}")
+        );
+    }
+
+    /// The steward-channel requests in the records at HEAD: each job id with its request text.
+    fn steward_requests(athena: &Athena) -> Vec<(JobId, String)> {
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        records
+            .jobs
+            .values()
+            .filter_map(|j| {
+                let request = j.request.as_ref()?;
+                (request.channel == crate::steward::REQUEST_CHANNEL)
+                    .then(|| (j.id().clone(), request.text.clone()))
+            })
+            .collect()
+    }
+
+    /// `script` with every reading that is made for a request naming an earlier job also naming that job in
+    /// its assumptions, as the reading rules ask of a retry that has an earlier result to answer for.
+    fn naming_the_earlier_job(script: athena_agent::fake::Script) -> athena_agent::fake::Script {
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = script(spec);
+            let earlier = crate::reading::job_ids_in(&spec.user_prompt)
+                .into_iter()
+                .find(|id| id.as_str() != spec.job);
+            if spec.role == Role::Reader
+                && let Some(earlier) = earlier
+                && let Some(reading) = turn.structured.as_mut()
+            {
+                reading["assumptions"] = json!([format!(
+                    "Job {earlier} did not land; this job has the same scope as it"
+                )]);
+            }
+            turn
+        })
+    }
+
+    /// Three out_of_scope items that name separate work, none naming a path.
+    const THREE_FOLLOW_UPS: [&str; 3] = [
+        "Propose queue order as a follow-up request",
+        "Critic memory runs as its own job",
+        "Backlog hold runs as its own request",
+    ];
+
+    /// Reads each queued text as `athena plan` and the reading rules do: a valid request that cites the jobs
+    /// as references and depends on none.
+    fn assert_a_plain_request(records: &Records, text: &str) {
+        assert!(
+            !crate::reading::request_text_acceptance(text).is_empty(),
+            "{text}"
+        );
+        assert!(
+            !crate::reading::request_text_touches(text).is_empty(),
+            "{text}"
+        );
+        assert!(crate::reading::dependency_ids_in(text).is_empty(), "{text}");
+        assert!(crate::reading::followed_up_ids(text).is_empty(), "{text}");
+        assert_eq!(crate::reading::retried_job(records, text), None, "{text}");
+    }
+
+    #[test]
+    fn followups_queue_one_request_per_follow_up_item_of_a_closed_job() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let items: Arc<Mutex<Vec<String>>> = Arc::default();
+        let shared = items.clone();
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script_with_readings(move |_| shared.lock().unwrap().clone()),
+        );
+        // Another job in the records, and an intervention commit on the branch before the job closes.
+        let other = athena.ask("another request", &Quiet).unwrap().job;
+        athena
+            .intervene(
+                &crate::manage::InterveneArgs {
+                    what: "Fixed a typo in the docs".into(),
+                    why: "It read wrong".into(),
+                    class: "docs".into(),
+                    category: "mistake".into(),
+                    job: None,
+                    with_staged: false,
+                },
+                &Quiet,
+            )
+            .unwrap();
+        *items.lock().unwrap() = vec![
+            format!(
+                "Propose these as follow-up requests: closing {other} and the October backlog hold"
+            ),
+            "Plan critic memory runs as its own job".into(),
+            "athena.toml, defaults.toml, workflows, docs/decisions.md and records/".into(),
+        ];
+        let (job, finished) = finished_job(&athena);
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let requests = steward_requests(&athena);
+        assert_eq!(requests.len(), 2, "{requests:#?}");
+        assert_eq!(
+            records.jobs.len(),
+            4,
+            "the job, the other job and two follow-ups"
+        );
+        for (id, text) in &requests {
+            assert!(id != &job && id != &other);
+            assert!(text.contains(job.as_str()), "{text}");
+            assert!(
+                text.contains(&format!("{} {job} ", crate::followups::KEY_LINE)),
+                "{text}"
+            );
+            assert_a_plain_request(&records, text);
+        }
+        // An item that cites an existing job is still queued, and its text holds that job.
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(_, t)| t.contains(other.as_str()))
+                .count(),
+            1
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|(_, t)| t.contains("runs as its own job"))
+        );
+        // The plain exclusion queued nothing.
+        assert!(
+            !requests
+                .iter()
+                .any(|(_, t)| t.contains("docs/decisions.md and records/"))
+        );
+    }
+
+    #[test]
+    fn followups_ignore_plain_exclusions_and_an_empty_out_of_scope_on_close() {
+        for items in [
+            vec!["athena.toml, defaults.toml, workflows, docs/decisions.md and records/"],
+            vec![],
+        ] {
+            let repo = repo();
+            let state = tempfile::tempdir().unwrap();
+            let athena = athena_with(
+                &repo,
+                &state,
+                PASSES,
+                crate::test_support::plenty_of_space,
+                script_with_out_of_scope(&items),
+            );
+            let before = athena.head().unwrap();
+            let (job, finished) = finished_job(&athena);
+            assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+            assert!(steward_requests(&athena).is_empty());
+            let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+            assert!(records.jobs.contains_key(job.as_str()));
+            assert_eq!(records.jobs.len(), 1, "only the job itself ({before})");
+        }
+    }
+
+    #[test]
+    fn followups_are_queued_once_on_reclose() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script_with_out_of_scope(&THREE_FOLLOW_UPS),
+        );
+        let (job, finished) = finished_job(&athena);
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        assert_eq!(steward_requests(&athena).len(), 3);
+        // Closing the same job again meets its own marker and queues nothing.
+        let ui = Lines::default();
+        assert!(
+            athena
+                .follow_up_files(&job, &finished.reading, &ui)
+                .is_empty()
+        );
+        assert!(
+            ui.0.lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("already queued")),
+            "{:#?}",
+            ui.0.lock().unwrap()
+        );
+        assert_eq!(steward_requests(&athena).len(), 3);
+    }
+
+    #[test]
+    fn followups_are_queued_once_across_a_failed_job_and_its_retry() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_with(
+            &repo,
+            &state,
+            FAILS_ON_EDIT,
+            crate::test_support::plenty_of_space,
+            naming_the_earlier_job(script_with_readings(|n| {
+                let items: &[&str] = if n == 0 {
+                    &THREE_FOLLOW_UPS
+                } else {
+                    &[
+                        "Propose queue order as a follow-up request, reworded",
+                        "Planner memory runs as its own job",
+                        "Backlog holds run as their own requests",
+                    ]
+                };
+                items.iter().map(|s| s.to_string()).collect()
+            })),
+        );
+        let (first, done) = finished_job(&athena);
+        assert_ne!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(steward_requests(&athena).len(), 3);
+
+        let proposal = athena
+            .ask(&format!("try again on {first}"), &Quiet)
+            .unwrap();
+        assert_eq!(proposal.reader_error, None, "{:?}", proposal.reading);
+        let retry = proposal.job;
+        let second = finished(athena.go(retry.as_str(), AcceptedBy::User, &Quiet).unwrap());
+        assert_ne!(second.state, OutcomeState::Landed, "{}", second.reason);
+        assert_eq!(second.job, retry);
+        // The retry's reading used other words, and queued nothing: the three requests are the first job's.
+        let requests = steward_requests(&athena);
+        assert_eq!(requests.len(), 3, "{requests:#?}");
+        for (_, text) in &requests {
+            assert!(
+                text.contains(&format!("{} {first} ", crate::followups::KEY_LINE)),
+                "{text}"
+            );
+            assert!(
+                !text.contains(&format!("{} {retry} ", crate::followups::KEY_LINE)),
+                "{text}"
+            );
+            assert!(!text.contains("reworded"), "{text}");
+        }
+    }
+
+    #[test]
+    fn followups_are_queued_once_when_a_held_job_is_retried() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("repo");
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::low_once_verifying,
+            naming_the_earlier_job(script_with_out_of_scope(&THREE_FOLLOW_UPS)),
+        );
+        let first = athena.ask("describe the demo", &Quiet).unwrap().job;
+        let error = athena
+            .go(first.as_str(), AcceptedBy::User, &Quiet)
+            .expect_err("low space after the checks holds the job");
+        assert!(
+            error.downcast_ref::<crate::disk::LowDisk>().is_some(),
+            "{error:#}"
+        );
+        // The held job is not closed, so it queued nothing.
+        assert!(steward_requests(&athena).is_empty());
+
+        std::fs::write(root.join("freed"), b"").unwrap();
+        let (retry, _) = athena.retry(first.as_str(), &Quiet).unwrap();
+        assert_eq!(retry.reader_error, None, "{:?}", retry.reading);
+        let done = finished(
+            athena
+                .go(retry.job.as_str(), AcceptedBy::User, &Quiet)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        let requests = steward_requests(&athena);
+        assert_eq!(requests.len(), 3, "{requests:#?}");
+        for (_, text) in &requests {
+            assert!(
+                text.contains(&format!("{} {first} ", crate::followups::KEY_LINE)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn followups_appear_in_queued_work_and_a_pathless_item_still_builds() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script_with_out_of_scope(&[
+                "Propose these as follow-up requests: queue order and the backlog hold",
+                "Planner deadline survival runs as its own request",
+            ]),
+        );
+        let (job, finished) = finished_job(&athena);
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let requests = steward_requests(&athena);
+        assert_eq!(requests.len(), 2);
+        let queued = crate::steward::queued_work(&records);
+        let improving = crate::hestia::improvement_of(&records);
+        for (id, text) in &requests {
+            // No item names a path, so the file is the fallback, and the request still builds.
+            assert_eq!(
+                crate::reading::request_text_touches(text),
+                vec!["records/".to_string()],
+                "{text}"
+            );
+            let listed = queued
+                .iter()
+                .find(|w| &w.job == id)
+                .expect("listed for the drain");
+            assert!(!listed.read);
+            assert!(
+                improving.items.iter().any(|i| i == id.as_str()),
+                "{:?}",
+                improving.items
+            );
+        }
+        assert!(
+            !queued.iter().any(|w| w.job == job),
+            "the closed job is not queued"
         );
     }
 }
