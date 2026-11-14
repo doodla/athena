@@ -469,7 +469,8 @@ fn critique_of(verdict: &str, findings: &[(&str, &str)], mismatch: Option<&str>)
             "evidence": "the second demonstration is the same as the first",
             "fix": "name a test that fails without the greeting"
         })).collect::<Vec<_>>(),
-        "request_reading_mismatch": mismatch,
+        "request_misread": mismatch.is_some(),
+        "request_misread_reason": mismatch,
         "summary": format!("The critic says {verdict}.")
     })
 }

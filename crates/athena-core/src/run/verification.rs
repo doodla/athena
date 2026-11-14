@@ -350,7 +350,7 @@ impl Athena {
         if let Some(output) = verdict_output.as_mut() {
             let mut text: Vec<String> = vec![
                 output.summary.clone(),
-                output.request_reading_mismatch.clone().unwrap_or_default(),
+                output.request_misread_reason.clone().unwrap_or_default(),
             ];
             for c in &output.criteria {
                 text.push(c.evidence.clone());
@@ -363,8 +363,8 @@ impl Athena {
             ctx.redactor.redact_all(&mut text)?;
             let mut it = text.into_iter();
             output.summary = it.next().unwrap_or_default();
-            let mismatch = it.next().unwrap_or_default();
-            output.request_reading_mismatch = (!mismatch.trim().is_empty()).then_some(mismatch);
+            let reason = it.next().unwrap_or_default();
+            output.request_misread_reason = (!reason.trim().is_empty()).then_some(reason);
             for c in output.criteria.iter_mut() {
                 c.evidence = it.next().unwrap_or_default();
             }
@@ -419,9 +419,14 @@ impl Athena {
             verifier_invocation,
             criteria: judgment.criteria.clone(),
             findings: judgment.findings.clone(),
-            request_reading_mismatch: verdict_output
-                .as_ref()
-                .and_then(|v| v.request_reading_mismatch.clone()),
+            // Stored only for a real misread: the boolean decides, and the text only explains it.
+            request_reading_mismatch: verdict_output.as_ref().and_then(|v| {
+                v.request_misread.then(|| {
+                    athena_context::outputs::misread_explanation(
+                        v.request_misread_reason.as_deref(),
+                    )
+                })
+            }),
             agent_verdict: judgment.agent_verdict,
             final_verdict: judgment.final_verdict,
             reasons: judgment.reasons.clone(),

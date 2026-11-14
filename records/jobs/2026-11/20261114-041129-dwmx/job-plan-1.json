@@ -1,0 +1,307 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-041129-dwmx",
+  "round": 1,
+  "at": "2026-11-14T07:52:16.995341032Z",
+  "invocation_seq": 2,
+  "approach": "Add a `fix: bool` to `PlanEntry` (serde-skipped when false) and change the one sort in `Plan::build_with` (plan.rs:783) from `(e.rung, age)` to `(!e.fix, e.rung, age)`. That sort only sees the ready items of the best effective priority (plan.rs:780-781), so the flag never beats priority or dependencies. `build_capped` and `build_improving` both call `build_with`, so `athena plan` and `athena drain` get the rule without further change. Where the flag is set: the drain's `entry_of` builds every queue entry (drain.rs:4339), and it is the one path for `queue()` (drain.rs:4527) and the re-read `plan_entry` (drain.rs:4543). A new pure `mark_fixes` in drain.rs sets `fix` from record links. (1) A work item of role steward or hestia and kind BlindSpot or RepeatedFailure, linked to the job by an evidence job reference (the steward appends the queued job last, steward.rs:712) or by an approved decision. The linked job must be on the steward channel or be the approved job. A classifier in reading/topics.rs, `is_fix_request(role, kind, touches)`, decides, and it returns false when every touched path is under `studies/` (website and study content). (2) Hestia's root-cause requests (the keys of `improvement_of(..).cause_jobs`) and its gate-review requests (an open request holding the `Gate under review:` line), listed by a new `hestia::fix_requests_of`. Titles and keys are not matched, because Hestia's own rule says requests are linked by what the records link (hestia.rs:957-958). A kind Proposal from the steward is never a fix, so its website and study content requests keep their age place. The rule is recorded as D181 and in CHANGELOG.md. The plan.rs Order doc, the drain.rs module docs and the `athena drain --help` Order text are updated so they stay true.",
+  "decisions": [
+    {
+      "choice": "Put the fix flag in the `build_with` sort key as the first element, `(!e.fix, e.rung, age)`, applied after the best-effective-priority filter.",
+      "reason": "Root cause of the starvation: the order inside a tier is rung then age (plan.rs:783), and nothing says a request that fixes Athena outranks feature work. Changing the key fixes it for every caller. The ready set is already cut to the best effective priority (plan.rs:780-781) and holds only items whose dependencies are done (plan.rs:767-775), so priority, urgent/high caps and dependencies cannot be overridden. `priority_violations` compares priority only, so it stays correct.",
+      "rejected": [
+        {
+          "option": "Raise fix requests to a higher priority tier in memory, as `build_improving` does for repeated causes.",
+          "why": "It would beat person-set high and urgent work, which the owner did not ask for and the out-of-scope list forbids, and it would consume the capped urgent and high slots."
+        },
+        {
+          "option": "Re-prioritise individual items or lean on the existing guaranteed turn (IMPROVEMENT_GAP = 2, plan.rs:466).",
+          "why": "The turn only moves one request in every three and treats every steward-channel request alike, website and study content included. That is how 52 requests still starved. The brief asks for the sort key to change."
+        }
+      ]
+    },
+    {
+      "choice": "Classify by typed records: `is_fix_request(role, kind, touches)` for steward work items, and `hestia::fix_requests_of` for Hestia's root-cause and gate-review requests. No title or key matching.",
+      "reason": "hestia.rs:957-958 says requests are found by what the records link, never by title, and `slowdown_request` is left out for that reason (hestia.rs:970-972). Steward keys are model-chosen free text (steward.rs:895), with no stable root-cause or gate-review key to match. Kind BlindSpot and RepeatedFailure plus the Hestia links cover the owner's list: root-cause, repeated-failure, blind-spot, gate-review.",
+      "rejected": [
+        {
+          "option": "Match 'root cause' or 'gate' in the title or key, as the accepted reading allows.",
+          "why": "A person's request with a similar title would jump the queue, and a reworded steward title would drop out. Both go against the records-link rule at hestia.rs:957."
+        },
+        {
+          "option": "Treat every steward-channel request as a fix (the existing `improvement_requests` set, steward.rs:376).",
+          "why": "It includes website and study content requests, which the owner says are not fixes."
+        }
+      ]
+    },
+    {
+      "choice": "Website and study content means every touched path is under `studies/`, and it is used as a guard. A steward request of kind Proposal is never a fix.",
+      "reason": "`OUTCOME_PATHS` (drain.rs:475-478) calls `studies/` the page sources, and `xtask/` and pages.yml the generator and the publisher. A steward fix to the generator is Athena's own code, so only `studies/` counts as content. Kind Proposal is where steward content requests land (steward.rs:723-727). The guard also covers a mislabelled blind-spot request that touches only `studies/`.",
+      "rejected": [
+        {
+          "option": "Use all of `OUTCOME_PATHS` as content.",
+          "why": "It would demote steward fixes to `xtask/` (the site generator), which are fixes to Athena."
+        }
+      ]
+    },
+    {
+      "choice": "Compute the fix set once per queue or re-read, from `Records`, in a free function `mark_fixes(entries, linked, hestia)` that takes plain data.",
+      "reason": "`entry_of` runs once per queue item (drain.rs:4527-4530), and `fix_requests_of` scans the records. Taking plain `WorkItem`s lets a unit test in athena-cli cover the website and study exclusion without building a repository.",
+      "rejected": [
+        {
+          "option": "Compute the flag inside `entry_of` for each job.",
+          "why": "It repeats the records scan for every queued item, which matters with 50 or more steward requests."
+        }
+      ]
+    },
+    {
+      "choice": "Update the three places that state the order: the plan.rs module Order paragraph and the `build_with` doc, the drain.rs module docs (lines 8 and 277), and the `athena drain --help` Order text (main.rs:302-304).",
+      "reason": "D156 records two rejections caused by a change that made a prose statement or help text false. Only the plan.rs paragraph is a named deliverable; the drain.rs docs are in a deliverable file. The main.rs text is not, and it is the one line that would otherwise go stale. Grep found no test that pins the old words.",
+      "rejected": [
+        {
+          "option": "Change plan.rs only.",
+          "why": "The drain help would still say 'then higher rung, then age' and be wrong."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "Add `PlanEntry::fix` (serde-skipped when false; `bare` sets it false). Change the sort at line 783 to `(!e.fix, e.rung, *age)`. Update the module Order paragraph (lines 7-19) and the `build_with` doc (line 686). Add the unit tests for criteria 1 and 2.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/topics.rs",
+      "action": "modify",
+      "purpose": "Add `CONTENT_PATHS` (`studies/`) and the pure classifier `is_fix_request(role, kind, touches)` (re-exported through `pub use topics::*`, reading.rs:73), with unit tests. Note in the `plan_entry` doc that `fix` is set by the caller from record links, not by `plan_entry`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "Add `pub fn fix_requests_of(records) -> BTreeSet<String>`: the keys of `improvement_of(..).cause_jobs` (waiting root-cause requests) plus waiting request jobs that hold a `Gate under review: ` line (the gate-review requests). Add a test beside the existing improvement tests (about line 7539). This file is not in the listed deliverables. It is needed because gate-review requests are linked to Hestia only by that line, and `GATE_LINE` is private.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `mark_fixes(entries, linked, hestia)` and `records_fix_inputs(records)`. Call them from `RealSteps::queue` and `RealSteps::plan_entry` (via `entry_of`). Update the module docs (lines 8 and 277). Add the unit tests for criterion 3.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the real-fixture tests: the steward blind-spot request dispatched before an older feature request (with the no-work-item control), and the steward content request that keeps its age place.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Update the `athena drain --help` Order text (lines 302-304) to say that inside a priority, requests that fix Athena itself come before the rung and age order. This file is not in the listed deliverables. It is needed so the help text does not become false (D156).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D181 after D180 (the file's last entry): the rule, the root cause, alternatives, tradeoff, reversal cost and a Provenance bullet citing the owner's request. No existing entry is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under `## [Unreleased]` / `### Added` for job 20261114-041129-dwmx.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "plan.rs: add `pub fix: bool` to `PlanEntry` with `#[serde(skip_serializing_if = \"std::ops::Not::not\")]` and a doc comment saying it is set by the caller from record links and only reorders within a priority. Set `fix: false` in `PlanEntry::bare` (line 288).",
+    "plan.rs: change `ready.sort_by_key(|(age, e)| (e.rung, *age))` (line 783) to a key `(!e.fix, e.rung, *age)`, with a comment that it applies only inside the best effective priority and ready set. Rewrite the Order paragraph (lines 7-19) and the `build_with` doc (line 686). Add the tests for criteria 1 and 2 to `mod tests`.",
+    "topics.rs: add `pub const CONTENT_PATHS: [&str; 1] = [\"studies/\"]` and `pub fn is_fix_request(role: &str, kind: WorkItemKind, touches: &[String]) -> bool`. It returns true only for role `steward` or `hestia` with kind `BlindSpot` or `RepeatedFailure`, and false when `touches` is non-empty and every path starts with a `CONTENT_PATHS` prefix. Add unit tests for kind Proposal, studies-only paths, empty paths, another role, and the two fix kinds.",
+    "hestia.rs: add `pub fn fix_requests_of(records: &Records) -> BTreeSet<String>`: `improvement_of(records).cause_jobs` keys plus waiting request jobs (`is_waiting_request`) whose text has a line starting `GATE_LINE`. Add a test in the improvement test block that queues a cause request, a gate-request text, a spec request and a plain request, and expects only the first two.",
+    "drain.rs: add `fn mark_fixes(entries: &mut [PlanEntry], linked: &[(String, &WorkItem)], hestia: &BTreeSet<String>)`, which sets `entry.fix` from `hestia` or from `is_fix_request(&work.role, work.kind, &entry.touches)`. Add `fn records_fix_inputs(records: &Records)`, which returns the `(job id, work item)` pairs from evidence job references whose job is on `steward::REQUEST_CHANNEL` and from approved decisions (`work_decisions::decision_of`), plus `hestia::fix_requests_of(records)`. Call them at the end of `RealSteps::queue` (after the `plan` vector is built, drain.rs:4527) and in `RealSteps::plan_entry` (drain.rs:4543). Update the module docs at lines 8 and 277. Add the unit tests for criterion 3.",
+    "tests/drain.rs: add `a_steward_blind_spot_request_is_dispatched_before_an_older_normal_feature_request`, with the no-work-item control run, and `a_steward_content_request_is_not_a_fix_and_keeps_its_age_place`. Both use `Fixture`, `queue_steward_request` and `commit_records_to`.",
+    "main.rs: update the Order text of the `Drain` long help (lines 302-304) to say that inside a priority, requests that fix Athena itself (the steward's blind-spot and repeated-failure requests, and Hestia's root-cause and gate-review requests) come first, then higher rung, then age, and that the steward's website and study content requests are not fixes.",
+    "docs/decisions.md: append D181 in the D180 layout. Case: 52 steward requests filed in the week to 14 Nov never ran, from the owner's request. Decision: the sort key, the typed classification, and the limits (kind Proposal and studies-only requests are not fixes; no title matching). Alternatives: the rejected options from `decisions`. Provenance: the owner's request of this job, the code read, and that the 52 figure was stated and not re-measured. CHANGELOG.md: add the entry under `[Unreleased]` / `### Added`.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`. Fix any struct literal that fails to compile because of the new field."
+  ],
+  "risks": [
+    {
+      "risk": "The owner's 52 starved requests were steward-channel requests applied directly (steward.rs:710-714), not approved proposals. A lookup through `work_decisions::decision_of` alone, as `entry_of` does for the rung hint (drain.rs:4342), would flag none of them.",
+      "mitigation": "`records_fix_inputs` links a work item to a job through both an evidence job reference on the steward channel and an approved decision. The criterion 4 test commits a work item that cites the queued job as evidence, with no decision, and a unit test covers the approved-decision link."
+    },
+    {
+      "risk": "A RepeatedFailure work item cites the failed jobs as evidence (work.rs:52), and a naive 'any evidence job' link would flag a person's open request that was cited as evidence.",
+      "mitigation": "The linked job must have a request on `REQUEST_CHANNEL` or be the job of an approved decision. A unit test cites a person-channel job as evidence and expects it unflagged."
+    },
+    {
+      "risk": "A steward Proposal that fixes Athena (touching `crates/`) is not ranked as a fix, because only kinds BlindSpot and RepeatedFailure count (the accepted reading). Such a request keeps its age place.",
+      "mitigation": "This is stated in D181 and the changelog as a limit, and the decision names the cause: no stable steward key marks a root-cause or gate-review Proposal. The owner can widen it later by adding a typed marker. It is not worked around by matching titles."
+    },
+    {
+      "risk": "The criterion 4 fixture may leave a request without a rung after reading, which would refuse it and leave the plan order empty.",
+      "mitigation": "The test asserts both items are in `plan.order` and not in `refused`, and uses request texts and the `rated_scenario` reader like the tests at tests/drain.rs:4037 and 5918, whose requests run to landing."
+    },
+    {
+      "risk": "`fix_requests_of` re-runs `improvement_of`, which scans the records on each queue or re-read.",
+      "mitigation": "It runs once per `queue()` or `plan_entry()` call, not once per item, and `improvement()` already does the same scan on every re-plan (drain.rs:2360)."
+    },
+    {
+      "risk": "Two files outside the listed deliverables (hestia.rs and main.rs) are changed.",
+      "mitigation": "Both changes are small and the reason for each is in `files`. Neither is a governance file. If the host refuses them, the fallback is to drop the gate-review part (named in D181) and the help text edit."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`Plan::build_with` sort key",
+      "dependent": "`Plan::build_capped` (crates/athena-core/src/plan.rs:804, calls `build_with` at 810 and 867)",
+      "kind": "code",
+      "test": "cargo test -p athena-core the_fix_flag_never_overrides_priority_or_dependencies (the `build_capped` case) and the existing `build_capped` tests in plan.rs (about 1662-1740).",
+      "reason": "It uses the uncapped order only to give the tier caps to the first entries of each tier (plan.rs:811-866). A fix entry now comes first inside its tier and so keeps a cap slot ahead of feature entries, which is the intended effect. The caps, `person_set` and demotion rules are unchanged."
+    },
+    {
+      "name": "`Plan::build_with` sort key",
+      "dependent": "`Plan::build_improving` (plan.rs:894), which gives steward and Hestia requests the guaranteed turn after two other dispatches",
+      "kind": "code",
+      "test": "Existing tests: the `build_improving` tests in plan.rs (2182-2610), tests/drain.rs:435-545, and hestia.rs:7500. New test: the criterion 4 integration test.",
+      "reason": "It calls `build_capped` and then walks `order` (plan.rs:932-975). The new key only changes how the order inside a tier starts. A fix entry that already stands early is not reported as a turn (`moved: false`), the same as the existing 'ranks early on its own' case. An entry with no `fix` flag gives exactly the old order, and `fix` is false in every existing test."
+    },
+    {
+      "name": "Order inside a tier",
+      "dependent": "`Plan::priority_violations` (plan.rs:633) and the drain's note 'plan order contradicts priority' (drain.rs:2374)",
+      "kind": "code",
+      "test": "cargo test -p athena-core the_order_check_flags_a_plan_that_puts_a_lower_priority_item_first (existing, plan.rs:1813).",
+      "reason": "It compares effective priority only, never rung, age or `fix`, so a different order inside a tier cannot create a violation."
+    },
+    {
+      "name": "Plan order and groups",
+      "dependent": "`drain::drain` and `drain::plan` (drain.rs:2350-2373) and `drain_concurrent` / `groups_in_order` (plan.rs:583)",
+      "kind": "code",
+      "test": "tests/drain.rs `the_drain_dispatches_in_the_order_the_plan_showed_and_reports_the_turns_it_took` (existing) and the new criterion 4 test.",
+      "reason": "The drain dispatches in `plan.order` and re-plans after each dispatch with the same entries. `groups_in_order` is built from the order, so the groups still flatten to the order. The flag is set on the queue entries, so it is the same on every re-plan of a run."
+    },
+    {
+      "name": "`entry_of` entries",
+      "dependent": "`RealSteps::plan_entry` (drain.rs:4543), used by the drain's read pass (drain.rs:2282) and the item runner (drain.rs:2078, 3104)",
+      "kind": "code",
+      "test": "tests/drain.rs criterion 4 test, using an unread steward request that the pass reads (the same shape as `real_steps_read_an_unread_but_specifiable_request_once_and_then_run_it`, tests/drain.rs:4037).",
+      "reason": "A re-read replaces the queue entry (drain.rs:2283), so `plan_entry` must also run `mark_fixes`, or an underspecified fix request would lose its flag when it is re-read. Plan step 5 makes both paths call it. The touch-path readers at 2078 and 3104 do not use `fix`."
+    },
+    {
+      "name": "New `PlanEntry::fix` field",
+      "dependent": "Struct literals of `PlanEntry` in plan.rs (1160, 1594), hestia.rs:7514, steward.rs:1665, drain.rs:4901, 5049, 6136, 6317, 7272 and tests/drain.rs:349, 399, 530, 595, 7449",
+      "kind": "code",
+      "test": "cargo test --locked (criterion 7), which fails to compile if one is missed.",
+      "reason": "Every one of them builds the struct with `..PlanEntry::bare(..)` or a `planned(..)`/`entry(..)` helper, so the new field defaults to false. display.rs:2636 and 2727 build `JobLine`, not `PlanEntry`."
+    },
+    {
+      "name": "`PlanEntry` serialization",
+      "dependent": "The serialized plan (`PlanEntry` derives `Serialize`; `athena plan` output and the drain report)",
+      "kind": "code",
+      "test": "cargo test --locked; existing display and drain tests that read the plan text (crates/athena-cli/src/display.rs tests around 2113-2160) do not change.",
+      "reason": "`fix` uses `#[serde(skip_serializing_if = \"std::ops::Not::not\")]`, the same as `on_hold` (plan.rs:177), so an entry with the flag false serializes exactly as before. `PlanEntry` has no `Deserialize`, so no stored plan is read back."
+    },
+    {
+      "name": "Improvement request set",
+      "dependent": "`steward::improvement_requests` and `hestia::improvement_of` (steward.rs:376, hestia.rs:973), the guaranteed-turn set and the cause counts",
+      "kind": "code",
+      "test": "hestia.rs improvement tests (about 7456-7700), unchanged and must still pass.",
+      "reason": "Not changed. `fix_requests_of` only reads `improvement_of(..).cause_jobs` and adds a gate-line scan, so the turn and the urgent promotion (`REPEAT_URGENT_JOBS`) behave as before."
+    },
+    {
+      "name": "Order wording",
+      "dependent": "`athena drain --help` Order text (crates/athena-cli/src/main.rs:299-324) and the `drain_help` test named in D156",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli drain_help (existing, named in D156).",
+      "reason": "The help text says 'then higher rung, then age'. Plan step 7 adds that fix requests come first inside a priority. Grep found no test that pins the old words, and the ceiling placeholder `{ceiling}` is untouched."
+    },
+    {
+      "name": "Governed paths",
+      "dependent": "D156 governance (`docs/decision-links.toml` `[[governs]]`, line 219)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Only D08 is governed, and only `crates/athena-git/src/snapshot.rs` and `crates/athena-core/src/run/candidate.rs`. This plan touches none of them, so no `[[link]]` and no reconcile entry is needed. D181 is appended with no link to an older decision."
+    },
+    {
+      "name": "Refusal and matching rules, budgets, configuration",
+      "dependent": "Admission and reading checks, `crates/athena-core/tests/refusal_corpus.rs` (case 'Order the work items by priority tier.', line 1549), `docs/system-facts.md` budgets, `athena.toml`, `defaults.toml`, workflows",
+      "kind": "rule",
+      "test": null,
+      "reason": "No refusal, parser, stem list or reading check is added or changed: the classifier reads typed role, kind and path-prefix data, not request text. So the form-to-corpus mapping does not apply and `refusal_corpus` is unaffected. The prompts and briefs are untouched, so the budget lines in docs/system-facts.md do not move. No config key is added, so the live athena.toml is not read for any role."
+    },
+    {
+      "name": "Appended decision entry",
+      "dependent": "`docs/decisions.md` readers: the mirror registry (D158, D162) and the decisions page of the site (`xtask`)",
+      "kind": "rule",
+      "test": "cargo test --locked (the decision-log and mirror tests run in the workspace test).",
+      "reason": "D181 follows the layout of D180 (a `## D181 · title` heading and Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance bullets), and no existing entry is edited, so the structure checks and the page render see one more well-formed entry."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in plan.rs `mod tests`. It builds the entries with the existing `entry(id, rung, touches, deps)` helper (plan.rs:1159) and sets `fix = true` on the newer one. The older normal feature entry 'feature' is first in the slice. It calls `Plan::build_with` and also `Plan::build_improving` with an empty `Improvement` and `TierCaps::UNLIMITED`, the entry point `athena plan` and `athena drain` use.",
+      "command": "cargo test -p athena-core a_ready_fix_entry_comes_before_an_older_feature_entry_of_the_same_tier",
+      "observes": "`plan.order` is ['fix', 'feature']. The same two entries with `fix` false give ['feature', 'fix'], the control that shows the old age order. The newer fix entry is also placed ahead when its rung is lower than the feature's.",
+      "fails_without": "With the sort key left at `(e.rung, *age)` the fix entry stays after the older feature entry and the assertion on `plan.order` fails.",
+      "seam": "Production entry point `Plan::build_with`, which exists (plan.rs:692); the test fixture is `PlanEntry` data built through `entry` (plan.rs:1159), which exists. The `PlanEntry::fix` field and the new sort key are added by plan step 1 and 2. Nothing is doubled."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in plan.rs `mod tests` through `Plan::build_with`, plus one through `Plan::build_capped` with a cap of 1 on the high tier. (a) An older urgent feature entry, an older high feature entry and a newer normal fix entry. (b) A normal fix entry that depends on a normal non-fix entry, where the non-fix entry is newer and has a lower rung. (c) A normal non-fix entry that is a dependency of a high feature entry, next to a normal fix entry. (d) Two fix entries and two feature entries in one tier with different rungs and ages.",
+      "command": "cargo test -p athena-core the_fix_flag_never_overrides_priority_or_dependencies",
+      "observes": "(a) The order is urgent, high, fix. (b) The prerequisite comes before the fix entry that needs it. (c) The prerequisite is raised to high through `effective_priorities` (plan.rs:608) and comes before the normal fix entry. (d) The order is both fix entries, then both feature entries, each pair by rung then age. (e) In the `build_capped` case the fix entry does not take a high slot it would not otherwise hold.",
+      "fails_without": "A key that put fix above effective priority, for instance sorting before the best-tier filter, would put the normal fix entry ahead of the urgent or high feature entry in (a) and (c). A key that ignored `depends_on` would put the dependent fix entry first in (b). Both fail the order assertions.",
+      "seam": "Production entry points `Plan::build_with` (plan.rs:692) and `Plan::build_capped` (plan.rs:804), which exist. Fixtures are `PlanEntry` values with `priority`, `depends_on` and `fix` set, using the `with_priority` helper (plan.rs:1662). The `fix` field is added by plan step 1."
+    },
+    {
+      "criterion": 3,
+      "method": "Three tests. (1) A unit test in drain.rs `mod tests` calls `mark_fixes(entries, linked, hestia)` with real `WorkItem` structs (all fields are pub, work.rs:62-81). Cases: steward Proposal touching `studies/demo/`, steward BlindSpot touching only `studies/x/model.json`, steward BlindSpot touching `crates/`, and a work item of role 'ghost'. (2) An integration test in tests/drain.rs on the real `Fixture`. It queues an older person feature request with `athena.queue`, queues a steward-channel request touching `studies/demo/` with the existing `queue_steward_request` (tests/drain.rs:2573), and commits a steward Proposal `WorkItem` that cites that job as evidence through `commit_records_to` (tests/drain.rs:6615). It calls `drain::plan` over `real_steps`. (3) Core tests for `is_fix_request` in topics.rs.",
+      "command": "cargo test -p athena-cli --lib mark_fixes && cargo test -p athena-cli --test drain a_steward_content_request_is_not_a_fix_and_keeps_its_age_place && cargo test -p athena-core is_fix_request",
+      "observes": "(1) `fix` is true only for the BlindSpot that touches `crates/`. (2) The plan order is [feature, content request], the same as age order, and the entry for the content request has `fix == false`. (3) `is_fix_request` is false for kind Proposal, false for studies-only paths, false for a role other than steward or hestia, and true for steward BlindSpot or RepeatedFailure with non-content paths.",
+      "fails_without": "If the classifier ignored kind and paths and flagged every steward work item or every steward-channel request, the steward content request would move ahead of the older feature request in (2), and the Proposal and studies-only cases in (1) would be true, so those assertions fail.",
+      "seam": "Production entry points `drain::plan` and `RealSteps::queue` (drain.rs:4483), which exist; `mark_fixes` and `records_fix_inputs` are added by plan step 5. Fixtures are the real `Fixture` and `athena.queue`, which exist (tests/drain.rs:3981-3998), and the `WorkItem` record is written to the fixture repository and read back by `Records::load`. The classifier is not doubled. The `athena-cli` unit test passes plain `WorkItem` data to `mark_fixes`."
+    },
+    {
+      "criterion": 4,
+      "method": "Integration test in tests/drain.rs on the real `Fixture` (`Fixture::new`, `fx.athena(rated_scenario().script())`). It queues a normal person feature request first with `athena.queue`, so its id is older. It then queues the steward-channel request with `queue_steward_request` (tests/drain.rs:2573, which goes through `RequestQueue::apply` as the steward does). It commits a steward BlindSpot `WorkItem` whose evidence is `Reference::job(steward_job)` through `commit_records_to`. It runs `drain::plan` and then `drain::drain(&real_steps(..), limits(..), &Quiet)`. A control run with no work item uses the same setup.",
+      "command": "cargo test -p athena-cli --test drain a_steward_blind_spot_request_is_dispatched_before_an_older_normal_feature_request",
+      "observes": "`report.plan.order[0]` is the steward job and `report.jobs[0].item` is the steward job, so the drain dispatches it first. The control run's first dispatched job is the older feature request, so the flip comes from the fix flag. The test also asserts that both items are in the order and not refused. If the fixture's reader leaves a rung missing, it uses a request text with a path that gives a rung through `infer_rung`.",
+      "fails_without": "Without `mark_fixes` in `RealSteps::queue` and `plan_entry`, or without the new sort key, the entries stay in rung then age order and the older feature request is dispatched first, so `report.jobs[0].item` is the feature request and the assertion fails.",
+      "seam": "Production entry points `drain::plan` and `drain::drain` over `RealSteps` (drain.rs:4268), which exist; the records, requests and decisions are real and committed to the fixture repository. Added by plan steps 2 to 5: the `fix` field, the sort key, `mark_fixes`, and the calls from `queue()` and `plan_entry()`. Only the existing scripted agent (`rated_scenario`) and `RecordingLander` stand in, and neither does any ordering."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff of plan.rs.",
+      "command": "git diff -- crates/athena-core/src/plan.rs",
+      "observes": "The Order paragraph (lines 7-19) says that inside a priority tier, requests that fix Athena itself come first, then rung, then age, and that the flag never beats priority or dependencies. The diff shows `ready.sort_by_key(|(age, e)| (e.rung, *age))` changed to a key whose first element is `!e.fix`. The `build_with` doc (line 686) is updated the same way.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff. The decisions diff must be only added lines after D180 (the log ends at about line 5225), so no existing entry changes.",
+      "command": "git diff -- docs/decisions.md CHANGELOG.md",
+      "observes": "A new `## D181 · ...` entry in the D180 layout (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance). Its Provenance bullet cites the owner's request of this job and the figure it states (52 steward requests filed in the week to 14 Nov that never ran), says what was read and what was not measured, and notes the stated figure was not re-measured. CHANGELOG.md gains one entry under `## [Unreleased]` / `### Added` naming job 20261114-041129-dwmx, the root cause, the rule, the website and study exclusion, and the tests.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Athena's recorded checks on the final tree.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. Existing tests that build `PlanEntry` with `..PlanEntry::bare(..)` (plan.rs:1167, drain.rs:4907, tests/drain.rs:355) still compile because `bare` sets `fix: false`. The drain tests `six_urgent_with_two_of_athenas_own` and `with_no_improvement_request_queued_the_order_and_the_report_are_unchanged` (tests/drain.rs:395-522) keep their orders because their entries have `fix` false.",
+      "fails_without": "A literal `PlanEntry { .. }` without `..bare` or a changed order in an existing test would fail the build or the tests.",
+      "seam": "Whole-workspace commands; no seam."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "31c7caa26a106df6f693b2f4fad03f7d7f91c51e599c3eb451cad157bd0220c5"
+}

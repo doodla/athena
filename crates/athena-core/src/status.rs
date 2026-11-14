@@ -129,7 +129,8 @@ impl PlanState {
 }
 
 /// The plan state of a job: that of its last critique. A critique that accepts stands unless it also says the
-/// reading misread the request, which stops the job. A job with no critique has no plan state.
+/// reading misread the request, which stops the job; the stored `request_reading_mismatch` is set only when
+/// the critic's `request_misread` was true. A job with no critique has no plan state.
 pub fn plan_state(job: &JobRecords) -> Option<PlanState> {
     let last = job.critiques.last()?;
     Some(PlanState {
@@ -2437,6 +2438,23 @@ pub(crate) mod planning_cost_tests {
             j.critiques.push(critique(&text, n as u32 + 1, *v));
         }
         j
+    }
+
+    #[test]
+    fn plan_state_reads_a_misread_only_from_the_stored_field() {
+        let state = |verdict: CritiqueVerdict, misread: Option<&str>| {
+            let mut j = planned(1, OutcomeState::Failed, 0.5, &[verdict]);
+            j.critiques[0].request_reading_mismatch = misread.map(String::from);
+            plan_state(&j).unwrap().accepted
+        };
+        // The stored field is unset unless the critic's `request_misread` was true.
+        assert!(state(CritiqueVerdict::Accept, None));
+        assert!(!state(
+            CritiqueVerdict::Accept,
+            Some("It reads the request as a refactor")
+        ));
+        assert!(!state(CritiqueVerdict::Revise, None));
+        assert!(plan_state(&planned(2, OutcomeState::Failed, 0.5, &[])).is_none());
     }
 
     /// `n` planned jobs of which `landed` landed (accepted in round 1); the rest were stopped in planning.

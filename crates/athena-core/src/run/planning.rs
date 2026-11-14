@@ -421,7 +421,12 @@ impl Athena {
             agent_verdict: Some(agent_verdict),
             final_verdict: verdict,
             findings,
-            request_reading_mismatch: critic_output.request_reading_mismatch.clone(),
+            // Stored only for a real misread: the boolean decides, and the text only explains it.
+            request_reading_mismatch: critic_output.request_misread.then(|| {
+                athena_context::outputs::misread_explanation(
+                    critic_output.request_misread_reason.as_deref(),
+                )
+            }),
             summary: Some(critic_output.summary.clone()),
         };
         if let Err(e) = critique.validate() {
@@ -433,6 +438,7 @@ impl Athena {
             closing,
             plan,
             critique,
+            critic_output.request_misread,
             section,
             last_round,
             cfg.max_rounds,
@@ -449,13 +455,18 @@ impl Athena {
         closing: &mut Closing,
         plan: JobPlan,
         critique: Critique,
+        request_misread: bool,
         section: String,
         last_round: bool,
         max_rounds: u32,
     ) -> Result<RoundEnd> {
         let round = plan.round;
         let verdict = critique.final_verdict;
-        let misread = critique.request_reading_mismatch.clone();
+        // The stored text is only the explanation for the stop message; `request_misread` decides.
+        let how = critique
+            .request_reading_mismatch
+            .clone()
+            .unwrap_or_default();
         let findings = critique.findings.clone();
         let summary = critique.summary.clone().unwrap_or_default();
         closing.plans.push(plan.clone());
@@ -471,7 +482,7 @@ impl Athena {
             );
             Ok(RoundEnd::Stopped)
         };
-        if let Some(how) = misread {
+        if request_misread {
             return stop(format!(
                 "the critic judged that the reading misread the request: {how}"
             ));

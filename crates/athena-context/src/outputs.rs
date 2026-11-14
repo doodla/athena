@@ -247,9 +247,21 @@ pub struct VerdictOutput {
     /// One entry per acceptance criterion, in the order given.
     pub criteria: Vec<CriterionVerdictOutput>,
     pub findings: Vec<FindingOutput>,
-    pub request_reading_mismatch: Option<String>,
+    /// True only when the accepted reading misread the request; Athena rates that major. False otherwise:
+    /// other remarks about the reading go in findings.
+    pub request_misread: bool,
+    /// How the reading misread the request; null when `request_misread` is false.
+    pub request_misread_reason: Option<String>,
     /// One paragraph for the user.
     pub summary: String,
+}
+
+/// The stored text for a misread: the agent's explanation trimmed, or a fixed phrase when it gave none.
+pub fn misread_explanation(reason: Option<&str>) -> String {
+    match reason.map(str::trim) {
+        Some(text) if !text.is_empty() => text.to_string(),
+        _ => "no explanation given".to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -535,8 +547,11 @@ pub enum CritiqueVerdictOutput {
 pub struct CriticOutput {
     pub verdict: CritiqueVerdictOutput,
     pub findings: Vec<CriticFindingOutput>,
-    /// Set when the accepted reading misread the request, with how.
-    pub request_reading_mismatch: Option<String>,
+    /// True only when the accepted reading misread the request; also add a major finding for it. False
+    /// otherwise: other remarks about the reading go in findings.
+    pub request_misread: bool,
+    /// How the reading misread the request; null when `request_misread` is false.
+    pub request_misread_reason: Option<String>,
     /// One paragraph.
     pub summary: String,
 }
@@ -689,7 +704,8 @@ mod tests {
 
     fn sample_critique() -> Value {
         json!({
-            "verdict": "revise", "request_reading_mismatch": null, "summary": "s",
+            "verdict": "revise", "request_misread": false, "request_misread_reason": null,
+            "summary": "s",
             "findings": [{ "severity": "major", "summary": "s", "location": "l",
                 "evidence": "e", "fix": "f" }]
         })
@@ -868,6 +884,58 @@ mod tests {
     }
 
     #[test]
+    fn the_request_misread_is_a_required_boolean_with_an_optional_reason_in_both_schemas() {
+        for schema in [critic_schema(), verdict_schema()] {
+            assert_eq!(schema["properties"]["request_misread"]["type"], "boolean");
+            assert!(schema["properties"]["request_misread_reason"].is_object());
+            assert!(
+                schema["properties"]
+                    .get("request_reading_mismatch")
+                    .is_none()
+            );
+            let required = schema["required"].as_array().unwrap();
+            for key in ["request_misread", "request_misread_reason"] {
+                assert!(required.contains(&json!(key)), "{key} in {required:?}");
+            }
+            assert!(!required.contains(&json!("request_reading_mismatch")));
+        }
+    }
+
+    #[test]
+    fn an_output_with_the_old_request_reading_mismatch_key_or_without_request_misread_is_refused() {
+        let critique = sample_critique();
+        assert!(serde_json::from_value::<CriticOutput>(critique.clone()).is_ok());
+        let mut old = critique.clone();
+        old["request_reading_mismatch"] = json!("None for the plan.");
+        assert!(serde_json::from_value::<CriticOutput>(old).is_err());
+        let mut missing = critique.clone();
+        missing.as_object_mut().unwrap().remove("request_misread");
+        assert!(serde_json::from_value::<CriticOutput>(missing).is_err());
+
+        let verdict = json!({
+            "verdict": "pass", "criteria": [], "findings": [], "summary": "s",
+            "request_misread": false, "request_misread_reason": null
+        });
+        assert!(serde_json::from_value::<VerdictOutput>(verdict.clone()).is_ok());
+        let mut old = verdict.clone();
+        old["request_reading_mismatch"] = json!("None for this change.");
+        assert!(serde_json::from_value::<VerdictOutput>(old).is_err());
+        let mut missing = verdict;
+        missing.as_object_mut().unwrap().remove("request_misread");
+        assert!(serde_json::from_value::<VerdictOutput>(missing).is_err());
+    }
+
+    #[test]
+    fn the_request_misread_explanation_is_the_trimmed_reason_or_a_fixed_phrase() {
+        assert_eq!(
+            misread_explanation(Some("  reads it as a refactor ")),
+            "reads it as a refactor"
+        );
+        assert_eq!(misread_explanation(Some("  ")), "no explanation given");
+        assert_eq!(misread_explanation(None), "no explanation given");
+    }
+
+    #[test]
     fn the_auditor_schema_requires_a_summary_and_findings_with_evidence() {
         let schema = auditor_schema();
         let required = |v: &Value| {
@@ -956,7 +1024,8 @@ mod tests {
                 commands: vec![],
             }],
             findings: vec![],
-            request_reading_mismatch: None,
+            request_misread: false,
+            request_misread_reason: None,
             summary: "fine".into(),
         };
         let text = serde_json::to_string(&verdict).unwrap();

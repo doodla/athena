@@ -1315,7 +1315,8 @@ mod watcher_tests {
                             { "criterion": CRITERIA[1], "met": fail != Some(1), "evidence": "checked", "commands": [] }
                         ],
                         "findings": [],
-                        "request_reading_mismatch": null,
+                        "request_misread": false,
+                        "request_misread_reason": null,
                         "summary": "Checked."
                     }))
                 }
