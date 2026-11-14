@@ -8525,9 +8525,20 @@ mod parallel {
         // ahead of both Steward requests.
         let plain = six_urgent_and_two_steward();
         let report = run_with(&plain, 3, 20.0);
-        let mut first_six = starts(&plain)[..6].to_vec();
-        first_six.sort();
-        assert_eq!(first_six, ["u1", "u2", "u3", "u4", "u5", "u6"]);
+        // The order the drain itself hands items out in does not depend on thread timing.
+        assert_eq!(
+            report.plan_groups.concat(),
+            ["u1", "u2", "u3", "u4", "u5", "u6", "s1", "s2"]
+        );
+        // A worker logs an item's start before it takes the next one, so with three workers at least
+        // four of the six urgent items have logged a start before s1 is even taken: s1 can start at
+        // index 4 or 5 of the log, never earlier. Which of the six logs fifth or sixth is thread timing.
+        let started = starts(&plain);
+        let s1_at = started.iter().position(|id| id == "s1").unwrap();
+        assert!(
+            s1_at >= 4,
+            "s1 started ahead of the urgent items: {started:?}"
+        );
         assert!(report.improvement_turns.is_empty());
 
         // With them named, a Steward request starts among the first three, whatever the bound.
