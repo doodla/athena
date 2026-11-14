@@ -1,0 +1,155 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-045647-w91y",
+  "n": 1,
+  "at": "2026-11-14T20:07:52.928746621Z",
+  "invocation_seq": 1,
+  "base_commit": "6ba89dd572fad0605cc1ae252fbb62cfe6c1e2e0",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Tell the producer its deadline and pacing in its brief",
+  "summary": "Root cause: the producer runs against a fixed wall-clock deadline (1800s) that its brief never states, so it can't pace itself or stop to report. Add a \"Time budget\" section to the producer brief with the real deadline, an instruction to finish the smallest complete change first, to run the full test suite at most once, and to leave the tree in a reportable state. Jobs 20261010-154006-vc5k, 20261016-052605-qw38 and 20261018-070117-qmxv failed only on this deadline and had no candidate; their requests are not redone here.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "small",
+      "how": "One focused change: brief text plus the plumbing for the deadline value."
+    },
+    {
+      "id": "tested",
+      "how": "New unit tests; fmt, clippy and test must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is in the stage's inputs, not a per-job workaround."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria assert the rendered brief text for different deadlines."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the producer agent is the audience of the brief change, and Athena's operator judges whether deadline failures drop. The failure class is 'producer deadline exceeded on a small job'.",
+    "Code survey: crates/athena-core/src/run/producer.rs (producer_snapshot and the producer loop, Ended::Deadline at line 395), crates/athena-core/src/run/mod.rs (line 999 formats 'the producer did not complete: deadline of Ns reached'; line 1010 handles Ended::Deadline; lines 1195-1213 build the resume RetrySeed), crates/athena-agent/src/procs.rs (the deadline reason text), and crates/athena-context/src/briefs.rs (producer_brief_with_evidence, retry_section, the resume note). A timed-out job already keeps its work and resumes with a progress note. No code puts the deadline in the brief (grep for deadline in athena-context finds only resume text). No record or data file is added, so check_record_file, AnyRecord and the round-trip test are not touched. The property is measured directly by reading the rendered brief text in a test.",
+    "Existing code: the change extends crates/athena-context/src/briefs.rs (ProducerInputs, producer_brief_with_evidence) and the producer-input construction in crates/athena-core/src/run/; the existing resume and progress-note mechanism is reused unchanged.",
+    "Field meaning: the new ProducerInputs field carries the producer deadline in seconds, read from the same config value that crates/athena-agent/src/procs.rs uses to enforce the deadline. The implementer should confirm the config key name in athena.toml.",
+    "Governance: athena.toml and defaults.toml are not changed. The existing deadline value is only read. Consumers: none found for a new config key because none is added.",
+    "Prompt files under crates/athena-context/prompts/ are not edited, because the reader, producer and verifier prompt sets are near their token budgets. The text lives in the generated brief, which has no token budget in the list above.",
+    "The introspections' other proposals are alternatives not taken here: a progress watchdog and resumable checkpoints (resume already exists), and a refusal of identical-scope retries (a refusal rule, allowed only if giving the information cannot prevent the failure). They are left for follow-up."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The producer brief in crates/athena-context/src/briefs.rs (producer_brief_with_evidence) has a new 'Time budget' section giving the producer's deadline in seconds, taken from the configured producer deadline and not a constant, and telling it to finish the smallest complete change first, run the full test suite at most once, and keep the tree reportable. Verify by reading the diff.",
+      "kind": "content"
+    },
+    {
+      "text": "A new unit test in crates/athena-context/src/briefs.rs fails on the base and passes with the change. It builds producer briefs for two different deadlines and asserts each brief states its own deadline value, and that the section appears for a fresh job, a retry and a resume. Run: cargo test -p athena-context.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test in crates/athena-core/src/run/tests.rs shows the deadline configured for the producer invocation is the number written into the stored brief-producer.md (the same value, not a copy). Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Root cause named in CHANGELOG.md and in the doc comment of the new section: the stage lacked its own deadline and pacing information. Jobs 20261010-154006-vc5k, 20261016-052605-qw38 and 20261018-070117-qmxv are addressed by this: they recorded no candidate, so nothing is kept from them. Their original requests (verifier snapshot note, auditor and warden roles, baseline checks) are not part of this change.",
+      "kind": "content"
+    },
+    {
+      "text": "No refusal rule is added: nothing in the diff refuses, holds or rejects a reading or job. Expected 0% of newly refused readings.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy and cargo test pass, as recorded by Athena's checks on the final tree.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Outcome check for the producer-deadline-exceeded-on-small-job class: running cargo test shows the brief of a small job (short deadline and one deliverable) carries the budget text, so the producer is told its limit before it starts.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Adding a progress watchdog, early-stop rule or checkpoint commits to the producer",
+    "Making retry or auto-requeue refuse identical-scope attempts",
+    "Redoing the requests of jobs 20261010-154006-vc5k (verifier snapshot note: crates/athena-context/prompts/verifier.md), 20261016-052605-qw38 (auditor and warden roles: roles.rs, warden.rs, auditor.rs, lib.rs, main.rs, drain.rs, store.rs, records.rs, design doc, decisions.md) and 20261018-070117-qmxv (baseline checks: checks.rs, routing.rs, display.rs, outputs.rs, verifier.md, lifecycle.rs, docs/design.md); their candidates changed no files, so no work is kept or dropped",
+    "Changing the deadline value, athena.toml, defaults.toml or CI workflows",
+    "Editing prompt files under crates/athena-context/prompts/"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1800.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.676271186440678,
+      "p_user_intervenes": 0.06210045662100456,
+      "cost_usd": {
+        "p10": 0.551185662938367,
+        "p50": 1.481907856463903,
+        "p90": 5.707760776970614
+      },
+      "wall_time_s": {
+        "p10": 605.8596641176966,
+        "p50": 2156.7690595889994,
+        "p90": 4406.389317891374
+      }
+    }
+  },
+  "departures": "Slightly lower verification pass rate than the reference: this is a hard-class pipeline change with a plumbing path through run/ that the producer must trace.",
+  "urgent_reason": "It cuts wasted time: repeated producer-deadline failures that burn the full 1800s with no progress signal.",
+  "hard_reason": "It changes the run pipeline: how the producer stage is briefed and run.",
+  "producer_effort": "high"
+}
