@@ -83,6 +83,7 @@ mod produce_and_verify_order_tests {
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     const CRITERION: &str = "README.md describes the demo";
 
@@ -1345,6 +1346,8 @@ mod produce_and_verify_order_tests {
         finished: Box<Finished>,
         /// `(role, model, effort)` of every call, as the agent was started.
         calls: Vec<(Role, String, String)>,
+        /// `(role, time limit)` of every call, as the agent was started.
+        timeouts: Vec<(Role, Duration)>,
         /// The Planner invocation records, in order: `(model, effort)`.
         records: Vec<(String, Option<String>)>,
         /// The `planner    ` lines, in order.
@@ -1355,6 +1358,15 @@ mod produce_and_verify_order_tests {
         /// The `(model, effort)` of each planner call, as started.
         fn planner(&self) -> Vec<(&str, &str)> {
             self.of(Role::Planner)
+        }
+
+        /// The time limit of each planner call, as started.
+        fn planner_timeouts(&self) -> Vec<Duration> {
+            self.timeouts
+                .iter()
+                .filter(|(r, _)| *r == Role::Planner)
+                .map(|(_, t)| *t)
+                .collect()
         }
 
         fn of(&self, role: Role) -> Vec<(&str, &str)> {
@@ -1376,13 +1388,19 @@ mod produce_and_verify_order_tests {
     ) -> RevisionRun {
         let state = tempfile::tempdir().unwrap();
         let seen: Arc<Mutex<Vec<(Role, String, String)>>> = Arc::default();
+        let limits: Arc<Mutex<Vec<(Role, Duration)>>> = Arc::default();
         let inner = planning_script(planner, critic, Calls::default());
         let (record, reader_model) = (seen.clone(), reader_model.to_string());
+        let record_limits = limits.clone();
         let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
             record
                 .lock()
                 .unwrap()
                 .push((spec.role, spec.model.clone(), spec.effort.clone()));
+            record_limits
+                .lock()
+                .unwrap()
+                .push((spec.role, spec.timeout));
             let mut turn = inner(spec);
             if spec.role == Role::Reader
                 && let Some(reading) = turn.structured.as_mut()
@@ -1425,9 +1443,11 @@ mod produce_and_verify_order_tests {
                 .cloned()
                 .collect();
         let calls = seen.lock().unwrap().clone();
+        let timeouts = limits.lock().unwrap().clone();
         RevisionRun {
             finished,
             calls,
+            timeouts,
             records,
             planner_lines,
         }
@@ -1576,6 +1596,103 @@ mod produce_and_verify_order_tests {
                 .all(|l| l.starts_with(&format!("planner    {HAIKU} · high · "))),
             "{:#?}",
             run.planner_lines
+        );
+    }
+
+    #[test]
+    fn a_stronger_revision_effort_scales_the_planner_time_limit() {
+        // job 20261114-041123-hvyh: round 2 at xhigh ran 606 s against the 600 s planner_timeout_s.
+        let repo = repo_with_revision_keys(3, Some(SONNET), Some("xhigh"));
+        let run = run_for_revision(
+            &repo,
+            HAIKU,
+            vec![good_plan()],
+            vec![revising_critique(), accepting_critique()],
+        );
+        assert_eq!(
+            run.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            run.finished.reason
+        );
+        let limits = run.planner_timeouts();
+        assert_eq!(limits.len(), 2, "{limits:?}");
+        // Round 1 keeps the base limit; round 2, at the stronger effort, gets more.
+        assert_eq!(limits[0], Duration::from_secs(600));
+        assert!(limits[1] > Duration::from_secs(600), "{limits:?}");
+        assert_eq!(limits[1], Duration::from_secs(1200));
+        // The critic's limit is not scaled.
+        assert!(
+            run.timeouts
+                .iter()
+                .filter(|(r, _)| *r == Role::Critic)
+                .all(|(_, t)| *t == Duration::from_secs(600)),
+            "{:?}",
+            run.timeouts
+        );
+    }
+
+    #[test]
+    fn planner_time_limit_is_unscaled_when_no_revision_key_is_set() {
+        let repo = repo_with_revision_keys(3, None, None);
+        let run = run_for_revision(
+            &repo,
+            HAIKU,
+            vec![bad_plan(), good_plan()],
+            vec![revising_critique(), accepting_critique()],
+        );
+        assert_eq!(
+            run.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            run.finished.reason
+        );
+        // A mechanical pass in round 1, then round 2 after a critic revise: three planner calls.
+        assert_eq!(run.planner_timeouts(), [Duration::from_secs(600); 3]);
+    }
+
+    #[test]
+    fn planner_time_limit_is_unscaled_when_the_revision_effort_is_not_stronger() {
+        // Weaker keys with a Sonnet planner at high.
+        let repo = repo_with_revision_keys(3, Some(HAIKU), Some("medium"));
+        let run = run_for_revision(
+            &repo,
+            SONNET,
+            vec![good_plan()],
+            vec![revising_critique(), accepting_critique()],
+        );
+        assert_eq!(run.planner(), [(SONNET, "high"), (SONNET, "high")]);
+        assert_eq!(run.planner_timeouts(), [Duration::from_secs(600); 2]);
+        // An effort key equal to the planner's own.
+        let repo = repo_with_revision_keys(3, None, Some("high"));
+        let run = run_for_revision(
+            &repo,
+            HAIKU,
+            vec![good_plan()],
+            vec![revising_critique(), accepting_critique()],
+        );
+        assert_eq!(run.planner(), [(HAIKU, "high"), (HAIKU, "high")]);
+        assert_eq!(run.planner_timeouts(), [Duration::from_secs(600); 2]);
+    }
+
+    #[test]
+    fn planner_time_limit_is_unscaled_in_round_1_and_scaled_on_the_mechanical_revision() {
+        let repo = repo_with_revision_keys(3, Some(SONNET), Some("xhigh"));
+        let run = run_for_revision(
+            &repo,
+            HAIKU,
+            vec![bad_plan(), good_plan()],
+            vec![accepting_critique()],
+        );
+        assert_eq!(
+            run.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            run.finished.reason
+        );
+        assert_eq!(
+            run.planner_timeouts(),
+            [Duration::from_secs(600), Duration::from_secs(1200)]
         );
     }
 

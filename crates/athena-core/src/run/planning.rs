@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// The factor applied to `job_plan.planner_timeout_s` for a planner call whose effort a revision setting
+/// raised above the planner's own. A stronger effort thinks longer, so the base limit no longer fits: job
+/// 20261114-041123-hvyh ran round 2 at xhigh for 606 s and hit the 600 s limit. The value 2 is an
+/// estimate from that one observation, not a measured bound.
+const PLANNER_ESCALATED_TIMEOUT_FACTOR: u64 = 2;
+
 impl Athena {
     /// Ends the job in planning: it fails before any code was written. Its verification result is unknown,
     /// not false: no verification could have failed (review F11).
@@ -20,7 +26,9 @@ impl Athena {
     /// [`MAX_MECHANICAL_PASSES`] times per round; a plan that still breaks a rule after that stops the job.
     /// Round 1's first call runs at the ordinary planner model and effort; every later call, after a critic
     /// revise or a mechanical revision, runs at `[models] planner_revision_*` where set and not weaker
-    /// (see `Models::planner_revision_setting`).
+    /// (see `Models::planner_revision_setting`). A call whose effort that setting raised also gets a time
+    /// limit of `planner_timeout_s` times [`PLANNER_ESCALATED_TIMEOUT_FACTOR`]; every other call keeps
+    /// `planner_timeout_s`.
     /// A critic's revise sends the planner a revision brief that quotes the previous plan and every
     /// finding. On accept, the invocations, plans and critiques go into `closing` and the rendered
     /// producer section is returned. Reject, a reading the critic judged a misread, revise in the last
@@ -141,10 +149,19 @@ impl Athena {
         // A revision call (after a critic revise or a mechanical plan-rule revision) may run at the
         // `[models] planner_revision_*` setting; round 1 and a seeded first call keep the ordinary one.
         let mut model = ctx.reading.producer_model.clone();
-        let mut effort = jc.config.effort_for(Role::Planner).to_string();
+        let base_effort = jc.config.effort_for(Role::Planner).to_string();
+        let mut effort = base_effort.clone();
         if round > 1 || mechanical_passes > 0 {
             (model, effort) = jc.config.models.planner_revision_setting(&model, &effort);
         }
+        // `planner_revision_setting` returns the effort unchanged unless the key is set and stronger, so a
+        // difference means the effort was raised and the call gets the longer limit.
+        let planner_timeout_s = if effort != base_effort {
+            cfg.planner_timeout_s
+                .saturating_mul(PLANNER_ESCALATED_TIMEOUT_FACTOR)
+        } else {
+            cfg.planner_timeout_s
+        };
         let seq = ctx.next_seq(closing);
         let mut spec = self.agent_spec(
             jc,
@@ -159,7 +176,7 @@ impl Athena {
             Side::Read,
             &no_env,
             cfg.planner_usd,
-            cfg.planner_timeout_s,
+            planner_timeout_s,
             plan_schema(),
         )?;
         spec.effort = effort.clone();
