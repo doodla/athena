@@ -1,0 +1,338 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-045647-w91y",
+  "round": 2,
+  "at": "2026-11-14T20:20:21.238317039Z",
+  "invocation_seq": 5,
+  "approach": "Root cause: the producer's per-run wall-clock limit (`budget.producer_timeout_s`, passed to `agent_spec` at crates/athena-core/src/run/producer.rs:344, stored as `spec.timeout` at crates/athena-core/src/reading.rs:457, enforced at crates/athena-agent/src/claude.rs:592) was never told to the producer. Its brief and prompt state no limit, so the stage could not pace itself against it. The pacing rules it already has (targeted tests; the suite at most once, crates/athena-context/prompts/producer.md:9; full-suite criteria left to Athena's checks, briefs.rs:856-858) were never tied to a limit.\n\nThe change adds one `## Time budget` section to the producer brief. A new `ProducerInputs.deadline_s: u64` feeds it. One accessor, `producer_deadline_s(jc)` in producer.rs, supplies the number both to the invocation (producer.rs:344) and to the brief builder (run/mod.rs:1178). The two cannot drift: the producer loop and dispatch share one `JobConfig` (`RunContext { jc: &jc }`, mod.rs:1301). The section renders unconditionally, so a fresh job, a seeded retry, an unseeded retry, a stale-conflict retry and a timeout resume all carry it. A send-back is the brief plus `## Sent back` (send_back.rs:136), so it carries it too.\n\nAnswers to the round-1 findings:\n1. The criterion-3 test no longer asserts byte equality. The prompt differs from the stored brief by the evidence placeholder (mod.rs:1157, 1340) and an optional governing-decisions tail (mod.rs:1362). The test compares the extracted `## Time budget` section of both texts, requires \"4321 seconds\" in each, and checks `prompt.starts_with(stored.replace(placeholder, real_path))`. It keeps the assertions on `spec.timeout` and the record's `caps.timeout_s`.\n2. The dependents now list the readers of the stored brief outside athena-core: athena-gate jobs.rs:287 and :489-511 and landing_tests.rs, athena-cli job_plan.rs:259-277 and lifecycle.rs:292, and athena-data records.rs:1451. Each has a reason and a test command.\n3. The section leads with the limit and points to the existing rules. It gives no new reason to run the full suite. It keeps only the cap \"at most once\" (criterion 1 asks for it) and says Athena runs the suite again on the result (see \"Checks before the verifier\"), so a second full run only spends the limit. The root cause is worded as \"the stage was never told its own per-run limit, so its existing pacing rules had nothing to hang on\".\n4. `date` is not in the producer's allowed commands (athena.toml:84 lists cargo, git, ls, rm, mv, chmod), so the brief cannot tell the producer to run it. The text says: if the Bash list below includes `date`, note the time at the start and read it between steps; otherwise pace by the order of work. The CHANGELOG records that the live limit is 86400 s (athena.toml:51) and that the information matters most if the limit is lowered again.\n\nPrompt files, athena.toml, defaults.toml and the resume, stall and deadline code are untouched. No check, hold or refusal is added: the expected share of newly refused readings is 0%. No reading rule, parser or stem list changes, so no refusal_corpus case is added or mapped.",
+  "decisions": [
+    {
+      "choice": "Carry the deadline as one new `ProducerInputs.deadline_s: u64`, filled in core from a single accessor `producer_deadline_s(jc: &JobConfig) -> u64` in producer.rs that the invocation also uses (producer.rs:344). Reuse of the config key `budget.producer_timeout_s`: documented meaning and fit, quoted below.",
+      "reason": "The context crate depends only on data (system facts, Crate reach), so it cannot read the config and the number must arrive as an input. One accessor for the enforced and the stated value means they cannot drift (criterion 3).\n\nDocumented meaning of the key. `Budget.producer_timeout_s` is a bare `pub producer_timeout_s: u64` with no doc comment (crates/athena-data/src/config.rs:405). Its meaning is fixed by four places in the code and config. athena.toml:49 says 'Stage time limits are 24 hours: they do not stop work', with the key at athena.toml:51. `check_reading_size` (reading.rs:361-368) calls it the 'producer ... deadline' beyond which 'no single run can finish' a reading. `agent_spec` turns it into `Duration::from_secs(timeout_s)` (reading.rs:457). The driver enforces it as `deadline = clock + spec.timeout` and records 'deadline of {secs}s reached' (claude.rs:592, procs.rs:20-22). That is exactly the per-run limit the brief must state.\n\nLive value for each role it could affect: producer_timeout_s = 86400 (athena.toml:51). The reader, verifier, planner and critic keys (athena.toml:50, 52, 224-225) are not read by this change. Because the live value is 86400, the brief states 86400 seconds today. That is true, and it stays true if the value is lowered.",
+      "rejected": [
+        {
+          "option": "Hard-code 1800 in the brief text",
+          "why": "The live athena.toml sets 86400 (athena.toml:51; CHANGELOG.md:12 raised it from the earlier limit). A constant is false today and would drift again, and the request asks for the configured value."
+        },
+        {
+          "option": "Read `budget.producer_timeout_s` separately in producer.rs and in mod.rs",
+          "why": "Two reads of one key can drift. The shared accessor makes the criterion-3 test about one value."
+        }
+      ]
+    },
+    {
+      "choice": "Put the text in the generated brief: a new `time_budget_section(deadline_s)` beside `no_change_section` (briefs.rs:757), called in `producer_brief_with_evidence` (briefs.rs:681) after `pin_section` and before `failure_classes_section`, unconditionally.",
+      "reason": "Briefs sit outside the prompt-set token budgets (docs/system-facts.md; the producer set is 1043 of 1200), so no budget line or `system_facts_budgets_match_computed` moves. The brief is stored verbatim as brief-producer.md (mod.rs:1274), so a test can read it. Placing it before the banned-words and checks sections keeps the order checks the existing tests rely on (briefs.rs:2283-2284, 2303-2305, 2324-2328).",
+      "rejected": [
+        {
+          "option": "Edit crates/athena-context/prompts/producer.md",
+          "why": "Out of scope. It moves the producer token budget and a pinned test."
+        }
+      ]
+    },
+    {
+      "choice": "Word the section to lead with the per-run limit and tie the existing pacing rules to it, not to restate them as new rules. Fixed text: 'Each producer run, the first and any send-back, is stopped after {deadline_s} seconds of wall-clock time. A stopped run sends no report, so what is on disk when it stops must already be a usable change.' Then: 'Do the smallest change that meets every acceptance criterion first, one file at a time, ... report as soon as the criteria are met. Leave no half-edited file and no broken build between steps. Use targeted tests ... The full suite runs at most once, and Athena runs it again on your result (see \"Checks before the verifier\" below), so a second full run only spends this limit.'",
+      "reason": "Answers finding 3. producer.md:9 already says to run targeted tests and the suite at most once, and briefs.rs:856-858 says a full-suite criterion is left to Athena's checks. The section keeps only the cap (acceptance criterion 1 asks for 'at most once') and gives the reason in terms of the limit, so it never tells the producer to run the full suite. It avoids the strings the existing producer-brief tests forbid: 'cost', '0.8', '0.97', 'p10' (briefs.rs:1557), 'reached its deadline' (1907), '## Retry' (1910, 1946), 'rejected candidate' (1851, 1948), 'starts from the base' (1939), 'sha:' (1966), and the boundary-scan words. It does not contain 'cargo test -p xtask --test policy' or 'cargo test -p athena-cli --test mirrors', whose first occurrence the tests at 2303 and 2324 require to sit after the banned-words section.",
+      "rejected": [
+        {
+          "option": "Tell the producer to run the full test suite once after the change is complete",
+          "why": "Gives a new reason to run the full suite and pulls against briefs.rs:856-858 (finding 3)."
+        }
+      ]
+    },
+    {
+      "choice": "Give an elapsed-time reference conditionally on the brief's own command list: 'You have no clock of your own. If the commands Bash may run (below) include `date`, note the time when you start and read it between steps; without it, count steps against the order above.' Record in the CHANGELOG that the number matters most if the limit is lowered again (live value 86400 s).",
+      "reason": "Answers finding 4. The producer's allowed commands are cargo, git, ls, rm, mv and chmod (athena.toml:84), so `date` is denied by the producer grant today. An unconditional instruction to run `date` would be wrong. Adding `date` to producer_commands means editing athena.toml, a governance file that is not a deliverable and is out of scope. The conditional sentence is true for any capability whose list holds `date`, and the 'Commands Bash may run' list in the same brief shows which it is.",
+      "rejected": [
+        {
+          "option": "Tell the producer to run `date` unconditionally",
+          "why": "Denied by the producer's command grant (athena.toml:84), so the instruction would fail."
+        },
+        {
+          "option": "Add `date` to `producer_commands` in athena.toml",
+          "why": "athena.toml is a governance file that is not a deliverable; out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "State the limit per run, not per job, and do not state the stall window.",
+      "reason": "`spec` is rebuilt on every pass of the producer loop with the same timeout (producer.rs:329-346), so a send-back gets a fresh limit. The stall window is `(timeout / 3).max(floor)` (procs.rs:27-31) with a driver-set floor that tests lower (claude.rs:598, 1341). Printing it needs a second field that can drift, and pacing does not need it. The stall stop (claude.rs:596-619) and resume of a timed-out job (`timeout_seed`, `keep_unfinished_work`, mod.rs:883, 945) stay as backstops.",
+      "rejected": [
+        {
+          "option": "Also print the stall window",
+          "why": "Adds a second field and a drift risk for no pacing gain."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal, hold, watchdog or retry rule. Expected share of past accepted readings newly refused: 0%.",
+      "reason": "Giving the stage the number does not need a rule, and the request asks to prefer that. `check_reading_size` (reading.rs:370) already refuses a reading whose forecast median exceeds the deadline and is unchanged. No parser, stem list or reading check changes, so there is no input form to map to a refusal_corpus case and no `refusal_corpus` demonstration.",
+      "rejected": [
+        {
+          "option": "Refuse an identical-scope retry after a deadline, or add a progress watchdog or checkpoints",
+          "why": "A refusal rule is allowed only when information cannot prevent the failure. Both are listed out of scope. The watchdog and resume already exist (claude.rs:596-619; mod.rs:883, 945)."
+        }
+      ]
+    },
+    {
+      "choice": "The criterion-3 test compares the extracted `## Time budget` section of the stored brief and of the prompt the fake producer received, plus `prompt.starts_with(stored.replace(placeholder, real_evidence_path))`, plus `spec.timeout` and the record's `caps.timeout_s`.",
+      "reason": "Answers finding 1. The prompt is the stored brief with the evidence placeholder replaced (mod.rs:1340) and optionally a governing-decisions tail (mod.rs:1362), so the two are not byte-equal. crates/athena-cli/tests/job_plan.rs:264-277 depends on the same difference. The section comparison and the prefix check are true on correct code and fail if the brief took its number from anywhere but the configured value.",
+      "rejected": [
+        {
+          "option": "Assert the prompt is byte-equal to the stored brief",
+          "why": "False on correct code (finding 1)."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `deadline_s: u64` to `ProducerInputs`. Add `time_budget_section(deadline_s)` with a doc comment naming the root cause, and call it in `producer_brief_with_evidence` after `pin_section` and before `failure_classes_section`. Add `deadline_s` to the 10 test literals (helper `producer_inputs` uses 1800). Add the tests `time_budget_states_each_jobs_own_deadline` and `a_small_job_brief_carries_its_short_deadline`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Add `pub(super) fn producer_deadline_s(jc: &JobConfig) -> u64` returning `jc.config.budget.producer_timeout_s`, and use it for the invocation timeout at line 344.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Set `deadline_s: producer::producer_deadline_s(&jc)` in the `ProducerInputs` literal at line 1178.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add `the_producer_deadline_in_the_stored_brief_is_the_one_the_invocation_runs_under`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "The test literal `ProducerInputs { .. }` at line 3581 gains `deadline_s`. No production change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "New bullet at the top of Added under [Unreleased]: root cause, the three jobs it addresses (nothing kept from them), the live 86400 s value and the earlier 1800 s, the `date` limitation, no refusal rule (0% newly refused), what is not measured, and the test commands.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-context/src/briefs.rs add `pub deadline_s: u64` to `ProducerInputs` (line 356) with a doc comment: the wall-clock limit, in seconds, of each producer run, as configured and enforced by the agent driver (the value of `budget.producer_timeout_s`).",
+    "Add `fn time_budget_section(deadline_s: u64) -> String` beside `no_change_section` (briefs.rs:757). Its doc comment names the root cause: the producer stage was never told its own per-run limit, so it could not pace against it and its existing pacing rules had nothing to hang on. It returns exactly this text (one `format!`, ending in a newline like the other section functions): '## Time budget\\n\\nEach producer run, the first and any send-back, is stopped after {deadline_s} seconds of wall-clock time. A stopped run sends no report, so what is on disk when it stops must already be a usable change.\\n\\nPace the work by its order. Do the smallest change that meets every acceptance criterion first, one file at a time, and leave extras for afterwards; report as soon as the criteria are met. Leave no half-edited file and no broken build between steps. Use targeted tests while you work (`cargo test -p <crate> <filter>`). The full suite runs at most once, and Athena runs it again on your result (see \"Checks before the verifier\" below), so a second full run only spends this limit.\\n\\nYou have no clock of your own. If the commands Bash may run (below) include `date`, note the time when you start and read it between steps; without it, count steps against the order above.\\n'. The text has no numeric deadline literal and none of the forbidden or boundary-scan strings listed in decision 3.",
+    "In `producer_brief_with_evidence` (briefs.rs:681) add `let _ = writeln!(out, \"{}\", time_budget_section(inputs.deadline_s));` after `pin_section(...)` (line 692) and before `failure_classes_section(...)` (line 693), unconditionally, so every brief shape carries it.",
+    "In crates/athena-core/src/run/producer.rs add `pub(super) fn producer_deadline_s(jc: &JobConfig) -> u64 { jc.config.budget.producer_timeout_s }` with a short doc comment (the one source of the stated and the enforced producer limit), and use it at line 344 in place of `jc.config.budget.producer_timeout_s`. `JobConfig` is in scope through `use super::*;` (producer.rs:4).",
+    "In crates/athena-core/src/run/mod.rs add `deadline_s: producer::producer_deadline_s(&jc),` to the `ProducerInputs` literal at line 1178 (`jc` is the `JobConfig` in scope there).",
+    "Add `deadline_s` to every other `ProducerInputs` literal: in briefs.rs tests at 1538, 1568, 1604, 1636, 1745, 2266, 2289, 2310 and 2337 (value 1800) and in the helper `producer_inputs` at 1798 (value 1800); and in crates/athena-core/src/reading.rs near line 3581 (value 1800).",
+    "Add the briefs.rs tests next to the helper tests (after `seed()`, briefs.rs:1811): `time_budget_states_each_jobs_own_deadline` (deadlines 300 and 5400; the pacing phrases; five shapes: fresh, seeded retry, resume, stale conflict, unseeded retry; count of '## Time budget' is 1 in each) and `a_small_job_brief_carries_its_short_deadline` (deadline 120, the one-deliverable `reading()` fixture; the section is before '## Checks Athena will run' and '## Working directory').",
+    "Add the run/tests.rs test `the_producer_deadline_in_the_stored_brief_is_the_one_the_invocation_runs_under` as specified in demonstration 3. Put a small local helper `fn time_budget_of(text: &str) -> &str` in the test that returns the text from '## Time budget' to the next '\\n## '. Do not assert byte equality of prompt and stored brief; use the section comparison and the `starts_with` check on the placeholder-replaced brief.",
+    "Add the CHANGELOG entry at the top of Added under [Unreleased] (CHANGELOG.md:20): root cause (the producer stage was never told its own per-run limit, so its existing pacing rules had nothing to hang on); the fix (the `deadline_s` input, the `producer_deadline_s` accessor shared by the brief and the invocation, the `## Time budget` section); jobs 20261010-154006-vc5k, 20261016-052605-qw38 and 20261018-070117-qmxv addressed, with no candidate so nothing is kept and their original requests not redone; the live limit of 86400 s and that the 1800 s of the failure class was the earlier value; that the producer has no `date` command under the default grant (athena.toml:84), so the brief paces by order of work unless the Bash list includes it; that the number matters most if the limit is lowered again; no refusal rule (0% of past accepted readings newly refused); that whether producers follow the text is not measured; the test commands. Avoid the boundary-scan words and any email-like text.",
+    "Run `cargo fmt --all`, then each check separately on the final tree: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. Fix any failure, including `producer_briefs_carry_no_predictions`, the briefs.rs retry and resume tests, the xtask policy tests and the budget tests. Also run `cargo test -p athena-gate`, `cargo test -p athena-cli --test job_plan` and `cargo test -p athena-cli --test lifecycle` to show the stored-brief readers are unaffected."
+  ],
+  "risks": [
+    {
+      "risk": "The live athena.toml sets producer_timeout_s = 86400 (athena.toml:51; 'they do not stop work'), while the failures in the class happened at 1800 s. Today's brief says 86400 seconds, and a number that large gives the producer little to pace against, so behaviour may change less than the request expects.",
+      "mitigation": "The brief states whatever is configured, so it is true today and stays true if the value is lowered. The pacing text (order of work, tree always reportable, targeted tests) does not depend on the size of the number. The CHANGELOG says the 1800 s was the earlier value and the information matters most if the limit is lowered again."
+    },
+    {
+      "risk": "The producer has no clock: `date` is not in its allowed commands (athena.toml:84), so it cannot measure elapsed time.",
+      "mitigation": "The text says so and offers the `date` reading only when the Bash list in the same brief includes it; otherwise it paces by the order of work. No governance file is edited. A real clock or progress signal is a follow-up (out of scope: watchdog, checkpoints)."
+    },
+    {
+      "risk": "A producer may ignore the pacing text, and nothing here measures whether it follows it.",
+      "mitigation": "The CHANGELOG says the effect is not measured. The stall stop (claude.rs:596-619) and resume of a timed-out job (mod.rs:883, 945) stay as backstops."
+    },
+    {
+      "risk": "The new brief text trips an existing brief test (forbidden substrings 'cost', '0.8', '0.97', 'p10'; 'reached its deadline'; '## Retry'; 'rejected candidate'; 'starts from the base'; 'sha:'; the boundary-scan words) or moves the first occurrence of 'cargo test -p xtask --test policy' or 'cargo test -p athena-cli --test mirrors' ahead of the banned-words section (briefs.rs:2303, 2324).",
+      "mitigation": "The fixed text in step 2 avoids all of them, and criterion 6 runs every one of those tests on the final tree. The producer fixes any hit before reporting."
+    },
+    {
+      "risk": "The config rewrite in the criterion-3 test might not reach the job, because config is read from the head commit by `JobConfig::at` (mod.rs:1030).",
+      "mitigation": "The test commits the rewritten athena.toml before `ask`, and asserts that the `replacen` changed the text. If the fixture read config another way, the assertions on 4321 fail visibly on 86400 instead of passing."
+    },
+    {
+      "risk": "A missed `ProducerInputs` literal breaks the build.",
+      "mitigation": "A search for `ProducerInputs {` finds the struct and 10 test literals in briefs.rs, one in reading.rs:3581 and one in mod.rs:1178; no other file uses the type. `cargo clippy --all-targets` and `cargo test` compile them all."
+    },
+    {
+      "risk": "A silent stretch of one third of the limit also stops the run (procs.rs:27-31), and the brief does not state that window, so a single very long command could still end a run.",
+      "mitigation": "Not stated on purpose: it would need a second field that can drift (decision 5). The stall stop exists already, and a stopped run's work is kept and resumable."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "ProducerInputs struct (new field `deadline_s`)",
+      "dependent": "crates/athena-context/src/briefs.rs tests: 10 `ProducerInputs { .. }` literals at 1538, 1568, 1604, 1636, 1745, 1798 (helper `producer_inputs`), 2266, 2289, 2310, 2337",
+      "kind": "code",
+      "test": "Each literal gains `deadline_s`. `cargo test -p athena-context` compiles and runs them all, including `producer_briefs_carry_no_predictions` (1536) and the retry and resume brief tests (1826-1941).",
+      "reason": null
+    },
+    {
+      "name": "ProducerInputs struct (new field `deadline_s`)",
+      "dependent": "crates/athena-core/src/reading.rs:3581 (test literal in `both_retry_paths_carry_every_major_finding_in_the_same_form`, imported at 3553) and the production literal at crates/athena-core/src/run/mod.rs:1178. A search for `ProducerInputs` finds only briefs.rs, reading.rs and run/mod.rs.",
+      "kind": "code",
+      "test": "The reading.rs literal gains `deadline_s` and mod.rs sets it from `producer::producer_deadline_s(&jc)`. `cargo test -p athena-core both_retry_paths_carry_every_major_finding_in_the_same_form` still finds the '## Findings you must address' block: its end is the next '\\n\\n## ', and the new section only adds a later heading.",
+      "reason": null
+    },
+    {
+      "name": "producer brief text (new `## Time budget` section)",
+      "dependent": "Stored brief-producer.md and `brief_sha256`: crates/athena-core/src/run/mod.rs:1259 (hash) and :1274 (committed file), both computed from the same `brief` string",
+      "kind": "code",
+      "test": "`cargo test -p athena-core dispatch_writes_a_read_only_evidence_snapshot_named_in_the_producer_and_verifier_briefs` (tests.rs:858) hashes whatever text is stored (tests.rs:1059-1062), so the hash moves with the text and stays consistent. The new criterion-3 test reads the stored brief.",
+      "reason": null
+    },
+    {
+      "name": "producer brief text (new `## Time budget` section)",
+      "dependent": "athena-gate landing gate: crates/athena-gate/src/jobs.rs:287 and :489-511 check that the committed brief-producer.md hashes to the job's `brief_sha256`; crates/athena-gate/src/landing_tests.rs:1301, 1338, 1395, 1532, 1629",
+      "kind": "code",
+      "test": "cargo test -p athena-gate",
+      "reason": "The gate hashes the committed bytes against the recorded hash, and both come from the same string at mod.rs:1259 and :1274, so adding text to the brief keeps them equal. landing_tests.rs builds its fixtures from its own constant `BRIEF` (landing_tests.rs:1338), not from `producer_brief`, so it does not read the new text."
+    },
+    {
+      "name": "producer brief text (new `## Time budget` section)",
+      "dependent": "crates/athena-cli/tests/job_plan.rs:259-277 rebuilds the first producer prompt from the committed brief (placeholder replaced, plan section appended) and asserts equality",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test job_plan",
+      "reason": "The test derives the expected prompt from the committed brief text, and the prompt is derived from the same text at mod.rs:1340 and :1352. A section inside the brief appears in both, so the equality still holds."
+    },
+    {
+      "name": "producer brief text (new `## Time budget` section)",
+      "dependent": "crates/athena-cli/tests/lifecycle.rs:288-306 checks that brief-producer.md is committed at the landing",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test lifecycle",
+      "reason": "It asserts only that the path exists in the landing commit (`path_exists`, lifecycle.rs:303), not its content."
+    },
+    {
+      "name": "producer brief text (new `## Time budget` section)",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:304-308 and :1537; crates/athena-core/src/run/tests.rs:8891 (`briefs[\"brief-producer\"]` of a retried job); crates/athena-data/src/records.rs:1451 (`JOB_MARKDOWN` lists brief-producer.md) and :2136 (`check_record_file` accepts it)",
+      "kind": "code",
+      "test": "cargo test -p athena-core and cargo test -p athena-data",
+      "reason": "run_pin_tests.rs and tests.rs:8891 assert substrings of the pinned-source section, the planned-files wording and the retry section. The new section is separate and sits after the pin section and before the failure classes, so none of those substrings changes. records.rs accepts a brief-producer.md of any text and applies no schema."
+    },
+    {
+      "name": "producer send-back text",
+      "dependent": "crates/athena-core/src/run/send_back.rs:92-136 (`send_back_text*` start from `format!(\"{brief}\\n\\n## Sent back\\n\\n\")`) and producer.rs:647-670 (`attempt_brief`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core; the criterion-3 test covers the first run, and the section's wording names the send-back run.",
+      "reason": "A send-back is the original brief plus the send-back text, so it carries the Time budget section, which says each send-back run has the limit. No send-back function reads or edits the section. send_back.rs tests use their own brief strings, not `producer_brief`."
+    },
+    {
+      "name": "config key budget.producer_timeout_s (read for the invocation through the new accessor)",
+      "dependent": "crates/athena-core/src/run/producer.rs:329-346 (every producer pass, including the send-back); crates/athena-core/src/reading.rs:370 `check_reading_size` and :813; crates/athena-core/src/manage.rs:296; crates/athena-core/src/run/mod.rs:1250 (job record caps)",
+      "kind": "code",
+      "test": "The criterion-3 test asserts `spec.timeout`, the invocation record's `caps.timeout_s` and the job record's `caps.producer_timeout_s` all equal the configured value. `cargo test -p athena-core` and `cargo test -p athena-data` cover the rest.",
+      "reason": "The accessor returns the same field the invocation read before, so the spec timeout is unchanged. The other readers only read the key; its name, value and meaning (config.rs:405, quoted in the decisions) are unchanged. The config test at config.rs:1020 asserts the repository value 86400."
+    },
+    {
+      "name": "producer_timeout_s value in athena.toml and defaults.toml (host setting)",
+      "dependent": "athena.toml:49-51 (`producer_timeout_s = 86400`, comment 'Stage time limits are 24 hours: they do not stop work') and defaults.toml",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Not changed. The brief shows whatever is configured, so it states 86400 seconds today and a smaller number if the value is lowered. Only the producer key is read; the reader, verifier, planner and critic keys are not."
+    },
+    {
+      "name": "the producer's deadline, stall stop and timeout resume",
+      "dependent": "crates/athena-agent/src/claude.rs:592-619 and procs.rs:19-36 (deadline and stall enforcement); crates/athena-core/src/run/mod.rs:883 `timeout_seed` and :945 `keep_unfinished_work`; producer.rs:388-398",
+      "kind": "code",
+      "test": "Existing tests stay: tests.rs:6161, 6215, 6474 (`cargo test -p athena-core timeout_seed`).",
+      "reason": "Unchanged. The plan adds information to the brief and edits no enforcement or resume code. The stated seconds equal `spec.timeout`, which claude.rs:592 enforces. The resume brief shape is covered by the new briefs.rs test."
+    },
+    {
+      "name": "words in the producer brief",
+      "dependent": "xtask/tests/policy.rs boundary scan (reads every tracked file, including briefs.rs and CHANGELOG.md) and `the_producer_brief_lists_exactly_the_scanners_terms` (policy.rs:376); `producer_briefs_carry_no_predictions` (briefs.rs:1536); the absence assertions at briefs.rs:1851, 1907, 1939, 1946, 1966",
+      "kind": "rule",
+      "test": "cargo test --locked. The new text and the CHANGELOG entry use no scanner word or fragment (the list is at crates/athena-context/src/briefs/boundary.rs:7-44) and none of the forbidden substrings.",
+      "reason": null
+    },
+    {
+      "name": "prompt-set token budgets",
+      "dependent": "docs/system-facts.md budget lines and `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Prompt files are not edited, and briefs sit outside the budget sets (docs/system-facts.md, 'Prompt sets and budgets'), so no budget line changes."
+    },
+    {
+      "name": "decision gate on touched paths",
+      "dependent": "docs/decision-links.toml (decision gate, crates/athena-core/src/run/checks.rs:684-691)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The file's crate paths are only crates/athena-git/src/snapshot.rs and crates/athena-core/src/run/candidate.rs (decision-links.toml:222-223). None of the five edited Rust files is listed, so the change needs no decision entry."
+    },
+    {
+      "name": "producer brief 'Working directory' text and the 'Producer snapshot' system fact",
+      "dependent": "docs/system-facts.md 'Producer snapshot' (quotes briefs.rs:709-737)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan does not edit that text. The new section is separate and sits before it, so the fact stays true."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff. Check (a) `time_budget_section(deadline_s: u64)` formats the number from its argument, with no numeric deadline literal; (b) it is called in `producer_brief_with_evidence` after `pin_section` and before `failure_classes_section`, unconditionally; (c) `ProducerInputs.deadline_s` is filled in run/mod.rs from `producer::producer_deadline_s(&jc)`, the same accessor the invocation uses at producer.rs:344, which returns `jc.config.budget.producer_timeout_s`; (d) the text says the smallest change that meets every acceptance criterion comes first, the full suite runs at most once, and no half-edited file or broken build is left between steps.",
+      "command": "git diff -- crates/athena-context/src/briefs.rs crates/athena-core/src/run/producer.rs crates/athena-core/src/run/mod.rs",
+      "observes": "The section is rendered from `inputs.deadline_s`. The value comes from the config accessor, not a constant, and the same accessor feeds the invocation. All three pacing instructions are in the text.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "New unit test `time_budget_states_each_jobs_own_deadline` in crates/athena-context/src/briefs.rs. It builds `producer_inputs(None)` and sets `deadline_s` to 300, then to 5400. It asserts the first brief contains 'is stopped after 300 seconds of wall-clock time' and not '5400 seconds', and the second the reverse. It asserts both contain 'smallest change that meets every acceptance criterion', 'at most once', 'no half-edited file' and '`date`'. It then builds five brief shapes at 300 seconds: fresh; seeded retry (`retry_from = Some(seed())`); resume (`RetrySeed { progress_note: Some(..), candidate: Some(..), ..seed() }`); stale conflict (`conflicts` non-empty); unseeded retry (`retry_findings = Some(RetryFindings { .. })`). For each it asserts `brief.matches(\"## Time budget\").count() == 1` and the '300 seconds' text.",
+      "command": "cargo test -p athena-context time_budget",
+      "observes": "Each brief carries its own number and the section appears exactly once in all five shapes. The two deadlines are not substrings of each other.",
+      "fails_without": "On the base the test does not compile (`ProducerInputs.deadline_s` does not exist). With the field but a constant in the text, the brief for 5400 lacks '5400 seconds'. With the section only on the fresh path, the retry, resume or conflict shape lacks '## Time budget' and the count assertion fails.",
+      "seam": "Production entry point: `producer_brief` / `producer_brief_with_evidence` (crates/athena-context/src/briefs.rs:675, 681). Inputs are plain `ProducerInputs` values from the existing helper `producer_inputs(pin)` (briefs.rs:1797) and the existing `seed()` helper (briefs.rs:1811), over the in-file fixture `reading()` (briefs.rs:1474). No fake or double: the code under test runs as production code. The seam exists (read at briefs.rs:1797-1824). Step 6 adds `deadline_s` to the helper and every literal; step 7 adds the test."
+    },
+    {
+      "criterion": 3,
+      "method": "New test `the_producer_deadline_in_the_stored_brief_is_the_one_the_invocation_runs_under` in crates/athena-core/src/run/tests.rs. Steps: `repo()` (tests.rs:288); read its athena.toml, `replacen(\"producer_timeout_s = 86400\", \"producer_timeout_s = 4321\", 1)` and assert the text changed (the line is athena.toml:51); commit with `commit_file` (tests.rs:358). Wrap `base_script()` in a `Script` closure that, for `Role::Producer`, records `spec.timeout.as_secs()` and `spec.user_prompt` and then calls the base script (the pattern at tests.rs:858-903). Run `athena_with(&repo, &state, PASSES, crate::test_support::plenty_of_space, script)`, then `ask(\"describe the demo\", &Quiet)` and `go(..., AcceptedBy::User, &Quiet)`, and assert the job landed. Load `Records::load(&athena.git, &athena.head().unwrap())` and take `jobs[id]`. Assert: recorded `spec.timeout` is 4321; the producer entry in `job.invocations` has `caps.timeout_s == 4321` (written from `spec.timeout` at crates/athena-core/src/invocation.rs:212); the job record's `caps.producer_timeout_s == 4321`; the `## Time budget` section (from that heading to the next '\\n## ') of `job.briefs[\"brief-producer\"]` equals the same section of the recorded prompt and contains '4321 seconds'; the stored brief does not contain '86400'; and `prompt.starts_with(&stored.replace(&format!(\"<state>/jobs/{id}/evidence\"), &state.path().join(\"repo/jobs\").join(id).join(\"evidence\").display().to_string()))`. The reader forecast has p50 = 30 s (tests.rs:245), under the 4321 limit that `check_reading_size` (reading.rs:370) applies, so the reading is accepted.",
+      "command": "cargo test -p athena-core the_producer_deadline_in_the_stored_brief_is_the_one_the_invocation_runs_under",
+      "observes": "The deadline the invocation ran under, the number recorded in the invocation and job records, and the number in the stored brief are all 4321. 4321 is neither the repository value (86400) nor a constant in the code, so a copy or a constant would show. The prompt is the stored brief with only the placeholder replaced.",
+      "fails_without": "Without the change the stored brief has no 'Time budget' section, so the '4321 seconds' assertion fails. If the brief took its number from another source (a constant, or the default 86400), the equality with `spec.timeout` and the '4321' assertion fail.",
+      "seam": "Production entry points: `Athena::ask` and `Athena::go` (crates/athena-core/src/run/mod.rs; `dispatch` builds the brief at mod.rs:1177 and the producer loop builds the spec at producer.rs:331-346), through the real `producer_deadline_s` accessor and `producer_brief_with_evidence`. Fake: `FakeAgentDriver` with a `Script` closure injected through `athena_with` (tests.rs:191-220). The closure only records `spec.timeout` and `spec.user_prompt` and then delegates to `base_script()` (tests.rs:224); the accessor and brief builder run as production code. Fixture: the test repository with its committed athena.toml rewritten through `commit_file`; config is read from the head commit by `JobConfig::at` (mod.rs:1030). Everything exists today (tests.rs:179-366, 858-1065); step 8 adds only the test."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the CHANGELOG entry (new bullet at the top of the Added list under [Unreleased]; the Added heading is at CHANGELOG.md:20) and the doc comment on `time_budget_section`. Both must name the root cause: the producer stage was never told its own per-run limit, so it could not pace against it and its existing pacing rules had nothing to hang on. The entry must list jobs 20261010-154006-vc5k, 20261016-052605-qw38 and 20261018-070117-qmxv as addressed by this. It must say they recorded no candidate, so nothing is kept from them, and their original requests (verifier snapshot note, auditor and warden roles, baseline checks) are not redone. It must note that the 1800 s of the failure class is the earlier value, that the live limit is 86400 s (athena.toml:51, CHANGELOG.md:12), that the number matters most if the limit is lowered again, and that the producer has no `date` command under the default grant. It must name the tests and say no refusal rule is added (0% newly refused) and that whether producers follow the pacing text is not measured.",
+      "command": "git diff -- CHANGELOG.md crates/athena-context/src/briefs.rs",
+      "observes": "Both texts name the root cause. The entry covers the three jobs, the 86400 value, the date limitation, the tests and the 0% figure.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the whole diff for any new error, bail, hold, reject or refuse path. The production changes are one text section, one input field and one shared accessor. No admission, reading check, retry, landing or gate code is touched; `check_reading_size` (reading.rs:370) is untouched.",
+      "command": "git diff",
+      "observes": "No refusal or hold is added; the expected share of past accepted readings newly refused is 0%. No reading rule, stem list or parser changes, so no refusal_corpus case is added or mapped and no refusal_corpus demonstration is needed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs (athena.toml:93-109) on the final tree, each as its own whole command: `cargo fmt --all --check`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`. Preconditions: all edits are in the tree and Cargo.lock is unchanged (no dependency is added), so `--locked` holds. The test run also covers `producer_briefs_carry_no_predictions` (briefs.rs:1536; forbids '0.97', '0.8', 'p10' and 'cost'), the retry and resume brief tests (briefs.rs:1826-1941), `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs) and the boundary scan in xtask/tests/policy.rs. This is not a protection test, so the root-user rule does not apply.",
+      "command": "cargo test --locked",
+      "observes": "All three commands exit 0 on the final tree: fmt prints nothing, clippy reports no warnings, and every test passes, including the three new ones.",
+      "fails_without": "A `ProducerInputs` literal left without `deadline_s` (10 in the briefs.rs tests at 1538, 1568, 1604, 1636, 1745, 1798, 2266, 2289, 2310 and 2337, one in reading.rs:3581, one in run/mod.rs:1178) fails to compile under `cargo clippy --all-targets` and `cargo test`. Brief text containing 'cost' or '0.8' fails `producer_briefs_carry_no_predictions`. Unformatted code fails `cargo fmt --all --check`.",
+      "seam": "Production entry points: the three check commands Athena itself runs, as configured at athena.toml:93-109 (fmt, clippy, test). The fixture is the real final working tree of the job. Nothing is injected and there is no double. The seam exists today: the same commands run on the base tree."
+    },
+    {
+      "criterion": 7,
+      "method": "New test `a_small_job_brief_carries_its_short_deadline` in crates/athena-context/src/briefs.rs. It builds `producer_inputs(None)` with `deadline_s = 120`. The fixture `reading()` has exactly one deliverable (CHANGELOG.md, create; briefs.rs:1514-1518). It asserts the brief contains '## Time budget' and 'is stopped after 120 seconds of wall-clock time'. It asserts the section's position is before '## Checks Athena will run' and before '## Working directory'. It asserts the section mentions `cargo test -p <crate> <filter>` and 'at most once'. The check `cargo test --locked` (criterion 6) also runs it.",
+      "command": "cargo test -p athena-context a_small_job_brief_carries_its_short_deadline",
+      "observes": "A small job (one deliverable, short limit) is told its limit and the pacing rule before the checks list and before it starts.",
+      "fails_without": "Without the section the brief lacks '120 seconds' and the pacing text, so the test fails. If the section were placed after the checks list, the ordering assertion fails.",
+      "seam": "Production entry point: `producer_brief` (briefs.rs:675) with the helper `producer_inputs` (briefs.rs:1797) and the `reading()` fixture; inputs are plain values and there is no double. The seam exists; step 6 adds `deadline_s` to the helper and step 7 adds the test."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "cd55a439d69967845c5ca9b3662d62a8d8c616c18be0decfd54b5b1c68810952"
+}

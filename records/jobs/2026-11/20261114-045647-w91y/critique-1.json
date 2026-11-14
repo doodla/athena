@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045647-w91y",
+  "round": 1,
+  "at": "2026-11-14T20:14:45.045244672Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The criterion-3 test asserts something that is false on correct code: the prompt the producer receives is not byte-equal to the stored brief.",
+      "evidence": "mod.rs:1157 builds the stored brief with `evidence_placeholder(id)`. mod.rs:1340 builds the prompt as `brief.replace(&evidence_stored, &evidence_path)`, and mod.rs:1362 may append a governing-decisions section (`producer_prompt_with_governing`, briefs.rs:1414-1421). crates/athena-cli/tests/job_plan.rs:264-277 already depends on this difference ('The committed brief names the evidence snapshot with a placeholder; the prompt names the real path'). So the planned equality fails even when the deadline plumbing is right, and the test cannot pass. Fix: Drop the byte-equality assertion. Either extract the `## Time budget` section from both texts and assert the two sections are equal and contain \"4321 seconds\", or compare `prompt` with `brief.replace(placeholder, real_evidence_path)` as a prefix, the way job_plan.rs:270-277 does. Keep the assertions on `spec.timeout == 4321` and the record's `caps.timeout_s == 4321`.",
+      "location": "Demonstrations, Criterion 3 (Observes: 'the prompt the agent received is byte-equal to the stored brief'); crates/athena-core/src/run/mod.rs:1157-1158, 1340, 1362",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out readers of the stored brief-producer.md outside athena-core.",
+      "evidence": "A grep for `brief-producer` finds readers the plan does not list: crates/athena-gate/src/jobs.rs:287 and :490 (the landing gate checks that brief-producer.md hashes to `brief_sha256`), crates/athena-gate/src/landing_tests.rs:1395/1532/1629, crates/athena-cli/tests/job_plan.rs:259-277 (rebuilds the first prompt from the committed brief) and crates/athena-cli/tests/lifecycle.rs:292. The plan lists only run_pin_tests.rs and run/tests.rs. These readers should be unaffected, because the hash and the prompt are both derived from the same stored text, but the plan neither says so nor names the tests that show it. Fix: Add entries for athena-gate jobs.rs (brief hash check at landing) and the athena-cli job_plan.rs and lifecycle.rs tests. Give each a reason it is unaffected and the test that shows it: `cargo test -p athena-gate`, `cargo test -p athena-cli --test job_plan` and `cargo test -p athena-cli --test lifecycle`.",
+      "location": "Dependents, 'producer brief text' entries",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two of the three pacing instructions already reach the producer, and the new wording partly contradicts the brief's existing rule, so 'lacked pacing information' overstates the cause.",
+      "evidence": "crates/athena-context/prompts/producer.md:9 already says 'Run targeted tests (`cargo test -p <crate> <filter>`) while you work ... run the suite at most once.' briefs.rs:856-858 says 'the full or workspace cargo test is not yours to run' and to report it as left to Athena's checks. The planned text 'run the full test suite (`cargo test`) at most once, after the change is complete' restates the first in different words and pulls against the second. What the stage really lacked is the deadline number. Fix: Make the section mainly state the per-run limit, and point to the existing rules instead of restating them, e.g. 'use targeted tests; the full suite is left to Athena's checks, as below'. Do not give the producer a new reason to run the full suite. Word the root cause as 'the stage was never told its own deadline', with the pacing rule as the existing one it is now tied to.",
+      "location": "Step 2 (section text); Decisions 2; Criterion 4 root-cause wording",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A bare deadline in seconds is weakly actionable: with today's value of 86400 the producer can do little with it, and it has no clock to pace against.",
+      "evidence": "athena.toml:51 sets producer_timeout_s = 86400. The failures in this class happened at 1800 s (docs/decisions.md:3088; CHANGELOG.md:3170). The brief states a duration but neither when the run started nor how to check elapsed time. The plan names the 86400 risk but not the missing elapsed-time reference. Fix: Have the section say how to tell elapsed time, for example by noting the start with `date` if Bash may run it, or by checking at intervals. Alternatively, record in CHANGELOG that the information mainly matters if the limit is lowered again. No code change is required for acceptance.",
+      "location": "Risks 1; Decision 3 (soundness)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan adds the configured per-run producer deadline to the producer brief at its origin. One accessor (`producer_deadline_s`) feeds both the invocation spec (producer.rs:344) and the `ProducerInputs` literal (run/mod.rs:1178), so the stated value is the enforced one. The section is rendered unconditionally, so fresh, retry, unseeded-retry and resume briefs all carry it. No refusal rule is added. I checked the named files, line numbers and the 13 `ProducerInputs` literals, and they match the snapshot. The athena.toml rewrite in the criterion-3 fixture works, because `repo_with_config` copies athena.toml verbatim and `JobConfig::at(head)` reads the committed file. Two major findings block acceptance. First, the criterion-3 test asserts that the prompt sent to the agent is byte-equal to the stored brief. It is not: mod.rs:1340 replaces the evidence placeholder with a real path, so the test would fail on correct code. Second, the dependents list leaves out readers of brief-producer.md in athena-gate (the brief-hash check at landing) and in the athena-cli job_plan and lifecycle tests. Two minor soundness points: producer.md:9 already contains most of the pacing text, and the new wording pulls against the 'full cargo test is not yours to run' rule; and a bare 86400-second limit with no elapsed-time reference does little for pacing today. The fixes are small, so the verdict is revise."
+}

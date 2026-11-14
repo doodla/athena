@@ -368,6 +368,9 @@ pub struct ProducerInputs {
     pub retry_findings: Option<RetryFindings>,
     /// Failure classes counted from the recorded introspections; the brief lists the recurring ones.
     pub failure_classes: Vec<ClassSummary>,
+    /// The wall-clock limit, in seconds, of each producer run, as configured and enforced by the agent driver
+    /// (the value of `budget.producer_timeout_s`).
+    pub deadline_s: u64,
 }
 
 /// The blocker and major findings of an earlier attempt that a retry from the base must address. The texts are
@@ -690,6 +693,7 @@ pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&s
         must_address_block(&mut out, &earlier.job, &earlier.findings);
     }
     pin_section(&mut out, inputs.pin.as_ref());
+    let _ = writeln!(out, "{}", time_budget_section(inputs.deadline_s));
     failure_classes_section(&mut out, &inputs.failure_classes);
     let _ = writeln!(out, "{}", banned_words_section());
     let _ = writeln!(out, "{}", mirror_check_section());
@@ -749,6 +753,26 @@ pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&s
         "## Report\n\nEnd with the producer report as your structured output."
     );
     out
+}
+
+/// The producer brief's time budget. Root cause it addresses: the producer stage was never told its own
+/// per-run wall-clock limit, so it could not pace against it and its existing pacing rules (targeted tests,
+/// the full suite at most once) had nothing to hang on; a small job could run to the limit before anyone
+/// learned it was stalled. The number is the configured limit the agent driver enforces, passed in by the
+/// caller, never a constant here. The section is the same for a fresh job, a retry, a send-back and a resume.
+fn time_budget_section(deadline_s: u64) -> String {
+    format!(
+        "## Time budget\n\n\
+         Each producer run, the first and any send-back, is stopped after {deadline_s} seconds of wall-clock time. \
+         A stopped run sends no report, so what is on disk when it stops must already be a usable change.\n\n\
+         Pace the work by its order. Do the smallest change that meets every acceptance criterion first, one file at \
+         a time, and leave extras for afterwards; report as soon as the criteria are met. Leave no half-edited file \
+         and no broken build between steps. Use targeted tests while you work (`cargo test -p <crate> <filter>`). \
+         The full suite runs at most once, and Athena runs it again on your result (see \"Checks before the \
+         verifier\" below), so a second full run only spends this limit.\n\n\
+         You have no clock of your own. If the commands Bash may run (below) include `date`, note the time when you \
+         start and read it between steps; without it, count steps against the order above.\n"
+    )
 }
 
 /// The producer brief's note on leaving the tree unchanged. The run still fails as an empty candidate; the
@@ -1548,6 +1572,7 @@ mod tests {
             retry_from: None,
             retry_findings: None,
             failure_classes: Vec::new(),
+            deadline_s: 1800,
         });
         assert!(brief.contains("## Acceptance criteria"));
         assert!(brief.contains("1. [content] CHANGELOG.md exists"));
@@ -1575,6 +1600,7 @@ mod tests {
             retry_from: None,
             retry_findings: None,
             failure_classes: Vec::new(),
+            deadline_s: 1800,
         });
         let (_, section) = brief
             .split_once("## criteria_check: copy the line\n")
@@ -1611,6 +1637,7 @@ mod tests {
             retry_from: None,
             retry_findings: None,
             failure_classes: Vec::new(),
+            deadline_s: 1800,
         });
         let (_, section) = brief
             .split_once("## If you leave the tree unchanged\n")
@@ -1643,6 +1670,7 @@ mod tests {
             retry_from: None,
             retry_findings: None,
             failure_classes: Vec::new(),
+            deadline_s: 1800,
         });
         let (_, section) = brief
             .split_once("## criteria_check: copy the line\n")
@@ -1752,6 +1780,7 @@ mod tests {
             retry_from: None,
             retry_findings: None,
             failure_classes: Vec::new(),
+            deadline_s: 1800,
         });
         assert!(brief.contains("## What the verifier sees"));
         assert!(brief.contains("only the candidate diff, in a fresh snapshot"));
@@ -1805,6 +1834,7 @@ mod tests {
             retry_from: None,
             retry_findings: None,
             failure_classes: Vec::new(),
+            deadline_s: 1800,
         }
     }
 
@@ -1821,6 +1851,93 @@ mod tests {
             candidate: None,
             conflicts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn time_budget_states_each_jobs_own_deadline() {
+        let with = |deadline_s: u64| {
+            let mut inputs = producer_inputs(None);
+            inputs.deadline_s = deadline_s;
+            producer_brief(&inputs)
+        };
+        let short = with(300);
+        let long = with(5400);
+        assert!(
+            short.contains("is stopped after 300 seconds of wall-clock time"),
+            "{short}"
+        );
+        assert!(!short.contains("5400 seconds"), "{short}");
+        assert!(
+            long.contains("is stopped after 5400 seconds of wall-clock time"),
+            "{long}"
+        );
+        assert!(!long.contains("300 seconds of wall-clock"), "{long}");
+        for brief in [&short, &long] {
+            for phrase in [
+                "smallest change that meets every acceptance criterion",
+                "at most once",
+                "no half-edited file",
+                "`date`",
+            ] {
+                assert!(brief.contains(phrase), "missing {phrase:?}: {brief}");
+            }
+        }
+
+        // Every brief shape carries the section once, with its own number.
+        let mut fresh = producer_inputs(None);
+        fresh.deadline_s = 300;
+        let mut seeded = fresh.clone();
+        seeded.retry_from = Some(seed());
+        let mut resume = fresh.clone();
+        resume.retry_from = Some(RetrySeed {
+            progress_note: Some("edited two files".into()),
+            candidate: Some("abc1234".into()),
+            ..seed()
+        });
+        let mut stale = fresh.clone();
+        stale.retry_from = Some(RetrySeed {
+            conflicts: vec!["README.md".into()],
+            ..seed()
+        });
+        let mut unseeded = fresh.clone();
+        unseeded.retry_findings = Some(RetryFindings {
+            job: "20261010-120000-abcd".into(),
+            findings: vec!["major: the CHANGELOG entry lists no callers".into()],
+        });
+        for (shape, inputs) in [
+            ("fresh", fresh),
+            ("seeded retry", seeded),
+            ("resume", resume),
+            ("stale conflict", stale),
+            ("unseeded retry", unseeded),
+        ] {
+            let brief = producer_brief(&inputs);
+            assert_eq!(
+                brief.matches("## Time budget").count(),
+                1,
+                "{shape}: {brief}"
+            );
+            assert!(
+                brief.contains("is stopped after 300 seconds of wall-clock time"),
+                "{shape}: {brief}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_small_job_brief_carries_its_short_deadline() {
+        let mut inputs = producer_inputs(None);
+        inputs.deadline_s = 120;
+        let brief = producer_brief(&inputs);
+        let section = brief.find("## Time budget").expect("a time budget section");
+        assert!(
+            brief.contains("is stopped after 120 seconds of wall-clock time"),
+            "{brief}"
+        );
+        assert!(section < brief.find("## Checks Athena will run").unwrap());
+        assert!(section < brief.find("## Working directory").unwrap());
+        assert!(brief.contains("`cargo test -p <crate> <filter>`"));
+        assert!(brief.contains("at most once"));
     }
 
     #[test]
@@ -2273,6 +2390,7 @@ mod tests {
             retry_from: None,
             retry_findings: None,
             failure_classes: Vec::new(),
+            deadline_s: 1800,
         });
         let words = boundary_words();
         assert_eq!(words.len(), 17);
@@ -2296,6 +2414,7 @@ mod tests {
             retry_from: None,
             retry_findings: None,
             failure_classes: Vec::new(),
+            deadline_s: 1800,
         });
         assert!(brief.contains("run `cargo test -p xtask --test policy` on your changed files"));
         assert!(brief.contains("Reword any banned word it finds"));
@@ -2317,6 +2436,7 @@ mod tests {
             retry_from: None,
             retry_findings: None,
             failure_classes: Vec::new(),
+            deadline_s: 1800,
         });
         assert!(brief.contains("run `cargo test -p athena-cli --test mirrors` before you finish"));
         assert!(brief.contains("needs its line in xtask/shard-timings.txt"));
@@ -2344,6 +2464,7 @@ mod tests {
             retry_from: None,
             retry_findings: None,
             failure_classes: Vec::new(),
+            deadline_s: 1800,
         });
         let at = brief
             .find("## Checks before the verifier")
