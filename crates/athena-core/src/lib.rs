@@ -47,6 +47,9 @@
 //!   not wired into any command;
 //! - [`mechanism_explanation`]: the check that each mechanism explanation cites a prompt, code and run source,
 //!   and, for Athena, its own records (OLY-B-S4-01); a pure function, not wired into any command;
+//! - [`comparison`]: the check that a study's comparison maps the three systems onto shared concepts, compares
+//!   them mechanism by mechanism and closes with a short essay on building orchestration from prompts
+//!   (OLY-B-S7-01); a pure function, not wired into any command;
 //! - [`labeled`]: the labeled set of reviewed introspections and the scoring of Jev's recorded shadow answers
 //!   against it, read-only;
 //! - [`evidence_labels`]: class labels derived from what happened after an introspection (the retry that
@@ -108,6 +111,7 @@ pub mod ci_result;
 pub mod class_trend;
 pub mod code_health;
 pub mod commits;
+pub mod comparison;
 pub mod context_load;
 pub mod design_surface;
 pub mod disk;
