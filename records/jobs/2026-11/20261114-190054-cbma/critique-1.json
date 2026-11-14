@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-190054-cbma",
+  "round": 1,
+  "at": "2026-11-14T19:09:56.311454666Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/hestia.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/hestia.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/main.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/main.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "A 'try again on <job>' retry of a steward or Hestia fix is not flagged, so retried fixes go back to normal order.",
+      "evidence": "The retry is an owner request without the root-cause anchor or gate line, and it has no work item whose last evidence is the retry job. `plan_entry` and `steward_fix` therefore both return false. The request for this job is itself such a retry. Fix: Either set `fix` in `entry_of` when the entry retries a job whose own entry would be a fix (the retried id is already in `depends_on` / `reading::dependency_ids_in`), or list this gap in D183 and the risks.",
+      "location": "Decision 3 / Approach (Hestia and steward detection); crates/athena-core/src/plan.rs:159-161 (depends_on includes the retried job)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An owner-bound blind spot (one with a brief) is recorded as a Proposal. When the owner approves it, the resulting job is not flagged, even though it is literally an approved steward blind-spot item.",
+      "evidence": "`decide` records any briefed change as `WorkItemKind::Proposal`, while its key keeps `blind-spot:<source>` (`blind_spot_key`). Approval links the job through a WorkDecision `Approved { job }`, which `entry_of` already holds as `proposal`. `steward_fix` checks only kind and the last-evidence link. Fix: In `entry_of`, also flag when `proposal` is a steward item whose key starts with `blind-spot:` (or the repeated-failure key prefix). Otherwise state in D183 that approved briefed blind spots are not fixes.",
+      "location": "Step 5 (`steward_fix`) and crates/athena-cli/src/drain.rs:4342-4381 (`entry_of` proposal lookup); crates/athena-core/src/steward.rs:721-727",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The rationale is inaccurate: root-cause requests are linked from records through `repeated_causes`/`addressing_request` (cited introspection ids), and `improvement_of` already uses that link.",
+      "evidence": "hestia.rs:834-849 `addressing_request` links a request job to a cause by the introspection ids its text cites. hestia.rs:978-987 puts those jobs in `Improvement.cause_jobs`. Fix: Correct the reason. In D183, compare the anchor approach with the records link (`repeated_causes(records)` request jobs, checkable in `entry_of`), and say why the anchor was chosen. The design itself can stay.",
+      "location": "Decision 3 reason ('Neither a root-cause nor a gate-review job has a record link')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Fix-first now decides which non-person item keeps an urgent or high slot when a tier is over its cap. That is a cross-tier effect, which sits awkwardly with criterion 2's claim that the flag never overrides priority.",
+      "evidence": "`build_capped` keeps slots in the uncapped order (`tier_in_order`) and demotes the rest. With the new key, an older urgent feature is demoted to high while a newer urgent fix keeps urgent. Fix: State this effect in D183's Tradeoff, and have the promised `build_capped` assertion check which item is demoted (the non-fix), so the behavior is pinned rather than left incidental.",
+      "location": "Dependents: within-tier order key / `Plan::build_capped` (plan.rs:804-870)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The timestamp guard compares the work item's `at` (the `ts` passed to `decide`) with `received_at` (real `crate::now()` inside `RequestQueue::apply`). A fixed fixture `ts` later than the wall clock would leave the steward job unflagged and make the test fail or flake.",
+      "evidence": "steward.rs:675 stamps `received_at: crate::now()`, while the item's `at` is the `now` argument to `decide` (steward.rs:729). Production callers pass `athena_core::now()` before the call (tests/steward.rs:142). Fix: In the test, pass `athena_core::now()` captured just before `decide`, as tests/steward.rs does. Add a short note to `steward_fix` that its guard relies on the item time being taken before the request is stamped.",
+      "location": "Demonstration for criterion 4 (b), real-steps test",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the accepted reading and changes the code where the starvation starts: the in-wave sort at plan.rs:783. That sort runs after the dependency filter and the best-effective-priority filter, so a `(!fix, rung, age)` key cannot let a fix pass a better tier or a dependency. Verified in the snapshot: only `PlanEntry::bare` lists every field, and `PlanEntry` derives only Serialize. `ROOT_CAUSE_ANCHOR` is `pub(super)` in reading/terms.rs, so topics.rs can reach it. `GATE_LINE` is a private const in hestia.rs:1079. `steward::decide` adds the queued job as the last evidence item only when it applies a change (steward.rs:705-713), and `RequestQueue::apply` stamps `received_at` with `crate::now()`. `find_open` decides only Proposal-kind items, so the applied-by-decide path is the only way a blind-spot or repeated-failure item becomes a job. Hestia queues its fix requests on the ordinary queue, so text anchors are a reasonable detector. `entry_of` is the only production caller of `plan_entry`, and `athena plan` reaches it through `drain::plan`. The guaranteed turn (`IMPROVEMENT_GAP` = 2, `since_turn` starting at 0) does not move the steward job in a two-item real-steps test, and the Proposal-kind contrast arm guards the test against passing for the wrong reason. No decision in docs/decision-links.toml governs the changed files, D183 is the next free number, and the help text appears only in main.rs. Remaining issues are minor: retries of fix requests lose the flag; owner-bound blind spots that the owner approves (recorded as Proposal) are not flagged; the plan wrongly says root-cause requests have no record link; fix-first changes which item `build_capped` demotes; and the real-steps test timestamps could make it flaky. None makes a criterion go unshown."
+}

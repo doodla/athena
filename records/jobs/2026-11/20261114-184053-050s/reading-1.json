@@ -1,0 +1,139 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-184053-050s",
+  "n": 1,
+  "at": "2026-11-14T19:01:19.033061853Z",
+  "invocation_seq": 1,
+  "base_commit": "400ff6e49c289a69a63c0f6d876d50f916983944",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Raise stage time limits to 24 hours in athena.toml; update pinning tests",
+  "summary": "Job 20261114-160818-cd94 was closed with no candidate. This job does part 1 of the replacement request: set reader, planner, critic, producer and verifier time limits in athena.toml to 24 hours (86400 s), keep a 4-hour guard on checks, and update the tests that pin the old values. Part 2, measuring stage durations, is queued as its own request.",
+  "class_of_work": "config",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-haiku-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the limits actually read as 86400 and that tests pass, not just that files changed."
+    },
+    {
+      "id": "tested",
+      "how": "cargo test, clippy and fmt --check must pass."
+    },
+    {
+      "id": "small",
+      "how": "Only item 1 is done; measurement is queued separately."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: Sri (owner, judging the result) wants stages not to be stopped by time limits. Per the request's own fallback, this job does item 1 only; item 2 (measuring and showing per-stage time and reasons) is queued as its own request and is out of scope here.",
+    "Code survey: crates/athena-data/src/config.rs holds the Budget and JobPlan fields (reader/producer/verifier/check_timeout_s, planner/critic_timeout_s) and tests pinning them at lines ~986-987, 1020-1026; the occurrences near 1394 and 1465 use inline test configs and likely need no change unless they parse the repo config. crates/athena-core/src/run/tests.rs contains inline configs with planner_timeout_s = 600 (lines 296, 1338, 8438) that are self-contained test fixtures and stay unchanged. No records or data files are added, so check_record_file and AnyRecord are not involved. No refusal rule is added or tightened.",
+    "Existing code: the timeout mechanism in crates/athena-core/src/run and crates/athena-data/src/config.rs is kept as is; only values change. The check deadline path (a_check_killed_at_its_deadline_closes_as_an_environment_stop) uses its own short test deadline, so it should not need changes.",
+    "Consumers: athena.toml is read by crates/athena-data/src/config.rs (REPO_CONFIG test constant and runtime loading). If config validation caps timeouts below 86400, the producer must raise that cap too and say so.",
+    "Previous job 20261114-160818-cd94 recorded no candidate, no deliverables and no changed files; nothing is kept or dropped from it. Its one finding (closed, replaced by this request because its background was wrong) is addressed by this reading: the hand change did not persist, so athena.toml and the pinning tests are changed together here.",
+    "Check limit set to 4 hours (14400 s) as the hung-test guard, as in the prior job's background; bash_default_timeout_ms and bash_max_timeout_ms (agent tool timeouts at lines 73-74) are left unchanged."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "athena.toml sets reader_timeout_s, producer_timeout_s, verifier_timeout_s, planner_timeout_s and critic_timeout_s to 86400, and check_timeout_s to 14400 (a hung-test guard only). Check with Grep on 'timeout_s' in athena.toml.",
+      "kind": "content"
+    },
+    {
+      "text": "The pinned values in crates/athena-data/src/config.rs (the_repository_config_plans_hard_jobs_only_with_the_designs_caps near line 986 and the_repository_budget_caps_cover_their_sum near lines 1020-1026) assert the new values; no assertion on the repository config still pins 600, 300, 5400 or 3600 for these limits.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo test passes, including the config tests and run::tests::a_check_killed_at_its_deadline_closes_as_an_environment_stop, so the check deadline mechanism still works. Evidence: cargo test, or a recorded Athena test check on the final tree.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo clippy and cargo fmt --check are clean (recorded Athena checks on the final tree).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Scope: the change touches only the deliverables (athena.toml, config.rs tests, CHANGELOG.md, optionally run/tests.rs and a new appended docs/decisions.md entry with a Provenance bullet). No stage-duration measuring or reporting is added; that is queued separately as part 2 of the request, and the 14 Nov planner-timeout failures are addressed by the limits no longer stopping work.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry stating the limits were raised to 24 h, checks to 4 h, and that measurement is follow-up work. Outcome for Sri: a planner at xhigh effort on revision rounds is no longer cut off at 600 s, as shown by planner_timeout_s = 86400 in athena.toml.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Measuring and displaying per-stage durations and reasons (request part 2, queued separately)",
+    "Inline test fixtures with planner_timeout_s = 600 in crates/athena-core/src/run/tests.rs unless they read athena.toml",
+    "bash_default_timeout_ms and bash_max_timeout_ms",
+    "records/ and owner files",
+    "Prompt files"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.8,
+      "p_user_intervenes": 0.05,
+      "cost_usd": {
+        "p10": 0.3,
+        "p50": 0.8,
+        "p90": 2.5
+      },
+      "wall_time_s": {
+        "p10": 400.0,
+        "p50": 1300.0,
+        "p90": 3200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.751219512195122,
+      "p_verification_passes": 0.627906976744186,
+      "p_user_intervenes": 0.10434782608695652,
+      "cost_usd": {
+        "p10": 0.011509691973393115,
+        "p50": 0.5205085079300049,
+        "p90": 1.503731650461387
+      },
+      "wall_time_s": {
+        "p10": 332.99761335647275,
+        "p50": 810.7119091393979,
+        "p90": 2885.6726604982273
+      }
+    }
+  },
+  "departures": "Small mechanical value change with tests, so cheaper and likelier to pass than the reference; the hard_reason is null, but limits are a governance-adjacent config.",
+  "urgent_reason": "Removing the 600 s planner limit cuts the failed jobs and wasted retries seen on 13-14 Nov."
+}
