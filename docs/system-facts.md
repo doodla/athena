@@ -24,9 +24,9 @@ whole. Each fact names its source. Where the source is a request and not code, t
   - budget contract: 310 of 350
   - budget reader: 1998 of 2000
   - budget producer: 1043 of 1200
-  - budget verifier: 1233 of 1300
+  - budget verifier: 1264 of 1300
   - budget planner: 1105 of 1200
-  - budget critic: 1002 of 1300
+  - budget critic: 1056 of 1300
 - **Banned words.** The boundary scan fails any tracked file naming who runs Athena or the machine it runs
   on. The list is not repeated here, so this file passes the scan. Source: `boundary_words()` in
   `xtask/tests/policy.rs`. Email-like text is checked by the `[personal_data]` allow-list in `athena.toml`;

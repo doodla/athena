@@ -210,7 +210,8 @@ fn athena_with(
                         { "criterion": "criterion 2", "met": true, "evidence": "checked", "commands": ["cargo test"] }
                     ],
                     "findings": [],
-                    "request_reading_mismatch": null,
+                    "request_misread": false,
+                    "request_misread_reason": null,
                     "summary": "Fine."
                 }));
                 t.commands_run = vec!["cargo test".into()];

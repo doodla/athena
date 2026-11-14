@@ -205,7 +205,8 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
         Role::Critic => FakeTurn::output(json!({
             "verdict": "accept",
             "findings": [],
-            "request_reading_mismatch": null,
+            "request_misread": false,
+            "request_misread_reason": null,
             "summary": "A fake critique made without a model call."
         })),
         // A nested run has nothing for the steward to report.
@@ -398,7 +399,8 @@ fn verifier_turn(spec: &AgentInvocation) -> FakeTurn {
         "verdict": "pass",
         "criteria": entries,
         "findings": [],
-        "request_reading_mismatch": null,
+        "request_misread": false,
+        "request_misread_reason": null,
         "summary": "A fake verdict made without a model call."
     }))
 }

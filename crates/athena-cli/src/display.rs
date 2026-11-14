@@ -1918,6 +1918,7 @@ pub fn trace(t: &JobTrace) -> String {
         });
         let _ = writeln!(out, "plan round {round}  {verdict} · {plan_text}");
         if let Some(c) = critique {
+            // The stored field is set only for a real misread (the agent's `request_misread` was true).
             if let Some(m) = &c.request_reading_mismatch {
                 let _ = writeln!(out, "            misread the request: {m}");
             }
@@ -2085,6 +2086,58 @@ mod tests {
             "            code: 3 scored · mean event Brier reader - · reference 0.250"
         );
         assert_eq!(forecast_headline_lines(&[]), "");
+    }
+
+    /// A trace of a job with one critique whose stored misread field is `misread`.
+    fn trace_with_critique(misread: Option<&str>) -> JobTrace {
+        use athena_data::records::{Critique, CritiqueVerdict};
+        let critique = Critique {
+            job: athena_data::JobId::parse("20261114-012353-pbvc").unwrap(),
+            round: 1,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: None,
+            agent_verdict: Some(CritiqueVerdict::Accept),
+            final_verdict: CritiqueVerdict::Accept,
+            findings: vec![],
+            request_reading_mismatch: misread.map(String::from),
+            summary: None,
+        };
+        JobTrace {
+            id: "20261114-012353-pbvc".into(),
+            state: "failed".into(),
+            request: None,
+            readings: vec![],
+            corrections: vec![],
+            accepted_reading: None,
+            owner: None,
+            verifier: None,
+            invocations: vec![],
+            plan: None,
+            plans: vec![],
+            critiques: vec![critique],
+            candidate: None,
+            verification: None,
+            outcome: None,
+            later_outcome: None,
+            score: None,
+            interventions: vec![],
+            introspections: vec![],
+            commits: vec![],
+            directory: "records/jobs/x".into(),
+        }
+    }
+
+    #[test]
+    fn the_trace_shows_a_misread_line_only_when_the_stored_field_is_set() {
+        // The stored field is set only when the critic's `request_misread` was true.
+        assert!(!trace(&trace_with_critique(None)).contains("misread the request"));
+        let text = trace(&trace_with_critique(Some(
+            "It reads the request as a refactor",
+        )));
+        assert!(
+            text.contains("misread the request: It reads the request as a refactor"),
+            "{text}"
+        );
     }
 
     use athena_core::gh::{Checks, PrReport};
