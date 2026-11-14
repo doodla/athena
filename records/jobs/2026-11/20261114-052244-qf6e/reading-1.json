@@ -1,0 +1,165 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-052244-qf6e",
+  "n": 1,
+  "at": "2026-11-14T05:23:12.724120329Z",
+  "invocation_seq": 1,
+  "base_commit": "6e7d7af52d4be5ae35d279f0f559a5bb8b5b68fe",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Queue each reading's out_of_scope follow-ups as their own requests",
+  "summary": "Retry of job 20261114-041123-hvyh, which failed with no code written because the planner hit its 600s deadline. The change is unchanged: when a job ends with a reading, each out_of_scope item that names follow-up work is queued once as its own steward-channel request citing the original job (the job 20261114-034034-fgwz case). The work is kept as one small, self-contained module so planning fits the deadline.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Behavior criteria check follow-ups actually queued, once each, and visible to the drain."
+    },
+    {
+      "id": "tested",
+      "how": "fmt, clippy and test criterion added."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is at the close path for all readings, not for the one fgwz case."
+    },
+    {
+      "id": "small",
+      "how": "One new module reusing existing request code, to fit the planner deadline."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: Sri and the drain should see each named follow-up as its own queued request instead of lost text in the reading record.",
+    "Job 20261114-041123-hvyh: its only recorded finding is 'planner did not complete: deadline of 600s reached'; no candidate or file changes exist, so nothing is kept or dropped from it and the retry starts from the base. The finding is addressed by making the change small and by fixing the design up front: one new module followups.rs reusing StewardRequest and RequestQueue. The deadline itself is not the topic of this job.",
+    "The request as typed is 'try again', so the original request is retried. The introspection's proposed planner-deadline change (draft plans, planning timeout state) is not done here; it is a separate request, listed in out_of_scope.",
+    "Code survey: crates/athena-core/src/steward.rs read. REQUEST_CHANNEL is 'steward' (line 335). StewardRequest::new (line 535) is the only text builder, and it checks the text against reading::request_text_acceptance and request_text_touches. A request needs a one-line title, at least one acceptance bullet and at least one path. RequestQueue::apply (line 663) writes a Request record on that channel. queued_work (line 405) lists unread steward requests for the drain. out_of_scope is a field of the reading in crates/athena-core/src/reading.rs; manage.rs is where a job closes, which the producer must confirm. The new module adds no record type, so AnyRecord and check_record_file are untouched; Request already exists.",
+    "Existing code: crates/athena-core/src/steward.rs (StewardRequest, RequestQueue, queued_work, REQUEST_CHANNEL) and crates/athena-core/src/reading.rs (out_of_scope, looks_like_path) are reused, not rebuilt.",
+    "Telling a follow-up from a plain exclusion is by wording: items that propose or name separate work ('as its own job', 'follow-up request', 'propose') queue; lists of files or rules do not. Idempotence is by a deterministic check for an existing request citing the same job and item, plus a per-job cap (assume 5).",
+    "A follow-up with no usable path falls back to a safe default file, as StewardRequest::from_change does with records/, so the request is still valid.",
+    "Consumers: none found; no config key or file is added, so athena.toml and defaults.toml stay unchanged."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "`cargo test` (athena-core) includes a test that closes a job whose reading has out_of_scope items like 'propose these as follow-up requests' and 'runs as its own job' (the fgwz case). It shows one new request per follow-up item, each with channel REQUEST_CHANNEL, text citing the original job id, and text accepted by StewardRequest::new and the plan parse.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo test` shows plain exclusions (for example 'athena.toml, defaults.toml, workflows, docs/decisions.md and records/') queue no request, and an empty out_of_scope queues none and is not an error.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo test` shows queuing is idempotent: closing, retrying or resuming the same job twice yields each follow-up request once, and the number queued per job is capped.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo test` shows a queued follow-up appears in queued_work (crates/athena-core/src/steward.rs), so the drain picks it up, and that an item naming no usable path still builds a valid request.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`git diff` shows StewardRequest and RequestQueue reused (Grep finds no second request-text writer) and no new record type, config key or crate; athena.toml, defaults.toml, .github/workflows, docs/decisions.md, records/ and crates/athena-core/src/hestia.rs are unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry saying out_of_scope follow-ups are queued as their own requests citing the original job, and how plain exclusions are told apart.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy` and `cargo test` each pass, or Athena recorded them passing on the same final tree; these supplement the behavior tests above.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/followups.rs",
+      "action": "create",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Making the planner survive its deadline (saving draft plans, a planning-timeout state, resume on retry, sizing requests before dispatch): a separate request from introspection 20261114-052207-pj25.",
+    "Backfilling the follow-ups already lost from job 20261114-034034-fgwz, or fixing its other items (queue order, October backlog hold, closing 20261017-205552-y1bh and 20261030-060410-9e5h, plan critic memory, review findings 1 and 3-13).",
+    "The three verifier findings on 20261114-034034-fgwz in crates/athena-core/src/hestia.rs; hestia.rs stays unchanged.",
+    "New refusal rules, changes to the reading prompts (the reader prompt is at its token limit), athena.toml, defaults.toml, workflows, docs/decisions.md and records/.",
+    "Reprioritizing queued follow-ups ahead of or behind other work."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.8,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2400.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.676923076923077,
+      "p_user_intervenes": 0.06296296296296296,
+      "cost_usd": {
+        "p10": 0.5474499759118978,
+        "p50": 1.4791114,
+        "p90": 5.636334730806151
+      },
+      "wall_time_s": {
+        "p10": 605.4201628073508,
+        "p50": 2152.4590019605225,
+        "p90": 4386.36454824228
+      }
+    }
+  },
+  "departures": "Slightly higher than the reference: the last attempt hit the planner deadline, and the change touches the close path, steward queue and tests, so another planner timeout is a real risk.",
+  "hard_reason": "It changes the run and close pipeline: how a finished job's reading is closed and what it queues, which feeds the drain, so mistakes are costly.",
+  "producer_effort": "high"
+}
