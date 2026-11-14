@@ -1,0 +1,379 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-112705-q134",
+  "round": 1,
+  "at": "2026-11-14T11:41:50.955155463Z",
+  "invocation_seq": 3,
+  "approach": "Hold a job the kill switch stops in planning or at producer start. Do not close it failed. One new method in run/mod.rs, `close_or_hold`, replaces the calls to `close_dispatched` at mod.rs:1349, 1355 and 1376 (`finish_dispatched`). Call 1328 (preflight stop) stays direct. `close_or_hold` is the one shared point, and it works in three steps.\n\n1. `kill_switch_stage(&Closing)` decides whether the closing is a kill-switch stop. The closing's `happened.reason` must contain `kill_switch_stop_reason()`, which is `DriverError::Stopped.to_string()` (athena-agent lib.rs:131). It must also have no candidate, no verification and no Producer invocation in `new_invocations`. So only stops in planning and at producer start qualify. A stop after a producer pass or at the verifier keeps today's failure path. The planner site (planning.rs:179), the critic site (:382) and the producer site (producer.rs:366) already put `{error}` into the reason, so none of them needs an edit.\n2. A kill-switch stop goes to `hold_for_kill_switch`, also in mod.rs. It commits the invocations, plans and critiques as a records-only commit with no outcome and no score, the same shape as the disk and slot holds (close.rs:226-228). Baseline, candidate and verification are left out, so a resume re-runs them without rewriting a record. It then writes a state-dir marker `KillHold { stage, prediction }` (new in state.rs), and returns an error so `go` fails as it does for any hold. With no files to commit it writes only the marker. The job stays Dispatched with no outcome, so no failure count, score, introspection or scope-guard attempt sees it.\n3. Status shows the marked job as `stopped`. `status()` counts it under `stopped`, not under `failed` or `interrupted`. It is left out of the first-round \"plan stopped\" count.\n\nResume runs in place. `go_job`'s Dispatched arm (mod.rs:477) checks the marker first. `dispatch` gains a `held: Option<KillHold>` parameter (the Proposed arm and the reread recursion pass `None`). For a held job it reuses the committed Job record and the stored prediction commit and commits no second Dispatch. It reads the stored `brief-producer.md` from the prediction commit, and it takes the accepted reading from `job.readings` by `Job.accepted_reading`, so no reader runs. If the last critique accepted, planning is skipped and the kept plan and critique are pushed into `closing`. The verifier and the producer read `closing.plans.last()`, and the identical re-added records are no-ops in the commit. If the last critique was a revise, planning continues from round N+1, seeded from that plan and its findings; this needs a new `from_round` parameter on `plan_round`. If there is no critique, planning starts at round 1. An in-flight planner or critic call is re-run, and an unreviewed plan is not kept, because re-running would collide with the `job-plan-N.json` path (athena-data records.rs:1388).\n\n`Athena::start_with` (manage.rs:511) gains one call, `resume_kill_stopped(ui)`, between `registry().start()` and `run_pending_introspections`. It resumes every marked job through `go_with_stages` and never fails the start: it prints a line per problem and stops if the switch comes on again. A job whose reading config hash changed, a pinned job, or a job whose prediction commit is gone cannot resume in place. Its marker is cleared, so it reads `interrupted` and `athena retry <id>` handles it. That is the only case where a reader runs, and it is the user's explicit command.\n\nNo OutcomeState or JobState variant is added, so no serialized record changes. Non-kill-switch failures keep `failure()` (mod.rs:2491) and `close_dispatched`. `failure()` prints the word `stopped` instead of `failed` only when the reason carries the kill-switch text, so the user does not see a misleading `failed` line before `held`.\n\nFiles outside the brief's list:\n- producer.rs and close.rs from the previous plan are dropped. The design needs neither. `commit_hold` and `push_closing_records` are private to close.rs, so the hold builds its own three record loops in mod.rs.\n- manage.rs stays, as a one-line edit. Criterion 3 names `start_with`, which is defined at manage.rs:511, and no listed file can host that call.\n- lib.rs and commands.rs from the list are left untouched. `state`, `status` and `run` are already `pub mod` (lib.rs:153,160,161), and `start_with(&Terminal)` (commands.rs:673) already prints the resume lines through the Ui.",
+  "decisions": [
+    {
+      "choice": "The shared stop point is `close_or_hold` in run/mod.rs. It recognises a kill-switch stop by `kill_switch_stop_reason()`, a function that returns `DriverError::Stopped.to_string()`.",
+      "reason": "All three stop sites build their reason from `{error}`, whose Display is the typed variant's text. One derived function (no literal copy) and one consumer give a single place to Grep for. It needs no edit to producer.rs or close.rs, which are outside the deliverables. The extra conditions (no candidate, no verification, no Producer invocation) keep a stop after a producer pass or at the verifier on the existing failure path.",
+      "rejected": [
+        {
+          "option": "A typed flag on `Closing` set at each site",
+          "why": "The producer site is in producer.rs, which is outside the deliverables. It would also leave two detection mechanisms."
+        },
+        {
+          "option": "Branch inside `close_dispatched` in close.rs",
+          "why": "close.rs is outside the deliverables, and `commit_hold` there is private anyway."
+        },
+        {
+          "option": "Close the job failed with an environment-style reason",
+          "why": "It would still count as `failed` in status. A closed job cannot be resumed in place: go_job bails on Closed at mod.rs:496, and `athena retry` runs the reader."
+        }
+      ]
+    },
+    {
+      "choice": "The hold is a records-only commit (invocations, plans, critiques) plus a state-dir marker `KillHold { stage, prediction }`. The job stays Dispatched and shows as `stopped` in status. Meaning of the marker, quoted from introspect.rs:1312-1314: \"kept in the pending queue (no record, no failed status) ... `athena start` runs the queue\". The job version adds a committed hold commit and an in-place resume. `Job.accepted_reading` and `Job.accepted_by` (athena-data records.rs:644-645, set at dispatch from `reading.n` at mod.rs:1235) are read, never changed.",
+      "reason": "A Dispatched job with no outcome is already invisible to failure, introspection and scope-guard counts, as the disk hold is (close.rs:170-175). The invocation records keep the cost accounting. The marker follows the introspection pending-queue pattern (state.rs:89) and the disk hold marker (state.rs:330). The display name `stopped` is a status string only (status.rs:1092-1098), not a stored value. It is distinct from `FirstRoundCounts.stopped` (status/planning.rs:8-11), which counts a different thing.",
+      "rejected": [
+        {
+          "option": "Add `OutcomeState::Stopped`",
+          "why": "OutcomeState is in athena-data, outside the deliverables. It is a serialized record change needing round-trip and gate coverage."
+        },
+        {
+          "option": "Commit nothing at the stop and keep everything in the state dir",
+          "why": "It would lose the invocation cost records and the kept plan, which the criteria say are kept."
+        }
+      ]
+    },
+    {
+      "choice": "Resume in place through `go_job` and `dispatch(held)`. It reuses the Job record and the prediction commit stored in the marker, reads the stored brief, takes the accepted reading from `job.readings`, and skips planning when the last critique accepted.",
+      "reason": "`dispatch` takes a reading and starts no reader (mod.rs:1015-1067). The Job record and brief are already committed, and rewriting them would modify committed records. Reusing the stored brief keeps the prompt equal to what was committed.",
+      "rejected": [
+        {
+          "option": "Resume by `athena retry`",
+          "why": "It starts a new job and runs `ask`, so the reader runs (reading.rs:1262-1319). That fails criterion 3."
+        },
+        {
+          "option": "Commit a second Dispatch commit for the same job",
+          "why": "It rewrites the committed job.json and moves the base."
+        }
+      ]
+    },
+    {
+      "choice": "Completed planning rounds are kept. An in-flight planner or critic call is re-run, and an unreviewed plan (critic stopped before its critique) is not kept. A last critique that is a revise continues at round N+1, seeded from that plan and its findings. `plan_round` gets a `from_round` parameter, clamped to `max_rounds`.",
+      "reason": "Plan and critique record paths are keyed by round (records.rs:1388-1389). Re-planning round N over a kept `job-plan-N.json` would modify a committed record. The loop at planning.rs:44 starts at round 1 today.",
+      "rejected": [
+        {
+          "option": "Keep the unreviewed plan by pushing it into `closing.plans` at the critic site",
+          "why": "The re-run's round numbering would collide with it, or the plan would have to be reviewed without a critic call."
+        }
+      ]
+    },
+    {
+      "choice": "`athena start` resumes held jobs synchronously from `start_with`, the way it already runs pending introspections (manage.rs:513). A job that cannot resume in place has its marker cleared and falls back to `interrupted` and `athena retry`.",
+      "reason": "Criterion 3 names `start_with`. A changed reading config (mod.rs:1030) must reread, and the reader running there is the existing rule. This settles the previous plan's open question in code, so no question remains.",
+      "rejected": [
+        {
+          "option": "Resume only on a later `athena go` or drain",
+          "why": "The held job would not resume after `athena start`, which the request asks for. A drain would also treat it as interrupted and retry it with a reader (steward.rs:450)."
+        },
+        {
+          "option": "Silently dispatch with the new config",
+          "why": "The reading was made under the old config. That is what the existing reread rule prevents."
+        }
+      ]
+    },
+    {
+      "choice": "In status, `state_name` returns `stopped` for a marked, not-running Dispatched job. `scan_jobs` leaves it out of the first-round `stopped` count but still counts an accepted first round. It sets no `JobLine.hold` text.",
+      "reason": "A round-1 revise followed by a round-2 stop would otherwise count as a plan stopped in round 1 (status.rs:1126-1130 uses the last critique's round). A `hold` text would render as \"(still queued)\" (display.rs:1074).",
+      "rejected": [
+        {
+          "option": "Leave status unchanged",
+          "why": "The stopped job would show as `interrupted` and could be counted as a first-round stop. Criterion 4 forbids this."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Add `kill_switch_stop_reason`, `kill_switch_stage`, `close_or_hold` and `hold_for_kill_switch`. Route mod.rs:1349, 1355 and `finish_dispatched` through `close_or_hold`. Make `failure()` print `stopped` for a kill-switch reason. Add the marker branch in `go_job`'s Dispatched arm and a `held` parameter on `dispatch` (reuse the Job record, prediction and stored brief, skip or continue planning, clear the marker). Add the public `resume_kill_stopped(ui)`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Give `plan_round` a `from_round` parameter, clamped to `max_rounds`, so a resumed job continues at the round after its last completed one (`resumed_from` applies only to the first round of a call).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the `kill_switch_hold_*` tests: the planning stop (critic site and round-2 planner site), the producer-start stop, the resume with a counted reader, the status counts, and the ordinary failures that stay failed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "purpose": "Add `KillStage`, `KillHold` and the state-dir marker functions (path, write, read, clear, list), with a doc comment quoting the introspection deferral's meaning, and a round-trip unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "`state_name` returns `stopped` for a marked, not-running Dispatched job. `scan_jobs` skips the first-round `stopped` tally for it and lists it as open work. `open_job_next_lines` gets a `stopped` arm pointing to `athena start`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "purpose": "One call in `start_with` (line 511): `resume_kill_stopped(ui)` before `run_pending_introspections`. Not on the brief's list; justified because criterion 3 names `start_with`, which is defined here.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "purpose": "Add a test: a held-job marker for a closed job is cleared by `start_with`, which still returns whether the switch was on and still runs the pending introspection. Also asserts the `athena start` binary prints its usual line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased entry: a job the kill switch stops in planning or at producer start is held, shown as stopped, not counted as failed, and resumed by `athena start` without a reader run.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append one entry (edit no existing entry): the hold and resume design, the fallback to `athena retry` when the config changed, and a Provenance bullet citing job 20261030-060410-mavp as the introspection counterpart.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read mod.rs:1015-1380 and 2491-2501, planning.rs:29-79, state.rs:85-95 and 325-335, status.rs:1092-1185, and the disk-hold test at run/tests.rs:4690-4763 before editing.",
+    "state.rs: add `KillStage { Planning, Producer }` and `KillHold { stage, prediction }` (Serialize, Deserialize, Debug, Clone, PartialEq). Add `kill_held_dir()`, `write_kill_hold`, `read_kill_hold` (None when missing or unreadable), `clear_kill_hold` and `kill_held_jobs() -> Vec<JobId>` (sorted). The doc comment quotes introspect.rs:1312-1314. Add a round-trip unit test.",
+    "run/mod.rs: add `kill_switch_stop_reason() -> String` (`DriverError::Stopped.to_string()`) and `kill_switch_stage(&Closing) -> Option<KillStage>`. It returns Some when `happened.reason` contains the stop reason, there is no candidate or verification, and `new_invocations` holds no Producer record. The stage is Planning when the reason starts with `PLANNING_STOPPED_PREFIX`, else Producer. Make `failure()` print `stopped` instead of `failed` when the reason contains the stop reason.",
+    "run/mod.rs: add `close_or_hold(ctx, closing)`. A stage means `Err(self.hold_for_kill_switch(...))`, otherwise `close_dispatched`. Replace the calls at the planning stop, the post-planning preflight stop and `finish_dispatched`. Leave the preflight `blocked` stop (1328) direct. Write `hold_for_kill_switch`: build `NewFile::record` entries for `new_invocations`, `plans` and `critiques`; commit them with `commit_records` and a `Held: <title>` message with the `Athena-Job` trailer (skip the commit when there are no files); write the marker with `ctx.prediction`; print `held       the kill switch is on; \\`athena start\\` resumes the job`; return an error naming the job.",
+    "run/planning.rs: add a `from_round: u32` parameter to `plan_round`, clamped to `max_rounds`. Loop `from_round..=max_rounds`. Apply `resumed_from` when `round == from_round` (the first round of this call).",
+    "run/mod.rs `dispatch`: add `held: Option<KillHold>`, passed None at mod.rs:457 and in the reread recursion. For a held job: bail and clear the marker when the reading config hash differs (before the reread branch), when the capability pins the repo, or when the prediction commit is missing, with the text pointing to `athena retry`. Skip the Job record build and the prediction commit by taking `job.job` and `held.prediction`. Take `brief` from `<id.dir()>/brief-producer.md` at the prediction commit. Print a `resuming` line. Clear the marker once `ctx` is built. For planning: if the last critique accepted, with no misread, and its plan exists, push the kept plan and critique into `closing`, use `render_plan_section`, and skip `plan_round`. If the last critique is a revise, call `plan_round` with `from_round = round + 1` and a `PlanRevision` from that plan and its findings. Otherwise use the existing seed and `from_round` 1.",
+    "run/mod.rs `go_job` Dispatched arm: after the running check, if `read_kill_hold` is Some, find the accepted reading by `Job.accepted_reading` in `job.readings`, take `accepted_by` from the Job record, and call `dispatch(..., Some(held))`. A missing reading clears the marker and bails with the retry hint. Add `pub fn resume_kill_stopped(&self, ui) -> usize`: for each marked job, stop if the switch is on; a marker whose job is unknown or closed is cleared; otherwise call `go_with_stages` and print a line for any error. Never return an error.",
+    "manage.rs: in `start_with`, call `self.resume_kill_stopped(ui)` after `registry().start()` and before `run_pending_introspections`; update the doc comment.",
+    "status.rs: `state_name` returns `stopped` for a marked, not-running Dispatched job. In `scan_jobs` compute the state name first, skip the first-round `stopped` tally for a stopped job, add `stopped` to the open-work set, and leave `hold` None. In `open_job_next_lines` add the `stopped` arm: `athena start   # resumes job <id> from its kept reading and plan`.",
+    "run/tests.rs: add a wrapper over `planning_script` that counts Reader calls and writes the stop file once. Add the `kill_switch_hold_*` tests of demonstrations 1 to 5, using `repo_with_planning(2)`, `good_plan`, `accepting_critique` and `revising_critique`, and assert the reader count, the Landed state after `start_with` and the `status()` counts.",
+    "athena-cli/tests/introspection.rs: add the stale-marker test with the pending introspection; asserts `start_with` runs it and clears the marker.",
+    "Append the docs/decisions.md entry (Provenance bullet citing job 20261030-060410-mavp) and the CHANGELOG.md Unreleased entry. Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, then `git diff --stat`."
+  ],
+  "risks": [
+    {
+      "risk": "The resume re-adds the kept plan and critique (when planning is skipped) through `push_closing_records`, which rewrites existing record paths. If their bytes are not identical, the gate could see a modified record.",
+      "mitigation": "The gate requires committed records to round-trip, so the bytes are identical and git sees no change. The kill_switch_hold_resume tests run the real `commit_records` gate and fail if it refuses. If they do, the fix is to skip the kept records when building the closing files."
+    },
+    {
+      "risk": "The hold commit or the marker write fails after the switch fires.",
+      "mitigation": "A failed commit returns the error with the job id (as close.rs:229-232 does), writes no marker, and leaves the job Dispatched, shown as `interrupted`, so `athena retry` still works. A marker write failure is reported on the held line."
+    },
+    {
+      "risk": "Detection by reason text could hold a stop that is not a planning or producer-start stop.",
+      "mitigation": "`kill_switch_stage` also requires no candidate, no verification and no Producer invocation in the closing. Stops in a producer send-back or at the verifier keep the failure path. Test (ii) of criterion 5 and the existing lifecycle test at lifecycle.rs:1240 (a producer killed mid-run closes `killed`) cover the boundary."
+    },
+    {
+      "risk": "`athena start` now runs jobs and can take long or spend money.",
+      "mitigation": "This matches the introspection queue, which also runs model calls inside `start_with`. The resume loop stops if the switch comes on again, and every problem is a line, never a failed start. The job lock keeps another process from running the same job."
+    },
+    {
+      "risk": "After a long stop the branch has moved or the config changed. The resumed job uses its old prediction commit as base.",
+      "mitigation": "A config hash mismatch, a pinned job, or a missing prediction commit clears the marker and falls back to `athena retry`. A moved branch goes through the existing stale landing path, and the test fixture does not move the branch."
+    },
+    {
+      "risk": "A resumed job with `from_round` greater than `max_rounds` would reach the `unreachable!` at planning.rs:78.",
+      "mitigation": "`plan_round` clamps `from_round` to `max_rounds`. A revise in the last round already stops the job, so it is never held with such a state."
+    },
+    {
+      "risk": "The producer's decision gate requires reconciling the decisions that govern run/ files.",
+      "mitigation": "The appended docs/decisions.md entry is the reconciliation. The producer reads the governing decisions through the prompt before editing."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "The line `failure()` prints: `failed` becomes `stopped` when the reason carries the kill-switch text",
+      "dependent": "crates/athena-core/src/run/mod.rs `Athena::failure` (line 2491): every `closing.happened = self.failure(...)` caller in planning.rs, producer.rs, verification.rs and pin.rs",
+      "kind": "code",
+      "test": "cargo test -p athena-core: the existing `failed     the format step stopped` assertion at run/tests.rs:712 still holds, because that reason has no kill-switch text. The new kill_switch_hold_* tests assert the `stopped` and `held` lines.",
+      "reason": null
+    },
+    {
+      "name": "The calls that close a dispatched job",
+      "dependent": "crates/athena-core/src/run/mod.rs calls to `close_dispatched` at 1328, 1349, 1355 and `finish_dispatched` (1376). Grep found no other caller (close.rs:8 is the definition).",
+      "kind": "code",
+      "test": "cargo test --locked: every existing run/tests.rs closing assertion. Line 1328 (preflight stop) stays a direct close. `close_or_hold` calls `close_dispatched` unchanged for any closing that is not a pre-candidate kill-switch stop.",
+      "reason": null
+    },
+    {
+      "name": "`dispatch` gains a `held: Option<KillHold>` parameter",
+      "dependent": "crates/athena-core/src/run/mod.rs `dispatch` callers: go_job Proposed arm (mod.rs:457) and the reread recursion (mod.rs:1059)",
+      "kind": "code",
+      "test": "cargo test --locked: both callers pass None, so the commit path, the reread path and the seeds follow the existing flow. The existing tests that run a job end to end cover that.",
+      "reason": null
+    },
+    {
+      "name": "`plan_round` takes a `from_round` parameter, default 1",
+      "dependent": "crates/athena-core/src/run/planning.rs `plan_round` (only caller mod.rs:1347, from Grep) and `planning_round`'s `resumed_from` rule `if round == 1`",
+      "kind": "code",
+      "test": "cargo test -p athena-core: the planning tests at run/tests.rs:1878-2079 and the revision tests (tests.rs:1322-1440) use from_round 1 and are unchanged. The new test B starts at round 2.",
+      "reason": null
+    },
+    {
+      "name": "Behavior of `go` on a Dispatched job",
+      "dependent": "crates/athena-core/src/run/mod.rs `go_job` Dispatched arm (477-495) and the disk and slot hold bails",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain and cargo test -p athena-core: a Dispatched job with no kill marker takes the unchanged branch. The disk-hold test at run/tests.rs:4739-4762 still reads `interrupted` and the disk hold text.",
+      "reason": null
+    },
+    {
+      "name": "Status state names and counts",
+      "dependent": "crates/athena-core/src/status.rs `state_name` (1092), `scan_jobs` (1114), `open_job_next_lines` (1157), and display.rs:1071 `plan_suffix`",
+      "kind": "code",
+      "test": "cargo test -p athena-core kill_switch_hold_status. The existing status.rs tests at 2007, 2017 and 3454-3455 still hold, since a job with no marker is named as before. display.rs only special-cases `interrupted`, and a stopped line sets no `hold`, so `(still queued)` is never printed for it.",
+      "reason": null
+    },
+    {
+      "name": "First-round planning counts",
+      "dependent": "crates/athena-core/src/status/planning.rs `first_round_accepted`, `plan_state` and `FirstRoundCounts` (and keep-rule consumers at status.rs:2496-2516)",
+      "kind": "code",
+      "test": null,
+      "reason": "The keep-rule and first-round figures read only closed jobs with an outcome. A held job is only skipped for the `stopped` tally in `scan_jobs`. Its accepted-first-round count is kept, so landed-share figures do not change."
+    },
+    {
+      "name": "`start_with` runs `resume_kill_stopped` before the pending introspections",
+      "dependent": "crates/athena-core/src/manage.rs `start_with` callers: commands.rs:673 (`athena start`), manage.rs:506 (`start`), crates/athena-cli/tests/introspection.rs:1588,1630,1701, lifecycle.rs:1728",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test introspection and --test lifecycle. With no marker the resume does nothing, so those tests are unchanged. The new introspection.rs test adds a marker for a closed job and shows `start_with` still returns the old value, runs the pending introspection, and clears the stale marker.",
+      "reason": null
+    },
+    {
+      "name": "A marked job reads as Dispatched with no process to a drain",
+      "dependent": "crates/athena-core/src/steward.rs `interrupted_work` (450), reading.rs:1033 drain selection, and drain.rs:4678 `go_with_stages`",
+      "kind": "code",
+      "test": null,
+      "reason": "A drain refuses to run while the switch is on (`refuse_if_stopped`, lib.rs:301). `athena start` resumes marked jobs before any later drain can pick one. If a resume cannot proceed, the marker is cleared, so the job is a plain interrupted job as today. A drain overlapping a resume is held off by the job lock (`try_lock_job`, mod.rs:443)."
+    },
+    {
+      "name": "The kill-switch text on a failed job",
+      "dependent": "crates/athena-core/src/introspect.rs `KILL_SWITCH_TEXT` and `requeue_kill_switch_failures` (1371-1427)",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged. That code requeues failed introspections whose failure text contains the kill-switch words. A held job has no outcome, so it is never introspected and never reaches it. Jobs already closed failed by the kill switch are not rewritten (out of scope)."
+    },
+    {
+      "name": "Attempt verdicts of a job with no outcome",
+      "dependent": "crates/athena-core/src/scope_guard.rs `verdict_of` (561-573), `attempt_of` (580) and the line watcher `watch_line`",
+      "kind": "code",
+      "test": null,
+      "reason": "`verdict_of` returns None for a Dispatched job, so a held job is no attempt, no spend and no retry or pause signal. This is the same reason the disk hold is invisible to the scope guard (close.rs:170-175). The resumed job closes through `go_with_stages` and is counted once, on its final outcome."
+    },
+    {
+      "name": "Environment stop classification",
+      "dependent": "crates/athena-core/src/disk.rs `StopCause`, `resumable_stop` (525) and reading/retry.rs `resumable_job` (299)",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged. A kill-switch hold writes no outcome reason, so `StopCause::of` never sees it. A marked job that falls back to interrupted is retried by the existing rule (`Dispatched` => true)."
+    },
+    {
+      "name": "State-dir marker `KillHold` (`kill-held/<job>.json`)",
+      "dependent": "crates/athena-core/src/state.rs new marker directory, beside `introspect_pending_dir` (89) and `hold_file` (330)",
+      "kind": "code",
+      "test": "A new unit test in state.rs: the marker round-trips; read of a missing or corrupt file is None; clear removes it; the list is sorted.",
+      "reason": null
+    },
+    {
+      "name": "Record shapes",
+      "dependent": "crates/athena-gate record checks, athena-data `AnyRecord` round-trip tests, and `check_record_file`",
+      "kind": "rule",
+      "test": null,
+      "reason": "No new record type or file under records/. The marker is in the state dir, outside the repository. The hold commit holds only existing kinds (Invocation, JobPlan, Critique). The resume re-adds the kept plan and critique with identical bytes, which the round-trip rule already requires of every committed record. The resume tests run the real `commit_records` gate."
+    },
+    {
+      "name": "Decision reconciliation for changed run/ code",
+      "dependent": "docs/decisions.md governing entries for crates/athena-core/src/run (`governing_decisions`, mod.rs:1363) and the append-only rule (send_back.rs:316)",
+      "kind": "rule",
+      "test": "cargo test --locked (xtask policy tests and the mirrors test). A new entry is appended with a Provenance bullet citing 20261030-060410-mavp. No existing entry is edited.",
+      "reason": null
+    },
+    {
+      "name": "Configuration and workflows",
+      "dependent": "athena.toml, defaults.toml, .github/workflows",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No key, check name or workflow is added or changed. `[job_plan] max_rounds` is only read."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two tests in run/tests.rs using `repo_with_planning(2)` (tests.rs:293), `planning_script` (:1208) and `athena_with` (:191). A wrapper script counts Reader invocations and writes the stop file once on a chosen turn, as tests.rs:676-682 does. Test A writes it on the first Planner turn, so the critic call returns `DriverError::Stopped`. Test B writes it on the first Critic turn (revising critique), so the round-2 planner call is stopped. Each runs `athena.ask`, then `athena.go`.",
+      "command": "cargo test -p athena-core kill_switch_hold_during_planning",
+      "observes": "`go` returns the hold error. `Records::load` shows `JobState::Dispatched`, no outcome, no score, and no introspection. The accepted reading is present. In B, `job-plan-1` and `critique-1` are present. `athena.state.read_kill_hold(&id)` is `Some` with stage Planning. No `failed` line is printed, and a `held` line is.",
+      "fails_without": "Without `close_or_hold`, the stop closes the job `Failed` with a `planning stopped before any code was written` reason (stop_planning, planning.rs:8-14). The Dispatched, marker and no-outcome assertions fail.",
+      "seam": "Entry point `Athena::go` (mod.rs:402) through `go_job`. Fake: `FakeAgentDriver::with_registry(state.registry())` (fake.rs:67) built by `athena_with`, honouring the stop file at fake.rs:92. The script wrapper is injected as the `script` argument of `athena_with`. The wrapper only counts and writes the stop file; detection and the hold are production code. All of this exists today, and `read_kill_hold` is added in step 1."
+    },
+    {
+      "criterion": 2,
+      "method": "The same fixture, with the wrapper writing the stop file on the Critic turn that returns `accepting_critique()` (tests.rs:1179). The plan is accepted, then the first Producer call returns `DriverError::Stopped` at producer.rs:364-370. The test calls `go`.",
+      "command": "cargo test -p athena-core kill_switch_hold_before_producer",
+      "observes": "The job is Dispatched with no outcome. The marker has stage Producer. `job-plan-1` and an Accept `critique-1` are kept. There is no Producer invocation record and no candidate. The baseline record is not committed.",
+      "fails_without": "Without the hold, producer.rs:366-369 records `the producer could not run` and the job closes `Failed`. The Dispatched, marker and plan-kept assertions fail.",
+      "seam": "Entry point `Athena::go`. Fake and injection as in criterion 1; the wrapper writes the stop file on `Role::Critic` the first time. The stop at the producer call exists today. The hold and the marker are added by steps 1 to 4."
+    },
+    {
+      "criterion": 3,
+      "method": "The tests of criteria 1 and 2 go on to call `athena.start_with(&Lines::default())`. The wrapper's `fired` flag keeps it from stopping again. Each test reads its own wrapper's Reader counter before the stop and after the resume.",
+      "command": "cargo test -p athena-core kill_switch_hold_resume",
+      "observes": "`start_with` returns true. The job reaches `JobState::Closed(OutcomeState::Landed)`. The marker is gone. The Reader count is unchanged by the resume (one, from `ask`). In the producer-stop test the Planner and Critic counts are also unchanged (planning skipped). In test A the planner runs again once. In test B it runs once more at round 2, with `job-plan-2` and `critique-2` added.",
+      "fails_without": "Without the `start_with` resume (manage.rs call and `go_job` marker branch), the job stays Dispatched and the Closed assertion fails. If resume went through `athena retry`, the Reader count would rise.",
+      "seam": "Entry point `Athena::start_with` (manage.rs:511), which calls the new `resume_kill_stopped`, then `go_with_stages`, `go_job` and `dispatch(held)`. Fake: the counting wrapper over `planning_script`, injected through `athena_with`. `start_with` exists. The resume code is added by steps 5 to 7. The commit path is the real `commit_records`, so the gate checks the kept-plan re-add."
+    },
+    {
+      "criterion": 4,
+      "method": "After each hold (tests A, B and the producer stop), call `athena.status()` (status.rs:1188), which runs `scan_jobs` (:1114) over `Records::load_current`. This follows the pattern at tests.rs:4755.",
+      "command": "cargo test -p athena-core kill_switch_hold_status",
+      "observes": "`jobs_by_state` has `stopped` = 1 and no `failed` or `interrupted`. The job is in `open` with state `stopped` and `hold` None. `status.planning` has `stopped` = 0 in test B, where a round-1 revise critique exists. The `next` lines include an `athena start` line for the job.",
+      "fails_without": "If the held job were counted `failed` or `interrupted`, or as a first-round plan stop, the `jobs_by_state` and `planning.stopped` assertions fail. Without the `stopped` arm in `state_name` the job reads `interrupted`.",
+      "seam": "Entry point `Athena::status` (public, status.rs:1188), which calls the private `scan_jobs`. No visibility change is needed. Records come from the real committed hold. Exists, and the fixture is the one of criterion 1."
+    },
+    {
+      "criterion": 5,
+      "method": "Two runs with the stop file never written. (i) The wrapper makes the Planner turn non-Success, as the existing planner-failure tests do (tests.rs:1878-2079). (ii) The wrapper makes the Producer turn non-Success. Both then call `athena.status()`. The whole `cargo test --locked` run covers all existing tests.",
+      "command": "cargo test -p athena-core kill_switch_hold_ordinary_failures_still_fail",
+      "observes": "Each returns `Finished` with `OutcomeState::Failed`. No marker exists. `jobs_by_state[\"failed\"]` is 1. The `failed     ` line is printed, not `stopped`.",
+      "fails_without": "If the hold caught every `could not run` stop or every failure, these jobs would stay Dispatched with a marker, and the Failed and count assertions fail.",
+      "seam": "Entry point `Athena::go`, with the wrapper over `base_script` (tests.rs:224) injected through `athena_with`. A FakeTurn with a non-Success `outcome` (fake.rs:17). Exists."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff. `kill_switch_stop_reason` is defined once. `kill_switch_stage` and `close_or_hold` are the only consumers that lead to the hold. `close_or_hold` is called at the three sites that formerly called `close_dispatched` (mod.rs:1349, 1355 and `finish_dispatched`). `hold_for_kill_switch` is called only from `close_or_hold`. No kill-switch literal is added, because the reason comes from `DriverError::Stopped.to_string()`. The diff touches neither producer.rs nor close.rs.",
+      "command": "git diff -- crates/athena-core/src/run/mod.rs crates/athena-core/src/run/planning.rs",
+      "observes": "One definition, one decision point, one hold function, the planning and producer-start stops reaching it through the same call.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the stat and the docs/decisions.md and CHANGELOG.md hunks.",
+      "command": "git diff --stat",
+      "observes": "Only the files named in this plan appear. docs/decisions.md has only added lines: a new entry whose Provenance bullet cites job 20261030-060410-mavp as the introspection counterpart, and no existing entry edited. CHANGELOG.md has a new Unreleased entry. Nothing under records/, athena.toml, defaults.toml or .github/workflows changed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "On the final tree run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, each as its own cargo command. The test run covers the new run/tests.rs tests, the new state.rs round-trip test and the new introspection.rs test. It also covers every existing suite that reads the changed code: status, drain, retry and introspection (athena-cli/tests/drain.rs and lifecycle.rs), plus the xtask policy tests and the `system_facts_budgets_match_computed` test.",
+      "command": "cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "A formatting or lint error in the new code, or any existing test broken by the changed `dispatch`, `failure()`, `scan_jobs` or `start_with`, fails the checks.",
+      "seam": "The entry points are the production functions the suites call: `Athena::go`, `Athena::start_with` and `Athena::status`. The fixtures are the existing `FakeAgentDriver` scripts via `athena_with` (tests.rs:191), the `check_seam` (mod.rs:1518) and the introspection.rs `setup` harness (introspection.rs:1541). Nothing new is injected for this criterion. All exist today, and the new tests join them in steps 8 and 9."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "51c4383f4308454f5306cf803c83052b6964cba12c3a1f187a8fc1c23e34c3c4"
+}

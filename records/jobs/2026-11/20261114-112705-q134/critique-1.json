@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-112705-q134",
+  "round": 1,
+  "at": "2026-11-14T11:45:34.123271659Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/manage.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/manage.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Detection misses a planner or critic killed mid-run by `athena stop`, the main way the kill switch interrupts planning.",
+      "evidence": "The real driver returns DriverError::Stopped only when the switch is already on before a call (claude.rs:518, 545). When `athena stop` ends a running child, invoke returns Ok(AgentOutput{outcome: Killed, detail: \"the kill switch was turned on\"}) (claude.rs:645-667, tested at claude.rs:1387-1403; lifecycle.rs:1240 shows the same for the producer). planning.rs:192-196 and 395 then call stop_planning with \"the planner/critic did not complete: the kill switch was turned on\". That reason does not contain `DriverError::Stopped.to_string()` (\"the kill switch is on (`athena start` turns it off)\"), so `kill_switch_stage` returns None and the job closes Failed. The criterion-1 tests write the stop file so the *next* call is refused, so they never exercise this path. Fix: Detect the stop from a typed or state signal, not the Stopped text alone. One option: in `close_or_hold`, hold when `self.state.registry().stopped()` is true, plus the existing no-candidate, no-verification, no-Producer-output conditions. Another: also accept a last Planner or Critic invocation in `closing.new_invocations` whose outcome is `InvocationOutcome::Killed` while the switch is on. Add a test where the fake script returns a Planner or Critic turn with outcome Killed and turns the switch on (as lifecycle.rs:1245-1251 does for the producer), and assert the job is held, not failed.",
+      "location": "Decision 1 / step 3 (`kill_switch_stage`); crates/athena-agent/src/claude.rs:645-667; crates/athena-core/src/run/planning.rs:190-197, 393-396",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The drain treats the hold error as a failed item. That reader is missing from the dependents list and no test covers it.",
+      "evidence": "drain.rs:4700-4718 sets `held: true` only for errors that downcast to BudgetShort, LowDisk or SlotWait. Any other Err from go_with_stages becomes Run{outcome: None, held: false}, which goes to the `other` arm at 1759-1779: line outcome \"no outcome\" and RunStep::Failed. So a job the switch stops during a drain is reported by the drain as failed, against the request's 'not failed'. The plan's only drain entries are steward.rs interrupted_work, reading.rs:1033 and drain.rs:4678, each with a Reason and no test. Fix: Return a typed error (for example a `KillHeld` struct in run/ or state.rs, like disk::LowDisk). Map it in drain.rs to `held: true` with its own outcome text in the held arm (1732-1758), so it is not reported as low disk. Add drain.rs to the files, and add a test in crates/athena-cli/tests/drain.rs that turns the switch on during a drained job's planning and asserts the item is held, not Failed.",
+      "location": "Step 4 (`hold_for_kill_switch` returns \"an error naming the job\"); Dependents list; crates/athena-cli/src/drain.rs:4700-4718 and 1759-1779",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The keep rule does count a held job: as planned and not landed.",
+      "evidence": "`is_planned` is `!job.plans.is_empty() && (job.job.is_some() || ...)`. A held job has a Job record and kept plans, so `keep_rule` counts it in `planned` and not in `landed`, which lowers the landed share while it is held. This is the same transient effect as for any running or interrupted planned job, but the plan's stated reason is false. Fix: Correct the dependents entry. Either accept the transient effect explicitly, or exclude held jobs in `is_planned` callers and add an assertion in the kill_switch_hold_status test.",
+      "location": "Dependents: \"First-round planning counts ... The keep-rule and first-round figures read only closed jobs with an outcome\"; crates/athena-core/src/status/planning.rs:185-187, 242-257",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The resume path does not say which pre-commit steps of dispatch re-run against the new head and which use the held prediction.",
+      "evidence": "Before the prediction commit, dispatch runs the disk and slot gates, preflight, pin_repo, tree_seed, timeout_seed, resume_seed, stale_seed, retry_findings and snapshot::write(head). On resume, head is newer than held.prediction, because the hold commit and other records land on top. Recomputing seeds or the evidence snapshot at the new head can disagree with the stored brief that the plan reuses (brief retry_from versus ctx.seed_commit/resume). Fix: State which steps the held path skips. Write the evidence snapshot at held.prediction, and either skip the seed lookups or check that they match the stored brief. Keep the disk and slot gates and the preflight.",
+      "location": "Step 6 (`dispatch(held)`), crates/athena-core/src/run/mod.rs:1068-1156",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly. It has the right overall shape: one shared hold point in run/mod.rs, a state-dir marker, the job left Dispatched with no outcome, and an in-place resume from start_with with no reader run. The functions and lines it names exist: close_dispatched calls at mod.rs:1328/1349/1355/1376, failure() at 2491, the stop sites at planning.rs:180/383 and producer.rs:366, DriverError::Stopped at athena-agent lib.rs:131, start_with at manage.rs:511, and the test helpers at tests.rs:191/224/293/1153-1208. Two design gaps remain.\n\nFirst, the plan detects a stop only by the DriverError::Stopped text. That catches an agent call refused *after* the switch is on. It misses the usual way the switch interrupts planning: `athena stop` killing a planner or critic that is already running. The real driver then returns Ok with outcome Killed and the detail \"the kill switch was turned on\" (claude.rs:645-667). planning.rs:192/395 turns that into \"did not complete: ...\", so the job still closes failed, and the plan's tests (stop file written between calls) never exercise this path.\n\nSecond, the hold returns a plain error. The drain sorts that as a failed \"no outcome\" item, not a held one (drain.rs:4700-4718, 1759-1779), and the dependents list omits this reader.\n\nSmaller point: the dependents entry for the keep rule wrongly says it reads only closed jobs. is_planned counts a held, dispatched job as planned and not landed."
+}
