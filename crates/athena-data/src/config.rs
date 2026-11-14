@@ -983,8 +983,8 @@ pub(crate) mod tests {
         assert!(!plan.plans(false));
         assert_eq!(plan.planner_usd, 3.0);
         assert_eq!(plan.critic_usd, 3.0);
-        assert_eq!(plan.planner_timeout_s, 600);
-        assert_eq!(plan.critic_timeout_s, 600);
+        assert_eq!(plan.planner_timeout_s, 86400);
+        assert_eq!(plan.critic_timeout_s, 86400);
         assert_eq!(plan.max_rounds, 5);
         let stripped = unplanned(REPO_CONFIG);
         assert!(!stripped.contains("[job_plan]"));
@@ -1017,13 +1017,16 @@ pub(crate) mod tests {
             (b.reader_usd, b.producer_usd, b.verifier_usd, b.job_usd),
             (2.0, 10.0, 5.0, 50.0)
         );
-        assert_eq!((b.producer_timeout_s, b.verifier_timeout_s), (5400, 3600));
-        assert_eq!((b.reader_timeout_s, b.check_timeout_s), (300, 1800));
+        assert_eq!((b.producer_timeout_s, b.verifier_timeout_s), (86400, 86400));
+        assert_eq!((b.reader_timeout_s, b.check_timeout_s), (86400, 14400));
         assert_eq!(
             (plan.planner_usd, plan.critic_usd, plan.max_rounds),
             (3.0, 3.0, 5)
         );
-        assert_eq!((plan.planner_timeout_s, plan.critic_timeout_s), (600, 600));
+        assert_eq!(
+            (plan.planner_timeout_s, plan.critic_timeout_s),
+            (86400, 86400)
+        );
         let sum = b.reader_usd
             + f64::from(plan.max_rounds) * (plan.planner_usd + plan.critic_usd)
             + b.producer_usd
