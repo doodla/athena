@@ -3317,6 +3317,19 @@ pub(crate) mod planning_cost_tests {
     }
 
     #[test]
+    fn the_landing_stage_ends_at_the_first_of_two_landing_records_carrying_the_commit() {
+        let mut records = landed_job_records();
+        // A later landing on a stacked branch carries the same job's commit again.
+        records.landings = vec![
+            landing_of(LANDED_JOB, t("2026-10-30T10:23:00Z")),
+            landing_of(LANDED_JOB, t("2026-10-29T10:23:00Z")),
+        ];
+        let landed = landed_jobs(&records);
+        assert!(landed[0].landing_found);
+        assert!((landed[0].stages.landing_and_rebuild - 6.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn a_landing_record_of_another_job_does_not_extend_the_landing_stage() {
         let mut records = landed_job_records();
         records.landings = vec![landing_of(
