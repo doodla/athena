@@ -1,0 +1,163 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-041123-hvyh",
+  "n": 1,
+  "at": "2026-11-14T04:59:33.250706925Z",
+  "invocation_seq": 1,
+  "base_commit": "31df058c59032e044682e24dd5c22143da8f9aae",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Queue each reading's out_of_scope follow-ups as their own requests",
+  "summary": "Athena today records a reading's out_of_scope items as text only, so named follow-ups are lost (job 20261114-034034-fgwz). The change makes the run, once a job ends with a reading, file each follow-up item as its own queued steward-channel request that cites the original job, once and only once per item. Audience: Sri and the drain, who should see the follow-ups in the queue.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the follow-up requests actually appear in the queue, not that wiring exists."
+    },
+    {
+      "id": "tested",
+      "how": "New behavior tests plus fmt, clippy and test passing."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuse the existing StewardRequest and RequestQueue instead of building a second writer; no new crate."
+    },
+    {
+      "id": "small",
+      "how": "One focused change; backfill and other review findings are excluded."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/steward.rs (StewardRequest::new/from_change at ~526-640 builds a request text that must have a title, an Acceptance: bullet list and a Files: line; RequestQueue::apply at ~662 writes a Request record with channel REQUEST_CHANNEL and a fresh RecordId; Decision/decide at ~698), crates/athena-data/src/records.rs (Request {job,text,received_at,channel} at 434; Reading.out_of_scope field), crates/athena-core/src/reading.rs (out_of_scope used at ~835-912 and carried by carry/retry), crates/athena-core/src/manage.rs (NewFile writes at ~254, close path). The entry point to hook is where a job's outcome is closed and records are committed (run/ and manage.rs close); the producer must find the exact spot. The records allow-list already accepts athena.request/1, so no new record type or file is added; if one were, check_record_file, AnyRecord and the round-trip test would cover it. The property is measured directly: new Request records appear in the records written at close, not via a stand-in.",
+    "Existing code: crates/athena-core/src/steward.rs (StewardRequest, RequestQueue, REQUEST_CHANNEL) and crates/athena-core/src/reading.rs (out_of_scope handling) are reused and extended; no second request writer is built, so queued follow-ups pass the same admission/plan parse as other steward requests (steward_requests_from_every_writer_pass_the_plan_parse).",
+    "Term ladder: not used. 'Follow-up' means an out_of_scope item of a reading that names later work to do (for example 'propose these as follow-up requests', or fix X 'runs as its own job'), as opposed to a plain exclusion such as 'athena.toml and records/ are not touched'. Assumed rule: an item is a follow-up only when it names work to be done later; the producer decides a conservative, testable classifier (buy-first: no new crate), and plain exclusions are never queued.",
+    "Assumption: follow-ups are queued for jobs that landed or were rejected alike (the fgwz case was landed), once per (job, item): a restart, retry or re-close must not duplicate them. Each request text cites the original job id and the item's words, and passes StewardRequest::new (title, acceptance bullet, Files: line; Files falls back from paths in the item to crates/).",
+    "Assumption: the already-lost follow-ups of job 20261114-034034-fgwz (queue order, October backlog hold, review findings 1 and 3-13, plan critic memory) are not backfilled by code; the owner or steward can queue them with the new mechanism or by hand. Prior job 20261114-034034-fgwz: its landed candidate changed crates/athena-core/src/hestia.rs and CHANGELOG.md. hestia.rs is kept as landed and not touched here; its three verifier findings (recurrence judged by introspection time not base commit; the no-op `later.at = at(600)`; one over-long doc line) are unrelated to this request and are left to their own follow-up requests, not fixed here. CHANGELOG.md is a deliverable of this job, with a new entry.",
+    "Environment: none reached. The change is unit and integration tested with fake agents and temp state; no CI workflow, push or records-branch read is needed. athena.toml, defaults.toml and workflows are not changed (no new config key, no consumers).",
+    "This adds a request-creating mechanism, not a refusal rule: it refuses no reading. Queued follow-ups must not raise queued-request volume without bound, so a cap per job is assumed (the existing steward cap of twenty per run, `a_run_queues_at_most_twenty_items`, is a model)."
+  ],
+  "question": "Should the follow-ups already lost from job 20261114-034034-fgwz also be queued once, by hand or by a backfill? I assumed no: this job only builds the mechanism.",
+  "acceptance_criteria": [
+    {
+      "text": "A test run by `cargo test` (athena-core) closes a job whose reading has out_of_scope items naming follow-up work and shows one new request per follow-up item is produced, each with channel REQUEST_CHANNEL, text citing the original job id, and text that passes StewardRequest::new / the plan parse; the test reproduces the fgwz case (items such as 'propose these as follow-up requests' and 'runs as its own job').",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run by `cargo test` shows plain exclusions in out_of_scope (for example 'athena.toml, defaults.toml, workflows, docs/decisions.md and records/') queue no request, and a job with an empty out_of_scope queues none and is not reported as an error.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run by `cargo test` shows queuing is idempotent: closing, retrying or resuming the same job twice yields each follow-up request once, and the number queued per job is capped.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run by `cargo test` shows a queued follow-up appears in the unread steward-channel queue (queued_work in crates/athena-core/src/steward.rs) so the drain picks it up, and that a follow-up whose item names no usable path still builds a valid request.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The diff to crates/athena-core/src/steward.rs and the close/run path reuses StewardRequest and RequestQueue (Grep shows no second request-text writer) and adds no new record type, config key or crate; athena.toml, defaults.toml, .github/workflows, docs/decisions.md, records/ and crates/athena-core/src/hestia.rs are unchanged in `git diff`.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry saying that out_of_scope follow-ups are now queued as their own requests citing the original job, naming how plain exclusions are told apart.",
+      "kind": "content"
+    },
+    {
+      "text": "fmt, clippy and the whole test run pass: `cargo fmt --check`, `cargo clippy`, `cargo test` (or a passing Athena record on the same final tree); these supplement, not replace, the behavior tests above.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/manage.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/followups.rs",
+      "action": "create",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Backfilling the follow-ups already lost from job 20261114-034034-fgwz, or fixing its jobs' other items (queue order, October backlog hold, closing 20261017-205552-y1bh and 20261030-060410-9e5h, plan critic memory, review findings 1 and 3-13).",
+    "The three verifier findings on 20261114-034034-fgwz in crates/athena-core/src/hestia.rs (base-commit recurrence rule, no-op `later.at`, long doc line); hestia.rs stays as landed and unchanged.",
+    "New refusal rules, changes to the reading prompts (the reader prompt is at its token limit), athena.toml, defaults.toml, workflows, docs/decisions.md and records/.",
+    "Reprioritizing queued follow-ups ahead of or behind other work."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.2,
+        "p90": 6.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2700.0,
+        "p90": 6000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.676923076923077,
+      "p_user_intervenes": 0.06306027820710973,
+      "cost_usd": {
+        "p10": 0.5474499759118978,
+        "p50": 1.4791114,
+        "p90": 5.636334730806151
+      },
+      "wall_time_s": {
+        "p10": 605.3459750647277,
+        "p50": 2153.684957172999,
+        "p90": 4386.869311420753
+      }
+    }
+  },
+  "departures": "The change touches the close/run pipeline and needs a classifier for follow-up items versus plain exclusions, so cost and time are above the reference.",
+  "hard_reason": "It changes the run pipeline: how a job is closed and its records written, adding new requests to the queue, so a mistake could duplicate or flood requests.",
+  "producer_effort": "high"
+}
