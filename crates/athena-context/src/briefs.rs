@@ -742,6 +742,7 @@ pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&s
     let _ = writeln!(out, "{}", checkable_evidence_section());
     criteria_check_section(&mut out, &inputs.reading);
     let _ = writeln!(out, "{}", unchanged_files_section());
+    let _ = writeln!(out, "{}", checks_before_verifier_section());
     let _ = writeln!(out, "{}", no_change_section());
     let _ = writeln!(
         out,
@@ -874,6 +875,21 @@ fn unchanged_files_section() -> String {
      did not change, either change it now or add an entry to `unchanged_planned_files` in your report \
      with its path and the reason. A listed file that is neither changed nor explained is sent back \
      once, then flagged to the verifier as a gap.\n"
+        .to_string()
+}
+
+/// The "Checks before the verifier" section: Athena runs the configured checks on the producer's work after
+/// each report, and a failure is sent back once. The root cause it answers: the recorded checks ran only at
+/// verification, so a producer could not see a failing gate before the verdict.
+fn checks_before_verifier_section() -> String {
+    "## Checks before the verifier\n\n\
+     After you report, Athena usually runs the configured checks (fmt, clippy and the test suite) on your \
+     work before the verifier does. A check that fails there, and did not already fail on the base, is sent \
+     back to you once, with its command, exit status and output tail, in the same send-back as any unmet \
+     criteria. A check still failing after that send-back goes to the verifier as flagged, and the \
+     verifier's own run of the checks is the verdict. The run is skipped, with a line saying so, when disk \
+     space is low, when no build slot is free, when it hits an error, or when your change holds check-tool \
+     configuration, which verification replaces with the base's.\n"
         .to_string()
 }
 
@@ -2314,6 +2330,43 @@ mod tests {
         let target =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../athena-cli/tests/mirrors.rs");
         assert!(target.is_file(), "{}", target.display());
+    }
+
+    #[test]
+    fn producer_briefs_say_athena_runs_the_checks_before_the_verifier() {
+        let brief = producer_brief(&ProducerInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a test".into(),
+            reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
+            checks: vec![],
+            commands: vec![],
+            pin: None,
+            retry_from: None,
+            retry_findings: None,
+            failure_classes: Vec::new(),
+        });
+        let at = brief
+            .find("## Checks before the verifier")
+            .expect("the section is in the brief");
+        let section = &brief[at..];
+        let section = &section[..section[3..].find("\n## ").map_or(section.len(), |n| n + 3)];
+        for phrase in [
+            "Athena usually runs the configured checks (fmt, clippy and the test suite)",
+            "before the verifier does",
+            "is sent back to you once, with its command, exit status and output tail",
+            "goes to the verifier as flagged",
+            "the verifier's own run of the checks is the verdict",
+            "the run is skipped",
+        ] {
+            assert!(
+                section.to_lowercase().contains(&phrase.to_lowercase()),
+                "{phrase}: {section}"
+            );
+        }
+        // After the planned-files section, before the no-change note and the report.
+        assert!(at > brief.find("## Planned files left unchanged").unwrap());
+        assert!(at < brief.find("## If you leave the tree unchanged").unwrap());
+        assert!(at < brief.find("## Report").unwrap());
     }
 
     #[test]
