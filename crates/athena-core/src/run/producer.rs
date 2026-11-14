@@ -262,6 +262,15 @@ impl Athena {
     /// the final verdict. A changelog still missing at the limit ends the job at admission, which applies the
     /// same rule (`crate::admission::changelog_required`), before the verifier runs.
     ///
+    /// The configured checks run on the work tree after each report ([`Athena::loop_check_failures`]). Root
+    /// cause: the recorded checks ran only at verification, so the producer could not see a failing gate
+    /// before the verdict, and a failed fmt, clippy or test check rejected a whole job. A new failure (not a
+    /// timeout, not already failing on the base) joins the unmet criteria in the one shared send-back, with
+    /// its command, exit status and output tail in the brief, so no loop is added. A failure still there at
+    /// the limit is named in the report gaps the verifier reads, flagged, and the verification run stays the
+    /// verdict. The run is advisory: low disk, a busy build slot, an error and a change to check-tool
+    /// configuration skip it with a line, and only the kill switch ends the job.
+    ///
     /// The work tree is formatted by `Athena::format_stage` (see the `format` module). The format step belongs
     /// at the end of producer_loop, before the change list is taken: it is the last producer-stage act of every
     /// pass, right after the producer returned and its report was parsed. "After the producer" means after each
@@ -486,6 +495,19 @@ impl Athena {
             // over the limit is a problem like an unmet criterion; a replay that did not run is not.
             loop_replay = self.loop_replay(ctx, &snapshot)?;
             let held = loop_replay.as_ref().filter(|l| l.run.held);
+            // The configured checks on the work tree as it stands, before the verifier. A check that fails
+            // here and did not fail on the base is a problem like an unmet criterion; a run that did not
+            // happen is not.
+            let check_failures = self.loop_check_failures(
+                ctx,
+                &LoopWork {
+                    job_dir: &job_dir,
+                    snapshot: &snapshot,
+                    capability_env: &capability_env,
+                    changed: &changed,
+                    baseline: closing.baseline.as_ref(),
+                },
+            )?;
             if unmet.is_empty()
                 && unchanged.is_empty()
                 && held.is_none()
@@ -493,6 +515,7 @@ impl Athena {
                 && outside.is_empty()
                 && !changelog_missing
                 && mirror_drift.is_empty()
+                && check_failures.is_empty()
             {
                 break Some(report);
             }
@@ -516,6 +539,8 @@ impl Athena {
             if let Some(replay) = held {
                 problems.push(replay_problem(replay));
             }
+            // A check that still fails at the limit reaches the verifier as a gap, flagged, not hidden.
+            problems.extend(check_failures.iter().map(CheckFailure::problem));
             // What the verifier is told the report still lacked at the limit; the gate's finding is not part
             // of it, because the job ends at the gate and no verifier runs.
             let report_problems = problems.clone();
@@ -636,9 +661,12 @@ impl Athena {
                 }
                 (None, None, None) => send_back_text(brief, &unmet, &unchanged),
             };
-            attempt_brief = append_missing_changelog(
-                append_mirror_drift(next_brief, &mirror_drift),
-                changelog_missing,
+            attempt_brief = append_check_failures(
+                append_missing_changelog(
+                    append_mirror_drift(next_brief, &mirror_drift),
+                    changelog_missing,
+                ),
+                &check_failures,
             );
         };
         Ok(Flow::Go(Reported {

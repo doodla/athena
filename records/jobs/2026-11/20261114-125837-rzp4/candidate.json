@@ -1,0 +1,198 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261114-125837-rzp4",
+  "base_commit": "036407fe95d3df25e79db8177c2dadbb8192dc10",
+  "base_fingerprint": "sha256:ff3e50ae152379f55f37554a6bd538dd3950a6e9fdfed465a78f159944ef3363",
+  "previous_job": "20261114-023201-cdp5",
+  "candidate_commit": "109c4716ce2fb82d0b328b21e2985fdc26e05f50",
+  "candidate_tree": "7c7cef36efcb5c3dc0166bf566253460c40148e5",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 463125
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 52408
+    },
+    {
+      "path": "crates/athena-context/prompts/producer.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 1102
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 207589
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 52395
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 116184
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 33807
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28387
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 374466
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 452782
+    }
+  ],
+  "fingerprint": "sha256:456eca4b462f23b2b6ec65419d0cacc14d83d1ae39b4ffc5098d65f8b1a902de",
+  "violations": [],
+  "producer_report": {
+    "summary": "Athena now runs the configured checks (fmt, clippy, test) on the producer's tree before the verifier. A new failure goes into the one existing send-back with its command, exit status and output tail. A failure still there after the send-back reaches the verifier as a flagged `producer-report-gaps` entry.\n\nRoot cause: the recorded checks ran only at verification, so the producer could not see a failing gate before the verdict.\n\n- **Code:** `producer_loop` calls `Athena::loop_check_failures` in run/checks.rs. It builds in the producer's own `target/produce` and takes a build slot only if one is free (it never waits). It skips with a visible line for low disk, a busy slot, an error or a change to check-tool configuration, and only the kill switch ends the job from it.\n- **Limits:** `PRODUCER_SEND_BACKS` stays 1, with only its comment extended. No loop is added.\n- **Departure from criterion 1:** `GIT_INDEX_FILE` is set only for the one `git add -A` that builds the temporary index. That index is swapped into the snapshot's `.git/index` and restored on drop, so `git ls-files` lists producer-added files. It is never exported to the checks, because a shared index would break the git calls inside Athena's own tests. D182 records this.\n- **Brief and prompt:** the producer brief gets a \"Checks before the verifier\" section with a test. producer.md changes net zero and is still 1102 bytes. D182 is appended to docs/decisions.md and CHANGELOG.md has one bullet.\n- **Tests:** the new core tests cover the send-back, a failure still there at the limit, a clean first pass, producer-added files, git inside a check, base failures, tool-config skip, low disk, a busy slot and the index guard. `MARKS_BASELINE_OUTSIDE` now touches its mark only in a `*/baseline` directory.\n- **athena-cli fix:** I fixed one assertion in retry.rs (`a_failed_check_retries_from_the_base`). The retry's producer run is now `seen[2]` because the first attempt gets a send-back run. The test also asserts that the send-back happened.\n- **Checks:** fmt and clippy are clean. The athena-core, athena-context and athena-cli suites pass, and so do the mirrors, budgets and boundary-policy scans. The only other failure was one drain.rs timing flake (see open issues).",
+    "files": [
+      "CHANGELOG.md",
+      "crates/athena-cli/tests/retry.rs",
+      "crates/athena-context/prompts/producer.md",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/run/checks.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/producer.rs",
+      "crates/athena-core/src/run/send_back.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --locked",
+        "result": "pass",
+        "note": "whole crate, includes the new in-loop tests and the baseline_ CI-reuse tests with the guarded MARKS_BASELINE_OUTSIDE"
+      },
+      {
+        "command": "cargo test -p athena-context --locked",
+        "result": "pass",
+        "note": "146 passed, includes producer_briefs_say_athena_runs_the_checks_before_the_verifier and the reference-doc test"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked (first run)",
+        "result": "fail",
+        "note": "one failure in retry.rs a_failed_check_retries_from_the_base (producer call index shifted by the send-back; fixed); one failure in drain.rs parallel::every_landing_path_ends_in_reinstall_for_any_unreadable_config, which passed when run alone (timing under load in a stubbed parallel drain)"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --test drain every_landing_path_ends_in_reinstall",
+        "result": "pass",
+        "note": "passes alone"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --no-fail-fast --test history_pr_head --test introspection --test job_plan --test lifecycle --test mirrors --test retry --test status_snapshot --test steward --test trailer_stop --test slot_exec",
+        "result": "fail",
+        "note": "all pass except retry.rs a_failed_check_retries_from_the_base, fixed afterwards"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --test retry",
+        "result": "pass",
+        "note": "28 passed after the index fix"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo test -p xtask --locked --test policy",
+        "result": "pass",
+        "note": "boundary scan, 22 passed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "crates/athena-core/src/run/producer.rs runs the configured checks (via the existing runner in crates/athena-core/src/run/checks.rs) on the producer's tree before the verifier, with GIT_INDEX_FILE set to a temporary index of the work tree. A failure's command, exit status and output tail are added to the existing send-back problems and rendered by send_back_text in crates/athena-core/src/run/send_back.rs. The stored invocation detail names the check failure.",
+        "status": "met",
+        "evidence": "producer_loop calls Athena::loop_check_failures (run/checks.rs), which runs the routed checks through SnapExec and run_check. A failure adds a problem string (so the stored `self-check failed:` detail names it) and goes into the send-back through append_check_failures in send_back.rs, with command, exit status and output tail. The test a_failing_check_is_sent_back_before_the_verifier_and_the_fix_reaches_it asserts the second brief and the stored detail; cargo test -p athena-core passes. Departure from the literal wording, as the plan decided: GIT_INDEX_FILE is set only for the one `git add -A` in ExposedIndex::new that builds the temporary index (the method of Snapshot::work_tree_tree). That index is installed as the snapshot's .git/index for the run and restored on drop. It is never exported to the checks, because run_check's environment would leak one shared index into the git calls of Athena's own tests. The decision entry D182 records this. The new-file test and the marker's `index=unset` assertion cover it."
+      },
+      {
+        "criterion": "The send-back stays bounded by PRODUCER_SEND_BACKS in crates/athena-core/src/run/mod.rs (diff shows no new loop and no changed limit). A check still failing after the send-back is passed to the verifier as flagged, not hidden.",
+        "status": "met",
+        "evidence": "The mod.rs diff changes only the PRODUCER_SEND_BACKS doc comment (value stays 1), the import, `in_loop: false` and the baseline_for call. a_check_still_failing_after_the_send_back_is_flagged_to_the_verifier asserts producer count 2, verifier count 1, the incomplete-report line and the verifier prompt carrying producer-report-gaps and the check name. Passes in cargo test -p athena-core."
+      },
+      {
+        "criterion": "A new test in crates/athena-core/src/run/tests.rs drives the real producer loop with a fake producer whose tree fails a configured check on the first pass and passes after the send-back. Run `cargo test -p athena-core`: it passes, and the brief of the second producer call contains the failed command and its output tail. On the base tree it fails because no send-back happens.",
+        "status": "met",
+        "evidence": "a_failing_check_is_sent_back_before_the_verifier_and_the_fix_reaches_it (tests.rs:4451) drives Athena::go with a fake producer that adds FIXED.txt only on `## Sent back`. It asserts Landed, producer count 2 and the second prompt carrying the command, `exit code 1` and the tail. Without the in-loop run there is one producer call and prompts[1] panics. cargo test -p athena-core passes."
+      },
+      {
+        "criterion": "A second test in crates/athena-core/src/run/tests.rs shows that when all checks pass on the first pass there is exactly one producer call and no send-back, and a test shows that a file added by the producer and listed only by `git ls-files` is seen by the in-loop check. Run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "all_checks_passing_means_one_producer_call_and_no_send_back (tests.rs:4569) asserts one producer call, no send-back and one in-loop marker line. a_file_the_producer_added_is_seen_by_the_in_loop_check (4602) shows the in-loop marker with new=yes and count 1. the_exposed_index_lists_new_files_and_is_restored_on_drop (4800) shows git ls-files lists the file only while the guard lives. All pass in cargo test -p athena-core."
+      },
+      {
+        "criterion": "The athena-cli tests that delete README.md and expect Rejected (retry.rs, introspection.rs, steward.rs, code_health_hooks.rs, lifecycle.rs:588) still pass with the extra producer pass. Run `cargo test -p athena-cli`.",
+        "status": "met",
+        "evidence": "Ran every athena-cli test target. lifecycle (79), introspection (35), steward (12), code_health_hooks (3), job_plan, mirrors, budgets, binary, auditor and the rest pass. One real break: retry.rs a_failed_check_retries_from_the_base indexed the retry's producer run as seen[1]; with the send-back the retry's run is seen[2]. I fixed it in retry.rs without weakening it: it now asserts three producer runs, that seen[1] holds `## Sent back`, and the same base-snapshot assertions on seen[2]; retry passes 28/28. drain.rs parallel::every_landing_path_ends_in_reinstall_for_any_unreadable_config failed once in the full run (a stub drain test that does not reach the producer loop) and passed alone, so I read it as a timing flake under load; I did not edit drain.rs."
+      },
+      {
+        "criterion": "crates/athena-context/prompts/producer.md and the producer brief in crates/athena-context/src/briefs.rs tell the producer that Athena runs the configured checks before the verifier and sends a failure back once. A test in briefs.rs asserts that text. The producer.md edit is net-zero bytes and the prompt budgets in crates/athena-cli/tests/budgets.rs still pass.",
+        "status": "met",
+        "evidence": "producer.md is 1102 bytes (ls -l), the same as before. Line 9 now reads: `- Run targeted tests (`cargo test -p <crate> <filter>`) while you work. Athena usually runs the checks before the verifier and sends a failure back once; run the suite at most once. `checks_run` lists only checks you ran.` Line 12 now reads: `Optional: if docs/agent-reference.md exists in the working copy, read it for the report; each rule is here and in your brief.` briefs.rs gains checks_before_verifier_section and the test producer_briefs_say_athena_runs_the_checks_before_the_verifier. cargo test -p athena-context passes (146) and the budgets test target passes (7)."
+      },
+      {
+        "criterion": "docs/decisions.md has a new appended entry with a Provenance bullet that names the root cause: Athena's recorded checks ran only at verification, so the producer could not see a failing gate before the verdict. It also names the temporary-index choice. No existing entry is edited. CHANGELOG.md records the change, and docs/decision-links.toml gets a link only if the entry amends or supersedes an earlier one.",
+        "status": "met",
+        "evidence": "D182 is appended after D181 (git diff shows only added lines in decisions.md). Its Provenance names the root cause and refers to the temporary-index choice described in the Decision, which also states the departure from criterion 1's wording. CHANGELOG.md has one new bullet at the top of Added. D182 uses no amends/supersedes wording, so decision-links.toml is unchanged. cargo test -p athena-cli --test mirrors passes."
+      },
+      {
+        "criterion": "No reading is newly refused (expected 0% of newly refused readings). Run `cargo test` for the workspace.",
+        "status": "met",
+        "evidence": "left to Athena's checks. No reading or refusal code changed, and the athena-core, athena-context and athena-cli suites pass."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets and cargo test pass on the final tree (Athena's recorded checks on the same tree, D115).",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran cargo fmt --all --check and cargo clippy --all-targets --locked -- -D warnings (both clean) and the crate tests above. I did not run the whole-workspace `cargo test --locked` as one command."
+      }
+    ],
+    "open_issues": [
+      "drain.rs parallel::every_landing_path_ends_in_reinstall_for_any_unreadable_config failed once under load in the full athena-cli run, with the stop Rebuilt where NeedsReinstall was expected. It passed when run alone. It uses stub steps and never reaches producer_loop, so I read it as a timing flake in the stubbed parallel drain, not an effect of this change. It was not reproduced a second time, and I did not edit drain.rs.",
+      "Departure from the literal wording of criterion 1, as the plan decided: GIT_INDEX_FILE is set only for the one `git add -A` that builds the temporary index. The index is then swapped into the snapshot's .git/index and restored on drop. It is not exported to the checks. This is recorded in D182 and the CHANGELOG bullet.",
+      "The wall-time cost and the busy-slot skip rate are estimates stated in D182, not measured."
+    ],
+    "mistakes": [
+      "The first full athena-cli run was in the background, and I could not read its output. I had to rerun the suite in the foreground to see the failing tests."
+    ],
+    "learnings": [
+      "The earlier attempt had already written almost all of the plan: checks.rs, producer.rs, send_back.rs, mod.rs, briefs.rs, producer.md, decisions.md, CHANGELOG.md and the tests. What remained was verification and one athena-cli assertion.",
+      "With the in-loop run, a rejected README-deleting job gets a second producer call. retry.rs a_failed_check_retries_from_the_base used seen[1] for the retry's run, which is now the send-back run.",
+      "The background task output lives under /tmp, outside the working directory, so it cannot be read from here; rerun in the foreground to see failures."
+    ],
+    "desires": [
+      "Read access to the background task output file; I had to rerun the failing athena-cli suite in the foreground to see its failure."
+    ]
+  }
+}

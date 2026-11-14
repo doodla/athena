@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-125837-rzp4",
+  "round": 2,
+  "at": "2026-11-14T13:19:50.745384293Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The in-loop run holds two builds at once, undoing the disk fix that removes the producer's build before checks; the reason given for rejecting the producer's own target directory is wrong",
+      "evidence": "disk.rs:64-67 says the producer build is removed before the first local check, 'The job so never holds two full builds while the checks run'. mod.rs:2009 repeats this, and CHANGELOG.md:1595-1600 records the incident: about 20 GB held, and a ~40 GB allowance ran out mid-test. In the plan, `loop_check_failures` builds a Side::Verify env (CARGO_TARGET_DIR = {job_dir}/target/verify, linked to the slot's target by SnapExec::link_slot_target, checks.rs:197-231) while target/produce is still on disk. The plan keeps target/produce on purpose (it relies on `low_once_built` to skip). So every in-loop cargo build or test writes workspace output into a second build tree next to the producer's. The disk gate only reads free space before the first check; it does not bound growth during the build, which is exactly how the recorded incident happened. The rejected alternative calls target/produce 'cold', but the producer's cargo shim (producer.rs:342-355) builds there, so it is the warmest directory for this exact tree. Neither D182 nor the disk.rs module doc is planned to state that the invariant changes. Fix: Run the in-loop checks with the producer's own build directory: build the env with Side::Produce, so CARGO_TARGET_DIR is target/produce. Add a SnapExec switch that still takes a slot with try_acquire but skips link_slot_target and clean_slot_target. Then no second build exists, and the incremental build is warm. If the planner keeps the slot target instead, it must update the disk.rs module doc and the mod.rs:2009 comment, say in D182 that the job now holds two builds during the producer stage, and add a test showing the gate and in-flight bound still hold.",
+      "location": "Plan Decision 2 (rejected alternative 'Call run_check directly … would build cold in the producer's own target directory'); Step 4 (Side::Verify env, slot target link); crates/athena-core/src/disk.rs:64-67; crates/athena-core/src/run/mod.rs:2008-2011",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The in-loop checks use the producer's tool configuration, so a legitimate tool-config deliverable causes a send-back the producer cannot fix and a false gap reported to the verifier; lifecycle.rs:947 is a counterexample missing from the dependents list",
+      "evidence": "The cli test check is `test -f README.md && ! test -f .cargo/config.toml && …` (common/mod.rs:62). `a_cargo_config_runner_in_the_candidate_is_set_aside_for_the_checks` (lifecycle.rs:947) has the producer create .cargo/config.toml as a listed deliverable and expects Landed, because verification applies the base's tool configuration (`toolconfig::apply_base_tool_config`, verification.rs:472). In the in-loop run that file is present, so `test` fails. The baseline passed it, so the failure is not pre-existing. The producer is sent back, rewrites the same file, fails again, and `check test failed before the verifier` goes to the verifier as a report gap, although the verifier's own checks pass. The same happens in real jobs whose deliverable is rustfmt.toml, clippy.toml or .cargo/config.toml: the one send-back is spent on a fault that does not exist. The dependents list names lifecycle.rs 55, 131, 395, 471, 588, 600, 864 and others, but not 947. Its test claim ('most assert only the state') does not cover the false gap. Fix: Apply the base's tool configuration for the in-loop run, the way verification does. Adapt `toolconfig::apply_base_tool_config` to a one-commit snapshot by comparing the base commit with the work tree's tree, overlay the base tool-config files, and take `prepared` before the overlay so `restore_to` puts the producer's files back. Alternatively, skip the in-loop run (with a line) when the change list holds a path where `admission::is_tool_config` is true. Either way, add lifecycle.rs:947 to the dependents with the reason it still passes, and add a core test where a tool-config deliverable is not sent back.",
+      "location": "Plan Decision 1/3 and Risk 2 ('in-loop result is advisory'); Dependents entry 'cli tests that delete README.md or use a failing change check'; crates/athena-cli/tests/lifecycle.rs:947-984; crates/athena-core/src/run/verification.rs:472",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 4 tests (b) and (c) pass trivially if the in-loop run is skipped or never happens",
+      "evidence": "Both checks are guarded by `if test -f NEW.txt` and assert only producer count 1. On the base tree, where there is no in-loop run, or whenever the run is skipped (busy slot, low disk, an empty change list), the producer count is also 1, so neither test proves that the in-loop check ran and saw NEW.txt. The plan's 'fails without' covers only a run that exists but has no swap. Fix: Have each test prove the in-loop check ran on the producer tree. For example, have the check append a line to a file under the snapshot's `.git/` (outside the tree, so restore_to leaves it), or assert there is no `producer   checks not run` line and that a counted run happened before the verifier. Add a negative twin: a check that runs `git ls-files --error-unmatch NEW.txt` must fail (producer count 2) when the swap is disabled.",
+      "location": "Plan Demonstrations, Criterion 4 (b) `a_file_the_producer_added_is_seen_by_the_in_loop_check` and (c) `a_check_that_runs_git_in_a_fresh_repository_passes_in_the_loop`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan deliberately departs from criterion 1's wording; the departure should be stated where the verifier will read it",
+      "evidence": "Criterion 1 says the checks run 'with GIT_INDEX_FILE set to a temporary index of the work tree'. The plan sets the variable only for the `git add -A` and swaps the result into .git/index. The reason is sound (run_check sets ctx.env after env_clear, so an exported variable would leak into the tests' own git calls). But a verifier reading criterion 1 literally may mark it unmet if the user's answer is not recorded. Fix: Have the producer report and D182 state the departure and its reason explicitly: the temporary index is built with GIT_INDEX_FILE and exposed by the swap, and the variable is never exported. If the user does not answer, treat the criterion as met by this reading.",
+      "location": "Plan Open questions; Acceptance criterion 1",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The new producer.md wording promises more than the code guarantees",
+      "evidence": "'Athena runs fmt, clippy and the suite before the verifier, and sends a failure back once' is false when the run is skipped (nested, pinned, busy slot, low disk) and for timeouts or failures already present on the base. Line 12 also loses 'and in your brief', which tells the producer the brief holds rules too. Fix: Use 'may run' or 'usually runs' with the same byte count, and keep 'in your brief' if bytes allow, for example by shortening another phrase on line 12.",
+      "location": "Plan Step 10 (producer.md line 9 and 12)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 2 deals well with the round-1 findings. The index swap removes the GIT_INDEX_FILE leak, the in-loop disk gate and the non-blocking slot are sound, and the seam skip keeps the existing seam tests meaningful. The send-back wiring matches the real code: problems and report_problems at producer.rs:499-521, the detail text at 559, report_gaps at 576-581 and the brief chain at 639. The baseline already exists before the producer runs (mod.rs:1794), and the producer.md edit really is net-zero: +29 bytes on line 9 and -29 on line 12, counted by hand. Two design faults remain, found by reading the code. (1) The in-loop run compiles into the build slot's target directory while the producer's own build (target/produce) is still on disk. That brings back the 'two full builds' condition that disk.rs:64-67, mod.rs:2008-2011 and CHANGELOG.md:1595-1600 describe as a fixed regression. The plan rejects building in the producer's own target directory as 'cold', but that directory is the producer's warm build. (2) The in-loop run keeps the producer's own tool configuration, while verification applies the base's (verification.rs:472). A job whose deliverable is a tool-config file therefore gets a false send-back it cannot fix, plus a false gap passed to the verifier. lifecycle.rs:947 (`a_cargo_config_runner_in_the_candidate_is_set_aside_for_the_checks`) is a concrete counterexample, and the dependents list leaves it out. Both are fixable, so the verdict is revise."
+}

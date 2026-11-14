@@ -1,0 +1,340 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-125837-rzp4",
+  "round": 1,
+  "at": "2026-11-14T13:04:09.957620342Z",
+  "invocation_seq": 2,
+  "approach": "In `producer_loop` (producer.rs), after the work-tree checks for a pass, run the configured checks on the producer's tree with the existing `run_check`. Skip a nested run, a pinned run and a pass with no change. The new `Athena::loop_check_failures` in run/checks.rs does it. It builds a `SnapExec` with `snapshot` = the producer's snapshot, `prepared` = `snapshot.work_tree_tree()`, the Verify-side env, and `GIT_INDEX_FILE` pointing at a temporary index filled by `git add -A`, so `git ls-files` lists new files. It routes with `routing::route` and runs each non-skipped spec through `Exec::exec`, stopping at the first failure. A failure that is not timed out and not pre-existing on the baseline (`verify::is_pre_existing`) becomes a `CheckFailure` (name, command, exit status, output tail). Each failure adds one short problem string to `problems` and `report_problems`. The string names the check, the command and the exit status, so the stored invocation detail (\"self-check failed: …\") names it. The full command and output tail go into the brief through a new `append_check_failures` in send_back.rs, chained in the same way as `append_mirror_drift` and `append_missing_changelog`. The existing single send-back (`PRODUCER_SEND_BACKS = 1`) carries it. At the limit the problem sits in `report_problems`, so it is printed and stored as `report_gaps`, and the verifier is told. The verifier still runs its own checks. `SnapExec` gains one field so the in-loop run skips the test-only `check_seam` and starts with `gated = true`. That leaves every existing seam-driven test and every disk-gate test unchanged. A new brief section and one net-zero line in producer.md tell the producer. D182 records it.",
+  "decisions": [
+    {
+      "choice": "Reuse `SnapExec` for the in-loop run, with `prepared` = the producer tree just taken, `gated = true` and a new `fakeable: bool` field set false for it (true in mod.rs:2037).",
+      "reason": "`SnapExec::exec` (run/checks.rs:98-145) already gives the check slot queue, the warm target link, `run_check`, the kill switch and a `restore_to(prepared)` that removes check-made files from the producer tree. The in-loop run is therefore the same as the verification run. `gated = true` leaves the disk gate to verification, so `low_once_verifying` style tests keep their call order. `fakeable = false` makes the in-loop run skip `check_seam` (checks.rs:116-119), so the many existing tests that install a seam still see one check call per check, and the new tests use real `sh -c` checks.",
+      "rejected": [
+        {
+          "option": "Call `run_check` directly with a hand-built `CheckContext` (as `format_stage` does, producer.rs:196)",
+          "why": "It bypasses build slots and the warm target link, so the in-loop `cargo test` would build cold in the producer's own target dir. It also leaves check-made files in the tree that `change_list` then sees."
+        },
+        {
+          "option": "Leave `SnapExec::exec` as it is and let the seam answer the in-loop run",
+          "why": "Every seam-driven test (tests.rs:4521, 4959, 5023, 5252, 5590, 6390, 6788) would get an extra check call. Failing fakes would add send-backs and change the producer counts."
+        }
+      ]
+    },
+    {
+      "choice": "Render the failure with a new `append_check_failures(text, &[CheckFailure])` in send_back.rs, chained after `append_mirror_drift` and `append_missing_changelog` (producer.rs:639). Do not add a seventh parameter to `send_back_text_scoped`.",
+      "reason": "Later send-back additions already use this shape (send_back.rs:219-267). It adds one leading sentence after `## Sent back` (the intro speaks only of criteria) and a section after the lists. It leaves the four `send_back_text*` wrappers and their many test callers unchanged.",
+      "rejected": [
+        {
+          "option": "Add a `checks: &[CheckFailure]` parameter to `send_back_text_scoped` and its wrappers",
+          "why": "It touches every wrapper and call site (producer.rs:622-638, send_back.rs tests) for no gain over the append pattern."
+        }
+      ]
+    },
+    {
+      "choice": "Only a real, new failure is sent back: not timed out (`checks::timed_out`), not pre-existing on the baseline (`verify::is_pre_existing(run, closing.baseline.as_ref())`). `LowDisk` and `SlotWait` from the in-loop run become a `checks     not run before the verifier: …` UI line. The kill-switch error propagates.",
+      "reason": "Verification already holds a job whose only failures timed out (`held_for_timeout`) and excludes pre-existing failures from the verdict. Sending the producer back for either would have it chase a fault it cannot fix. A disk or slot wait is judged at verification, which holds the job there.",
+      "rejected": [
+        {
+          "option": "Send back every non-passing check",
+          "why": "It spends the one send-back on a timeout or on a base failure the verdict already ignores."
+        }
+      ]
+    },
+    {
+      "choice": "Run the in-loop checks on every pass, including the second, and put the failure summary in both `problems` and `report_problems`. Skip a nested run, a pinned run (`ctx.pin_dir`, as `format_stage` does) and a pass with an empty change list.",
+      "reason": "A check still failing after the send-back must reach the verifier as flagged (criterion 2). `report_problems` becomes `report_gaps`, which candidate.rs:47-50 and verification.rs:100-108 already carry to the verifier. An empty change list fails as an idle producer after the loop.",
+      "rejected": [
+        {
+          "option": "Run only on the first pass",
+          "why": "Nothing would flag a still-failing check, and a producer that breaks a check while fixing another would not be caught."
+        }
+      ]
+    },
+    {
+      "choice": "Do not edit decision-links.toml. D182 is worded without the words amends, supersedes or superseded, so the log parse finds no hit that needs a `[[link]]`. It says D115 and D156 stand.",
+      "reason": "The only `[[governs]]` entry is D08 (candidate.rs and snapshot.rs), and neither file is touched. The change amends no earlier decision. Criterion 7 asks for a link only when one is needed.",
+      "rejected": [
+        {
+          "option": "Add an `amended` link from D115",
+          "why": "D115 (recorded checks on the same tree count as evidence) is applied, not revised."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "Add `fakeable: bool` to `SnapExec` (the test seam applies only when true). Add `Athena::loop_check_failures`, which runs the routed checks on the producer's tree through `SnapExec` with a temporary-index `GIT_INDEX_FILE` and returns `Vec<CheckFailure>`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add `pub(crate) struct CheckFailure` (name, command, exit, tail) and `append_check_failures`, plus unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Call `loop_check_failures` in `producer_loop` after the mirror-drift step. Add the problem string to `problems` and `report_problems`. Chain `append_check_failures` into `attempt_brief`. Extend the loop doc comment with the root cause.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Set `fakeable: true` in the `SnapExec` literal (mod.rs:2037). Extend the doc comment of `PRODUCER_SEND_BACKS` (value unchanged at 1).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add consts `NEEDS_FIXED_FILE` and `LISTS_NEW_FILE` and the tests for criteria 1 to 4. Fix any existing assertion that depends on the producer count of a failing real-process check, without weakening it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `checks_before_verifier_section()`, emitted after `unchanged_files_section()` (briefs.rs:744), and a test beside `producer_briefs_tell_the_producer_to_run_the_mirror_check`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/producer.md",
+      "action": "modify",
+      "purpose": "Net-zero-byte edit of lines 9 and 12 (step 10).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append `## D182 · Athena runs the configured checks on the producer's tree before the verifier and sends a failure back once; D115 and D156 stand`. Use the Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance bullets as in D181. No earlier line is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet under `## [Unreleased]` / `### Added` naming the root cause, the files, the tests and D182.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Listed as a deliverable but expected unchanged, because D182 amends nothing. Leave it alone unless the mirrors or backtest test reports a hit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/budgets.rs",
+      "action": "modify",
+      "purpose": "Expected unchanged (producer.md stays 1102 bytes). Edit only if a pinned expectation there reads the producer text and fails.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Edit only an assertion on producer counts or order that the extra producer pass breaks (the tests around lines 588, 656-664, 869-883 and 1441-1644), without weakening it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "purpose": "Same, for the producer-count assertions at lines 184, 471 and 1378, only if `cargo test -p athena-cli` shows they break.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "1. In crates/athena-core/src/run/send_back.rs add `pub(crate) struct CheckFailure { name, command: String, exit: String, tail: String }` with `CheckFailure::of(&CheckRun)`. `command` is `run.command.join(\" \")`, `exit` is `exit code N` or the run's note when there is no code, and `tail` is `crate::checks::tail(&run.output_tail, 4000)`. Add `append_check_failures(text: String, failures: &[CheckFailure]) -> String` after `append_missing_changelog`. With no failures it returns the text unchanged. Otherwise it inserts after the last `## Sent back\\n\\n` one leading sentence, 'Athena ran the configured checks on your work before the verifier and one failed; this is a reason for this send-back whether or not criteria are listed. ', then appends `\\nChecks that failed on your work (fix each; the verifier runs them again):\\n\\n` followed, for each failure, by `- <name>: <command> (<exit>)` and the tail in an indented fence. Add unit tests in a new `mod check_failure_tests`: one failure is rendered with command, exit and tail, and an empty list returns the text unchanged.",
+    "2. In crates/athena-core/src/run/checks.rs add `pub(super) fakeable: bool` to `SnapExec` with a doc line: the test seam applies only when true. Change line 117 to `check_seam::current().filter(|_| self.fakeable).map(|fake| fake(spec))`. In crates/athena-core/src/run/mod.rs:2037 set `fakeable: true`. Grep tests.rs for other `SnapExec {` literals and give them `fakeable: true`.",
+    "3. In checks.rs add `impl Athena { pub(super) fn loop_check_failures(&self, ctx: &RunContext<'_>, job_dir: &Path, snapshot: &Snapshot, capability_env: &BTreeMap<String,String>, changed: &[String], baseline: Option<&Baseline>) -> Result<Vec<CheckFailure>> }`. It returns an empty list when `self.nested.is_some()`, `ctx.pin_dir.is_some()` or `changed.is_empty()`. Otherwise it: (a) builds the env with `athena_agent::env::build` (Side::Verify, snapshot.dir(), job_dir, capability_env), as run/mod.rs:1981-1992 does; (b) makes the temporary index: `tempfile::NamedTempFile::new()?.into_temp_path()`, `remove_file`, then `snapshot.git().run_bytes([\"add\",\"-A\"], None, &[(\"GIT_INDEX_FILE\", path.as_os_str())])`, and inserts `GIT_INDEX_FILE` into a clone of the env map; (c) takes `prepared = snapshot.work_tree_tree()?` and calls `self.state.ensure_slot_targets(pipeline.max_check_slots as usize)?`; (d) builds a `SnapExec` with the fields as at mod.rs:2037-2054 but `snapshot` = the producer's snapshot, `gated: Cell::new(true)` and `fakeable: false`; (e) calls `crate::routing::route(kind, ctx.capability.checks(jc), changed)`, with the same `kind` expression as mod.rs:2021-2025, and for each `item` in `route.items` (skipping those with `skip`) calls `exec.exec(&item.spec)`, stopping after the first run that did not pass; (f) maps a downcast `LowDisk` or `SlotWait` error to a `ctx.ui.line(\"checks     not run before the verifier: …\")` and an empty list, and propagates any other error; (g) returns `CheckFailure::of(run)` for each run that is not passed, `!crate::checks::timed_out(run)` and `!crate::verify::is_pre_existing(run, baseline)`. The temporary-index `TempPath` lives to the end of the function.",
+    "4. In crates/athena-core/src/run/producer.rs, in `producer_loop`, after `mirror_drift` (about line 482) and before `left_criteria`, call `let check_failures = self.loop_check_failures(ctx, &job_dir, &snapshot, &capability_env, &changed, closing.baseline.as_ref())?;`. Include `&& check_failures.is_empty()` in the all-clear condition at line 489. Right after the `held` problem (line 517) push, for each failure, `format!(\"check {} failed before the verifier: `{}` ({})\", f.name, f.command, f.exit)` to `problems`, so `report_problems` (cloned at line 521) holds it. This puts the check, command and exit status into the stored `self-check failed: …` detail, into the 'report still incomplete after the send-back' line and into `report_gaps`.",
+    "5. In producer.rs wrap the final brief at line 639: `attempt_brief = append_check_failures(append_missing_changelog(append_mirror_drift(next_brief, &mirror_drift), changelog_missing), &check_failures);`. Import `append_check_failures` where the other send_back functions are imported (producer.rs uses `super::*`; add it to the `use` list in run/mod.rs that names `append_missing_changelog`). Add one paragraph to the `producer_loop` doc comment: the root cause (the recorded checks ran only at verification, so the producer could not see a failing gate before the verdict), that the run uses the same shared send-back, and that a failure after it is flagged.",
+    "6. In run/mod.rs extend the doc comment of `PRODUCER_SEND_BACKS` (line 1590) to say that a check failure before the verifier shares this one send-back. Do not change the value or add a counter.",
+    "7. In crates/athena-core/src/run/tests.rs add consts `NEEDS_FIXED_FILE` and `LISTS_NEW_FILE` beside `FAILS_ON_EDIT` (line 104) and a helper `fixing_file_on_send_back(counts, prompts)` modelled on `reconciling_on_send_back` (line 3120): it adds a `FIXED.txt` edit when the prompt has `## Sent back`. Add the tests named in the demonstrations: `a_failing_check_is_sent_back_before_the_verifier_and_the_fix_reaches_it` (also load `Records` and assert the first producer invocation's `detail` has `check probe failed before the verifier`), `a_check_still_failing_after_the_send_back_is_flagged_to_the_verifier`, `all_checks_passing_means_one_producer_call_and_no_send_back` and `a_file_the_producer_added_is_seen_by_the_in_loop_check`. Place them next to the other send-back tests (after line 4020).",
+    "8. In crates/athena-context/src/briefs.rs add `fn checks_before_verifier_section() -> String` returning `## Checks before the verifier` with text that says: Athena runs the configured checks (fmt, clippy and the test suite) on your work after you report and before the verifier; a failure is sent back to you once, with its command, exit status and output tail; one still failing afterwards goes to the verifier as flagged. Emit it with `writeln!` after `unchanged_files_section()` (briefs.rs:744). Add the test `producer_briefs_say_athena_runs_the_checks_before_the_verifier`, modelled on briefs.rs:2293, asserting the heading, those phrases and the order (after `## Planned files left unchanged`, before `## Report`).",
+    "9. Run `cargo test -p athena-context` and fix any size pin in briefs.rs that counts the producer brief (grep `len()` assertions near briefs.rs:2811, 3412).",
+    "10. Edit crates/athena-context/prompts/producer.md. Line 9 becomes: `- Run targeted tests (`cargo test -p <crate> <filter>`) while you work. Athena runs fmt, clippy and the full suite before the verifier and sends a failure back once; run the suite at most once. List in `checks_run` only checks you ran.` Line 12 becomes: `Optional: docs/agent-reference.md, if present, shows what the report holds; every rule is stated here and in your brief.` Then check `wc -c` is still 1102. If it is not, adjust the wording of line 12 only, until the byte count is equal (the producer states the final text of each changed line in its report). Run `cargo test -p athena-cli --test budgets` and `cargo test -p athena-context`; fix the wording, never the budget or system-facts.",
+    "11. Append `## D182 · …` to docs/decisions.md after D181 (file end, line 5257), using the bullet structure of D181. Case: the verdict-time rejections where a fmt, clippy or test failure was found only at verification. Decision: the in-loop run, the shared single send-back, the flag at the limit. State the temporary index (`GIT_INDEX_FILE` built by `git add -A`, as `Snapshot::work_tree_tree` does), so `git ls-files` sees files the producer added. Provenance: Read: producer.rs, send_back.rs, run/checks.rs, run/mod.rs, routing.rs, and D115, D156. Root cause: Athena's recorded checks ran only at verification, so the producer could not see a failing gate before the verdict. Measured: the new tests. Not measured: the added wall time per job. Do not use the words amends, supersedes or superseded; say that D115 and D156 stand.",
+    "12. Add a CHANGELOG.md bullet under `## [Unreleased]` / `### Added`, at the top of that list, saying what changed, the root cause, the tests (`cargo test -p athena-core a_failing_check_is_sent_back`) and D182. Leave docs/decision-links.toml unchanged.",
+    "13. Run `cargo test -p athena-core`, then `cargo test -p athena-cli`. For each failing test that asserts on producer counts or on order, because of the extra producer pass, fix only that assertion (lifecycle.rs, retry.rs). Do not weaken it. Edit no other athena-cli test file. Report any such file in open_issues.",
+    "14. Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` and `cargo test -p athena-cli --test mirrors`."
+  ],
+  "risks": [
+    {
+      "risk": "Added wall time per job.",
+      "mitigation": "Cost: each pass of a job now runs fmt, clippy and the full test on the producer's tree, and the same checks run again at verification. The in-loop run stops at the first failing check. It takes slots through `SnapExec`, so it waits like any check. It shares the warm slot target, so third-party crates stay compiled, and the workspace crates are rebuilt at verification (checks.rs:233-239). The producer's own target dir is untouched. The run is skipped for a nested run, a pinned run and an empty change list. Not measured: the added wall time per job. The producer states this in D182's Tradeoff, and it is not fixed by this plan."
+    },
+    {
+      "risk": "The producer fixes only the first failing check.",
+      "mitigation": "The in-loop run reports only the first failing check, because `run_local`-style stopping hides later ones. The brief says later checks may also fail, and the verifier still runs all of them. Do not lift the stop here."
+    },
+    {
+      "risk": "Tests outside the deliverables break from the extra producer pass.",
+      "mitigation": "Existing athena-core tests with `FAILS_ON_EDIT`, and the athena-cli tests that delete README.md, now see a second producer call. The producer runs the full `cargo test -p athena-core` and `cargo test -p athena-cli` and edits only an assertion that counts producers or orders reports. introspection.rs, steward.rs and code_health_hooks.rs are not deliverables. If one of them needs an edit, the producer reports it in open_issues and does not edit it. The scope check would send such an edit back."
+    },
+    {
+      "risk": "A check that writes into the tree changes the candidate.",
+      "mitigation": "`SnapExec::exec` calls `restore_to(prepared)` after each check with `prepared` taken just before the run, so files a check writes to the tree are removed before the next check and before the change list is taken again. The new test of criterion 4 shows the tree and the change list are as the producer left them (the producer count stays 1)."
+    },
+    {
+      "risk": "The temporary index leaks into the verification-time run, or the real index is changed.",
+      "mitigation": "`git add -A` into a temporary `GIT_INDEX_FILE` outside the work tree, as `Snapshot::work_tree_tree` does (athena-git/src/snapshot.rs:209-218). It touches neither the snapshot's real index nor the work tree. `run_check` clears the env, so the variable is set in the env map handed to `CheckContext`. The `TempPath` is held until the checks end. Because `GIT_INDEX_FILE` is in the in-loop env only, the verification-time env is unchanged."
+    },
+    {
+      "risk": "The `ls-files` test could pass in the loop and fail at verification for the same file.",
+      "mitigation": "The verifier snapshot's own index may not list a candidate-added file for `git ls-files`. That is existing verification behavior and outside this change. The criterion 4 test therefore asserts only the in-loop result (producer count 1) and not the landing."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "the send-back brief and its problem list",
+      "dependent": "crates/athena-core/src/run/producer.rs `producer_loop` (the only caller of `send_back_text*`, `append_mirror_drift`, `append_missing_changelog`; reads `PRODUCER_SEND_BACKS` at producer.rs:573, 614)",
+      "kind": "code",
+      "test": "cargo test -p athena-core: the existing send-back tests (tests.rs 2700-2780 replay, 3183-3260 gate, 3340-3530 mirrors, 3940-4020 scope) keep their producer counts, because their `true` check passes in-loop. The new tests cover the check problem.",
+      "reason": null
+    },
+    {
+      "name": "SnapExec fields and check_seam use",
+      "dependent": "crates/athena-core/src/run/mod.rs:2037 (the only `SnapExec { .. }` construction outside tests; producer must grep tests.rs for others) and run/checks.rs:116-119 (`check_seam`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core: every test that installs `check_seam` (tests.rs:4521, 4959, 5023, 5252, 5590, 6390, 6788) still sees only the verification-time calls, because the in-loop `SnapExec` has `fakeable = false`.",
+      "reason": null
+    },
+    {
+      "name": "report_gaps text that now can hold a check failure",
+      "dependent": "crates/athena-core/src/run/candidate.rs:26-50 and run/verification.rs:38,100-108 (read `Reported.report_gaps` into the candidate note and the verifier brief); run/mod.rs:150, 822, 847 (the resume mark stores `report_gaps` as strings)",
+      "kind": "code",
+      "test": null,
+      "reason": "They treat `report_gaps` as free `Vec<String>` joined with `; `. A check-failure entry is one more string. No record schema changes, so `check_record_file` and AnyRecord round-trip are untouched."
+    },
+    {
+      "name": "in-loop check on the producer tree for real-process fixtures",
+      "dependent": "crates/athena-core/src/run/tests.rs tests whose check is `FAILS_ON_EDIT` (lines 4314, 4570, 5628, 7590) and `MARKS_BASELINE` (4701, 6837)",
+      "kind": "code",
+      "test": "cargo test -p athena-core: `a_real_nonzero_check_failure_is_still_rejected` (4562) and the retry test at 5628 now send the producer back once; both assert the state and verifier count only. `produce_dir_is_removed_before_the_checks_whether_they_pass_or_fail` (4312) reads the free space at each gate, and `gated = true` adds no read. The `MARKS_BASELINE` commands touch `../baseline-ran` relative to the check dir. A test of low disk before the producer returns before any producer pass (4704), and the producer must confirm the second marker test (6837) the same way and fix an assertion only if it counts check runs.",
+      "reason": null
+    },
+    {
+      "name": "extra producer pass on a failing `test` check",
+      "dependent": "crates/athena-cli/tests/{lifecycle.rs (588, 656-664, 869-883, 1441-1644), retry.rs (184, 471, 1378), introspection.rs, steward.rs, code_health_hooks.rs} using `test_config()` (common/mod.rs:62) and README deletion scenarios",
+      "kind": "code",
+      "test": "cargo test -p athena-cli (criterion 5). The fake deletion is idempotent (athena-agent/src/fake.rs:107-109).",
+      "reason": null
+    },
+    {
+      "name": "producer prompt set size (1043 of 1200)",
+      "dependent": "docs/system-facts.md budget lines and crates/athena-cli/tests/budgets.rs (`system_facts_budgets_match_computed`)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets",
+      "reason": "producer.md stays 1102 bytes, so ⌈bytes/3⌉ is unchanged. The new brief text is in `briefs.rs`, which is outside the always-loaded sets."
+    },
+    {
+      "name": "docs/decisions.md and prompts/producer.md structure",
+      "dependent": "crates/athena-core/src/mirrors (prompt-structure and decision-entry rules, D162) and docs/decision-links.toml `line` numbers (D158 backtest)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test mirrors",
+      "reason": "The decision log gets an append only, so no existing `line =` in decision-links.toml moves. The D182 text avoids the phrases the parse reads as amends/supersedes hits. The producer.md line keeps its bullet shape."
+    },
+    {
+      "name": "disk gate and slot-wait holds at verification",
+      "dependent": "crates/athena-core/src/disk.rs `LowDisk` and `SlotWait` handling in `check_and_verify` (run/mod.rs:2078-2088), and the kill switch via `refuse_if_stopped`",
+      "kind": "rule",
+      "test": "cargo test -p athena-core low_disk_before_the_verifier_holds_the_job_and_a_retry_resumes_it",
+      "reason": "The in-loop run sets `gated = true`, so it adds no disk read. A `SlotWait` or `LowDisk` from it is turned into a UI line and the check is left to verification, which still holds the job as before. The kill-switch error propagates unchanged."
+    },
+    {
+      "name": "order of producer-stage acts",
+      "dependent": "crates/athena-core/src/run/format.rs `format_stage` (producer.rs:172) and the 'format step is the last act of each pass' rule in the `producer_loop` doc",
+      "kind": "rule",
+      "test": "cargo test -p athena-core: the existing format tests (run/format.rs) keep their order.",
+      "reason": "The in-loop check run comes after `format_stage` in the same pass, so it checks the formatted tree. The `producer_loop` doc comment gains one paragraph saying so."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two test runs and a diff read. The first is the end-to-end test of criterion 3. It also loads `Records` and asserts that the first producer invocation's `detail` contains `self-check failed: check probe failed before the verifier`. The second is a unit test in send_back.rs `mod` tests. `append_check_failures` on a `## Sent back` brief and one `CheckFailure { name: \"probe\", command: sh -c …, exit: \"exit code 1\", tail: \"MISSING-FIXED-TXT\" }` must contain the command, `exit code 1` and the tail. With an empty slice it must return the text unchanged. The diff shows the call in `producer_loop`, the use of `GIT_INDEX_FILE`, `run_check` reached through `SnapExec` and no new loop.",
+      "command": "cargo test -p athena-core a_failing_check_is_sent_back_before_the_verifier; cargo test -p athena-core the_send_back_names_the_failed_check; git diff -- crates/athena-core/src/run/producer.rs crates/athena-core/src/run/send_back.rs crates/athena-core/src/run/checks.rs",
+      "observes": "Both tests pass. The send-back brief has the section with the command, exit status and output tail. The stored detail names the failing check.",
+      "fails_without": "With no in-loop run, the first-pass check failure is not seen: the producer count is 1, `prompts[1]` does not exist, and no `check probe failed` text is stored in the first producer's `detail`.",
+      "seam": "Production entry point: `Athena::go`, which reaches `producer_loop` (producer.rs:272). Fixture: `athena_with(&repo, &state, NEEDS_FIXED_FILE, plenty_of_space, script)`, where `NEEDS_FIXED_FILE` is a new const `&[\"sh\",\"-c\",\"test -f FIXED.txt || { echo MISSING-FIXED-TXT; exit 1; }\"]` run by the real `run_check` (no `check_seam` is installed). `script` wraps `editing(...)` so the producer adds `FIXED.txt` only when its prompt has `## Sent back`. This is the same device as `reconciling_on_send_back` (tests.rs:3120). The seam exists today. The fixture const and the wrapper are added in step 9. The unit test needs no seam."
+    },
+    {
+      "criterion": 2,
+      "method": "The second test uses the same fixture but the producer never creates FIXED.txt. It asserts the producer count is exactly 2, the verifier count is exactly 1, and the outcome is Rejected. It asserts a UI line starting `producer   report still incomplete after the send-back: check probe failed`. It also asserts that the stored verification-time report gaps (read from the candidate note or the verifier prompt that `candidate.rs:47-50` builds) contain `check probe failed`. The diff of mod.rs shows only the `SnapExec` field and an unchanged `PRODUCER_SEND_BACKS: u32 = 1` line.",
+      "command": "cargo test -p athena-core a_failing_check_is_sent_back_before_the_verifier; cargo test -p athena-core a_check_still_failing_after_the_send_back_is_flagged; git diff -- crates/athena-core/src/run/mod.rs",
+      "observes": "Exactly one send-back. The still-failing check is shown in the incomplete-report line and reaches the verifier as a gap. Verification then rejects on its own recorded check.",
+      "fails_without": "Without the `report_problems` entry, the 'report still incomplete after the send-back: check probe failed' line is missing and the verifier is not told. If the loop were unbounded, the producer count would pass 2.",
+      "seam": "Production entry point: `Athena::go` (producer_loop). Fixture: `athena_with` with `NEEDS_FIXED_FILE` and `counting(counts, None)` via `editing`. `Counts::all()` gives the producer and verifier counts (tests.rs:2984). The seam exists today."
+    },
+    {
+      "criterion": 3,
+      "method": "Test `a_failing_check_is_sent_back_before_the_verifier_and_the_fix_reaches_it`. It builds `repo()`, `athena_with(.., NEEDS_FIXED_FILE, ..)` and a script that records every producer prompt and adds FIXED.txt on a send-back. It runs `athena.ask(\"describe the demo\")` then `athena.go(job, AcceptedBy::User, &ui)`. It asserts: state Landed; producer count 2 and verifier count 1; `prompts[0]` has no `## Sent back`; `prompts[1]` has `## Sent back`, the command text `sh -c test -f FIXED.txt || { echo MISSING-FIXED-TXT; exit 1; }` and the output tail `MISSING-FIXED-TXT`; and a UI line `producer   sent back: check probe failed`.",
+      "command": "cargo test -p athena-core --lib a_failing_check_is_sent_back_before_the_verifier",
+      "observes": "The second producer call's brief names the failed command and its tail. After the fix the verifier runs once and the job lands.",
+      "fails_without": "On the base tree no send-back happens: the producer count is 1 (the check fails only at verification, so the job is Rejected) and `prompts[1]` is an index panic. The test fails.",
+      "seam": "Production entry point: `Athena::go` (producer.rs:272, via run/mod.rs). Fake: the producer script of `FakeAgentDriver`, injected through `athena_with`. It only edits files and returns the report. It does not run the checks, which are the real `run_check` on a real `sh` process. The check command is configuration, not logic under test. The seam exists today (tests.rs:191, 3066). Step 9 adds the const and the wrapper script."
+    },
+    {
+      "criterion": 4,
+      "method": "First test: `athena_with(.., PASSES, ..)` with `editing(counts, prompts, vec![])`. It asserts producer count 1, verifier count 1, a single prompt with no `## Sent back`, and no UI line starting `producer   sent back`. Second test: the check is a new const `LISTS_NEW_FILE = &[\"sh\",\"-c\",\"git ls-files --error-unmatch NEW.txt\"]`, and the producer adds `NEW.txt` through the `extra` edits of `editing`. It asserts producer count 1 and exactly one prompt, so no send-back happened. It does not assert the final landing, because the verifier-time snapshot is outside this criterion.",
+      "command": "cargo test -p athena-core all_checks_passing_means_one_producer_call; cargo test -p athena-core a_file_the_producer_added_is_seen_by_the_in_loop_check",
+      "observes": "With passing checks there is exactly one producer call and no send-back. A producer-added file is listed by `git ls-files` inside the in-loop check.",
+      "fails_without": "If the in-loop run always sent back, the first test would see producer count 2. If `GIT_INDEX_FILE` were not set, `git ls-files --error-unmatch NEW.txt` in the snapshot's own index would fail for a file the producer added, so the second test would send back and see producer count 2.",
+      "seam": "Production entry point: `Athena::go`. Fixture: `athena_with`, `editing`, `Counts`. The seam exists today. Step 9 adds `LISTS_NEW_FILE` and the two tests."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the whole `cargo test -p athena-cli` on the final tree. The cli fixtures delete README.md and the `test` check (`test -f README.md && …`, crates/athena-cli/tests/common/mod.rs:62) fails in the loop, so the producer is sent back once. The fake producer deletes the missing file again (athena-agent/src/fake.rs:107-109 ignores a missing file), so the second pass fails the same check and the verifier still gets the flagged gap and rejects. The producer fixes any assertion on producer counts or order that breaks (lifecycle.rs:1441-1644, 656-664; retry.rs:184, 471, 1378), without weakening it. The listed deliverables lifecycle.rs and retry.rs may be edited for this.",
+      "command": "cargo test -p athena-cli",
+      "observes": "All athena-cli tests pass, including those that delete README.md and expect Rejected (lifecycle.rs:588 and 869-883, retry.rs, introspection.rs, steward.rs, code_health_hooks.rs).",
+      "fails_without": "If the in-loop run broke the cli fixtures, a test asserting `Rejected` after a README deletion would fail on a changed producer count, report order or retry brief.",
+      "seam": "Production entry point: `Athena::go` through the cli `Fixture` with `test_config()` and the scenario scripts. They exist today and are only run, not changed, except where an assertion needs the extra producer call."
+    },
+    {
+      "criterion": 6,
+      "method": "New test in briefs.rs, modelled on `producer_briefs_tell_the_producer_to_run_the_mirror_check` (briefs.rs:2293). It builds a `producer_brief` and asserts the new `## Checks before the verifier` section: it says Athena runs the configured checks before the verifier, that a failure is sent back once with its command and output tail, and that one still failing is flagged to the verifier. It also asserts the section sits after `## Planned files left unchanged` and before `## Report`. The producer edits producer.md line 9 to the exact final text in step 10 and shows with `wc -c` that the file is still 1102 bytes. `cargo test -p athena-cli --test budgets` keeps 1043 of 1200 for the producer set.",
+      "command": "cargo test -p athena-context producer_briefs_say_athena_runs_the_checks_before_the_verifier; cargo test -p athena-cli --test budgets; git diff --stat -- crates/athena-context/prompts/producer.md",
+      "observes": "The brief test passes. The budgets tests pass with `budget producer: 1043 of 1200` unchanged. The producer.md byte count is unchanged.",
+      "fails_without": "With no new section or prompt line, the brief test fails on the missing text. A producer.md that changed size would fail `system_facts_budgets_match_computed` and the producer budget test.",
+      "seam": "Production entry points: `producer_brief` (briefs.rs:675) and the budget tests. No fake is needed. Step 8 adds the section."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff. docs/decisions.md ends with a new `## D182 · …` entry whose Provenance bullet names the root cause (checks ran only at verification, so the producer could not see a failing gate before the verdict) and the temporary-index choice. It says D115 and D156 stand, and no earlier line changes. CHANGELOG.md gets one bullet under `## [Unreleased]` / `### Added`. docs/decision-links.toml is unchanged. The mirrors test checks the appended entry's structure.",
+      "command": "cargo test -p athena-cli --test mirrors; cargo test -p athena-core; git diff -- docs/decisions.md CHANGELOG.md docs/decision-links.toml",
+      "observes": "A pure append to decisions.md, one new changelog bullet, an unchanged links file, and a passing mirrors test.",
+      "fails_without": "A decision entry that breaks the structure rules, or that is not appended, fails the `mirrors` registry check on the finished diff (D162). A used amends/supersedes phrase would need a `[[link]]` and fail the backtest condition.",
+      "seam": "Production entry point: the mirror registry (`mirrors::check_all`, run by the `mirrors` test and by `producer_loop`'s `mirror_drift_in`). No fake. The seam exists today."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the full workspace `cargo test`. This plan adds or changes no refusal or matching rule. It adds information to the existing send-back only, so no corpus case is added. `cargo test -p athena-core --test refusal_corpus` is still run as part of the workspace run; this plan cites no case ids and no result for it.",
+      "command": "cargo test",
+      "observes": "The workspace passes. The share of newly refused readings stays 0%, because no reading code changes.",
+      "fails_without": "If the change made any reading refuse, `refusal_corpus` or a reading test would fail. No parser, stem list or reading check is touched.",
+      "seam": "Production entry point: the whole workspace test run. No fake."
+    },
+    {
+      "criterion": 9,
+      "method": "Run Athena's three recorded checks on the final tree. This is also what the in-loop run now does on the producer's tree before the verifier.",
+      "command": "cargo fmt --all --check; cargo clippy --all-targets --locked -- -D warnings; cargo test --locked",
+      "observes": "All three exit 0 on the final tree (D115).",
+      "fails_without": "A formatting, lint or test fault in the new code fails the matching check.",
+      "seam": "Production entry point: the three checks as written. No fake."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "681c4de11c27c3244fd6d2182e33d37d4702b243f3d406346bbcc3d543af2f6f"
+}

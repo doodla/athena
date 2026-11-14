@@ -1,0 +1,172 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-113229-kgrg",
+  "n": 1,
+  "at": "2026-11-14T11:09:53.590191732Z",
+  "invocation_seq": 1,
+  "base_commit": "3d91feab63d557d6bb4d94a0d9582fc797a2e61b",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Record kill-switch-stopped jobs as stopped and resumable, not failed",
+  "summary": "When the kill switch interrupts planning or blocks the producer from starting, the job is recorded as stopped and resumable instead of failed. It keeps its accepted reading and any plan, stays out of the failure-class counts, and resumes after `athena start` with no new reader run. Audience: the person running Athena, who judges this by the two tests and by failure counts and resume behavior. Job 20261030-060410-mavp (introspections only) is not redone: its landed work stays, and its three minor findings do not apply to jobs.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests plus fmt, clippy -D warnings and cargo test pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check job status, failure counts and reader invocation counts in tests, not wiring."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix at the shared point where planner interruption and producer-start refusal are turned into a failure, so both paths are covered."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/run/mod.rs (refuse_if_stopped at ~438 and ~2341, resume marks, held/interrupted messages, resume_seed), run/planning.rs (RoundEnd::Stopped returns at many points; planning returns Ok(None) on stop), run/format.rs, lib.rs:300 (refuse_if_stopped), status.rs:1200 (kill switch next-step text) and introspect.rs (run_or_defer, start_with from job 20261030-060410-mavp). The entry point is the run in run/mod.rs; the reader runs first, planning second, producer third. Records validation and AnyRecord are touched only if a new status or marker is stored, which I try to avoid by reusing the existing held/resume mechanism; if a new record shape is needed, the round-trip test for it must be extended. Behavior is measured directly by job outcome, failure-class counts and a counting fake reader driver.",
+    "Existing code: reuse the existing hold/resume-mark machinery in crates/athena-core/src/run/mod.rs (read_resume, write_resume, held and interrupted jobs, `athena retry`) and Athena::start_with in crates/athena-core/src/introspect.rs, extending start to resume stopped jobs.",
+    "Field meaning: a stopped job reuses the existing 'held' or 'interrupted' notion (run/mod.rs:483-493), meaning a job that did not close and is resumed later; no new record key is assumed. If the code requires a new status, the producer adds it as one new field and states it in the decision entry.",
+    "Assumption: 'stopped and resumable' means the job is not closed as failed, is excluded from failure-class counts in status, and a later `athena start` resumes it from its saved accepted reading (and plan if any) without invoking the reader; if the pipeline lacks a way to resume a job without its candidate, the producer adds one reusing saved readings.",
+    "Assumption: the request's 'Files: records/' means the records directory is where the evidence lies; no records file is edited."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in crates/athena-core/src/run/tests.rs (or a crates/athena-cli test) turns the kill switch on during planning; after the run, the job is not recorded as failed, is recorded as stopped and resumable, and its accepted reading and any plan are kept. Run with `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test turns the kill switch on before the producer starts; the job is not recorded as failed, is stopped and resumable, and keeps its accepted reading and plan. Run with `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In both tests, after `athena start` (start_with) the job resumes and proceeds, and a counting fake reader shows zero new reader invocations after the stop. Run with `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In both tests, the failure-class counts (class code failures in status) do not include the stopped job. A test asserts this through the status or counting function. Run with `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Failures that are not kill-switch stops (a planner error, a producer failure with the switch off) are still recorded as failed and counted; an existing or new test covers this, and all existing tests still pass. Run with `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The kill-switch stop for a job reaches the stopped-and-resumable record at one shared point in crates/athena-core/src/run/, found by Grep for the stop reason used in both the planning and producer-start paths, not by duplicated text matching.",
+      "kind": "content"
+    },
+    {
+      "text": "The change is recorded in a new appended entry in docs/decisions.md with a Provenance bullet that cites job 20261030-060410-mavp as the introspection counterpart, and CHANGELOG.md has an entry. No existing decision entry is edited and nothing under records/ changes (check with `git diff --stat`).",
+      "kind": "content"
+    },
+    {
+      "text": "Athena's recorded fmt (`cargo fmt --check`), `cargo clippy -- -D warnings` and `cargo test` checks pass on the final tree.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/src/commands.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.8
+    }
+  ],
+  "out_of_scope": [
+    "Any edit to records/ (the 'Files: records/' line in the request is not a deliverable: records are append-only and never change by hand).",
+    "Introspection deferral (job 20261030-060410-mavp): its landed changes to introspect.rs, manage.rs, commands.rs, state.rs, CHANGELOG.md and docs/decisions.md are kept as they are; only additions needed for jobs are made, and its minor findings (kill-switch text duplicated from DriverError::Stopped, four reruns on first start, requeue test coverage) concern introspections and are not addressed here.",
+    "Changing how the kill switch blocks agents and checks, or deferring anything other than jobs.",
+    "Changes to athena.toml, defaults.toml or .github/workflows.",
+    "Rewriting records of jobs already recorded as failed by the kill switch."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 6.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6757215619694398,
+      "p_user_intervenes": 0.06257668711656442,
+      "cost_usd": {
+        "p10": 0.5504364917533153,
+        "p50": 1.4791114,
+        "p90": 5.687058881982814
+      },
+      "wall_time_s": {
+        "p10": 605.6313230013942,
+        "p50": 2159.444995015573,
+        "p90": 4396.032011170137
+      }
+    }
+  },
+  "departures": "Higher cost and lower pass chance than the reference because the change touches the run pipeline's close and resume path and needs two new end-to-end tests with a counting fake reader.",
+  "hard_reason": "It changes how a job is closed and resumed in the run pipeline and which jobs count toward failure-class counts, which feed gates that judge other jobs.",
+  "producer_effort": "high"
+}

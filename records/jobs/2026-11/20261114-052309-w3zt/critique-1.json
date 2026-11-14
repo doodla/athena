@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-052309-w3zt",
+  "round": 1,
+  "at": "2026-11-14T09:45:08.533315843Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Leaving config.rs and docs/decisions.md untouched will trigger a send-back unless the producer gives a reason for each.",
+      "evidence": "`planned_paths` merges the plan's files with the reading's deliverables, and the reading lists config.rs and docs/decisions.md. `unchanged_planned_files` flags any planned path that is unchanged and has no non-empty reason in the report's `unchanged_planned_files`. That costs a send-back (send_back.rs:161-186) and, if left unanswered, reaches the verifier as a flag. The plan only mentions the conflict as an open question for the user. Fix: Add a step telling the producer to list crates/athena-data/src/config.rs and docs/decisions.md in `unchanged_planned_files`. Reason for both: criterion 4 limits the diff to planning.rs, run/tests.rs and CHANGELOG.md, and config.rs needs no change because `planner_revision_setting` is reused as it is.",
+      "location": "Plan: Deliverable scope / Steps (no step covers unchanged deliverables); crates/athena-core/src/run/mod.rs:1595-1638",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The list of dependents leaves out the stored timeout in the invocation record and does not say the stall window doubles.",
+      "evidence": "invocation.rs:212 and :246 write `spec.timeout.as_secs()` into `InvocationCaps.timeout_s` and into the in-flight usage record, so an escalated planner's record will say 1200. claude.rs:598 sets the stall window with `stall_window(spec.timeout, ..)`, which is timeout/3 (procs.rs:29-31). An escalated call that goes silent is therefore stopped after 400 s instead of 200 s. The plan's risk entry only mentions the longer deadline. I found no code that reads `caps.timeout_s` back (grep for `.caps.` found only unrelated drain caps). Fix: Add the invocation record (`InvocationCaps.timeout_s`) as a dependent, and say in Risks and in the CHANGELOG entry that the stall window grows with the limit. Optionally, have the criterion 1 test also check the recorded planner invocation's `caps.timeout_s` is 1200, so the record shows the change too.",
+      "location": "Plan: Dependents (AgentInvocation.timeout entry)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A test named `planner_time_limit_is_unscaled_*` also checks that a call is scaled.",
+      "evidence": "Case (d) checks that the first call is 600 s and the mechanical revision call at xhigh is scaled. That is the criterion 1 behaviour on a different path, placed under a name that says 'unscaled'. Fix: Move the mechanical-pass check into its own test, for example `a_mechanical_revision_at_a_stronger_effort_scales_the_planner_time_limit`, or into the criterion 1 test.",
+      "location": "Plan: Demonstration for criterion 2, case (d)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Only effort is scaled: a model-only escalation (haiku to sonnet) or a jump of several levels (low to max) gets the same treatment as the request asks for.",
+      "evidence": "The request ties the time limit to effort escalation only, and the reading accepted a fixed 2x. A slower model or a bigger jump can also push wall time up, but scaling for those would go beyond the request. Fix: No change needed. Optionally note this limit next to the constant's doc comment so a later change can scale by rank difference or by model.",
+      "location": "Plan: Decision 1 (soundness)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan answers the request. It scales the planner timeout only when `planner_revision_setting` returns a stronger effort, and keeps the change to the three files criterion 4 allows. I read the code and the plan's claims hold. `planning_round` (planning.rs:143-163) picks the effort and passes `cfg.planner_timeout_s` straight to `agent_spec`. `planner_revision_setting` (config.rs:377-393) hands back the planner's own effort string when the key is unset, weaker, equal or cannot be ranked, so comparing strings detects escalation correctly. The `run_for_revision` test helper (tests.rs:1371-1434) already receives each planner call's `AgentInvocation` from the real `go` flow, and the `calls` tuple is only unpacked at tests.rs:1363 and 1497. Its tests would fail without the change. Their 600 s baseline comes from tests.rs:1338. I found no blocker or major problem; a fixed 2x factor is the design the user accepted. Gaps worth fixing: (1) The reading still lists config.rs and docs/decisions.md as deliverables. Through `planned_paths`/`unchanged_planned_files` (run/mod.rs:1595-1638), Athena sends the work back if those files are untouched with no reason given, and the plan never tells the producer to give one. (2) The list of things that depend on the timeout leaves out the stored invocation record (`InvocationCaps.timeout_s`, invocation.rs:212/246) and the doubled stall window. Neither breaks anything."
+}

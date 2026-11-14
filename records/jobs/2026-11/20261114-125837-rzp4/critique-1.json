@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-125837-rzp4",
+  "round": 1,
+  "at": "2026-11-14T13:07:17.16636358Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "GIT_INDEX_FILE set in the check env leaks into every git process the checks start, including the git calls in Athena's own test suite, so the in-loop `cargo test` fails for no fault in the work.",
+      "evidence": "`run_check` clears the environment and then sets `ctx.env` (checks.rs:534). The plan puts GIT_INDEX_FILE into that map, so `cargo test` and every test binary it starts inherit it. `Git::command` (athena-git/src/lib.rs:233-246) only adds variables and never removes GIT_INDEX_FILE, and `Git::at`/`Git::isolated` are what Athena's tests use to build temp repositories. Each `git add`/`git commit` in those tests would then write one shared temp index. Parallel test threads would race on its lock, and its entries point to blobs that exist only in the producer snapshot's object store, so commits fail. On Athena's own repo, the main target, every job would spend its one send-back on a false test failure and pass it to the verifier as a flagged gap. The criterion-4 test uses a bare `sh -c git ls-files`, so it cannot catch this. The claim that the in-loop run 'is the same as the verification run' is also wrong: verification runs in a committed two-commit snapshot (mod.rs:1976-1980) and never needs GIT_INDEX_FILE. Fix: Do not export GIT_INDEX_FILE to the check processes. Make `git ls-files` see new files another way. Option 1: save `.git/index` of the producer snapshot, run `git add -A` on it, run the checks, then restore the saved index. Option 2: run the in-loop checks in a committed snapshot built the way `verifier_snapshot` builds one. Add a test whose in-loop check runs `git init && git add && git commit` in a fresh temp repo and passes. If criterion 1's literal 'GIT_INDEX_FILE set' wording blocks this, raise it as an open question and do not ship the leak.",
+      "location": "Plan step 3(b) and Decision 1; crates/athena-git/src/lib.rs:233-246; crates/athena-core/src/checks.rs:534",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The in-loop run skips the disk gate (`gated = true`) while the producer's build directory still exists, so a full build can run on low space and an out-of-space failure is sent back as a fault in the work.",
+      "evidence": "Verification frees the producer build before its checks 'so the job never holds two full builds at once' (mod.rs:2008-2011). It applies the disk gate because 'low space makes builds fail in ways that look like faults in the work' (mod.rs:2059-2061). The in-loop run keeps the producer build, since it is kept for a send-back, builds again in a slot target, and sets `gated = true`, so no free-space read happens unless the slot waited. Step 3(f)'s LowDisk mapping therefore almost never fires. Fix: Run the disk gate before the in-loop checks (`gated = false`, or one explicit `disk_gate` call) and turn LowDisk into the 'not run before the verifier' line, as step 3(f) already does. Update the tests that count disk reads (low_once_verifying style) in the dependents list, instead of skipping the gate to keep them unchanged.",
+      "location": "Decision 1, step 3(d); crates/athena-core/src/run/mod.rs:2008-2011 and 2059-2064",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list omits athena-cli tests outside the five named files that get an extra producer pass, and step 13 forbids editing them.",
+      "evidence": "`per_job_worktree_a_rejected_job_leaves_neither_directory` (drain.rs:9631) configures `! grep -q Hello README.md`, which passes on the base and fails on the candidate. The in-loop run will now send it back, and the test asserts directory isolation (`assert_isolated_start`, `assert_both_gone`) across the run. `gate_run` (drain.rs:3130) runs under the `low_while_built_or_checking` disk probe with CI-first routing, and the in-loop run adds local check runs and slot or disk reads ahead of verification. lifecycle.rs:471 (counter case, same check) is also not in the listed lines. Step 13 says 'Edit no other athena-cli test file', so a break in drain.rs could not be fixed. Fix: Add drain.rs (both tests) and lifecycle.rs:55/131/471 to the dependents list, each with the test that covers it. Either show they pass unchanged or add drain.rs to the files the producer may edit for count or order assertions only.",
+      "location": "Dependents 'extra producer pass on a failing test check'; step 13; crates/athena-cli/tests/drain.rs:9631-9646, 3130-3140; crates/athena-cli/tests/lifecycle.rs:471-475",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The pre-existing filter uses the baseline without the base-commit check that verification applies.",
+      "evidence": "Verification uses `closing.baseline.filter(|b| b.base_commit == p)` because 'a baseline taken on any other commit says nothing about this base'. The plan passes the raw baseline. Fix: Apply the same base_commit filter, or share a helper with mod.rs:2127.",
+      "location": "Step 3(g), step 4 (`closing.baseline.as_ref()`); crates/athena-core/src/run/mod.rs:2127-2130",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The in-loop run uses the producer's tool configuration, while verification uses the base's, so the two results can differ.",
+      "evidence": "`verifier_snapshot` returns `tool_config_from_base` and puts the base's check-tool configuration in the verifier's working tree (mod.rs:1976-1980). The producer snapshot has whatever tool configuration the producer left. Fix: Remove the 'same as verification' claim. Either restore the base tool configuration for the in-loop run or note the difference in D182's Tradeoff.",
+      "location": "Decision 1 ('the in-loop run is therefore the same as the verification run')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A SlotWait in the loop waits the full build_wait_s before giving up, so the wait can happen twice for one job.",
+      "evidence": "`SlotQueue::acquire` waits up to build_wait_s before it returns SlotWait. The plan then waits again at verification, where the hold happens. Fix: Use a non-blocking or short acquire for the in-loop run, or state the doubled wait in the risks and in D182.",
+      "location": "Step 3(f)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Step references and test locations are inconsistent.",
+      "evidence": "The demonstrations say the consts and the wrapper are added in 'step 9', but step 7 adds them and step 9 is the briefs size check. The format tests that drive `producer_loop` with the real `cargo fmt` check are in run/tests.rs:600-720, not run/format.rs. Fix: Correct the step numbers and point the format dependent at run/tests.rs.",
+      "location": "Demonstrations for criteria 1, 3 and 4; Dependents 'order of producer-stage acts'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan follows the accepted reading. It adds an in-loop check run in `producer_loop` through `SnapExec`, uses the single existing send-back, renders the failure with an append helper, and adds tests on the real loop with real `sh` checks. The files and functions it names exist (SnapExec at checks.rs:73, the check_seam at :116-119, producer_loop at producer.rs:272, briefs.rs:744 and :2293, `is_pre_existing`, `timed_out`, `tail`), and the demonstrations for criteria 1-4 would fail without the behavior. Two design faults need a revision. First, exporting GIT_INDEX_FILE into the check environment leaks into every git process that `cargo test` starts; Athena's own tests build temp repos through `Git::at`/`isolated`, which never clear it, so the in-loop test check would fail falsely on Athena's own repo. Second, setting `gated = true` skips the disk gate while the producer's build is still on disk, which breaks the 'never two full builds' rule verification relies on. The dependents list also misses drain.rs tests (9631, 3130) and lifecycle.rs:471, which the extra producer pass reaches, and step 13 forbids editing drain.rs. Smaller points: the baseline is not filtered by base_commit as verification does, the 'same as verification' claim ignores the base tool configuration and CI reuse, a slot wait can happen twice, and some step references are wrong. All of these can be fixed in the plan, so the verdict is revise."
+}

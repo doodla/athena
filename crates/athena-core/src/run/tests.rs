@@ -4365,6 +4365,490 @@ mod produce_and_verify_order_tests {
         Box::leak(vec!["sh", "-c", script].into_boxed_slice())
     }
 
+    /// A check that passes on the base README, and on the candidate only once the producer has added
+    /// `FIXED.txt`; it says `MISSING-FIXED-TXT` while the file is missing.
+    const NEEDS_FIXED_FILE: &str = "grep -q 'A demo' README.md || exit 0; \
+         test -f FIXED.txt || { echo MISSING-FIXED-TXT; exit 1; }";
+
+    /// A check named `probe` that first appends one line to `marker` (the directory it runs in, its build
+    /// directory, its `GIT_INDEX_FILE` and whether `NEW.txt` is there), then runs `body`. The producer's work
+    /// tree is `<job dir>/work`, the baseline's `<job dir>/baseline` and the verifier's `<job dir>/verify`,
+    /// so a line whose directory ends in `/work` is a run before the verifier.
+    fn marked_check(body: &str, marker: &std::path::Path) -> &'static [&'static str] {
+        leaked_sh_check(format!(
+            "echo \"$PWD target=$CARGO_TARGET_DIR index=${{GIT_INDEX_FILE:-unset}} \
+             new=$(test -f NEW.txt && echo yes || echo no)\" >> '{}'; {body}",
+            marker.display()
+        ))
+    }
+
+    /// The lines of `marker` written by runs in the producer's work tree.
+    fn loop_lines(marker: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(marker)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| {
+                l.split_whitespace()
+                    .next()
+                    .is_some_and(|dir| dir.ends_with("/work"))
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The editing script, except that the producer adds `FIXED.txt` only when its prompt carries a
+    /// send-back, as a producer that read the failed check in it would.
+    fn fixing_file_on_send_back(
+        counts: Arc<Counts>,
+        prompts: Arc<Mutex<Vec<String>>>,
+    ) -> athena_agent::fake::Script {
+        let inner = editing(counts, prompts, Vec::new());
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            if spec.role == Role::Producer && spec.user_prompt.contains("## Sent back") {
+                turn.edits
+                    .push(("FIXED.txt".into(), Some("fixed\n".into())));
+            }
+            turn
+        })
+    }
+
+    /// `inner`, with every verifier prompt kept in `prompts`.
+    fn recording_verifier_prompts(
+        inner: athena_agent::fake::Script,
+        prompts: Arc<Mutex<Vec<String>>>,
+    ) -> athena_agent::fake::Script {
+        Box::new(move |spec: &AgentInvocation| {
+            if spec.role == Role::Verifier {
+                prompts.lock().unwrap().push(spec.user_prompt.clone());
+            }
+            inner(spec)
+        })
+    }
+
+    /// Runs one job to its end over `repo` with the capability's check `check`; the closing, what the UI
+    /// said and the athena it ran on.
+    fn run_checked_job(
+        repo: &tempfile::TempDir,
+        state: &tempfile::TempDir,
+        check: &'static [&'static str],
+        free_space: crate::state::FreeSpace,
+        script: athena_agent::fake::Script,
+    ) -> (Finished, Vec<String>, Athena, JobId) {
+        let athena = athena_with(repo, state, check, free_space, script);
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        let said = ui.0.lock().unwrap().clone();
+        (done, said, athena, proposal.job)
+    }
+
+    #[test]
+    fn a_failing_check_is_sent_back_before_the_verifier_and_the_fix_reaches_it() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let marker = marks.path().join("marks");
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (done, said, athena, job) = run_checked_job(
+            &repo,
+            &state,
+            marked_check(NEEDS_FIXED_FILE, &marker),
+            crate::test_support::plenty_of_space,
+            fixing_file_on_send_back(counts.clone(), prompts.clone()),
+        );
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (2, 1), "{said:#?}");
+        // The second brief names the failed command, how it ended and the end of its output.
+        let prompts = prompts.lock().unwrap().clone();
+        assert!(!prompts[0].contains("## Sent back"), "{}", prompts[0]);
+        let second = &prompts[1];
+        assert!(second.contains("## Sent back"), "{second}");
+        assert!(second.contains("test -f FIXED.txt"), "{second}");
+        assert!(second.contains("exit code 1"), "{second}");
+        assert!(second.contains("MISSING-FIXED-TXT"), "{second}");
+        assert!(
+            said.iter()
+                .any(|l| l
+                    .starts_with("producer   sent back: check probe failed before the verifier")),
+            "{said:#?}"
+        );
+        // The checks ran on the producer's tree, in its own build directory, with no index variable.
+        let lines = loop_lines(&marker);
+        assert_eq!(lines.len(), 2, "{lines:#?}");
+        for line in &lines {
+            assert!(line.contains("/target/produce index=unset"), "{line}");
+        }
+        // The first invocation's stored detail names the failed check.
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let mut producers: Vec<_> = records.jobs[job.as_str()]
+            .invocations
+            .iter()
+            .filter(|i| i.role == Role::Producer)
+            .collect();
+        producers.sort_by_key(|i| i.seq);
+        let detail = producers[0].detail.clone().unwrap_or_default();
+        assert!(
+            detail.contains("self-check failed: check probe failed before the verifier"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn a_check_still_failing_after_the_send_back_is_flagged_to_the_verifier() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let marker = marks.path().join("marks");
+        let counts = Arc::new(Counts::default());
+        let verifier_prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        // A producer that never creates FIXED.txt.
+        let script = recording_verifier_prompts(
+            editing(counts.clone(), Arc::default(), Vec::new()),
+            verifier_prompts.clone(),
+        );
+        let (done, said, athena, job) = run_checked_job(
+            &repo,
+            &state,
+            marked_check(NEEDS_FIXED_FILE, &marker),
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        // One send-back and no more; verification then rejects on its own recorded check.
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (2, 1), "{said:#?}");
+        assert_eq!(done.state, OutcomeState::Rejected, "{}", done.reason);
+        assert_eq!(
+            said.iter()
+                .filter(|l| l.starts_with("producer   sent back"))
+                .count(),
+            1,
+            "{said:#?}"
+        );
+        assert!(
+            said.iter().any(|l| l.starts_with(
+                "producer   report still incomplete after the send-back: check probe failed before the verifier"
+            )),
+            "{said:#?}"
+        );
+        let prompts = verifier_prompts.lock().unwrap().clone();
+        assert!(
+            prompts[0].contains("producer-report-gaps")
+                && prompts[0].contains("check probe failed"),
+            "{}",
+            prompts[0]
+        );
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let mut producers: Vec<_> = records.jobs[job.as_str()]
+            .invocations
+            .iter()
+            .filter(|i| i.role == Role::Producer)
+            .collect();
+        producers.sort_by_key(|i| i.seq);
+        let detail = producers[1].detail.clone().unwrap_or_default();
+        assert!(
+            detail.contains("check probe failed before the verifier"),
+            "{detail}"
+        );
+        // Both passes ran the checks on the producer's tree.
+        assert_eq!(loop_lines(&marker).len(), 2);
+    }
+
+    #[test]
+    fn all_checks_passing_means_one_producer_call_and_no_send_back() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let marker = marks.path().join("marks");
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (done, said, _, _) = run_checked_job(
+            &repo,
+            &state,
+            marked_check("true", &marker),
+            crate::test_support::plenty_of_space,
+            editing(counts.clone(), prompts.clone(), Vec::new()),
+        );
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (1, 1), "{said:#?}");
+        assert_eq!(prompts.lock().unwrap().len(), 1);
+        assert!(!prompts.lock().unwrap()[0].contains("## Sent back"));
+        assert!(
+            !said.iter().any(|l| l.starts_with("producer   sent back")),
+            "{said:#?}"
+        );
+        // The run before the verifier happened, once.
+        assert_eq!(loop_lines(&marker).len(), 1);
+    }
+
+    #[test]
+    fn a_file_the_producer_added_is_seen_by_the_in_loop_check() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let marker = marks.path().join("marks");
+        let counts = Arc::new(Counts::default());
+        // Passes on the base, which has no NEW.txt. With it, the file must be listed by git.
+        let body = "if test -f NEW.txt; then git ls-files --error-unmatch NEW.txt || exit 1; fi";
+        let (done, said, _, _) = run_checked_job(
+            &repo,
+            &state,
+            marked_check(body, &marker),
+            crate::test_support::plenty_of_space,
+            editing(
+                counts.clone(),
+                Arc::default(),
+                vec![("NEW.txt".into(), Some("new\n".into()))],
+            ),
+        );
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        assert_eq!(counts.all().1, 1, "{said:#?}");
+        let lines = loop_lines(&marker);
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(lines[0].ends_with("new=yes"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn a_check_that_runs_git_in_a_fresh_repository_passes_in_the_loop() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let marker = marks.path().join("marks");
+        let counts = Arc::new(Counts::default());
+        // Makes its own repository in a temporary directory when NEW.txt exists. A leaked `GIT_INDEX_FILE`
+        // would make these git calls write one shared index, and the commit would fail.
+        let body = "if test -f NEW.txt; then \
+             d=$(mktemp -d) || exit 1; cp NEW.txt \"$d\"; cd \"$d\" || exit 1; \
+             git init -q . && git add NEW.txt && \
+             git -c user.name=t -c user.email=t commit -q -m one || exit 1; \
+             fi";
+        let (done, said, _, _) = run_checked_job(
+            &repo,
+            &state,
+            marked_check(body, &marker),
+            crate::test_support::plenty_of_space,
+            editing(
+                counts.clone(),
+                Arc::default(),
+                vec![("NEW.txt".into(), Some("new\n".into()))],
+            ),
+        );
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        assert_eq!(counts.all().1, 1, "{said:#?}");
+        let lines = loop_lines(&marker);
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(lines[0].contains("index=unset"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn a_check_failure_that_already_fails_on_the_base_is_not_sent_back() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let marker = marks.path().join("marks");
+        let counts = Arc::new(Counts::default());
+        let (done, said, _, _) = run_checked_job(
+            &repo,
+            &state,
+            marked_check("exit 1", &marker),
+            crate::test_support::plenty_of_space,
+            editing(counts.clone(), Arc::default(), Vec::new()),
+        );
+        // The check fails on the base too, so it is no reason to send the producer back.
+        assert_eq!(counts.all().1, 1, "{said:#?}");
+        assert!(
+            !said.iter().any(|l| l.starts_with("producer   sent back")),
+            "{said:#?}"
+        );
+        assert_eq!(loop_lines(&marker).len(), 1, "{}", done.reason);
+    }
+
+    #[test]
+    fn a_tool_configuration_change_skips_the_in_loop_checks() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let marker = marks.path().join("marks");
+        let counts = Arc::new(Counts::default());
+        // Verification replaces `rustfmt.toml` with the base's, so the producer's copy decides nothing.
+        let (_, said, _, _) = run_checked_job(
+            &repo,
+            &state,
+            marked_check("test ! -f rustfmt.toml", &marker),
+            crate::test_support::plenty_of_space,
+            editing(
+                counts.clone(),
+                Arc::default(),
+                vec![("rustfmt.toml".into(), Some("max_width = 80\n".into()))],
+            ),
+        );
+        assert_eq!(counts.all().1, 1, "{said:#?}");
+        assert!(
+            !said.iter().any(|l| l.starts_with("producer   sent back")),
+            "{said:#?}"
+        );
+        assert!(
+            said.iter().any(|l| l.starts_with(
+                "producer   checks not run before the verifier: the change holds check-tool configuration (rustfmt.toml)"
+            )),
+            "{said:#?}"
+        );
+        assert!(loop_lines(&marker).is_empty());
+    }
+
+    #[test]
+    fn low_disk_while_the_producer_build_exists_skips_the_in_loop_checks() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("repo");
+        let counts = Arc::new(Counts::default());
+        // The producer leaves its build directory, so the free space reads 3 GB until verification removes it.
+        let (done, said, _, _) = run_checked_job(
+            &repo,
+            &state,
+            leaked_sh_check(NEEDS_FIXED_FILE.to_string()),
+            crate::test_support::low_once_built,
+            counting(counts.clone(), Some(root)),
+        );
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("producer   checks not run before the verifier:")),
+            "{said:#?}"
+        );
+        // Space is no reason to send the producer back; verification judges the check.
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (1, 1), "{said:#?}");
+        assert!(
+            !said.iter().any(|l| l.starts_with("producer   sent back")),
+            "{said:#?}"
+        );
+        assert_eq!(done.state, OutcomeState::Rejected, "{}", done.reason);
+    }
+
+    #[test]
+    fn a_busy_build_slot_skips_the_in_loop_checks_without_waiting() {
+        let repo = repo_with_config("\n[drain.pipeline]\nbuild_wait_s = 1\n");
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            leaked_sh_check(NEEDS_FIXED_FILE.to_string()),
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let job = athena.ask("describe the demo", &Quiet).unwrap().job;
+        // Another command holds the only build slot for the whole run.
+        let holder = slot_queue(&athena)
+            .try_acquire()
+            .unwrap()
+            .expect("the slot is free");
+        let ui = Lines::default();
+        let started = std::time::Instant::now();
+        let error = athena
+            .go(job.as_str(), AcceptedBy::User, &ui)
+            .expect_err("verification waits for the slot and is held");
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            error.downcast_ref::<crate::disk::SlotWait>().is_some(),
+            "{error:#}"
+        );
+        assert!(
+            said.iter().any(
+                |l| l == "producer   checks not run before the verifier: no build slot is free"
+            ),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.starts_with("producer   sent back")),
+            "{said:#?}"
+        );
+        assert_eq!(counts.all().1, 1);
+        // The in-loop run never waits: only verification waits out the one second.
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        drop(holder);
+    }
+
+    #[test]
+    fn the_exposed_index_lists_new_files_and_is_restored_on_drop() {
+        use athena_git::snapshot::{Snapshot, SnapshotRepo};
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let head = athena.head().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("snap");
+        let snapshot =
+            Snapshot::create(&athena.git, &head, &head, &at, SnapshotRepo::Base).unwrap();
+        std::fs::write(at.join("NEW.txt"), "new\n").unwrap();
+        let listed = || snapshot.git().run(["ls-files"]).unwrap();
+        // Without the guard git does not list the new file.
+        assert!(!listed().contains("NEW.txt"), "{}", listed());
+        let before = std::fs::read(at.join(".git/index")).unwrap();
+        {
+            let _exposed = super::super::checks::ExposedIndex::new(&snapshot).unwrap();
+            assert!(listed().contains("NEW.txt"), "{}", listed());
+            assert!(listed().contains("README.md"));
+        }
+        assert!(!listed().contains("NEW.txt"), "{}", listed());
+        assert_eq!(std::fs::read(at.join(".git/index")).unwrap(), before);
+    }
+
+    #[test]
+    fn an_error_in_the_in_loop_run_is_a_skip_line_and_only_the_kill_switch_leaves() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let ui = Lines::default();
+        // An error from the advisory run is a line, not the end of the job.
+        athena
+            .settle_loop_checks(&ui, Err(anyhow::anyhow!("boom")))
+            .unwrap();
+        athena.settle_loop_checks(&ui, Ok(())).unwrap();
+        let said = ui.0.lock().unwrap().clone();
+        assert_eq!(
+            said,
+            ["producer   checks not run before the verifier: boom"],
+            "{said:#?}"
+        );
+        // With the kill switch on, the job ends, whatever the run returned.
+        let stop_file = athena.state.registry().stop_file().to_path_buf();
+        std::fs::create_dir_all(stop_file.parent().unwrap()).unwrap();
+        std::fs::write(&stop_file, "").unwrap();
+        let error = athena
+            .settle_loop_checks(&ui, Err(anyhow::anyhow!("boom")))
+            .expect_err("the kill switch ends the job");
+        assert!(format!("{error:#}").contains("kill switch"), "{error:#}");
+        assert!(athena.settle_loop_checks(&ui, Ok(())).is_err());
+    }
+
     #[test]
     fn producer_build_directory_is_gone_when_the_first_check_starts_and_the_candidate_is_kept() {
         let repo = repo();
@@ -6833,8 +7317,14 @@ mod produce_and_verify_order_tests {
     }
 
     /// A baseline check that leaves `baseline-ran` beside the job directory (it runs in `<job dir>/baseline`),
-    /// where it survives the cleaning of the job directory when the job closes.
-    const MARKS_BASELINE_OUTSIDE: &[&str] = &["sh", "-c", "touch ../../baseline-ran"];
+    /// where it survives the cleaning of the job directory when the job closes. Only the baseline run makes
+    /// the mark: the in-loop run in `<job dir>/work` and the checks in `<job dir>/verify` run the same
+    /// command for real, and they leave nothing.
+    const MARKS_BASELINE_OUTSIDE: &[&str] = &[
+        "sh",
+        "-c",
+        "case \"$(pwd)\" in */baseline) touch ../../baseline-ran;; esac",
+    ];
 
     /// A previous job, as the closing records of a landing name it.
     const PREVIOUS_JOB: &str = "20261030-120000-abcd";

@@ -1,0 +1,431 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-045625-aymy",
+  "round": 2,
+  "at": "2026-11-14T12:44:28.71449712Z",
+  "invocation_seq": 5,
+  "approach": "Root cause: `producer_loop` (run/producer.rs:272-643) sends one report back for unmet criteria, unchanged files, replay, gate, mirror drift, scope and changelog. It never runs Athena's configured checks (fmt, clippy, test), which run only in `check_and_verify` (run/mod.rs:1865). So a failing gate or an unmet command criterion is first seen by the verifier and costs the whole job.\n\nFix, at that origin and in the one existing send-back: after each producer report and the formatter, if a send-back can still be spent, a new `Athena::pre_verdict_checks` (run/checks.rs) runs the capability's configured checks on the producer's work tree through `run_check`. Results pass through a new `split_failures` (send_back.rs). It keeps only new, real failures. It drops checks already failing on the job's base (`verify::is_pre_existing` against `closing.baseline` filtered to `ctx.prediction`, as mod.rs:2127-2130 does) and checks killed at their deadline (`checks::timed_out`), the two cases the verdict excuses (verify.rs:447; mod.rs:2139-2158).\n\nEach kept failure joins `problems` and the brief through `append_failed_checks`: command, exit status, output tail. The attempt invocation's `detail` stores a short note (`pre-verdict checks on the work tree: fmt ok · clippy FAILED · test ok`) on every pass the checks ran, passing or failing, so the stored record shows the check ran before the verdict. No new loop or limit: the failure shares the `PRODUCER_SEND_BACKS = 1` send-back (or the scope slot when that applies). Nothing is refused, so the share of past accepted readings newly refused is 0%.\n\nAnswers to the six findings:\n(1) Pre-existing and deadline-killed runs are filtered out, with tests.\n(2) The dependents list now covers every non-PASSES check in the athena-core and athena-cli tests. MARKS_BASELINE_OUTSIDE is changed to touch its marker only when run in `baseline`.\n(3) A passing run stores its note on the attempt invocation, with no UI line and no new invocation.\n(4) The run is skipped when no send-back is left, so no full suite runs only to make a flag.\n(5) The producer.md target is named: a net change of 0 bytes, so the file stays at 1102 bytes.\n(6) The fake applies edits in order, so the last write wins (athena-agent/src/fake.rs:98-111). The repair test also asserts the final README is clean.\n\nThe pre-verdict run is advisory. Verification still re-runs everything on the verifier's snapshot and decides.",
+  "decisions": [
+    {
+      "choice": "Run the configured checks inside `producer_loop` after each report (once the formatter has run and the change list is non-empty) and fold a kept failure into the existing single send-back. It uses the shared `send_backs`/`scope_send_backs` counters, `problems`, the attempt `detail`, and a brief section from `append_failed_checks`.",
+      "reason": "The producer is the stage that lacks the information, and the only stage that can repair while it holds its work tree. The loop already gathers every pre-verdict problem into one send-back (producer.rs:499-643), so one more problem adds the information with no new budget. `PRODUCER_SEND_BACKS` (run/mod.rs:1591) stays 1.",
+      "rejected": [
+        {
+          "option": "A new repair loop after verification, or a higher PRODUCER_SEND_BACKS",
+          "why": "Out of scope, and each miss still costs a verifier run, which is the failure being fixed."
+        },
+        {
+          "option": "A refusal rule that refuses a job whose report lacks per-criterion evidence",
+          "why": "The request prefers giving the stage the information. The producer can be given the real check output instead, and a refusal would refuse readings."
+        },
+        {
+          "option": "Reuse the verification run's result by moving the checks earlier",
+          "why": "Verification runs in the verifier's snapshot with the base's tool configuration, CI reuse, slots and a disk gate (mod.rs:1976-2092). Reusing a producer-tree result would weaken that independence."
+        }
+      ]
+    },
+    {
+      "choice": "Send back only new, real failures. `split_failures(runs, usable_baseline)` drops a run when `crate::verify::is_pre_existing(run, baseline)` is true, where the baseline is `closing.baseline` filtered to `base_commit == ctx.prediction`. It also drops a run when `crate::checks::timed_out(run)` is true. Dropped runs are named in the stored note (`already failing on the base`, `killed at its deadline`). A deadline kill also gets one UI line (`precheck   <name> killed at its deadline; not sent back`). A kill-switch stop is an error through `refuse_if_stopped`.",
+      "reason": "Answers finding 1. The verdict counts only `!passed && !is_pre_existing` (verify.rs:447) and holds a deadline kill as an environment stop (mod.rs:2144). Spending the one send-back on those would ask the producer to fix what it did not break. The baseline is taken before the producer in `baseline_stage` (mod.rs:1794), so `closing.baseline` is set when the loop runs.",
+      "rejected": [
+        {
+          "option": "Send back every `!passed` run",
+          "why": "Contradicts the verdict. lifecycle.rs `baseline_failure_does_not_stop_the_job` configures checks that fail on the base."
+        },
+        {
+          "option": "Stop at the first failure like `run_local` (routing.rs:182-197)",
+          "why": "The send-back is single-shot, so it must carry everything the producer can fix. Every non-skipped check runs."
+        }
+      ]
+    },
+    {
+      "choice": "Do not run the checks when nothing can be sent back. The run is skipped when `send_backs >= PRODUCER_SEND_BACKS` and the scope slot is not free, using the same `scope_slot_free` value that decides the limit break (producer.rs:571-573, moved up so the two cannot drift).",
+      "reason": "Answers finding 4. At the limit a failure could only become a flag, and the verifier already re-runs the same checks and shows a failing one as `failed` under 'Checks Athena ran on this tree' (briefs.rs:1330-1348). D113 measured the suite at 9 to 11 minutes, so a last-pass run would add a full suite run that changes nothing. Consequence: an in-loop failure never reaches `report_problems` or `report_gaps`, and criterion 5 is met through the verifier's recorded checks.",
+      "rejected": [
+        {
+          "option": "Run on every pass and add the failure to report_gaps",
+          "why": "Doubles check time on the last pass for a flag the recorded check results already carry."
+        }
+      ]
+    },
+    {
+      "choice": "Skip the run, with one `precheck   not run: ...` line, when it cannot be truthful. The guard is a pure `pre_verdict_skip(nested, pinned, changed)`. It skips for a nested run (`self.nested.is_some()`, as checks.rs:542-545), for a pinned study (`ctx.pin_dir.is_some()`, as `format_stage` at producer.rs:179), for an empty change list (the idle-producer failure comes later), and when any changed path is check-tool configuration (`crate::admission::is_tool_config`, admission.rs:56-60).",
+      "reason": "Verification replaces tool configuration (rustfmt.toml, clippy.toml, .cargo/config.toml) with the base's (verification.rs:472 `apply_base_tool_config`), so a run on the producer's tree would pass or fail differently from the verdict. The lifecycle test `relaxed_tool_configuration_does_not_relax_its_check` shows the divergence. Skipping avoids a false send-back, and the verifier decides.",
+      "rejected": [
+        {
+          "option": "Build a verifier-like scratch snapshot with the base tool configuration for the in-loop run",
+          "why": "Needs a candidate commit and snapshot per pass, which is heavy and duplicates `verifier_snapshot`. A skip on these rare, governance-listed paths is enough."
+        }
+      ]
+    },
+    {
+      "choice": "Take a `Class::Producer` slot like `loop_replay` (mod.rs:2336-2348). When the slot wait expires, print `precheck   not run: no build slot was free within build_wait_s` and return None; the kill switch is an error. Do not call `disk_gate` and do not read `check_seam`. Build in the producer's own `Side::Produce` environment. Snapshot the tree before the run and `restore_to` it after, naming any stray file in a UI line.",
+      "reason": "`disk_gate` frees idle build directories, and some tests read free space keyed on `target/produce`. `check_seam` (mod.rs:1518) is read in `SnapExec::exec`, so reading it here would give seam tests a second fake run. The restore keeps a check that writes into the tree from changing the candidate (`SnapExec` does the same at checks.rs:139-142). Using `SnapExec` itself would reset the producer's tree to a prepared state it does not have.",
+      "rejected": [
+        {
+          "option": "Hold the job on a slot wait, as `check_and_verify` does",
+          "why": "The verifier-side run still follows and holds if needed. `loop_replay` already treats a slot wait as a skip (mod.rs:2344)."
+        },
+        {
+          "option": "Leave a check's side effects in the producer's tree",
+          "why": "They would enter the candidate's change list."
+        }
+      ]
+    },
+    {
+      "choice": "Store the event on the attempt invocation's `detail` (the existing home of the self-check text, producer.rs:552-563) on every pass the checks ran. A passing pass sets `detail = Some('pre-verdict checks on the work tree: fmt ok · clippy ok · test ok')`. A send-back pass inserts the same note before `; redacted report: `, which stays unique (run_pin_tests.rs:1707 splits on it). Print no UI line and add no invocation on a pass.",
+      "reason": "Answers finding 3 and the accepted reading ('a stored event showing the check ran'). `Invocation.detail` (athena-data records.rs:768) is `Option<String>` with no doc comment. Producer.rs:559 already stores the self-check there, and no new field or schema is added, so no round-trip test moves. I read the code that reads an invocation `detail`. The readers at producer.rs:380 and :392 read the record before the note is set, and only for non-success outcomes. disk.rs:573 `producer_stop_reason` likewise reads failed-run detail, and audience.rs:291, auditor.rs:403, hestia.rs:2892, steward.rs:1309 and pin.rs:479 read their own role's detail. None treats a Success invocation's detail as a failure. A UI line or an extra invocation would break the 8-line, seq 1/2/3 order test (tests.rs:1068); this does not.",
+      "rejected": [
+        {
+          "option": "Store nothing on a pass",
+          "why": "Leaves the stored record unable to show the check ran, which the reading asks for."
+        },
+        {
+          "option": "A new `pre_verdict` field on the Invocation record",
+          "why": "Changes the record schema and round-trip tests for something the existing field already carries."
+        }
+      ]
+    },
+    {
+      "choice": "The UI label of the in-loop lines is `precheck   `, not `checks     `.",
+      "reason": "Tests find the verification line with `starts_with('checks     ')` (tests.rs:4405-4410, 4452, drain.rs:3180). An in-loop line with that label would be found first and break them. Lines print only on a skip, a deadline drop, a stray-file restore or the existing `producer   sent back:` line.",
+      "rejected": [
+        {
+          "option": "`checks     in the loop:` (the label in the previous plan)",
+          "why": "Collides with those tests."
+        }
+      ]
+    },
+    {
+      "choice": "Hold the producer prompt set at its computed size by a net change of 0 bytes in `producer.md` (stays 1102 bytes), so `docs/system-facts.md` is not edited.",
+      "reason": "The facts line `budget producer: 1043 of 1200` is compared for equality (budgets.rs:109-114). The estimator is ceil(bytes/3) (lib.rs:74-76), so 1043 means the composed set is 3127 to 3129 bytes. I could not measure where in that window it sits with read-only tools, so only a net-zero edit is guaranteed to stay equal. The bullet 9 text and the trims below are my hand counts (an estimate); the producer confirms them with `cargo test -p athena-cli --test budgets`. Bullet 9 becomes: `- Run targeted tests (`cargo test -p <crate> <filter>`) while you work. Athena runs fmt, clippy and the suite on your tree before the verifier and sends a failure back once; run the suite at most once. List in `checks_run` only checks you ran.` That is about +41 bytes. Pay for it with trims such as ` while you work` (15), `with ` in `finish, with no placeholders` (5), and `and in your brief` shortened in the last line (18), then adjust one or two bytes by punctuation. Keep the anchors 'governance file', 'stop and report it in open_issues; do not edit it', 'Never mark a requirement row Covered', 'criteria_check', and exactly one 'if docs/agent-reference.md exists in the working copy' (lib.rs:468-478, 564-651). PRODUCER_FRAME's version stays 1.",
+      "rejected": [
+        {
+          "option": "Update the `budget producer:` line in docs/system-facts.md",
+          "why": "Not a listed deliverable; a same-size edit makes it unnecessary."
+        },
+        {
+          "option": "Raise the producer budget",
+          "why": "A budget never rises to fit a set (lib.rs:177-179)."
+        }
+      ]
+    },
+    {
+      "choice": "The decision entry is D182, appended after D181 (decisions.md:5227). It amends D113 only. It states the root cause, the 0% refusal share, that the pre-verdict run is advisory, and the trade-off: one more full suite run per job on the first pass, against a miss costing the whole job. A [[link]] (older D113, newer D182, status amended) in decision-links.toml has its `line` set to the line of the amend phrase.",
+      "reason": "D113 (decisions.md:2659-2671) says the one send-back is for unmet or unreported criteria only and that the producer need not run the suite because Athena runs it on the candidate; both change in meaning. D103 is not amended because a check failure no longer enters `report_gaps` (decision 3). The log is append-only, so past entries are not edited.",
+      "rejected": [
+        {
+          "option": "Edit D113 in place",
+          "why": "Append-only log; edits to past entries are out of scope."
+        },
+        {
+          "option": "Also amend D103",
+          "why": "The gaps entry is unchanged."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Extract the `Side::Produce` env build of `format_stage` into a private `produce_env` helper. Move `scope_slot_free` up. In `producer_loop`, after the mirror-drift step and before `loop_replay`, call `pre_verdict_checks` only when a send-back can be spent, split its runs with `split_failures`, and add a `failed_checks.is_empty()` condition to the break. Add the problem 'configured checks failed on the work tree: ...' to `problems` after the `report_problems` clone, so it is not a report gap. Store the note on the attempt `detail`, on pass and on send-back. Wrap `attempt_brief` with `append_failed_checks`. Extend the root-cause doc comment.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "Add `Athena::pre_verdict_checks` (guards, `Class::Producer` slot, `run_check` for each non-skipped spec without stopping at the first failure, tree restore, no `disk_gate`, no `check_seam`, no record), the pure `pre_verdict_skip` guard, and a shared `route_for(ctx, changed)` helper used by it and by `check_and_verify`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add `PRE_VERDICT_TAIL_LINES` (40), `FAILED_CHECKS_SENTENCE`, `split_failures`, `failed_check_problem`, `precheck_note` and `append_failed_checks`, with unit tests next to `mirror_drift_tests` (send_back.rs:293).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Extend the doc comment of `PRODUCER_SEND_BACKS` (line 1590) to say a pre-verdict check failure shares this one send-back. Replace the route-kind lines in `check_and_verify` (2019-2027) with the shared `route_for` call. The constant and `SCOPE_SEND_BACKS` are unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add `FAILS_WHILE_BROKEN`, a `check_job` helper (verifier prompts and stored producer details), and the `pre_verdict_*` tests: repaired on the send-back, no send-back with note stored on a pass, still failing after the send-back (bounded, skipped on the limit pass, verifier shows it failed), failing on the base not sent back, stray file restored, failure named in the stored detail, and the guard unit tests. Change `MARKS_BASELINE_OUTSIDE` to touch its marker only in a directory named `baseline`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Extend the 'Checks Athena will run' paragraph of the producer brief (lines 700-703) with the in-loop run, the one send-back, the base-failure exception and the tool-config note. Add the test `producer_brief_tells_the_producer_athena_runs_the_checks_before_the_verifier`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/producer.md",
+      "action": "modify",
+      "purpose": "Rewrite bullet 9 to say Athena runs fmt, clippy and the suite on the producer's tree before the verifier and sends a failure back once. Trim words elsewhere so the file stays at 1102 bytes (net 0) and the anchors survive. Keep one bullet per line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/budgets.rs",
+      "action": "modify",
+      "purpose": "Add `producer_prompt_says_athena_runs_the_checks_before_the_verifier`, which composes the producer set, asserts the new wording and that `check_budget(BudgetSet::Producer, ..)` passes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append `## D182 · ...` after D181: Case (this failure class, 43 jobs), Decision with the root-cause sentence and the amend of D113, Alternatives, Tradeoff (one more full suite run per job against a miss costing the job; tool-config divergence; advisory run), Reversal cost, Provenance (files read, tests run, what was not measured), and the 0% refusal share.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Add one [[link]] (older D113, newer D182, status amended) with `line` equal to the line of the amend phrase in D182.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under [Unreleased] > Fixed naming the root cause (the checks ran only at verification), the fix in the producer loop's one send-back, and the producer prompt and brief change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the code the plan cites: producer.rs 160-226 and 272-643, run/checks.rs 1-150 and 500-570, run/mod.rs 1581-1650, 2019-2027, 2125-2165 and 2294-2410, routing.rs 86-106, checks.rs 456-638, verify.rs 190-237, slots.rs 143-200, admission.rs 36-60, and the test helpers `athena_with` (tests.rs:191), `editing` (3066), `fixing_on_send_back` (3311) and `mirror_job` (3333).",
+    "send_back.rs: add `PRE_VERDICT_TAIL_LINES` (40) and `FAILED_CHECKS_SENTENCE` ('Checks Athena ran on your work tree failed; this is a reason for this send-back whether or not criteria are listed. '). Add `split_failures(runs, baseline) -> Failures`, with `send` (new real failures), `pre_existing` and `timed_out` names; it drops `is_pre_existing` and `checks::timed_out` runs. Add `failed_check_problem(&CheckRun)` (name, command, `exit <code>` or the note), `precheck_note(runs, &Failures)` (`pre-verdict checks on the work tree: fmt ok · clippy FAILED (already failing on the base) · ...`) and `append_failed_checks(text, &[CheckRun])`. The last is a no-op on an empty slice; otherwise it puts the sentence right after the last `## Sent back\\n\\n` as `append_mirror_drift` does (send_back.rs:226-246), then adds a section 'Checks Athena ran on your work tree that failed (fix each):' with each command, exit status, failing test names and the last 40 lines of `output_tail`. Add unit tests: no-op on empty, sentence placement, tail cut, no exit code, a pre-existing run dropped, a deadline-killed run dropped, a real failure kept, and no baseline keeps every failure.",
+    "run/checks.rs: add `route_for(ctx, changed) -> Route` (kind `study` for the study capability, else `ctx.reading.class_of_work`, then `routing::route(Some(kind), ctx.capability.checks(jc), changed)`) and a pure `pre_verdict_skip(nested, pinned, changed) -> Option<Skip>`. It returns a silent skip for nested, pinned or an empty change list, and a said skip naming the files when any changed path is `crate::admission::is_tool_config`. Add `pub(super) fn pre_verdict_checks(&self, ctx, job_dir, snapshot, capability_env, changed) -> Result<Option<Vec<CheckRun>>>`: apply the guard; build the env with `produce_env`; take `before = snapshot.work_tree_tree()`; `ensure_slot_targets`; `SlotQueue::from_config(..).acquire(Class::Producer, &|| self.refuse_if_stopped())` (on `SlotWait` print `precheck   not run: no build slot was free within build_wait_s` and return None; any other error propagates); for each routed item with no skip note call `refuse_if_stopped`, `run_check` with `CheckContext` (timeout `check_timeout_s`, `self.state.registry()`, `ctx.redactor`) and `refuse_if_stopped`; push every run without stopping; drop the slot; `snapshot.restore_to(&before)` and print a `precheck   removed files a check wrote into the work tree: ...` line if any came back. Never call `disk_gate`, never read `check_seam`, write no record.",
+    "producer.rs: extract `produce_env` from `format_stage` and use it in both. In `producer_loop`, move the `scope_slot_free` computation above the break. After `mirror_drift`, compute `may_send_back = send_backs < PRODUCER_SEND_BACKS || scope_slot_free`. When true, call `pre_verdict_checks`, take `usable_baseline = closing.baseline.clone().filter(|b| b.base_commit == ctx.prediction.as_str())`, and call `split_failures`. Print a `precheck   <name> killed at its deadline; not sent back` line for each dropped timeout. Add `failed_checks.is_empty()` to the break condition. Before the break, when a note exists, set the last attempt `detail` to it. After the `report_problems` clone, push 'configured checks failed on the work tree: ...' to `problems`. In the stored `detail`, put the note before `; redacted report: `. Wrap `attempt_brief` as `append_failed_checks(append_missing_changelog(append_mirror_drift(next_brief, &mirror_drift), changelog_missing), &failed_checks)`. Extend the `producer_loop` doc comment with the root cause. In run/mod.rs, extend the `PRODUCER_SEND_BACKS` doc comment and replace the route-kind lines at 2019-2027 with `route_for`.",
+    "briefs.rs: extend the paragraph at lines 700-703 with 'Athena also runs them on your work tree before the verifier, once your report is in. A check that fails goes back to you once, with its command, exit status and the end of its output; a check already failing on the base commit, or killed at its deadline, is not sent back.' Keep 'Athena runs them again on your result, with the base commit's tool configuration'. Add `producer_brief_tells_the_producer_athena_runs_the_checks_before_the_verifier` beside the producer-brief tests (about briefs.rs:1564) asserting those phrases after `## Checks Athena will run`.",
+    "producer.md: rewrite bullet 9 (one line) as in decision 8 and trim words elsewhere so the file stays at 1102 bytes, keeping the anchors. Add `producer_prompt_says_athena_runs_the_checks_before_the_verifier` to budgets.rs. Run `cargo test -p athena-cli --test budgets` and adjust punctuation until `system_facts_budgets_match_computed` passes with docs/system-facts.md unchanged, then `cargo test -p athena-context`.",
+    "Append `## D182 · ...` to docs/decisions.md after D181, with Case, Decision (root cause: the recorded checks ran only at verification, so the producer could not see a failing gate before the verdict), Alternatives, Tradeoff, Reversal cost and Provenance. State that it amends D113, that a passing run's note is stored on the attempt `detail`, and that the share of past accepted readings newly refused is 0%. Add the matching [[link]] to docs/decision-links.toml with `line` set to the line of the amend phrase in the saved file. Add the CHANGELOG [Unreleased] > Fixed entry. Run `cargo test -p athena-core mirrors`.",
+    "tests.rs, in `produce_and_verify_order_tests`: change `MARKS_BASELINE_OUTSIDE` to `sh -c 'case \"$(pwd)\" in */baseline) touch ../../baseline-ran;; esac'`. Add `FAILS_WHILE_BROKEN` (log a line to `../../ran-in-work` when `$(pwd)` ends in `/work`; if README.md has BROKEN, print CHECK-OUTPUT-CANARY and exit 1) and a stray-file variant. Add `check_job(repo, check, extra, fix)`, a copy of `mirror_job` over `athena_with` that wraps the script to keep `Role::Verifier` prompts and reads the stored producer invocation `detail`s from `Records::load`.",
+    "tests.rs: add the `pre_verdict_*` tests: a failing check sent back with command, status and output, and named in the stored detail (criterion 2); a check that fails on pass one is repaired on the send-back and the job lands, with `ran-in-work` at 1 line (3); checks that pass cause no send-back, print no line, and store the note (4); a check still failing after the send-back is bounded at 2 producers, is not run on the limit pass, and shows as failed in the verifier prompt (5); a check failing on the base (`false`) and again after the edit gives no send-back, 1 producer and no failed-check section; a check that writes `stray.txt` leaves the candidate change list as `README.md` only; unit tests of `pre_verdict_skip` for nested, pinned, empty list, `.cargo/config.toml`, `sub/clippy.toml` and a plain README.",
+    "Run `cargo test -p athena-core`, `cargo test -p athena-context`, `cargo test -p athena-cli --test lifecycle`, `cargo test -p athena-cli --test drain per_job_worktree` and `cargo test -p athena-cli --test budgets`. Fix any producer-count or seq assertion the extra send-back moves, asserting the outcome and a producer count of 2.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix what they find. State in the change description the root cause (the recorded checks ran only at verification, so the producer could not see a failing gate before the verdict), that the fix is in the producer loop's one send-back, and that no reading is newly refused."
+  ],
+  "risks": [
+    {
+      "risk": "The full `cargo test` now runs in the loop on the first pass, so every job pays a second suite run (D113 measured 9 to 11 minutes) and a build slot. The test check never skips, so a docs-only change also runs it (athena.toml:103-108).",
+      "mitigation": "It builds in the producer's own warm `Side::Produce` directory, is bounded by `check_timeout_s` and a build slot, and runs only while a send-back can still be spent, so at most twice per job and never on the limit pass. D182 states the trade-off. The accepted reading chose it."
+    },
+    {
+      "risk": "The producer's tree can differ from the verifier's snapshot, so a check could pass or fail differently from the verdict.",
+      "mitigation": "The run is advisory and the verifier decides. Tool-configuration changes (the only files the verifier replaces) skip the run with a UI line. Pre-existing and deadline-killed failures are not sent back. The brief and D182 say the run is on the work tree."
+    },
+    {
+      "risk": "Existing tests with a real failing check now get one extra producer invocation, which moves counts and seqs.",
+      "mitigation": "I read the tests that use FAILS_ON_EDIT, leaked checks, MARKS_BASELINE_OUTSIDE and the lifecycle and drain checks, and none asserts a producer count that moves. The producer runs `cargo test -p athena-core`, `cargo test -p athena-cli --test lifecycle` and `cargo test -p athena-cli --test drain` and fixes any count I missed."
+    },
+    {
+      "risk": "The slot-wait skip (no free build slot within `build_wait_s`) has no end-to-end test, since holding every slot in a test is costly.",
+      "mitigation": "The code copies `loop_replay`'s pattern (mod.rs:2341-2348), which the slot tests already cover. The skip prints one UI line and never holds the job. The producer runs `cargo test -p athena-core slots` to confirm none holds every slot while a job runs through the producer stage."
+    },
+    {
+      "risk": "A check that writes into the work tree would put files in the candidate.",
+      "mitigation": "`pre_verdict_checks` restores the tree to its pre-run state and names stray files in a UI line. `pre_verdict_a_check_that_writes_into_the_tree_leaves_the_change_list_as_the_producer_left_it` tests it."
+    },
+    {
+      "risk": "Holding the producer set at 1043 tokens takes a net 0-byte edit, and my hand counts of the bullet and the trims could be off by a byte or two.",
+      "mitigation": "The target is the file size, 1102 bytes. The budgets test prints the computed size on failure, so the producer adjusts punctuation until `system_facts_budgets_match_computed` passes with docs/system-facts.md unchanged."
+    },
+    {
+      "risk": "The accepted criteria could be read as limiting which files may change, which would send a file outside the deliverables back.",
+      "mitigation": "None of the accepted criteria matches the limiting forms (briefs.rs:137-167), and the plan touches only the 11 listed deliverables."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`producer_loop` problem list and the shared send-back (`PRODUCER_SEND_BACKS`, `SCOPE_SEND_BACKS`)",
+      "dependent": "crates/athena-core/src/run/producer.rs `producer_loop`, reached from `produce_and_verify` (run/mod.rs:1781) by go, retry, resume, seeded retries (`ctx.seed_commit`) and nested runs. Also the scope, changelog and mirror-drift send-back tests in run/tests.rs (mirrors_*, scope_send_back_*, governed_*)",
+      "kind": "code",
+      "test": "cargo test -p athena-core mirrors_",
+      "reason": "The new step runs after the existing steps and only when a send-back can still be spent, not nested, not pinned, with a non-empty change list and no tool-config path. Those tests configure PASSES (`true`), so the step finds no failure and adds no problem. A candidate resumed past the loop (recorded checks, mod.rs:1887) never reaches it. The counters and scope-slot logic are unchanged; `scope_slot_free` is only moved up."
+    },
+    {
+      "name": "Producer invocation counts of jobs whose real configured check fails after the producer's edit (FAILS_ON_EDIT users)",
+      "dependent": "run/tests.rs: `produce_dir_is_removed_before_the_checks_whether_they_pass_or_fail` (4313), `a_real_nonzero_check_failure_is_still_rejected` (4562), the retry-brief test using FAILS_ON_EDIT (5625), `ci_branch_is_deleted_when_the_job_is_rejected_or_fails` (7590)",
+      "kind": "code",
+      "test": "cargo test -p athena-core a_real_nonzero_check_failure_is_still_rejected",
+      "reason": "The check passes on the base README and fails after the edit, so it is a new failure: one send-back, 2 producers, then the verifier rejects as before. None of these asserts a producer count (I read 4313-4360, 4562-4589, 5615-5654, 7587-7600). They assert Rejected and the verifier count of 1, which hold. The disk probes of 4313 are unchanged because the loop run reads no free space."
+    },
+    {
+      "name": "Tests whose real check fails on the base (pre-existing) or fails with a verification-only effect",
+      "dependent": "run/tests.rs `producer_build_directory_is_gone_when_the_first_check_starts_and_the_candidate_is_kept` (4369) and `a_failed_check_logs_its_failing_test_and_records_its_last_200_lines` (4420)",
+      "kind": "code",
+      "test": "cargo test -p athena-core producer_build_directory_is_gone",
+      "reason": "4369: the check fails on the base too (README lacks 'A demo'), so the loop run is dropped as pre-existing: 1 producer and no change. Its first `checks     ` line is still the verification line because the loop prints only `precheck   ` lines. 4420: it passes on the base and fails on the candidate, so there is one send-back (2 producers) and Rejected as before. It asserts no producer count, and the verification record's 200-line tail is unchanged because the loop writes no record."
+    },
+    {
+      "name": "CI-reuse tests whose baseline marker is a real command",
+      "dependent": "run/tests.rs `MARKS_BASELINE_OUTSIDE` (6837, `touch ../../baseline-ran`) and the tests using it (6919, 6968, 7027, 7054, 7092, 7322, 7346), which assert `!run.baseline_ran` (6945, 6988, 7041, 7131)",
+      "kind": "code",
+      "test": "cargo test -p athena-core baseline_reused",
+      "reason": "The producer's tree is `<job dir>/work` (state.rs:101-102) beside `<job dir>/baseline`, so `../../baseline-ran` lands in the same place from both, and the loop run would set the marker. Step 9 changes the constant to `sh -c 'case \"$(pwd)\" in */baseline) touch ../../baseline-ran;; esac'`, which exits 0 either way and touches the file only in the baseline directory. The `!run.baseline_ran` assertions then stay meaningful. `run.executed` lists seam runs only, and the loop never reads `check_seam`."
+    },
+    {
+      "name": "Tests with checks the loop cannot reach or that pass in it",
+      "dependent": "run/tests.rs: MARKS_BASELINE (4701, `low_disk_before_the_producer_holds_the_job...`), ABSENT_TOOL tests (8164, 8255, 8285, 8345, 8444), `/usr/bin/env true` (8238), FMT_CHECK tests (610, 683), demonstration jobs (7689-7830, check PASSES)",
+      "kind": "code",
+      "test": "cargo test -p athena-core capability_preflight",
+      "reason": "MARKS_BASELINE and ABSENT_TOOL jobs stop before the producer (0 producers asserted at 8194), so the loop is never reached. `/usr/bin/env true` passes. At 610 the loop's `cargo fmt --all --check` runs after `format_stage` has formatted the tree, so it passes. 683 stops at the format step before the loop step. The demonstration jobs configure PASSES; README_TEST runs only through `demo_seam` in `demonstration_records` (run/checks.rs:585-608) at verification, never in the loop."
+    },
+    {
+      "name": "Tests that read the check seam",
+      "dependent": "run/mod.rs `check_seam` (1518) and the tests that install it (tests.rs about 4521, 5023, 5252, 5590, 6390, 6788)",
+      "kind": "code",
+      "test": "cargo test -p athena-core a_check_killed_at_its_deadline_closes_as_an_environment_stop",
+      "reason": "The loop calls `run_check` directly and never reads the seam, so a seam test sees no extra fake run. Those tests configure `true` or a seam fake, and a real `true` passes in the loop."
+    },
+    {
+      "name": "UI line count and invocation numbers of a passing job",
+      "dependent": "run/tests.rs:1068 `a_fake_job_takes_its_baseline_before_the_producer_and_numbers_the_invocations_in_order` (asserts 8 lines, seqs 1, 2, 3)",
+      "kind": "code",
+      "test": "cargo test -p athena-core a_fake_job_takes_its_baseline_before_the_producer_and_numbers_the_invocations_in_order",
+      "reason": "A passing loop run prints nothing and adds no invocation; it only sets the attempt `detail`."
+    },
+    {
+      "name": "Configured checks of the end-to-end fake-driver jobs",
+      "dependent": "crates/athena-cli/tests/lifecycle.rs: `baseline_records_failing_and_passing_checks` (54), `baseline_is_taken_from_the_base_before_the_producer` (75), `baseline_failure_does_not_stop_the_job` (129), `a_check_already_failing_on_the_base_does_not_reject_a_job_that_leaves_it_failing` (441, incl. the counter-case at 471), `a_candidate_that_deletes_a_check_still_has_it_run` (864), `relaxed_tool_configuration_does_not_relax_its_check` (905); tests/common/mod.rs:37-70",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test lifecycle",
+      "reason": "129 and the first case of 441: the checks (`missing`, `exit 1`) fail on the base too, so they are pre-existing and not sent back. This is the case finding 1 raised, and `pre_verdict_a_check_failing_on_the_base_is_not_sent_back` covers it in athena-core. The counter-case at 471 (`! grep -q Hello README.md`) is a new failure: one send-back, the fake producer repeats its edit, and the job ends Rejected as the test asserts. 864: README is deleted, so the base's `test` check fails in the loop; one send-back and Rejected, as asserted. 905: `rustfmt.toml` is changed, so the tool-config guard skips the loop run and verification (with the base config) rejects as before. 54 and 75: the checks pass on the candidate or fail on the base, so no send-back."
+    },
+    {
+      "name": "Producer start state in drain tests",
+      "dependent": "crates/athena-cli/tests/drain.rs `per_job_worktree_a_rejected_job_leaves_neither_directory` (9631) via `run_watched`/`assert_isolated_start` (9525-9603); `gate_run` (3130)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain per_job_worktree",
+      "reason": "9631: the check `! grep -q Hello README.md` is a new failure, so there are two producer starts. `assert_isolated_start` needs every start's build directory to be empty, which holds because the check builds nothing. Both directories are removed as asserted. `gate_run` configures `true` checks, and the loop reads no free space and never calls `disk_gate`, so the disk probes are unchanged."
+    },
+    {
+      "name": "The attempt invocation `detail` of a producer run",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:1691-1707 (needs 'self-check failed' and one 'redacted report: ' delimiter); readers of `Invocation.detail`: producer.rs:380 and :392, disk.rs:573, audience.rs:291, auditor.rs:403, hestia.rs:2892, steward.rs:1309, pin.rs:479",
+      "kind": "code",
+      "test": "cargo test -p athena-core pre_verdict_checks_that_pass",
+      "reason": "The note goes before `; redacted report: `, so the delimiter and the 'self-check failed' prefix stay. Every other reader reads a failed or non-success run's detail, or its own role's invocation; none treats a Success detail as a failure. The new test asserts the stored `detail` of a passing run."
+    },
+    {
+      "name": "`report_gaps` / `producer-report-gaps` and `no_change_reason`",
+      "dependent": "run/verification.rs:97-112 (the gaps entry) and run/candidate.rs `no_change_reason`",
+      "kind": "code",
+      "test": "cargo test -p athena-core pre_verdict_a_check_still_failing",
+      "reason": "A loop check failure is never added to `report_problems` or `report_gaps`, because the run is skipped when no send-back is left. So the gaps entry and D103 are unchanged and the verifier sees the failure only through its own recorded checks. `no_change_reason` is reached only for an empty change list, where the loop does not run the checks."
+    },
+    {
+      "name": "The checks run at verification",
+      "dependent": "run/mod.rs `check_and_verify` (1865-2165), routing.rs `run_routed_with_record` and `SnapExec` (run/checks.rs:73-150), the verifier's recorded check results, `held_for_timeout`",
+      "kind": "code",
+      "test": "cargo test -p athena-core",
+      "reason": "Unchanged. The only edit is that `check_and_verify` calls the shared `route_for` helper (the same kind and the same `routing::route`) in place of its own five lines. The loop run writes no record and reads none of the verifier snapshot, CI source or disk state."
+    },
+    {
+      "name": "Producer prompt set size and frame anchors",
+      "dependent": "crates/athena-cli/tests/budgets.rs `system_facts_budgets_match_computed` (125) and docs/system-facts.md `budget producer: 1043 of 1200`; crates/athena-context/src/lib.rs `reader_checks_for_governance_files_and_producer_stops_on_unlisted_ones` (458), FRAME_ANCHORS (564-626) and `frames_name_the_reference_doc_as_optional_and_it_exists` (629)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets system_facts_budgets_match_computed",
+      "reason": "Bullet 9 is edited with a net 0 bytes, so the computed size stays 1043 and docs/system-facts.md is not touched. The planner row uses PLANNER_FRAME only (budgets.rs:62-66). The anchors stay verbatim and the single conditional reference-doc pointer is unchanged. No hash-pinned test of producer.md exists (I searched `frame.producer` and PRODUCER_FRAME)."
+    },
+    {
+      "name": "Decision log, link list and prompt structure rules",
+      "dependent": "crates/athena-core/src/mirrors.rs (append-only decision log, prompt structure; D158, D162) and the decision-links backtest (docs/decision-links.toml header lines 9-10 and 22-23)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core mirrors",
+      "reason": "producer.md keeps one bullet per line. D182 is appended after D181 with the usual bullets, and the new [[link]] `line` equals the line of the amend phrase, counted in the saved file. The decision gate (`unreconciled_in_snapshot`) fires only for paths a [[governs]] entry lists; I found none for the files changed (only D08 governs candidate.rs and snapshot.rs, decision-links.toml:219-224), and the producer re-checks with the link backtest."
+    },
+    {
+      "name": "Refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs, reading.rs, plan.rs, admission.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "Not changed. `admission::is_tool_config` is only read (not edited), and no parser, stem list, stop list or reading check is added, so no input form needs a corpus case."
+    },
+    {
+      "name": "Check timeout, slots and configured checks",
+      "dependent": "athena.toml `[budget] check_timeout_s`, `[drain.pipeline] max_check_slots` and `build_wait_s`, `[capabilities.change.checks]` and `[capabilities.study.checks]` (92-134); crates/athena-core/src/slots.rs `SlotQueue::acquire` (`Class::Producer`)",
+      "kind": "host_setting",
+      "test": "cargo test -p athena-core slots",
+      "reason": "Read, not changed. The loop run uses `check_timeout_s` for each check and `ctx.capability.checks(jc)` through `routing::route`. A slot wait past `build_wait_s` skips the run with one UI line and is not a hold. The time spent is outside the producer agent's own deadline, since Athena runs the checks."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diffs of the decision log, changelog, link list and producer loop, then run the log and link checks.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "The diff holds a new `## D182 ·` entry after D181 whose Decision names the root cause: Athena's recorded checks ran only at verification, so the producer could not see a failing gate before the verdict. It has a Provenance bullet and states D113 is amended. `git diff -- CHANGELOG.md` shows one [Unreleased] > Fixed entry with the same cause and the fix in the producer loop's one send-back. `git diff -- docs/decision-links.toml` shows the D113 to D182 [[link]]. `git diff -- crates/athena-core/src/run/producer.rs` shows the new step inside `producer_loop` where `problems` is built, not a per-job path. Then run `cargo test -p athena-core mirrors` for the decision-log structure and link checks.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "A test drives the real `Athena::go` with a real `sh -c` check that fails once the producer breaks the README, a fake producer, and reads the second producer prompt and the stored attempt invocation `detail`. Unit tests of `append_failed_checks`, `failed_check_problem` and `split_failures` run beside `mirror_drift_tests` in send_back.rs.",
+      "command": "cargo test -p athena-core pre_verdict_",
+      "observes": "In `pre_verdict_a_failing_check_is_sent_back_with_its_command_status_and_output`, the second producer prompt contains `## Sent back`, the check name `probe`, its command, `exit 1` and the line `CHECK-OUTPUT-CANARY`. The UI has a line starting `producer   sent back: ` that names `probe`. The first stored producer invocation `detail` starts with `self-check failed:`, names `probe` and its exit status, contains `pre-verdict checks on the work tree: probe FAILED`, and still has exactly one `redacted report: `. The unit tests show the output tail cut to the last 40 lines, the sentence placed right after `## Sent back`, a no-op on an empty list, and the no-exit-code form.",
+      "fails_without": "On the base tree no pre-verdict run exists. The producer runs once, no prompt has `## Sent back` or the canary, and no invocation `detail` names a failed check, so the test cannot find them.",
+      "seam": "Production entry point: `Athena::go` -> `produce_and_verify` -> `producer_loop` -> new `Athena::pre_verdict_checks`. Guards: not nested, no pin_dir, non-empty change list, no tool-config path changed, a send-back still available. Fixture: the existing `Docs` capability in `produce_and_verify_order_tests` (tests.rs:91-167), whose one check is named `probe`, with a new const `FAILS_WHILE_BROKEN` = `sh -c` of: log a line to `../../ran-in-work` when `$(pwd)` ends in `/work`, then if README.md contains BROKEN print CHECK-OUTPUT-CANARY and exit 1 (passes on the base README). It is injected through `athena_with(repo, state, check, free_space, script)` (exists, tests.rs:191). The fake producer is `fixing_on_send_back` (exists, tests.rs:3311) over `editing` (tests.rs:3066): pass one writes a README containing BROKEN as `extra`; the pass whose prompt contains `## Sent back` appends the clean README as `fix`. The fake applies edits in order, so the last write wins (athena-agent/src/fake.rs:98-111). `run_check` runs the real `sh`. A new helper `check_job` (step 9) copies `mirror_job` (tests.rs:3333), takes the check, and also returns the verifier prompts (a script wrapper that keeps `spec.user_prompt` when `spec.role == Role::Verifier`) and the stored producer `detail`s (via `Records::load(&athena.git, &athena.head().unwrap())`, as tests.rs:4412 does). `check_job` is added by step 9; everything else exists. The logic under test is production code, not in the fake."
+    },
+    {
+      "criterion": 3,
+      "method": "The criterion 2 fixture end to end: pass one breaks the README, the send-back pass restores it, and the verifier then runs on the clean tree.",
+      "command": "cargo test -p athena-core pre_verdict_a_check_that_fails_on_the_first_pass",
+      "observes": "`(producer, verifier) == (2, 1)`, the closing state is `OutcomeState::Landed`, the final candidate README has no BROKEN, and the UI line `producer   sent back: ` names `probe`. The marker file `ran-in-work` has exactly 1 line: the check ran in the loop once, on pass one, and not on the limit pass (decision 3).",
+      "fails_without": "On the base tree the producer runs once and the verifier runs on the failing tree. The job is Rejected, so `(2, 1)` and `Landed` both fail.",
+      "seam": "Same as criterion 2: `Athena::go` over `Docs` injected through `athena_with`, `FAILS_WHILE_BROKEN`, `fixing_on_send_back` with a fix that restores a clean README (exists), and the verifier-prompt wrapper in `check_job` (added by step 9). The `ran-in-work` file is outside the job directory (like MARKS_BASELINE_OUTSIDE, tests.rs:6837), so it survives job cleanup."
+    },
+    {
+      "criterion": 4,
+      "method": "The same fixture with the passing check, and the existing 8-line characterization test.",
+      "command": "cargo test -p athena-core pre_verdict_checks_that_pass",
+      "observes": "In `pre_verdict_checks_that_pass_cause_no_send_back_and_the_note_is_stored`: producer 1 and verifier 1, no producer prompt contains `## Sent back`, no UI line contains `sent back` or starts with `precheck`, the state is Landed, and the stored producer invocation `detail` is exactly `pre-verdict checks on the work tree: probe ok`. The same check run on `a_fake_job_takes_its_baseline_before_the_producer_and_numbers_the_invocations_in_order` (tests.rs:1068) still shows 8 UI lines and invocation seqs 1, 2, 3.",
+      "fails_without": "If a pass printed a line, sent back or added an invocation, the producer count, the line check or the 8-line test would fail. If the note were not stored, the `detail` assertion would fail.",
+      "seam": "Production entry point `Athena::go`, same guards. Fixture: `athena_with(.., PASSES, ..)` (`true`, tests.rs:102) with the existing `editing` script (exists, tests.rs:3066), through `check_job`. The 8-line test (tests.rs:1068) exists and is unchanged."
+    },
+    {
+      "criterion": 5,
+      "method": "The failing fixture with an empty fix, so the check fails on both passes; plus the diff of mod.rs.",
+      "command": "cargo test -p athena-core pre_verdict_a_check_still_failing",
+      "observes": "In `pre_verdict_a_check_still_failing_after_the_send_back_is_judged_by_the_verifier_and_bounded`: producer invocations are exactly 2 (bounded by `PRODUCER_SEND_BACKS`, no third), `ran-in-work` has exactly 1 line (the run is skipped on the limit pass), the verifier ran once, its prompt lists `- probe: ` ... ` failed` under `## Checks Athena ran on this tree`, and the outcome is Rejected by the recorded check. Then `git diff -- crates/athena-core/src/run/mod.rs` shows the `PRODUCER_SEND_BACKS` doc comment, the shared route helper call and no new constant, and the line is still `const PRODUCER_SEND_BACKS: u32 = 1;`.",
+      "fails_without": "A second send-back would make the producer count 3. A run on the limit pass would make the marker 2 lines. A verifier prompt that hid the failing check would lack the `probe` ... `failed` line.",
+      "seam": "Same as criterion 3: `Athena::go`, `athena_with`, `FAILS_WHILE_BROKEN`, `fixing_on_send_back` with empty `fix` (exists), and the verifier-prompt wrapper (step 9). The constant at run/mod.rs:1591 exists."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the briefs test, then the budgets tests.",
+      "command": "cargo test -p athena-context producer_brief_tells",
+      "observes": "`producer_brief_tells_the_producer_athena_runs_the_checks_before_the_verifier` renders `producer_brief` from the inputs helper used by the nearby producer-brief tests (around briefs.rs:1564) and asserts, after `## Checks Athena will run`, that Athena also runs the checks on the producer's work tree before the verifier, that a failure goes back once with its command, exit status and the end of its output, that a check already failing on the base is not sent back, and that Athena runs them again on the result with the base commit's tool configuration. Then `cargo test -p athena-cli --test budgets` runs the new `producer_prompt_says_athena_runs_the_checks_before_the_verifier`, which composes the producer set from PRODUCER_FRAME and asserts the new wording and `check_budget(BudgetSet::Producer, ..)`. `system_facts_budgets_match_computed` (budgets.rs:125) stays green with docs/system-facts.md unchanged. `cargo test -p athena-context frames_name_the_reference_doc_as_optional_and_it_exists` keeps the frame anchors.",
+      "fails_without": "Without the edits the new briefs.rs and budgets.rs tests fail on the missing sentence. A producer.md edit that changed the composed size by one bucket would fail `system_facts_budgets_match_computed`.",
+      "seam": "Production entry points `athena_context::briefs::producer_brief` (briefs.rs:676-751) and `compose`/`check_budget` over `PRODUCER_FRAME` (budgets.rs:357-371). Both exist. Fixtures: the producer-brief inputs helper in briefs.rs tests (exists) and `athena_cli::wiring::capabilities()` (budgets.rs:42). The two new tests are added by steps 6 and 7."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the refusal corpus through the production gate, then check that no gate file is in the diff.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "`corpus_cases_get_the_expected_outcome` and `the_wrapper_agrees_with_refusing_check_on_every_case` (the test names I read earlier in refusal_corpus.rs) pass unchanged. `git diff --stat` lists none of crates/athena-core/src/reading.rs, reading/, plan.rs, admission.rs or tests/refusal_corpus.rs. The expected share of newly refused past readings is 0%. The change adds no parser, stem list, stop list or reading check, so no input form needs a new corpus case.",
+      "fails_without": "A refusal check added to the gate would turn a stored Accept case into a refusal and `corpus_cases_get_the_expected_outcome` would list it as a mismatch.",
+      "seam": "Production entry point `athena_core::reading::refusing_check`, called by `run(c)` in crates/athena-core/tests/refusal_corpus.rs:2770-2778 over the stored `cases()` (refusal_corpus.rs:303). The seam exists; no step adds it, and the producer and verifier run it. I cite only the test names; I did not run it."
+    },
+    {
+      "criterion": 8,
+      "method": "The three recorded checks on the final tree, each as its own command.",
+      "command": "cargo test --locked",
+      "observes": "`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` all exit 0. They are the checks configured at athena.toml:92-108 that Athena runs through `run_check`. They include the tests whose producer counts move with the extra send-back (the FAILS_ON_EDIT users, the lifecycle and drain tests listed in dependents) and `system_facts_budgets_match_computed`.",
+      "fails_without": "Any fmt, clippy or test failure fails this. The likeliest are a count assertion on a job whose check fails after the producer's edit, the CI-reuse `!run.baseline_ran` asserts if MARKS_BASELINE_OUTSIDE is not changed, and the budget equality if producer.md does not net to 0 bytes.",
+      "seam": "Production entry points are the three configured cargo checks run through `run_check` (checks.rs:513) at verification. The fixture is the final tree itself, with no double. They exist today; no step adds them."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "bd7975bf278a54890c239c6b6c99129dc27058c9d349f2021984d5e61af5e166"
+}

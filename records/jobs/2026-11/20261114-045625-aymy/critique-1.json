@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045625-aymy",
+  "round": 1,
+  "at": "2026-11-14T12:34:57.424344027Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The pre-verdict run sends back checks that already fail on the base commit, and deadline kills, which the verifier itself excuses",
+      "evidence": "The verdict counts only `!c.passed && !is_pre_existing(c, inputs.baseline)` as blocking (verify.rs:447). check_and_verify calls mark_pre_existing (run/mod.rs:2139) and treats a check killed at its deadline as an environment stop (held_for_timeout, mod.rs:2144). The plan pushes every `!passed` run into problems and report_problems, and its own lifecycle dependents entry says 'A check failing on the base and again on the candidate now gets one send-back'. lifecycle.rs:129 `baseline_failure_does_not_stop_the_job` configures checks that fail on the base. The result: the shared send-back is spent on a failure the producer did not cause, the producer is invited to edit outside its scope, and the verifier gets a producer-report-gaps entry that contradicts its own pre-existing marking. Fix: In pre_verdict_checks, or where producer_loop builds failed_checks, drop runs for which `crate::verify::is_pre_existing(run, usable_baseline)` is true. Use closing.baseline filtered to the job's base commit, as mod.rs:2127-2130 does. Also drop runs killed at their deadline, or report them as not the producer's fault without spending the send-back. Add a test with a check that fails on the base README and again after the edit: expect no send-back, 1 producer invocation and no producer-report-gaps entry. List lifecycle.rs baseline_failure_does_not_stop_the_job as a dependent with that test.",
+      "location": "Decision 1/2, Step 3 (pre_verdict_checks), Dependents entry for crates/athena-cli/tests/lifecycle.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list omits existing tests whose real check commands now also run in the producer's tree and change what they observe",
+      "evidence": "The producer tree is <job dir>/work (state.rs:101-102), next to the baseline's <job dir>/baseline. MARKS_BASELINE_OUTSIDE = `touch ../../baseline-ran` (tests.rs:6837) leaves the same file whether it runs in work or baseline, so the CI-reuse tests asserting `!run.baseline_ran` (tests.rs:6945, 6988, 7041, 7131) would fail once the step runs the check in the loop. Other tests with real failing or side-effecting checks are also missing from the list: producer_build_directory_is_gone_when_the_first_check_starts_and_the_candidate_is_kept (tests.rs:4369, whose check fails if any jobs/*/target/produce exists), a_failed_check_logs_its_failing_test_and_records_its_last_200_lines (tests.rs:4420, fails on the candidate with base_script), and the demonstration-job checks (tests.rs:7725, 7823). The plan names only FAILS_ON_EDIT users and says seam tests 'configure true', which is not true of these. Fix: Grep tests.rs and athena-cli/tests for every `athena_with`/`ci_reuse_run_with`/`leaked_sh_check` check that is not PASSES. Add each as a dependent with the test that covers it, and say how each stays valid. For example, make the baseline marker record its working directory (or `touch ../baseline-ran` only when `basename $PWD = baseline`), or have the CI-reuse fixture skip the in-loop run with a stated reason. Then state the expected producer count and UI-line changes for 4369/4420/7725/7823.",
+      "location": "Dependents (check_seam entry and 'a configured check that fails once the producer edits' entry); Step 8",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A passing pre-verdict run stores no event, although the accepted reading asks for 'a stored event showing the check ran'",
+      "evidence": "The reading says: 'run the configured checks ... and put any failure ... into the one existing send-back brief, with a stored event showing the check ran.' The failure class itself is 'Nothing in the stored event shows the unmet criterion being checked before the final verdict.' The plan writes the attempt detail only on failure (producer.rs:559 is reached only when problems exist) and accepts the gap as a known limit. Its reason is that a UI line or an invocation would break the 8-line and seq-1,2,3 order test (tests.rs:1068). A stored note with no UI line and no new invocation would change neither. Fix: On a passing run, record a short stored line, for example `pre-verdict checks on the work tree: fmt ok · clippy ok · test ok` (the log_entry format), on the attempt invocation (`detail` when it is None) or in the stored report. Print no UI line and add no invocation. First grep the readers of a producer invocation's `detail` (no_change_reason, introspection, status) to confirm none treats it as a failure. Add an assertion for it in pre_verdict_checks_that_pass_cause_no_send_back_and_no_extra_run. If that is not possible, state why the reading's requirement is unmet, in D182 and the change description.",
+      "location": "Decision 4; Risk 'A passing pre-verdict run leaves no stored event'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The full suite runs in the loop even when no send-back is left, only to produce a flag the verifier's own recorded check results already carry",
+      "evidence": "Once send_backs >= PRODUCER_SEND_BACKS and no scope slot is free (producer.rs:573), a failed check cannot be repaired; it only becomes a report_gaps string. The verifier then reruns the same checks and records them (mod.rs:2131-2165). D113 measured the suite at 9-11 minutes, so the last pass adds a full suite run that changes nothing. Fix: Skip pre_verdict_checks when neither the shared nor the scope send-back is still available. Satisfy criterion 5 through the recorded verification checks, which already flag the failure; or keep the run and state the cost in D182 explicitly.",
+      "location": "Decision 2 / Step 4 (running on every pass, including the last)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Holding the producer set at exactly 1043 tokens leaves only a 3-byte window and is fragile",
+      "evidence": "The estimator is ⌈bytes/3⌉ (lib.rs:74-76) and system_facts_budgets_match_computed checks equality (budgets.rs:109-114). Any rewrite of bullet 9 must land within the same 3-byte bucket, and only by trial and error. Fix: Keep the approach, but name the measured current byte total of the producer set as the target in the plan, so the producer aims for a number instead of iterating blind.",
+      "location": "Decision 8 / Step 6",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The repair test relies on the fix edit being applied after the extra edit on the send-back pass",
+      "evidence": "fixing_on_send_back appends `fix` after `editing`'s `extra` (tests.rs:3317-3322), and both write README.md. The fixture works only if the fake applies edits in order, last write winning. Fix: Confirm the fake applies edits in order, or let the send-back pass write only the fixed README (an extra that is empty when the prompt contains '## Sent back').",
+      "location": "Criterion 3 demonstration (fixing_on_send_back with extra = BROKEN README and fix = clean README)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the fix where the gap starts: run the configured checks inside producer_loop and add any failure to the one existing send-back. That matches the request and the reading. The code it names exists and matches (producer.rs:272-643, send_back.rs append_mirror_drift, loop_replay's slot pattern at run/mod.rs:2341, PRODUCER_SEND_BACKS at mod.rs:1591), and the demonstrations drive the real Athena::go path with real sh checks. Two design gaps and one dependents gap block acceptance. (1) The verifier ignores checks that already failed on the base (mark_pre_existing, verify.rs:447), but the pre-verdict run sends back every failure, base failures and deadline kills included. That spends the only send-back on work that isn't the producer's, invites edits outside the job's scope, and tells the verifier about a gap its own check results call pre-existing. (2) The step runs every test's check command in <job dir>/work, which sits next to the baseline's directory. Several existing tests are missing from the dependents list, notably the CI-reuse tests asserting !baseline_ran with MARKS_BASELINE_OUTSIDE, which the new run would break. (3) A passing run stores nothing, although the reading asks for a stored event showing the check ran. The planner can fix all three."
+}

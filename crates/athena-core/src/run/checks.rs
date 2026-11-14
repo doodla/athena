@@ -92,6 +92,10 @@ pub(super) struct SnapExec<'a> {
     pub(super) job_dir: &'a std::path::Path,
     /// `[drain.pipeline] slot_max_gb`: the size above which a slot's target directory is deleted.
     pub(super) slot_max_gb: u64,
+    /// The producer loop's run, before the verifier ([`Athena::loop_check_failures`]): it reads no test seam,
+    /// takes a build slot only if one is free (it never waits), and builds in the producer's own directory
+    /// with no slot link, so the job still holds one build.
+    pub(super) in_loop: bool,
 }
 
 impl crate::routing::Exec for SnapExec<'_> {
@@ -103,18 +107,31 @@ impl crate::routing::Exec for SnapExec<'_> {
             return Err(low.into());
         }
         // The slot lives to the end of this call, past the snapshot restore: it is the guard that frees it.
-        let slot = self.slots.acquire(crate::slots::Class::Check, &|| {
-            self.athena.refuse_if_stopped()
-        })?;
+        let slot = if self.in_loop {
+            self.slots
+                .try_acquire()?
+                .ok_or_else(|| anyhow::anyhow!("no build slot is free"))?
+        } else {
+            self.slots.acquire(crate::slots::Class::Check, &|| {
+                self.athena.refuse_if_stopped()
+            })?
+        };
         if slot.waited()
             && let Some(low) = self.athena.disk_gate(self.min_free_gb, self.id, self.ui)
         {
             return Err(low.into());
         }
-        // The slot's warm target directory is linked at the job's build path for this one command only.
-        let link = self.link_slot_target(&slot);
+        // The slot's warm target directory is linked at the job's build path for this one command only. The
+        // in-loop run builds in the producer's own directory and links nothing.
+        let link = if self.in_loop {
+            None
+        } else {
+            self.link_slot_target(&slot)
+        };
         #[cfg(test)]
-        let seamed = check_seam::current().map(|fake| fake(spec));
+        let seamed = check_seam::current()
+            .filter(|_| !self.in_loop)
+            .map(|fake| fake(spec));
         #[cfg(not(test))]
         let seamed: Option<CheckRun> = None;
         let ran = match seamed {
@@ -247,6 +264,196 @@ impl SnapExec<'_> {
                 ));
             }
         }
+    }
+}
+
+/// The baseline when it was taken on `base`, the one commit whose failures it can excuse; a baseline taken on
+/// any other commit says nothing about this base.
+pub(super) fn baseline_for<'a>(baseline: Option<&'a Baseline>, base: &str) -> Option<&'a Baseline> {
+    baseline.filter(|b| b.base_commit == base)
+}
+
+/// The snapshot's own index while the in-loop checks run, so `git ls-files` in a check lists the files the
+/// producer added. The index is built the way [`Snapshot::work_tree_tree`] builds its own: `GIT_INDEX_FILE`
+/// names a temporary file for the one `git add -A`, and the result is copied over the snapshot's
+/// `.git/index`. The variable is never put in a check's environment, because the git calls a check starts
+/// (the tests of Athena's own repository make temporary repositories) would all write one shared index.
+/// Dropping the guard puts back the bytes the index held before, or removes the file when there was none, so
+/// the producer's next pass sees the index it had.
+pub(super) struct ExposedIndex {
+    path: PathBuf,
+    saved: Option<Vec<u8>>,
+}
+
+impl ExposedIndex {
+    pub(super) fn new(snapshot: &Snapshot) -> Result<Self> {
+        let path = snapshot.dir().join(".git").join("index");
+        let saved = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        // Built before anything is written, so a failure here leaves the index as it was.
+        let temporary = tempfile::NamedTempFile::new()?.into_temp_path();
+        std::fs::remove_file(&temporary)?;
+        snapshot.git().run_bytes(
+            ["add", "-A"],
+            None,
+            &[("GIT_INDEX_FILE", temporary.as_os_str())],
+        )?;
+        let guard = ExposedIndex { path, saved };
+        std::fs::copy(&temporary, &guard.path)?;
+        Ok(guard)
+    }
+}
+
+impl Drop for ExposedIndex {
+    fn drop(&mut self) {
+        let _ = match &self.saved {
+            Some(bytes) => std::fs::write(&self.path, bytes),
+            None => std::fs::remove_file(&self.path),
+        };
+    }
+}
+
+/// What the producer loop gives [`Athena::loop_check_failures`]: the producer's work tree and what changed.
+pub(super) struct LoopWork<'a> {
+    pub(super) job_dir: &'a std::path::Path,
+    pub(super) snapshot: &'a Snapshot,
+    pub(super) capability_env: &'a std::collections::BTreeMap<String, String>,
+    /// The paths the work tree changes from the base.
+    pub(super) changed: &'a [String],
+    /// The job's baseline; it excuses a failure the base also had.
+    pub(super) baseline: Option<&'a Baseline>,
+}
+
+/// The line that says the checks did not run before the verifier, and why.
+fn loop_skip_line(why: &str) -> String {
+    format!("producer   checks not run before the verifier: {why}")
+}
+
+impl Athena {
+    /// Runs the capability's routed checks on the producer's work tree, before the verifier, and returns the
+    /// new failures: those that did not time out and did not already fail on the job's base.
+    ///
+    /// Root cause of the failure class it answers: the recorded checks ran only at verification, so the
+    /// producer could not see a failing gate before the verdict, and one failed check rejected a whole job.
+    /// The producer loop sends the failures back in its one shared send-back.
+    ///
+    /// The run is advisory and the verification run stays the verdict. It uses the executor of the
+    /// verification ([`SnapExec`] and `run_check`) with these differences: it builds in the producer's own
+    /// directory (`target/produce`), so the job holds one build; it takes a build slot only if one is free and
+    /// never waits for one; it is skipped, with a `producer   checks not run before the verifier` line, for a
+    /// change that holds check-tool configuration (verification replaces it with the base's), for low disk, for
+    /// a busy slot, and for any error. A nested run, a pinned run and an empty change are skipped without a
+    /// line. Only the kill switch ends the job from here.
+    pub(super) fn loop_check_failures(
+        &self,
+        ctx: &RunContext<'_>,
+        work: &LoopWork<'_>,
+    ) -> Result<Vec<CheckFailure>> {
+        let mut found = Vec::new();
+        let ran = self.run_loop_checks(ctx, work, &mut found);
+        self.settle_loop_checks(ctx.ui, ran)?;
+        Ok(found)
+    }
+
+    /// Ends the in-loop step. The kill switch is read again first, so a check it killed ends the job; any
+    /// other error is a skip line, because an advisory step must never discard the producer's finished work.
+    pub(super) fn settle_loop_checks(&self, ui: &dyn Ui, ran: Result<()>) -> Result<()> {
+        self.refuse_if_stopped()?;
+        if let Err(error) = ran {
+            let why = match error.downcast_ref::<crate::disk::LowDisk>() {
+                Some(low) => low.text(),
+                None => format!("{error:#}"),
+            };
+            ui.line(&loop_skip_line(&why));
+        }
+        Ok(())
+    }
+
+    fn run_loop_checks(
+        &self,
+        ctx: &RunContext<'_>,
+        work: &LoopWork<'_>,
+        found: &mut Vec<CheckFailure>,
+    ) -> Result<()> {
+        if self.nested.is_some() || ctx.pin_dir.is_some() || work.changed.is_empty() {
+            return Ok(());
+        }
+        let tool_config: Vec<&str> = work
+            .changed
+            .iter()
+            .map(String::as_str)
+            .filter(|p| crate::admission::is_tool_config(p))
+            .collect();
+        if !tool_config.is_empty() {
+            ctx.ui.line(&loop_skip_line(&format!(
+                "the change holds check-tool configuration ({}), which verification replaces with the base's",
+                tool_config.join(", ")
+            )));
+            return Ok(());
+        }
+        let jc = ctx.jc;
+        let kind = if ctx.capability.id() == "study" {
+            "study"
+        } else {
+            ctx.reading.class_of_work.as_str()
+        };
+        let route = crate::routing::route(Some(kind), ctx.capability.checks(jc), work.changed);
+        let items: Vec<&crate::routing::Routed> =
+            route.items.iter().filter(|i| i.skip.is_none()).collect();
+        if items.is_empty() {
+            return Ok(());
+        }
+        let env = athena_agent::env::build(
+            &EnvSpec {
+                agents: &jc.config.agents,
+                job: ctx.id().as_str(),
+                job_dir: work.job_dir,
+                snapshot: work.snapshot.dir(),
+                side: Side::Produce,
+                capability_env: work.capability_env,
+            },
+            |key| std::env::var(key).ok(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let pipeline = jc.config.pipeline();
+        std::fs::create_dir_all(self.state.slots_dir())?;
+        // Declared first so it drops last: the index goes back after the last check.
+        let _index = ExposedIndex::new(work.snapshot)?;
+        let prepared = work.snapshot.work_tree_tree()?;
+        let registry = self.state.registry();
+        let exec = SnapExec {
+            athena: self,
+            snapshot: work.snapshot,
+            prepared: &prepared,
+            env: &env,
+            registry: &registry,
+            job: ctx.id().as_str(),
+            timeout: std::time::Duration::from_secs(jc.config.budget.check_timeout_s),
+            redactor: ctx.redactor,
+            cleanup: std::cell::RefCell::new(Vec::new()),
+            id: ctx.id(),
+            ui: ctx.ui,
+            min_free_gb: jc.config.min_free_gb(),
+            gated: std::cell::Cell::new(false),
+            slots: crate::slots::SlotQueue::from_config(&self.state, &pipeline),
+            job_dir: work.job_dir,
+            slot_max_gb: pipeline.slot_max_gb,
+            in_loop: true,
+        };
+        let base = baseline_for(work.baseline, &ctx.prediction);
+        for item in items {
+            let run = crate::routing::Exec::exec(&exec, &item.spec)?;
+            if !run.passed
+                && !crate::checks::timed_out(&run)
+                && !crate::verify::is_pre_existing(&run, base)
+            {
+                found.push(CheckFailure::of(&run));
+            }
+        }
+        Ok(())
     }
 }
 
