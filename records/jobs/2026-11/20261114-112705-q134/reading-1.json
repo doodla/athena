@@ -1,0 +1,176 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-112705-q134",
+  "n": 1,
+  "at": "2026-11-14T11:27:29.950368521Z",
+  "invocation_seq": 1,
+  "base_commit": "efe0bad9254b26402eb128bf99a045034191951f",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Hold kill-switch-stopped jobs as resumable, not failed",
+  "summary": "Retry of job 20261030-113229-kgrg (it failed only because the 600s planner deadline hit, nothing was kept). When the kill switch interrupts planning or blocks the producer from starting, record the job as stopped and resumable, keep its reading and plan, exclude it from failure-class counts, and resume it after `athena start` with no reader rerun. The reading is kept small so planning fits the deadline.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check stopped, resumable and zero-reader-rerun behavior by tests."
+    },
+    {
+      "id": "tested",
+      "how": "cargo test, clippy and fmt required."
+    },
+    {
+      "id": "mechanism",
+      "how": "Enforced by tests at one shared stop point."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the person running Athena, who judges this by the two kill-switch tests, status failure counts and resume behavior.",
+    "Previous result: job 20261030-113229-kgrg failed with no candidate (planner deadline of 600s reached, not verified); its changes are none, so nothing is kept or dropped. This retry redoes the work from the base, with the same deliverable list, trimmed of files only if the planner finds them unneeded.",
+    "Job 20261030-060410-mavp (introspections) is not redone: its landed changes to introspect.rs, manage.rs and its minor findings do not apply to jobs. Deadline handling for the planner (introspection 20261114-112627-efkg proposal) is a separate request and not addressed here.",
+    "Code survey: read crates/athena-core/src/run/planning.rs (RoundEnd::Stopped returned at many sites, lines 66-483, enum at 531; planning returns Ok(None) on stop), run/producer.rs (line 207 Formatted::Stopped(note) returns the stop note), run/mod.rs, run/tests.rs, state.rs, status.rs, lib.rs. The shared point is the Stopped outcome from planning and producer start; the job end state is set in run/mod.rs. No new record or data file under crates/ is added, so check_record_file/AnyRecord are unaffected unless a new state variant is serialized; if so the existing round-trip tests must cover it.",
+    "Existing code: crates/athena-core/src/run/planning.rs, run/producer.rs, run/mod.rs, state.rs, status.rs and the introspection deferral in introspect.rs/manage.rs are reused or extended; the job path follows the introspection's stopped-and-resumable pattern.",
+    "Field meaning: any reused job end-state value 'stopped' follows the introspection deferral's meaning (held, resumable, not failed); the producer must quote it from state.rs and add a new variant only if none fits.",
+    "Consumers: none found for config; athena.toml, defaults.toml and .github/workflows are not changed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in crates/athena-core/src/run/tests.rs turns the kill switch on during planning; after the run the job is recorded as stopped and resumable (not failed), and its accepted reading and any plan are kept. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test turns the kill switch on before the producer starts; the job is stopped and resumable, not failed, and keeps its reading and plan. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In both tests, after `athena start` (start_with) the job resumes and proceeds, and a counting fake reader shows zero new reader invocations after the stop. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In both tests, the failure-class counts in status do not include the stopped job, asserted through the status counting function. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Non-kill-switch failures (a planner error, a producer failure with the switch off) are still recorded as failed and counted; a test covers this and all existing tests pass. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Both the planning and producer-start stops reach the stopped-and-resumable record at one shared point in crates/athena-core/src/run/, found by Grep for the shared stop reason, not duplicated text matching.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md has a new appended entry with a Provenance bullet citing job 20261030-060410-mavp as the introspection counterpart; no existing entry is edited; CHANGELOG.md has an entry; nothing under records/, athena.toml, defaults.toml or .github/workflows changes (check `git diff --stat`).",
+      "kind": "content"
+    },
+    {
+      "text": "The recorded `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` checks pass on the final tree.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/src/commands.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Any edit to records/ (the 'Files: records/' line in the earlier request is not a deliverable).",
+    "Introspection deferral (job 20261030-060410-mavp): landed changes kept as they are; its minor findings are not addressed.",
+    "Changing how the kill switch blocks agents and checks, or deferring anything other than jobs.",
+    "Changes to athena.toml, defaults.toml or .github/workflows.",
+    "Rewriting records of jobs already recorded as failed by the kill switch.",
+    "Planner deadline handling, draft-plan persistence and retry-from-draft (separate request from introspection 20261114-112627-efkg)."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.6,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2200.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6757215619694398,
+      "p_user_intervenes": 0.06248085758039816,
+      "cost_usd": {
+        "p10": 0.5504364917533153,
+        "p50": 1.4791114,
+        "p90": 5.687058881982814
+      },
+      "wall_time_s": {
+        "p10": 605.6769843388978,
+        "p50": 2156.7690595889994,
+        "p90": 4395.299859360221
+      }
+    }
+  },
+  "departures": "Lower verification pass than reference: the same request already hit the planner deadline once and touches several surfaces.",
+  "urgent_reason": "Job 20261030-113229-kgrg and two earlier jobs ended on the planner deadline; a narrower deliverable list cuts planning timeouts.",
+  "hard_reason": "It changes job lifecycle states, the run pipeline's stop handling, and resume after start, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
