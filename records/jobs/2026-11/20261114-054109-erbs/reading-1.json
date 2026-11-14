@@ -1,0 +1,127 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-054109-erbs",
+  "n": 1,
+  "at": "2026-11-14T05:41:33.693270984Z",
+  "invocation_seq": 1,
+  "base_commit": "d6e7f5a4255b16b2cca94c1cd1c55cd7ff36a954",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Fix flaky urgent-group drain test without weakening its assertions",
+  "summary": "Retry of job 20261112-005306-pa2j (rejected): reproduce the flake of parallel::a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn under load, state its cause from the code, and fix it in drain.rs tests so the test can still fail on a wrong drain order. Audience: CI and verifiers rejecting jobs on this flake. Also follows up 20261029-204942-2zqw, 20261111-213010-8jgz and 20261029-233047-ab43.",
+  "class_of_work": "tests",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "fmt, clippy and test must pass"
+    },
+    {
+      "id": "root-cause",
+      "how": "fix the measured cause, not the symptom"
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "criteria check that start order is still verified by the drain"
+    },
+    {
+      "id": "verified",
+      "how": "behavior criteria name cargo commands the verifier runs"
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/tests/drain.rs (the test and its stub), crates/athena-cli/src/drain.rs (run_batches at 2855 starts workers over one VecDeque; take_until_done at 2770 pops an item and runs it, logging start, before popping again) and crates/athena-core/src/plan.rs (groups_in_order at 583 gives one group u1..u6,s1,s2 for disjoint items). Consequence: with 3 workers, s1 is popped only after six u's, so s1 can appear at log index 4 or 5 but never in the first four starts; the base flake is log-order skew between popping and logging. No records or data files are added, so check_record_file/AnyRecord do not apply.",
+    "Previous job 20261112-005306-pa2j: finding 1 (stub made to log starts in expected order, so the assertion tested the stub) is addressed by dropping that stub gate and instead asserting on the drain's deterministic hand-out order (report.plan_groups.concat() == u1..u6,s1,s2) plus a race-free log check (s1 start index >= 4 with 3 workers). Finding 2 (changelog failure example impossible) is addressed by rewriting the entry with a failure the drain and stub can produce (s1 at index 4 or 5 of the log, or whatever the new measurement shows), taken from a fresh reproduction. Finding 3 (CI 'did not finish' unexplained) is addressed by the entry saying plainly that a hang was not reproduced and the open question remains. Its candidate's drain.rs and CHANGELOG.md changes are dropped and redone from base.",
+    "Producer must first reproduce the flake on the base tree by running the test repeatedly in parallel under load, measure runtimes, and state the cause from that output. The original first assertion (s1 among the first three starts) is racy only if it is the failing one; if the measured cause differs, the producer keeps the intent (s1 not ahead of the improvement turn) in a form the drain can fail.",
+    "Mutation check: the producer deliberately breaks the drain's order (temporarily, not committed) or the test's input and shows the repaired assertions fail; this is reported but only the committed diff counts.",
+    "Governance: no change to athena.toml, defaults.toml, xtask or CI workflows; shard layout and limits untouched."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Running `cargo test -p athena-cli --test drain a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn` passes, and the full `cargo test --locked` (which runs the drain tests in parallel) passes, each in seconds for this test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The diff in crates/athena-cli/tests/drain.rs does not make the stub log starts in an expected order (no gate that holds a start entry until earlier entries exist), does not raise a timeout, add #[ignore] or delete the test.",
+      "kind": "content"
+    },
+    {
+      "text": "The test in crates/athena-cli/tests/drain.rs still asserts 8 starts, at most two non-Steward starts in a row, improvement_turns equal to s1, s2, and an order check that fails if s1 is misplaced: either report.plan_groups.concat() equals u1..u6,s1,s2, or s1's start index is at least 4 with 3 workers (verifiable by reading the assertions against take_until_done in crates/athena-cli/src/drain.rs).",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new Fixed entry naming the test, a cause stated in terms of drain.rs worker pop-then-log behavior, a failure example the drain and stub can produce (s1 not in the first four log entries is impossible; example shows s1 at index 4 or 5 versus the old assertion), the jobs 20261029-204942-2zqw, 20261111-213010-8jgz and 20261029-233047-ab43, and a plain statement that a never-finishing run was not reproduced.",
+      "kind": "content"
+    },
+    {
+      "text": "No file other than crates/athena-cli/tests/drain.rs and CHANGELOG.md changes; no production code under crates/ changes behavior (checked with git diff).",
+      "kind": "content"
+    },
+    {
+      "text": "Recorded Athena checks `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked` pass on the final tree (D115).",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.98
+    }
+  ],
+  "out_of_scope": [
+    "Changing drain production code in crates/athena-core or crates/athena-cli/src unless the measured cause is there",
+    "Changes to athena.toml, defaults.toml, xtask or CI workflows, including shard layout or time limits",
+    "docs/spec.toml, OLY-8-05, OLY-10-03 and OLY-9-09 work from earlier jobs; those candidates are dropped",
+    "Changing other drain tests except shared helpers needed for the fix",
+    "Adding a flaky-test step to the Athena job flow (the introspection's prevention); not part of this fix"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.4,
+        "p90": 4.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7375,
+      "p_verification_passes": 0.47058823529411764,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.4460696,
+        "p50": 1.1910715,
+        "p90": 2.6253525
+      },
+      "wall_time_s": {
+        "p10": 889.04173460514,
+        "p50": 1623.1756406473216,
+        "p90": 4157.290728272444
+      }
+    }
+  },
+  "departures": "Fourth attempt of a flaky-test class with a known prior rejection; slightly lower verification pass odds.",
+  "urgent_reason": "Cuts repeated rejected jobs and redo retries caused by this flaky shard test."
+}
