@@ -1,0 +1,223 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-045636-95ed",
+  "round": 1,
+  "at": "2026-11-14T16:59:24.316592044Z",
+  "invocation_seq": 2,
+  "approach": "The producer brief and the planner brief both build on `AcceptedReading`, which carries no class of work. Add a `class_of_work: String` field to `AcceptedReading`, filled in `AcceptedReading::new` from `Reading.class_of_work`. Add one Rust function in `briefs.rs`, `existing_code_section(reading)`, and call it from `producer_brief_with_evidence` right after `reading_sections`, so the producer sees it near the top. For a design reading it writes a section that quotes each assumption starting `Existing code:` (trimmed, case-insensitive, the same filter as `existing_code_assumptions` in `surveys.rs:1328`; `athena-context` cannot call it because `core` depends on `context`, so the filter is repeated as a few lines). The section tells the producer to open those paths, to put an \"Existing code\" section in the doc naming each reused or extended path, to state for each component the design proposes whether it exists in the repository, and to check each cache, config or limit the design depends on against the repository before relying on it. For any other class it writes nothing. The doc comment names the root cause. In `planner.rs`, a short constant `DESIGN_EXISTING_CODE_PLAN_RULE` is appended to the planner's Report only for design readings, so the plan's steps carry the same inventory forward. No refusal rule is added and `check_design_existing_code` is untouched, so the share of past accepted readings newly refused is 0%. The existing struct literals in `run_pin_tests.rs` and `send_back.rs`, plus the one in `reading.rs`, get the new field; they are all under crates/ and are compile fixes only. Add a CHANGELOG entry and decision D183.",
+  "decisions": [
+    {
+      "choice": "Add a `class_of_work` field to `AcceptedReading` and gate the section on it being `design`.",
+      "reason": "The producer brief is built from `AcceptedReading` (briefs.rs:74, ProducerInputs.reading at :359), which has no class. The criterion requires the section only for design, and `Reading.class_of_work` (athena-data records.rs:455) is the field `check_design_existing_code` uses (surveys.rs:1412). Tests build the view through `AcceptedReading::new(&reading(), ...)` from a Reading with `class_of_work = \"design\"`, so on the base commit they compile and fail on the assertion.",
+      "rejected": [
+        {
+          "option": "Infer design from the presence of an `Existing code:` assumption",
+          "why": "A code reading may carry that label too, so other classes' briefs would change (criterion 4), and the class is already recorded."
+        },
+        {
+          "option": "Pass the class as a new field of `ProducerInputs`",
+          "why": "The planner brief also needs it, and it is the same data as the reading; it would need a second field on `PlannerInputs`. One field on the shared view serves both."
+        }
+      ]
+    },
+    {
+      "choice": "Give the information in the brief (a Rust section), with no refusal rule and no prompt-file edit.",
+      "reason": "The failing stage, the producer, lacked the inventory the reader already forces the reader to produce (reader.rs:292, surveys.rs:1409). The request prefers giving information over refusing. D180 used the same route. The producer/planner prompts are inside the computed token budgets in docs/system-facts.md, so a brief section avoids moving those lines.",
+      "rejected": [
+        {
+          "option": "A check in athena-core that refuses a design doc without an Existing code section",
+          "why": "It would compare words, not whether the doc matches the repository, and it adds a refusal; the request allows one only when information cannot prevent the failure."
+        },
+        {
+          "option": "Edit prompts/producer.md",
+          "why": "It moves the computed budget line in docs/system-facts.md (producer 1043 of 1200) and the drift test would need a matching edit; the brief has no such budget."
+        }
+      ]
+    },
+    {
+      "choice": "Repeat the 3-line `Existing code:` filter in athena-context instead of reusing `existing_code_assumptions`.",
+      "reason": "That function is `pub(super)` in athena-core (surveys.rs:1328) and athena-context cannot depend on core (system facts: crate context deps data only). A test pins that the same texts select, using the assumptions in the refusal-corpus style.",
+      "rejected": [
+        {
+          "option": "Move the function into athena-data and call it from both crates",
+          "why": "A larger change touching the reading rules; out of scope (no change to check_design_existing_code)."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `class_of_work` to `AcceptedReading` and `AcceptedReading::new`; add `existing_code_section` with the root-cause doc comment; call it in `producer_brief_with_evidence`; add the two unit tests and a planner-brief test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs/planner.rs",
+      "action": "modify",
+      "purpose": "Add `DESIGN_EXISTING_CODE_PLAN_RULE`, appended to the planner Report only for a design reading.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add the new field to the `accepted` fixture literal (line 1048).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add the new field to the `accepted` test fixture literal (line 497).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add the new field to the test literal at line 3584.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under Unreleased / Fixed naming the root cause, the fix and the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D183 recording the decision, in the D180 to D182 shape.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-context/src/briefs.rs add `pub class_of_work: String` to `AcceptedReading` (line 74) and set it from `reading.class_of_work.clone()` in `AcceptedReading::new` (line 93).",
+    "Add `fn existing_code_section(out: &mut String, reading: &AcceptedReading)` near `existing_tests_section` (line 783). Doc comment: root cause as in criterion 1. It returns early unless `class_of_work == \"design\"`. It lists each assumption whose trimmed lowercase text starts with `existing code:` (a note that this repeats `existing_code_assumptions`, surveys.rs:1328). It writes the heading `## Existing code to read before you design`, the instruction to open each path, to put an `Existing code` section in the doc that names each path it will reuse or extend, to state for each component the design proposes whether it already exists in the repository (with the path), and to check each cache, config or limit the design depends on against the repository before relying on it. Write nothing and no heading when the design reading has no such assumption, since the reader check makes that case unreachable in practice.",
+    "Call `existing_code_section(&mut out, &inputs.reading)` in `producer_brief_with_evidence` straight after `reading_sections` (line 685), before `retry_section`.",
+    "In briefs/planner.rs add `DESIGN_EXISTING_CODE_PLAN_RULE` (one paragraph: a plan for a design job names each `Existing code:` path in its approach or steps and says whether each proposed component exists). Append it to the Report text in `planner_brief` only when the reading's class is design.",
+    "Add the missing field to the three struct literals in run_pin_tests.rs:1048, run/send_back.rs:497 and reading.rs:3584.",
+    "Add tests in briefs.rs: `the_design_producer_brief_lists_the_existing_code` (criteria 2 and 3), `other_classes_producer_briefs_have_no_existing_code_section` (criterion 4), and `the_planner_brief_carries_the_design_rule_only_for_design`.",
+    "Add the CHANGELOG.md entry under Unreleased / Fixed and decision D183 at the end of docs/decisions.md. D183 names the root cause, states that no refusal is added (0% newly refused), lists alternatives, and cites the three tests.",
+    "Run `cargo fmt --all`, then `cargo test -p athena-context`, then the full checks."
+  ],
+  "risks": [
+    {
+      "risk": "A design producer may ignore the new section; a brief cannot force it.",
+      "mitigation": "The reader already requires a criterion that the design has an Existing code section that reuses or extends the listed paths (surveys.rs:1439-1451), so the verifier judges the doc against that criterion. D183 states that this is information, not enforcement."
+    },
+    {
+      "risk": "The planner Report byte-bound test fails if the design-only rule leaks into the non-design planner brief.",
+      "mitigation": "The rule is added only when `class_of_work == \"design\"`; a test builds the planner brief for a docs reading and a design reading and asserts presence only in the second."
+    },
+    {
+      "risk": "A struct literal of `AcceptedReading` in a crate outside the three found is missed.",
+      "mitigation": "A grep of `AcceptedReading {` across all .rs files found three literals plus the definition; the producer greps once more, and clippy with --all-targets compiles every test."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "producer brief text",
+      "dependent": "crates/athena-context/src/briefs.rs `producer_brief_with_evidence` (called from crates/athena-core/src/run/mod.rs:1177 and by `producer_brief`)",
+      "kind": "code",
+      "test": "cargo test -p athena-context (all existing brief tests; the new tests pin the design and non-design cases). Non-design briefs are byte-identical to before; the design brief gains one section.",
+      "reason": null
+    },
+    {
+      "name": "planner brief Report section",
+      "dependent": "crates/athena-context/src/briefs.rs tests at 3650-3684 (planner Report byte bound `PLANNER_REPORT_BASE_BYTES`)",
+      "kind": "code",
+      "test": null,
+      "reason": "They build the planner brief from `planner_inputs(None)` over the `reading()` fixture, whose class is docs, so the design-only planner rule is not added and the bound holds."
+    },
+    {
+      "name": "`AcceptedReading` struct literals (new field)",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:1048, crates/athena-core/src/run/send_back.rs:497, crates/athena-core/src/reading.rs:3584",
+      "kind": "code",
+      "test": "cargo test -p athena-core compiles and runs them; each literal gets `class_of_work: String::new()` (or \"code\"), and those tests do not read the class.",
+      "reason": null
+    },
+    {
+      "name": "the design `Existing code:` reading rule",
+      "dependent": "crates/athena-core/src/reading/surveys.rs `check_design_existing_code`, `existing_code_assumptions`; crates/athena-context/src/briefs/reader.rs:292 rule line; crates/athena-core/tests/refusal_corpus.rs:2195-2212",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not changed. The plan adds no refusal or matching rule and does not edit the check, so no input form needs a corpus case and the replay share of newly refused readings is 0%."
+    },
+    {
+      "name": "producer brief built for first runs, seeded retries and conflict retries",
+      "dependent": "crates/athena-core/src/run/mod.rs:1169 (`AcceptedReading::new` for the real dispatch), the retry paths that rebuild `ProducerInputs` for seeded retries",
+      "kind": "code",
+      "test": null,
+      "reason": "All go through `producer_brief_with_evidence` with the same `reading`, so a retry brief also carries the section for a design reading; no state beyond the reading is read."
+    },
+    {
+      "name": "prompt-set token budgets",
+      "dependent": "docs/system-facts.md budget lines and `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompts/ file is edited; briefs sit outside the prompt sets (system facts, 'Prompt sets and budgets'), so the computed lines do not move."
+    },
+    {
+      "name": "decision log entry shape",
+      "dependent": "docs/decisions.md log structure checks (the mirror registry of D158/D162 and crates/athena-cli/src/decisions.rs)",
+      "kind": "rule",
+      "test": "cargo test --locked runs the decision-log and mirror tests.",
+      "reason": "The new D183 uses the same headings as D180 to D182 (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance) and is appended after D182, so structure checks hold; nothing else outside the two md files mentions D181 or D182 (searched)."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the doc comment of the new function and the test that pins section wording.",
+      "command": "cargo test -p athena-context the_design_producer_brief_lists_the_existing_code",
+      "observes": "The test asserts the section text in the rendered brief; the doc comment above `existing_code_section` in briefs.rs states the root cause (read by the verifier with git show / diff): the design producer was never given the inventory the reader already requires, and nothing compared the doc's components with the repository.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Test on the rendered brief of a design reading with two `Existing code:` assumptions and one ordinary assumption, plus read the function.",
+      "command": "cargo test -p athena-context the_design_producer_brief_lists_the_existing_code",
+      "observes": "The section quotes both `Existing code:` assumptions and not the ordinary one; it contains the heading text 'Existing code', 'reuse or extend', an instruction to open the paths, to state for each proposed component whether it exists, and to check each cache, config or limit against the repository.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test `the_design_producer_brief_lists_the_existing_code` calling the production `producer_brief` for a design reading whose assumption is `Existing code: crates/athena-core/src/jev.rs ...`.",
+      "command": "cargo test -p athena-context the_design_producer_brief_lists_the_existing_code",
+      "observes": "The brief contains `crates/athena-core/src/jev.rs`, the heading `Existing code` and `reuse or extend`. It is also checked that the section sits after `## Out of scope`/user defaults and before `## Checks Athena will run`.",
+      "fails_without": "On the base commit the brief has no section: the assertions on the path in a section, the heading and the instruction fail (the path appears only in the Assumptions list, so the test asserts the instruction text and the heading at the section, which are absent).",
+      "seam": "Entry point `producer_brief` (briefs.rs:675) with `ProducerInputs`. Fixture: the existing test helper `reading()` (briefs.rs:1474, exists) modified in the test to set `class_of_work = \"design\"` and `assumptions`, then `AcceptedReading::new(&r, &defaults(), |_| false)` (exists). No double. The `class_of_work` field and `existing_code_section` are added by plan steps 1 and 2."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit test `other_classes_producer_briefs_have_no_existing_code_section` builds `producer_brief` for class `code` and class `docs` readings that carry an `Existing code:` assumption.",
+      "command": "cargo test -p athena-context other_classes_producer_briefs_have_no_existing_code_section",
+      "observes": "Neither brief contains the new section heading. A third assertion compares the code brief to one built from the same reading with the assumption removed: they differ only in the assumption line, so nothing else changed. Then `cargo test -p athena-context` runs every existing brief test, including the planner Report byte bound (briefs.rs:3650), which uses a non-design reading.",
+      "fails_without": "A section written for every class would put the heading in the code and docs briefs and fail the absence assertions.",
+      "seam": "Entry point `producer_brief` with the `reading()` fixture (exists) and `class_of_work` set per case."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the recorded checks on the final tree.",
+      "command": "cargo fmt --all --check",
+      "observes": "fmt passes; then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` pass. The three struct-literal fixtures (run_pin_tests.rs:1048, run/send_back.rs:497, reading.rs:3584) compile with the new field.",
+      "fails_without": "A missed struct literal fails to compile in `cargo clippy --all-targets` and `cargo test`.",
+      "seam": "Athena's recorded checks; left to Athena's checks."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the CHANGELOG.md diff and the briefs.rs diff.",
+      "command": "git diff -- CHANGELOG.md crates/athena-context/src/briefs.rs",
+      "observes": "CHANGELOG.md has an entry under `## [Unreleased]` / `### Fixed` naming the root cause and the tests; the new text is a Rust `fn` in briefs.rs, and the diff touches no prompts/ file and no `athena-core/src/reading` check.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "40994aa1b4fc645b9fa3a6133c7a5caa9930b897c7717b671f44d612a14ef2b7"
+}
