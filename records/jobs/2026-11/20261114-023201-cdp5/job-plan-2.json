@@ -1,0 +1,482 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-023201-cdp5",
+  "round": 2,
+  "at": "2026-11-14T08:01:29.062987749Z",
+  "invocation_seq": 13,
+  "approach": "Root cause: the critic and verifier fill a free-text `request_reading_mismatch: Option<String>`, and Athena reads any non-empty value as a misread, so \"None for the plan…\" counts. Fix at the agent-facing structs only. In outputs.rs, `CriticOutput` (line 535) and `VerdictOutput` (line 245) lose `request_reading_mismatch`. They gain a required `request_misread: bool` and an optional `request_misread_reason: Option<String>`. `harden` (outputs.rs:581) already lists every property as required, so the schema needs no special case. A helper `misread_explanation(Option<&str>) -> String` (trimmed text, else \"no explanation given\") builds the stored text. `critic_round` (planning.rs:307) sets the stored `Critique.request_reading_mismatch` only when the boolean is true, and passes the boolean to `end_round` (planning.rs:446) as an explicit argument, which branches on it. `judge` (verify.rs:625) tests `output.request_misread`. A true value with no reason still stops or fails. The stored record fields (records.rs:944, records/plan.rs:171) are unchanged, so old records, `check_record_file`, retry.rs, status.rs, status/planning.rs and display.rs keep reading the same thing. D93 (decisions.md:2078-2086) says `judge()` enforces the major rating, so the verifier path keeps its Athena-source major finding (verify.rs:632). The critic path adds no Athena finding: the critic prompt tells the critic to add the major finding itself, and `end_round` stops on the boolean either way. This revision removes the earlier run/mod.rs change. Prompts, the `M-mismatch` anchor (verify.rs:1254), the context anchors (lib.rs:605, 612) and every agent-JSON fixture move to the new keys, because both structs use `deny_unknown_fields`. The prompt edits move the computed budget lines in docs/system-facts.md, which a test enforces. The tests replay the recorded openings from pbvc and sza7 by mapping the recorded text into `request_misread_reason` with `request_misread` false. They say so in their names and comments.",
+  "decisions": [
+    {
+      "choice": "Keep the stored record fields `Critique.request_reading_mismatch` and `Verification.request_reading_mismatch` (Option<String>). Set them only when `request_misread` is true. Change only the agent output structs.",
+      "reason": "The documented meaning at records/plan.rs:170 is 'Set when the critic judged that the accepted reading misread the request'. It fits once the field is set only on a real misread. Verification at records.rs:944 holds the same field. This leaves athena-data, old records, retry.rs:349/548/741, status.rs:137, status/planning.rs:43 and the cli readers working, and records.rs is out of scope.",
+      "rejected": [
+        {
+          "option": "Add a bool to the Verification and Critique records and migrate readers",
+          "why": "It changes the record schema and every reader and needs a migration for old records. records.rs is out of scope."
+        },
+        {
+          "option": "Keep the free-text field and add a prefix check for 'None…'",
+          "why": "It adds a string heuristic on free text. The root cause is a text field read as a flag."
+        }
+      ]
+    },
+    {
+      "choice": "`end_round` gets an explicit `request_misread: bool` argument from `critic_round` and branches on it. The message text comes from the stored field (`critique.request_reading_mismatch.clone().unwrap_or_default()`) and is used only to build the stop message. `judge` tests `output.request_misread` and reads the reason only for the finding evidence, through `misread_explanation(output.request_misread_reason.as_deref())`.",
+      "reason": "The brief says planning and judge act only on the yes/no field. An argument that carries the boolean makes the decision visible in the diff. The stored value is derived from the boolean, so the two cannot disagree. The stop message keeps its wording ('the critic judged that the reading misread the request: {how}'), which reading.rs:2178 and job_plan.rs:655 match on.",
+      "rejected": [
+        {
+          "option": "Keep `if let Some(how) = critique.request_reading_mismatch` in end_round",
+          "why": "It would give the right answer today, but it tests whether text exists, which is the mistake being removed. It also fails the grep-style check in criterion 3."
+        }
+      ]
+    },
+    {
+      "choice": "The critic path adds no Athena-written finding. The critic prompt tells the critic that a real misread is also a major finding, and the critic writes it. `critic_findings` and `run/mod.rs` are untouched.",
+      "reason": "D93 (decisions.md:2084) puts the enforcement in `judge()`, which is the verifier path. Planning today stops on the misread in `end_round` before it looks at the verdict, with no finding added. An Athena finding with source Critic would be read by evidence_labels.rs:322-328 `findings_vote` as critic evidence, which it is not. An Athena-source finding would add a second carried copy of the text in retry.rs:741-761. Adding nothing keeps behavior unchanged, and it answers findings 10 and 11 of round 1.",
+      "rejected": [
+        {
+          "option": "Add a Major finding with source Critic in critic_findings (the earlier plan)",
+          "why": "Athena would write text that evidence_labels counts as critic evidence, and a retry would carry the misread text twice."
+        },
+        {
+          "option": "Add the finding with source Athena",
+          "why": "It still carries the text twice into a retry (retry.rs:741 and the finding loop), widens scope to run/mod.rs, and the request keeps D93 as it is."
+        }
+      ]
+    },
+    {
+      "choice": "A true `request_misread` with an empty or missing reason is still a misread, with the stored text 'no explanation given'. A false one ignores any reason text and stores nothing. The CHANGELOG and decision entries name the dropped text as a known trade-off.",
+      "reason": "The boolean is the single decision. The invocation record keeps no structured output (invocation.rs:145-195 records the usage, commands and detail only), so a remark sent in the reason with a false boolean is not kept. The prompts send such remarks to findings. A model that ignores that loses the remark, and this is accepted and stated openly. A model that sets true with a reason like 'None…' still stops planning: that case is rare, and the prompt asks for false and a null reason otherwise.",
+      "rejected": [
+        {
+          "option": "Require a non-empty reason when true and refuse the output otherwise",
+          "why": "It costs a retry for a formatting lapse and adds a new refusal rule."
+        },
+        {
+          "option": "Add a minor Athena finding or ui line when a reason arrives with a false boolean",
+          "why": "It adds code, a test and another finding source for a case the prompt already routes to findings. The trade-off is named in the CHANGELOG instead."
+        }
+      ]
+    },
+    {
+      "choice": "The replay tests copy the recorded openings into `request_misread_reason` with `request_misread` false, and say so in their names and comments. Their claim is that an `end_round` or `judge` that tests the reason text for Some would stop or fail. A separate test shows the old key is refused.",
+      "reason": "Old-format JSON no longer parses (`deny_unknown_fields` plus a required boolean), so the recorded output cannot go through the new parse unchanged. The property that matters is that the reason text no longer decides. The snapshot has no records/ directory, and the repository holds neither text (a search found no match), so only the openings quoted in the request are exact.",
+      "rejected": [
+        {
+          "option": "Claim the tests replay the old behavior",
+          "why": "The old code would not compile against the new structs, so that claim cannot be demonstrated."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the verifier prompt growth to about 100 bytes net (about 34 tokens) and update the two computed lines in docs/system-facts.md.",
+      "reason": "docs/system-facts.md says verifier 1233 of 1300, so the largest verifier set has 67 tokens of headroom. The brief's 90 tokens apply to the change capability only. `system_facts_budgets_match_computed` (budgets.rs:125) fails on any stale line, and the file says to update the line, never the budget.",
+      "rejected": [
+        {
+          "option": "Leave docs/system-facts.md alone",
+          "why": "Any growth of 3 bytes or more in critic.md or verifier.md moves a computed line and fails cargo test."
+        }
+      ]
+    },
+    {
+      "choice": "display.rs and status.rs keep their logic and gain doc updates and tests. Both already read the stored field, which is now set only on a true boolean.",
+      "reason": "The reader logic is correct once the stored field means a real misread. A change to it would alter unrelated behavior. The tests pin that None prints no misread line and plan_state treats None as accepted and Some as stopped.",
+      "rejected": [
+        {
+          "option": "Filter blank stored values in display.rs and not in status.rs",
+          "why": "The two readers would disagree on a hand-edited record. The new code never writes a blank value, because misread_explanation falls back to 'no explanation given'."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "purpose": "Replace `request_reading_mismatch` in VerdictOutput (line 245-253) and CriticOutput (535-542) with `request_misread: bool` and `request_misread_reason: Option<String>`, with doc comments that become the schema text. Add `pub fn misread_explanation`. Update `sample_critique` (692) and the VerdictOutput literal (950). Add the schema and old-key tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "`critic_round` stores the field only when the boolean is true and passes the boolean to `end_round`. `end_round` branches on it. The message wording stays.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "`judge` acts only on `request_misread` and builds the finding evidence with `misread_explanation`. Update the `M-mismatch` row, its doc comment (1243) and test (3240), the VerdictOutput literal (1936), `judged_with_mismatch` (2928) and the misread tests. Add the sza7 replay and the true-misread tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Redact `request_misread_reason` (350-377), and set the stored `Verification.request_reading_mismatch` (422) from the boolean through `misread_explanation`, None when false.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/critic.md",
+      "action": "modify",
+      "purpose": "Line 5: set `request_misread` true only for a real misread, say how in `request_misread_reason` and add a major finding; otherwise false, the reason null, and other remarks about the reading in findings.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/verifier.md",
+      "action": "modify",
+      "purpose": "Lines 5-6: the same wording for the verifier (Athena rates it major), and 'Falling short of it is a request_misread'. Net growth about 100 bytes, under the 90-token limit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "purpose": "Update the prompt anchor rows at 605 and 612 to the new wording.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Logic unchanged: the misread line prints for a stored value only (line 1921). Add a doc comment and a test that None prints no line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Update the `plan_state` doc (131-132) and add a unit test next to the fixtures at 2413 and 2577. Logic unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Update the four fixtures (21, 267, 1179, 1194). Add the pbvc replay with a null-reason variant, the true-misread planning test, and the sza7 and true-misread verifier tests through `Athena::go`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "The fake critic and verifier defaults (208, 401) use the new keys.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "The verifier fixture at 213 uses the new keys.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "purpose": "The shared verifier fixture at 411 uses the new keys.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under [Unreleased] / Fixed: root cause, new fields, jobs pbvc, pkhp and sza7, the unchanged stored field, the prompt and budget effect, the dropped reason text when the boolean is false, and the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D181 after D180 (5198-5225) in the D180 form, with a Provenance bullet. Earlier entries are not edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "One sentence at lines 97-99: the stored `request_reading_mismatch` is set only when the critic's or verifier's `request_misread` is true.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Outside the brief's deliverable list; needed to compile. The test-module VerdictOutput literal at line 462 gets the two new fields (one edit, no logic change).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Outside the brief's deliverable list; needed because `system_facts_budgets_match_computed` (budgets.rs:125) fails until the `budget critic` and `budget verifier` lines match the computed sizes after the prompt edits. Update those two lines only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "purpose": "Outside the deliverable list; a fixture. The scripted verifier output at line 1318 uses the new keys. The request says to update 'any fixtures that set the field'.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Outside the deliverable list; fixtures. The five agent-output fixtures (531, 580, 747, 3260, 3693) use the new keys.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "purpose": "Outside the deliverable list; fixtures. The agent outputs at 439 and 757 use the new keys. The record literal at 1215 is unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "purpose": "Outside the deliverable list; a fixture. The verifier output at 669 uses the new keys.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Outside the deliverable list; a fixture. The verifier output at 4948 uses the new keys.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "Outside the deliverable list; a fixture helper. `critique_of` (462) maps `Some(text)` to `request_misread` true plus the reason, and `None` to false plus null, so the test at 636 still passes.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "outputs.rs: replace the two fields in VerdictOutput and CriticOutput with `request_misread: bool` and `request_misread_reason: Option<String>`. The doc comments say: true only for a real misread, which is also a major finding; other remarks go in findings; the reason is null when false. Add `pub fn misread_explanation(reason: Option<&str>) -> String` (trimmed text, else 'no explanation given'). Update `sample_critique` (line 692) and the VerdictOutput literal (line 950). Add the schema tests and the old-key refusal tests, with names containing `request_misread`.",
+    "Fix every struct literal of VerdictOutput: send_back.rs:462 and verify.rs:1936 get `request_misread: false, request_misread_reason: None`. Let the compiler find any other.",
+    "verify.rs `judge` (line 625): replace the string test with `if output.request_misread`. Push the reason 'the reading misread the request' and the Major `athena_finding` with evidence `misread_explanation(output.request_misread_reason.as_deref())`. Update the `M-mismatch` row of `REQUIRED_FIELDS` (anchor `set request_misread true`), its doc comment (1243) and the test at 3240. Update `judged_with_mismatch` (2928). Replace the two misread tests: a true boolean with a reason, a true boolean with no reason, and a false boolean with any reason that adds nothing. Assert the finding's source is Athena.",
+    "run/verification.rs: redact `request_misread_reason` in the free-text block (lines 350-367), setting it to None when blank. Build the stored `Verification.request_reading_mismatch` (line 422) as `Some(misread_explanation(..))` only when `request_misread` is true, else None.",
+    "planning.rs: in `critic_round` set `request_reading_mismatch` to `critic_output.request_misread.then(|| misread_explanation(critic_output.request_misread_reason.as_deref()))`, and pass `critic_output.request_misread` to `end_round` as a new argument (the function already allows too_many_arguments). In `end_round`, take the message text from `critique.request_reading_mismatch.clone().unwrap_or_default()` before the critique is pushed, and branch with `if request_misread`. Keep the message wording. Do not touch run/mod.rs.",
+    "Prompts: edit critic.md line 5 and verifier.md lines 5-6. The verifier sentence is about: 'Set request_misread true only if the reading misread the request, with how in request_misread_reason; Athena rates it major. Otherwise set it false and the reason null; other remarks go in findings.' Line 6 ends 'Falling short of it is a request_misread.' The critic sentence adds 'and add a major finding for it'. Keep the verifier net growth to about 100 bytes.",
+    "Update the anchor rows in context lib.rs (605 and 612) to the new wording.",
+    "Run `cargo test -p athena-cli --test budgets` and `cargo test -p athena-context`. Set the `budget critic` and `budget verifier` lines in docs/system-facts.md to the computed values in the failure message. Leave the budgets unchanged.",
+    "display.rs: add a doc comment at line 1921 and a test that a critique with the stored field None prints no misread line and one with Some prints it. status.rs: update the `plan_state` doc and add the unit test. docs/records.md: add the one sentence at lines 97-99.",
+    "Update every agent-JSON fixture to `\"request_misread\": false, \"request_misread_reason\": null`: fake.rs:208 and 401; run/tests.rs:21, 267, 1179 and 1194; run_pin_tests.rs:213; scope_guard.rs:1318; cli tests common/mod.rs:411; lifecycle.rs (five sites); introspection.rs:439 and 757; retry.rs:669; drain.rs:4948. In job_plan.rs `critique_of`, map `Some(text)` to `request_misread` true plus the reason, and `None` to false plus null. Leave the record-shaped fixtures alone.",
+    "run/tests.rs: add the pbvc replay (and a null-reason variant), `a_true_request_misread_stops_planning`, `the_sza7_verifier_text_does_not_fail_verification` and `a_true_request_misread_fails_verification`. Use `athena_with`, `planning_script` and `finished_job`, a wrapper over `base_script` that rewrites the verifier turn, and `Records::load(&athena.git, &athena.head().unwrap())` to read the stored critique. Label the reconstructed remainder of each recorded text in a comment. verify.rs: add `the_sza7_reason_with_request_misread_false_adds_nothing`.",
+    "CHANGELOG.md: add an entry under [Unreleased] / Fixed with the root cause, the new fields, the three job ids, the unchanged stored field, the dropped reason text when the boolean is false, the prompt and budget effect, and the tests. docs/decisions.md: append D181 after D180 in the D180 form, with a Provenance bullet naming the files read and the tests run, and `Not measured:` for anything not run.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix what fails. Do not touch athena.toml, defaults.toml, workflows, records.rs or run/mod.rs."
+  ],
+  "risks": [
+    {
+      "risk": "A missed fixture or struct literal of the old field breaks the compile or a test. There are about 25 sites, and several are outside the brief's deliverable list.",
+      "mitigation": "List every site found by search in the files list. The struct literals (send_back.rs:462, verify.rs:1936, outputs.rs:950) fail to compile when missed. Every JSON fixture fails its test loudly because of `deny_unknown_fields`. The producer runs the full `cargo test --locked`. The files outside the deliverable list are named with their reason in the files list."
+    },
+    {
+      "risk": "The largest verifier set has 67 tokens of headroom in the facts file (1233 of 1300), against the brief's 90 tokens for the change capability.",
+      "mitigation": "Keep the verifier prompt growth to about 100 bytes net. Run the budgets test, then set the two lines in docs/system-facts.md from its failure message. If the verifier set cannot fit, shorten the sentence rather than raise a budget."
+    },
+    {
+      "risk": "`check_verifier_prompt` refuses the new wording or the old anchor. Its clause split on commas and colons is sensitive to wording.",
+      "mitigation": "Move the `M-mismatch` anchor to `set request_misread true` together with the prompt and the test at verify.rs:3240. Write the new sentences without a clause that matches a forbidden pattern. `cargo test -p athena-core --lib verify` runs the check on the shipped frame and both fragments."
+    },
+    {
+      "risk": "A reason sent with a false boolean is dropped from the records (the invocation record keeps no structured output), so a real remark such as pbvc's 'One factual error' is lost if the model ignores the prompt.",
+      "mitigation": "State it in the CHANGELOG and decision entries, and have the prompts send remarks to findings. The replay tests pin that a false boolean never stops planning or fails verification."
+    },
+    {
+      "risk": "A model sets `request_misread` true while its reason says 'None…', and planning stops.",
+      "mitigation": "The prompt asks for false and a null reason when there is no misread. No code change; a true flag with a 'None…' reason is much less likely than the free-text case."
+    },
+    {
+      "risk": "The agent-facing field changes, so an in-flight job planned before the change cannot parse old-format output after it.",
+      "mitigation": "The CHANGELOG and decision entries say so. The stored field and its readers are unchanged, so records stay readable."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "stored `request_reading_mismatch` on Verification and Critique records",
+      "dependent": "crates/athena-core/src/reading/retry.rs:349, 548 and 741 (restart qualification and carried retry text)",
+      "kind": "code",
+      "test": "cargo test -p athena-core retry (existing tests at reading.rs:3411 and 3492 set the stored field directly) and the new a_true_request_misread_stops_planning in run/tests.rs. The stored field keeps its type and is set only when the boolean is true. The critic path adds no finding, so retry.rs:741-761 carries the misread text once, as today.",
+      "reason": null
+    },
+    {
+      "name": "stored `request_reading_mismatch` on Critique",
+      "dependent": "crates/athena-core/src/status.rs:137 (`plan_state`) and crates/athena-core/src/status/planning.rs:43 (planning first-pass)",
+      "kind": "code",
+      "test": "New plan_state unit test in status.rs next to the fixtures at 2413 and 2577; cargo test -p athena-core --lib status. Both read `is_none()`, and the field is None unless the boolean is true. Records already written with a 'None for…' string still read as stopped, and are not rewritten (records are immutable).",
+      "reason": null
+    },
+    {
+      "name": "stored `request_reading_mismatch` on Critique",
+      "dependent": "crates/athena-cli/src/display.rs:1921 (plan rounds in the job view)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli with a new assertion that a critique with the stored field None prints no 'misread the request' line and one with Some prints it.",
+      "reason": null
+    },
+    {
+      "name": "findings recorded for a misread",
+      "dependent": "crates/athena-core/src/evidence_labels.rs:322-328 `findings_vote`, which keeps only FindingSource::Critic findings from critiques and Verifier findings from verification",
+      "kind": "code",
+      "test": null,
+      "reason": "The plan adds no Critic-source finding. The verifier's misread finding is built by `athena_finding` with source Athena (verify.rs:291-298), and `findings_vote` skips Athena-source findings (evidence_labels.rs:322, `f.source != FindingSource::Athena`). The new verify.rs test asserts the finding's source is Athena. The existing evidence_labels tests (evidence_labels.rs:869-1046) build records with the stored field None and are unchanged."
+    },
+    {
+      "name": "stop message 'the critic judged that the reading misread the request: …' and the failure reason 'the reading misread the request'",
+      "dependent": "crates/athena-core/src/reading.rs:2178 (stop-message prefix check) and `PLANNING_STOPPED_PREFIX` recognition of a stopped plan; crates/athena-cli/tests/job_plan.rs:636-660",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading and cargo test -p athena-cli --test job_plan a_reject_a_misread_reading. The message and reason wording are unchanged. reading.rs is a listed deliverable but needs no edit: its tests build records, not agent output.",
+      "reason": null
+    },
+    {
+      "name": "VerdictOutput fields",
+      "dependent": "VerdictOutput struct literals: crates/athena-core/src/run/send_back.rs:462 (test module), crates/athena-core/src/verify.rs:1936 and crates/athena-context/src/outputs.rs:950",
+      "kind": "code",
+      "test": "cargo clippy --all-targets --locked -- -D warnings and cargo test -p athena-core send_back. Each literal names every field, so each gets `request_misread: false, request_misread_reason: None`, and a missed one fails to compile. verify.rs:2576 builds CriterionVerdictOutput, which does not change.",
+      "reason": null
+    },
+    {
+      "name": "verifier output free text and the stored verification field",
+      "dependent": "crates/athena-core/src/run/verification.rs:350-377 (redaction of the verifier's free text), :396 (the `judge` call) and :422 (the stored `Verification` field)",
+      "kind": "code",
+      "test": "The new run/tests.rs verifier tests for criteria 5 and 6, and the existing redaction tests in cargo test -p athena-core. Redaction now covers `request_misread_reason`; the stored field is built with `misread_explanation` and is None when the boolean is false.",
+      "reason": null
+    },
+    {
+      "name": "misread decision points",
+      "dependent": "Callers and modes reaching the changed decisions: `end_round` is called only by `critic_round` (planning.rs:431), which is called only by the plan round (planning.rs:260). `judge` is called by run/verification.rs:396 and run/send_back.rs:475, plus the verify.rs tests. Nested runs on the fake driver (D47) read the fake defaults at fake.rs:208 and 401.",
+      "kind": "code",
+      "test": "cargo test -p athena-core a_critique_whose_reason_starts_with_none, a_true_request_misread and send_back; cargo test -p athena-cli (drain and lifecycle suites run the fake defaults).",
+      "reason": "The Athena-only critique at planning.rs:286-299 never reaches `end_round`, and its stored field stays None. The send-back caller builds a VerdictOutput with the boolean false. No job or record state is read besides the critic or verifier output."
+    },
+    {
+      "name": "verifier prompt wording rule",
+      "dependent": "crates/athena-core/src/verify.rs:1246-1258 `REQUIRED_FIELDS` row M-mismatch, its test at 3240-3244, crates/athena-context/src/lib.rs:605 and 612 anchors, `check_verifier_prompt` over the shipped frame and the cap-change and cap-study fragments (verify.rs:3148-3290), and crates/athena-context/src/briefs.rs:4084, which slices verify.rs between `const VERDICT_RULES` and `const REQUIRED_FIELDS`",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --lib verify and cargo test -p athena-context. The row and its anchors name the old field, so they move with the prompt. The new sentences use no negator word in a clause that matches a forbidden pattern. The REQUIRED_FIELDS constant keeps its position, so the briefs.rs slice is unaffected.",
+      "reason": null
+    },
+    {
+      "name": "prompt set sizes (critic and verifier)",
+      "dependent": "docs/system-facts.md budget lines for critic (1002 of 1300) and verifier (1233 of 1300); crates/athena-cli/tests/budgets.rs:125 `system_facts_budgets_match_computed`; `BudgetSet::budget` in crates/athena-context/src/lib.rs; the planner and critic briefs, which carry the facts file whole",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets and cargo test -p athena-context. The two lines are set to the computed values from the failure message, with the budgets unchanged. The verifier stays at or under 1300.",
+      "reason": null
+    },
+    {
+      "name": "critic and verifier JSON fixtures",
+      "dependent": "Agent-JSON fixtures that feed the fake agent: crates/athena-agent/src/fake.rs:208, 401; crates/athena-core/src/run/tests.rs:21, 267, 1179, 1194; run_pin_tests.rs:213; scope_guard.rs:1318; crates/athena-cli/tests/common/mod.rs:411; lifecycle.rs:531, 580, 747, 3260, 3693; introspection.rs:439, 757; retry.rs:669; drain.rs:4948; job_plan.rs:472",
+      "kind": "code",
+      "test": "cargo test --locked. Both structs use `deny_unknown_fields` and `request_misread` is required, so each fixture must swap `\"request_reading_mismatch\": …` for `\"request_misread\": false, \"request_misread_reason\": null`. job_plan.rs maps its `mismatch` argument. A missed fixture fails its test loudly.",
+      "reason": null
+    },
+    {
+      "name": "`athena.verification/1` and `athena.critique/1` record shape",
+      "dependent": "Record-shaped fixtures that stay unchanged: crates/athena-gate/src/invariant.rs:1126, landing_tests.rs:199, crates/athena-core/src/land.rs:403, store.rs:742, pr_check.rs:337, gate_counts.rs:286, introspect.rs:2032, reading.rs:1955 and 2138, status.rs:2413, 2577 and 3054, crates/athena-data/src/records.rs:3467, crates/athena-cli/tests/reconcile.rs:55, status_durations.rs:42, introspection.rs:1215",
+      "kind": "code",
+      "test": "cargo test -p athena-data and cargo test -p athena-gate",
+      "reason": "The record schema and its fields are untouched, so these fixtures and the `check_record_file` round trips are unaffected."
+    },
+    {
+      "name": "documentation of the field and of the critic's and verifier's output",
+      "dependent": "docs/records.md:97-99, docs/design/athena-v0.md:1828 and docs/design/job-planning.md:114",
+      "kind": "rule",
+      "test": null,
+      "reason": "docs/records.md describes the stored record, so it gets one sentence that the field is set only when the agent's yes/no field is true. athena-v0.md B.3 is a historical design text: the only tests that read it are learnings_recorded.rs (section 15 only) and a text include at lifecycle.rs:2887 that does not name the field. job-planning.md:114 says only 'whether the reading misread the request', which stays true. Both are left as they are."
+    },
+    {
+      "name": "reading refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "This change adds no parser, stem list or reading check. It changes how the critic's and verifier's own output is read, and the only prompt check touched is the REQUIRED_FIELDS anchor row. The corpus mentions 'misread' only in unrelated case text (refusal_corpus.rs:20, 1072, 1107). No input form maps to a corpus case, and no case is added or changed."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New tests in the `mod tests` of crates/athena-context/src/outputs.rs, with names containing `request_misread`. They call `critic_schema()` and `verdict_schema()` and assert that `properties.request_misread.type` is boolean, that `request_misread_reason` is present, that both are in `required`, and that `request_reading_mismatch` is absent. They also assert that `serde_json::from_value::<CriticOutput>` and `::<VerdictOutput>` refuse a JSON that still carries the old key, and that a JSON without `request_misread` is refused. The existing `sample_critique` (outputs.rs:692) and the VerdictOutput literal (outputs.rs:950) are updated to the new fields.",
+      "command": "cargo test -p athena-context request_misread",
+      "observes": "The schema requires the boolean and the reason for both agents, the old key is gone, and an old-format output no longer parses.",
+      "fails_without": "With the old structs the schema holds `request_reading_mismatch` and no `request_misread`, so the property assertions fail, and the old-key refusal assertion fails because the old JSON would still parse.",
+      "seam": "Production `schema_of`, `critic_schema`, `verdict_schema` and serde parse in outputs.rs. No fake is used. The tests are added in step 1, to the existing `mod tests`."
+    },
+    {
+      "criterion": 2,
+      "method": "Rewrite the prompt anchor rows in crates/athena-context/src/lib.rs (605 and 612) to the new sentences: `request_misread` true only for a real misread, a real misread is also a major finding, other remarks go in findings. Move the `M-mismatch` row of `REQUIRED_FIELDS` (verify.rs:1254) to anchor on `set request_misread true`, and move the test at verify.rs:3240 to replace that phrase. Then `git diff -- crates/athena-context/prompts/verifier.md` shows the net growth, which must stay under 90 tokens (270 bytes). The target is about 100 bytes, and the headroom in the facts file is 67 tokens.",
+      "command": "cargo test -p athena-context && cargo test -p athena-cli --test budgets && cargo test -p athena-core --lib verify",
+      "observes": "The critic and verifier prompts carry the new wording. `check_verifier_prompt` accepts the shipped frame and the cap-change and cap-study fragments. The budgets test passes with the facts lines updated, and the verifier set stays at or under 1300.",
+      "fails_without": "The lib.rs anchor test fails if a prompt lacks the new wording. `check_verifier_prompt` refuses the frame with `M-mismatch` if the anchor phrase is missing. The budgets test fails if a prompt overflows or the facts lines are stale.",
+      "seam": "Production `compose`, `check_budget`, `check_verifier_prompt` and the prompt-anchor test in the context lib.rs, through `system_facts_budgets_match_computed` (budgets.rs:125) and the verify.rs prompt tests (verify.rs:3167-3290). All exist today. Step 8 edits the anchors and the facts lines."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the diff of `critic_round`, `end_round` and `judge`. `end_round` has a `request_misread: bool` parameter and an `if request_misread` branch. `critic_round` passes `critic_output.request_misread`. `judge` tests `output.request_misread`. No `if let Some(..)` or `.is_some()` test of `request_misread_reason` or of `request_reading_mismatch` decides either outcome. The reason is read only to build the message and the finding evidence.",
+      "command": "git diff -- crates/athena-core/src/run/planning.rs crates/athena-core/src/verify.rs",
+      "observes": "Both decisions branch on the boolean. The reason text is used for wording only.",
+      "fails_without": "If either function still tested the reason text for Some, the criterion 4 and 5 replays would stop planning or fail verification.",
+      "seam": "Not applicable: a content criterion read from the diff. Criteria 4 and 5 give the behavior proof."
+    },
+    {
+      "criterion": 4,
+      "method": "New tests in crates/athena-core/src/run/tests.rs next to the planning tests (step 11). The tests build `repo_with_planning(3)` and a `state` tempdir. They call `athena_with(&repo, &state, PASSES, crate::test_support::plenty_of_space, planning_script(vec![good_plan()], vec![critique], calls.clone()))` and then `finished_job`. The critique JSON is the pbvc critic output as the new agent writes it: verdict accept, findings with minor items only, `request_misread` false, and `request_misread_reason` starting 'None for the plan. One factual error' (recorded start from the request; the rest is reconstructed and labelled so in the comment, because records/ is absent). A second variant sets the reason to null. The tests assert `finished.state == Landed`, a non-empty `prompts_of(&calls, Role::Producer)`, and that the stored critique (from `Records::load(&athena.git, &athena.head().unwrap())`, `jobs[job.as_str()].critiques`) has `final_verdict` Accept and `request_reading_mismatch` None. They also assert that `finished.reason` lacks 'misread'.",
+      "command": "cargo test -p athena-core a_critique_whose_reason_starts_with_none_does_not_stop_planning",
+      "observes": "Planning is not stopped, the producer runs, and no misread reason is added to the job or its critique.",
+      "fails_without": "An `end_round` or `critic_round` that tests the reason text for Some stops the job with 'the critic judged that the reading misread the request', makes no producer call, and stores the text. The three assertions on state, the producer call and the stored critique then fail. The test is a replay that maps the recorded text into the reason with the boolean false. It does not run the old code.",
+      "seam": "Production entry `Athena::go` through `athena_with` and `finished_job` into the real `critic_round`, `CriticOutput` parse, `critic_findings`, `plan_verdict` and `end_round`. The fake agent script `planning_script` (run/tests.rs:1204) only supplies the critic JSON. It exists today. The new tests are added in step 11."
+    },
+    {
+      "criterion": 5,
+      "method": "Two tests. In crates/athena-core/src/verify.rs tests, `the_sza7_reason_with_request_misread_false_adds_nothing` builds a `VerdictOutput` with `serde_json::from_value` (pass, both criteria met, no findings, `request_misread` false, `request_misread_reason` 'None for this change.', the recorded sza7 text). It calls `judge_with(&out, &[\"cargo test\".to_string()], &[check(true)])` with the existing helpers `output()` and `check()`. It asserts `final_verdict` Pass, empty `findings`, and no reason containing 'misread the request'. In run/tests.rs, `the_sza7_verifier_text_does_not_fail_verification` wraps `base_script()` in a closure like the one in `run_planned_behavior` (run/tests.rs:1267). The closure sets `request_misread_reason` on the verifier turn and leaves the boolean false. It runs `athena_with(&repo(), ...)` and `finished_job`, and asserts Landed, no misread reason in `finished.verification.unwrap().reasons`, and `request_reading_mismatch` None in the stored verification.",
+      "command": "cargo test -p athena-core the_sza7",
+      "observes": "The verdict is not failed for a misread, and neither the reason 'the reading misread the request' nor a major finding is added.",
+      "fails_without": "A `judge` that tests the reason text for Some returns Fail, adds 'the reading misread the request' and a Major finding with the sza7 text, and `check_and_verify` stores the text. Each assertion above then fails. The test maps the recorded text into the reason with the boolean false, as its name and comment say.",
+      "seam": "Production `judge` (verify.rs:408) with the `output()` and `judge_with()` helpers (verify.rs:1935, 1958), which exist. For the second test, production `Athena::go` into `check_and_verify` (run/verification.rs, redaction at 350-377 and the stored field at 422), with a `base_script` wrapper that step 11 adds. The fake supplies only the verifier JSON."
+    },
+    {
+      "criterion": 6,
+      "method": "Four tests plus one existing. In verify.rs, `a_true_request_misread_is_a_major_finding_and_the_verdict_is_not_pass` replaces the old test at verify.rs:2935. It sets `request_misread` true with a reason, and asserts Fail, a Major finding with source `FindingSource::Athena` whose evidence is the reason, and 'misread the request' in `reasons`. A sibling with no reason asserts the same with evidence 'no explanation given'. In run/tests.rs, `a_true_request_misread_stops_planning` runs `athena_with` and `planning_script` with an accept critique, `request_misread` true and a reason. It asserts Failed, a `finished.reason` containing 'the critic judged that the reading misread the request: <reason>', an empty producer prompt list, and a stored critique with `request_reading_mismatch` Some(reason). `a_true_request_misread_fails_verification` wraps the verifier turn as in criterion 5 with the boolean true, and asserts a Rejected state, the 'the reading misread the request' reason, a Major Athena finding, and the stored verification field Some(reason). The existing crates/athena-cli/tests/job_plan.rs test at line 636 still asserts 'misread the request: It reads the request as a refactor', with `critique_of` (line 462) mapping its `mismatch` argument to `request_misread` and the reason.",
+      "command": "cargo test -p athena-core a_true_request_misread && cargo test -p athena-cli --test job_plan a_reject_a_misread_reading",
+      "observes": "With the boolean true, planning stops and verification fails, each with the misread reason, and the verification records a Major finding (D93). The critic path records no Athena finding.",
+      "fails_without": "A `judge` or `end_round` that ignored the boolean would let a true value pass verification or continue planning. The Fail, Failed and Rejected assertions would then fail. A `judge` that dropped the finding would fail the `any(Major)` assertion.",
+      "seam": "Same production entries as criteria 4 and 5. The `critique_of` helper and `Scenario` in job_plan.rs exist today. The job_plan.rs edit and the new tests are added in steps 10 and 11."
+    },
+    {
+      "criterion": 7,
+      "method": "status.rs `plan_state` (line 133) already reads the stored field, so step 9 updates its doc line and adds a unit test next to the fixtures at status.rs:2413 and 2577. The test shows that a critique with a final verdict of accept and the stored field None is accepted, that the same critique with the field Some is stopped, and that a revise stays stopped. In display.rs (line 1921) the logic is unchanged: it prints the misread line only for a stored value. A new assertion renders a critique with the stored field None and one with Some, and checks that the first has no 'misread the request' line. Every agent-JSON fixture is updated, and the record-shaped fixtures (`request_reading_mismatch: None` literals) and the invariant.rs JSON are left as they are. The round-trip tests of `check_record_file` (records.rs:1455) still pass.",
+      "command": "cargo test -p athena-core --lib status && cargo test -p athena-cli",
+      "observes": "The readers show a misread only for a set stored field. The cli suite and the records round trips pass with the new fixtures.",
+      "fails_without": "A reader that showed a misread with the field unset would fail the new `plan_state` and display assertions. A fixture still carrying the old key would fail to parse and fail its cli or core test.",
+      "seam": "Production `plan_state`, the display renderer and `check_record_file`, through existing tests. The only new double is a `Critique` record with the stored field None or Some. Step 9 adds the tests."
+    },
+    {
+      "criterion": 8,
+      "method": "Read `git diff -- CHANGELOG.md docs/decisions.md docs/records.md`. CHANGELOG.md gets an entry under `## [Unreleased]` / `### Fixed` (line 8 and 10). It names the root cause, the new fields, jobs 20261114-012353-pbvc, 20261114-013056-pkhp (the retry) and 20261029-084645-sza7, the unchanged stored field, the prompt and budget effect, and the dropped reason text when the boolean is false. docs/decisions.md gets `## D181 · …` appended after D180 (lines 5198-5225) in the D180 form: Case, Decision, Alternatives, Tradeoff, Reversal cost and a Provenance bullet with `Not measured:` for anything not run. It edits no earlier entry. docs/records.md gets one sentence at lines 97-99.",
+      "command": "cargo test -p xtask && cargo test -p athena-cli",
+      "observes": "Both files carry the new entry with a Provenance bullet, and the existing decision-log and mirror checks pass.",
+      "fails_without": "The decision-log structure checks and the changelog tests flag a decision entry without its required bullets. Without the entries the criterion is unmet.",
+      "seam": "Not applicable for the diff read. The log structure is checked by existing tests (xtask policy tests and the cli tests), and they exist today."
+    },
+    {
+      "criterion": 9,
+      "method": "Run the three Athena checks on the final tree. Athena's recorded checks on the same tree count as evidence. Also run `cargo test -p athena-core --test refusal_corpus`: the change touches no reading refusal or matching rule, so no corpus case is added or changed. The producer and verifier run it only as a guard.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "fmt, clippy and the full test run all pass.",
+      "fails_without": "A fixture still carrying the old key, a stale constructor of VerdictOutput (send_back.rs:462, verify.rs:1936, outputs.rs:950), a stale anchor or a stale budget line fails to compile or fails a test.",
+      "seam": "Not applicable: the repository's own checks."
+    }
+  ],
+  "open_questions": [
+    "User: The recorded pbvc and sza7 texts are not in this snapshot (records/ is absent, and a search of the repository found neither). Is it acceptable for the replays to use the openings quoted in the request ('None for the plan. One factual error…' and 'None for this change.') with a reconstructed, labelled remainder, or can the full recorded texts be supplied?",
+    "User: Records written before this change that hold a 'None for…' string in `request_reading_mismatch` (the stopped plan of pbvc, the failed verification of sza7) will keep showing as misreads in status and display. The plan does not rewrite them, since records are immutable (D06). Is that acceptable?"
+  ],
+  "producer_section_sha256": "1de8b54a759f0ff7c2ba2aec824f7c4b1f57422916a3113f75270d5cde6ae2c7"
+}

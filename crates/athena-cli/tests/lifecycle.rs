@@ -528,7 +528,8 @@ fn try_again_on_a_rejected_job_carries_its_request_and_findings_to_the_reader() 
             "evidence": "README.md has no greeting",
             "location": "README.md"
         }],
-        "request_reading_mismatch": null,
+        "request_misread": false,
+        "request_misread_reason": null,
         "summary": "The greeting is missing."
     });
     let (script, readers) = recording_readers(scenario);
@@ -577,7 +578,8 @@ fn failing_verdict(canary: &str) -> serde_json::Value {
             "evidence": "README.md has no greeting",
             "location": "README.md"
         }],
-        "request_reading_mismatch": null,
+        "request_misread": false,
+        "request_misread_reason": null,
         "summary": "The greeting is missing."
     })
 }
@@ -744,7 +746,8 @@ fn a_request_naming_a_job_carries_its_request_and_findings_to_the_reader() {
             "evidence": "README.md has no greeting",
             "location": "README.md"
         }],
-        "request_reading_mismatch": null,
+        "request_misread": false,
+        "request_misread_reason": null,
         "summary": "The greeting is missing."
     });
     let (script, readers) = recording_readers(scenario);
@@ -3257,7 +3260,8 @@ fn critique_json(verdict: &str, findings: &[(&str, &str)]) -> serde_json::Value 
             "evidence": "the second demonstration repeats the first",
             "fix": "name a test that fails without the greeting"
         })).collect::<Vec<_>>(),
-        "request_reading_mismatch": null,
+        "request_misread": false,
+        "request_misread_reason": null,
         "summary": format!("The critic says {verdict}.")
     })
 }
@@ -3690,7 +3694,8 @@ fn hand_written_scores_and_outcomes_are_refused() {
             { "criterion": "criterion 2", "met": true, "evidence": "ran", "commands": ["cargo test"] }
         ],
         "findings": [],
-        "request_reading_mismatch": null,
+        "request_misread": false,
+        "request_misread_reason": null,
         "summary": "The greeting is missing."
     });
     let athena = fx.athena(scenario.script());

@@ -436,7 +436,8 @@ fn the_prompt_for_a_rejected_job_names_the_unmet_criterion_and_the_major_finding
               "location": "README.md:3" },
             { "severity": "minor", "summary": "A trailing space", "evidence": "line 1", "location": null }
         ],
-        "request_reading_mismatch": null,
+        "request_misread": false,
+        "request_misread_reason": null,
         "summary": "The greeting is missing."
     });
     let scenario = Scenario {
@@ -754,7 +755,8 @@ fn a_job_that_failed_in_planning_is_marked_and_carries_the_context_field() {
             "findings": [{ "severity": "major", "summary": "The plan misses the request",
                 "location": "approach", "evidence": "it edits the wrong file",
                 "fix": "edit the right file" }],
-            "request_reading_mismatch": null,
+            "request_misread": false,
+            "request_misread_reason": null,
             "summary": "The critic says reject."
         })],
         ..Scenario::default()

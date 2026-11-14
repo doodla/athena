@@ -12,7 +12,7 @@
 //! called with anything unverified.
 
 use crate::reading::REPLAY_HOLD_PERCENT;
-use athena_context::outputs::{SeverityOutput, VerdictOutput, VerdictValue};
+use athena_context::outputs::{SeverityOutput, VerdictOutput, VerdictValue, misread_explanation};
 use athena_data::records::{
     Baseline, CheckRun, Criterion, CriterionKind, CriterionResult, Demonstration, Finding,
     FindingSource, PRE_EXISTING_NOTE, Replay, Severity, Verdict, Verification,
@@ -622,17 +622,13 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
                 source: FindingSource::Verifier,
             });
         }
-        if let Some(mismatch) = output
-            .request_reading_mismatch
-            .as_deref()
-            .map(str::trim)
-            .filter(|m| !m.is_empty())
-        {
+        // The boolean decides; the reason text only explains it and never decides.
+        if output.request_misread {
             reasons.push("the reading misread the request".into());
             findings.push(athena_finding(
                 Severity::Major,
                 "The reading does not match the request, so passing criteria do not show the request was met".into(),
-                mismatch.to_string(),
+                misread_explanation(output.request_misread_reason.as_deref()),
             ));
         }
     } else if inputs.verifier_failure.is_none() {
@@ -1240,8 +1236,8 @@ const VERDICT_RULES: &[VerdictRule] = &[
 /// Instructions the frame must keep, as (rule id, field, anchor words). The anchor is a run of consecutive
 /// words that must occur inside one clause of the frame, so the bare word `commands` elsewhere in the text does
 /// not satisfy it once the instruction naming it is deleted. The `M-mismatch` row describes how
-/// `request_reading_mismatch` is rated in [`judge`]; its text is not checked against judge (judge builds that
-/// finding without a format string), and the test `a_request_reading_mismatch_is_a_major_finding_and_the_verdict_is_not_pass`
+/// `request_misread` is rated in [`judge`]; its text is not checked against judge (judge builds that
+/// finding without a format string), and the test `a_true_request_misread_is_a_major_finding_and_the_verdict_is_not_pass`
 /// guards the behavior instead.
 const REQUIRED_FIELDS: &[(&str, &str, &[&str])] = &[
     ("D43", "commands", &["in", "commands"]),
@@ -1252,8 +1248,8 @@ const REQUIRED_FIELDS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "M-mismatch",
-        "request_reading_mismatch",
-        &["in", "request_reading_mismatch"],
+        "request_misread",
+        &["set", "request_misread", "true"],
     ),
 ];
 
@@ -1950,7 +1946,8 @@ mod tests {
                 },
             ],
             findings,
-            request_reading_mismatch: None,
+            request_misread: false,
+            request_misread_reason: None,
             summary: "ok".into(),
         }
     }
@@ -2925,29 +2922,78 @@ mod tests {
         );
     }
 
-    fn judged_with_mismatch(mismatch: Option<&str>) -> Judgment {
+    fn judged_with_misread(misread: bool, reason: Option<&str>) -> Judgment {
         let mut out = output(vec!["cargo test"], vec![]);
-        out.request_reading_mismatch = mismatch.map(String::from);
+        out.request_misread = misread;
+        out.request_misread_reason = reason.map(String::from);
         judge_with(&out, &["cargo test".to_string()], &[check(true)])
     }
 
     #[test]
-    fn a_request_reading_mismatch_is_a_major_finding_and_the_verdict_is_not_pass() {
-        let j = judged_with_mismatch(Some("The request asked for the goal, not the checklist"));
+    fn a_true_request_misread_is_a_major_finding_and_the_verdict_is_not_pass() {
+        let j = judged_with_misread(
+            true,
+            Some("The request asked for the goal, not the checklist"),
+        );
         assert_eq!(j.final_verdict, Verdict::Fail);
         assert!(j.findings.iter().any(|f| f.severity == Severity::Major
+            && f.source == FindingSource::Athena
             && f.evidence == "The request asked for the goal, not the checklist"));
         assert!(j.reasons.iter().any(|r| r.contains("misread the request")));
     }
 
     #[test]
-    fn an_absent_or_blank_request_reading_mismatch_adds_nothing() {
-        for mismatch in [None, Some(""), Some("  \n")] {
-            let j = judged_with_mismatch(mismatch);
-            assert_eq!(j.final_verdict, Verdict::Pass, "{mismatch:?}");
-            assert!(j.findings.is_empty(), "{mismatch:?}");
-            assert!(j.reasons.is_empty(), "{mismatch:?}");
+    fn a_true_request_misread_with_a_blank_or_missing_reason_still_fails_with_a_fixed_explanation()
+    {
+        for reason in [None, Some(""), Some("  \n")] {
+            let j = judged_with_misread(true, reason);
+            assert_eq!(j.final_verdict, Verdict::Fail, "{reason:?}");
+            assert!(
+                j.findings
+                    .iter()
+                    .any(|f| f.severity == Severity::Major && f.evidence == "no explanation given"),
+                "{reason:?}"
+            );
+            assert!(j.reasons.iter().any(|r| r.contains("misread the request")));
         }
+    }
+
+    #[test]
+    fn a_false_request_misread_adds_nothing_whatever_the_reason_says() {
+        for reason in [None, Some(""), Some("  \n"), Some("Looks fine, one remark")] {
+            let j = judged_with_misread(false, reason);
+            assert_eq!(j.final_verdict, Verdict::Pass, "{reason:?}");
+            assert!(j.findings.is_empty(), "{reason:?}");
+            assert!(j.reasons.is_empty(), "{reason:?}");
+        }
+    }
+
+    #[test]
+    fn the_sza7_reason_with_request_misread_false_adds_nothing() {
+        // Replay of job 20261029-084645-sza7: the verifier wrote "None for this change." where Athena read a
+        // misread, and verification failed with "the reading misread the request". The recorded text is
+        // mapped into `request_misread_reason` with `request_misread` false, as the new prompt asks.
+        let out: VerdictOutput = serde_json::from_value(serde_json::json!({
+            "verdict": "pass",
+            "criteria": [
+                { "criterion": "CHANGELOG.md exists", "met": true, "evidence": "read it", "commands": [] },
+                { "criterion": "cargo test passes", "met": true, "evidence": "ran it",
+                  "commands": ["cargo test"] }
+            ],
+            "findings": [],
+            "request_misread": false,
+            "request_misread_reason": "None for this change.",
+            "summary": "ok"
+        }))
+        .unwrap();
+        let j = judge_with(&out, &["cargo test".to_string()], &[check(true)]);
+        assert_eq!(j.final_verdict, Verdict::Pass);
+        assert!(j.findings.is_empty());
+        assert!(
+            !j.reasons.iter().any(|r| r.contains("misread the request")),
+            "{:?}",
+            j.reasons
+        );
     }
 
     fn passes_when_ran(cited: &str, ran: &str) -> bool {
@@ -3237,11 +3283,11 @@ mod tests {
         assert!(message.starts_with("D43: "), "{message}");
         assert!(message.contains("`commands`"), "{message}");
 
-        let edited = frame().replace("say how in request_reading_mismatch", "");
+        let edited = frame().replace("set request_misread true and say how in", "");
         assert_ne!(edited, frame());
         let message = refusal(&edited, PromptScope::Frame);
         assert!(message.starts_with("M-mismatch: "), "{message}");
-        assert!(message.contains("`request_reading_mismatch`"), "{message}");
+        assert!(message.contains("`request_misread`"), "{message}");
 
         let edited = frame().replace("as a whole simple command", "");
         assert_ne!(edited, frame());

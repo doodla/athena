@@ -408,7 +408,8 @@ pub fn passing_verdict(criteria: usize) -> Value {
             "commands": if i == 1 { vec!["cargo test"] } else { Vec::<&str>::new() }
         })).collect::<Vec<_>>(),
         "findings": [],
-        "request_reading_mismatch": null,
+        "request_misread": false,
+        "request_misread_reason": null,
         "summary": "The change does what was asked."
     })
 }

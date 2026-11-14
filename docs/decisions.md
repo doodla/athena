@@ -5223,3 +5223,35 @@ should replace those estimates with its figures.
   the_reader_brief_requires_a_field_meaning_assumption_for_a_reused_field`, `the_planner_brief_requires_a_reused_field_to_quote_its_meaning_and_check_the_live_config`
   and the moved pins in `the_reader_brief_names_each_reading_rule_in_one_short_line` read the rendered briefs. Not
   measured: whether the reader and the planner follow the rule.
+
+## D181 · The critic's and verifier's misread is a yes/no field
+
+- **Case:** The critic and the verifier reported a misread of the request in one free-text field,
+  `request_reading_mismatch`, and Athena read any non-empty value as a misread. Job 20261114-012353-pbvc: the critic
+  accepted the plan with no blocker or major finding and wrote "None for the plan. One factual error…", `end_round`
+  stopped planning on the text, and the job failed and was retried as 20261114-013056-pkhp. Job 20261029-084645-sza7:
+  the verifier wrote "None for this change." and `judge` failed verification with "the reading misread the request".
+- **Decision:** Root cause: a free-text field was read as a flag. In `CriticOutput` and `VerdictOutput`
+  (`crates/athena-context/src/outputs.rs`) the field is replaced by a required boolean `request_misread` and an optional
+  `request_misread_reason`. `critic_round` stores `Critique.request_reading_mismatch` only when the boolean is true, and
+  `end_round` takes the boolean as an argument and branches on it. `judge` branches on `request_misread` and uses the
+  reason only as the evidence of its major finding. A true boolean with no reason still stops or fails, with the text
+  "no explanation given". D93 stands: a real misread is a major finding. The stored record fields keep their type and
+  are set only for a real misread, so old records and their readers are untouched. The prompts say the boolean is true
+  only for a real misread and that other remarks go in findings.
+- **Alternatives:** A prefix check for "None…" on the free text: a string heuristic on the thing that was the mistake.
+  A boolean on the stored records: it changes the record schema and every reader. Refusing a true boolean with no
+  reason: it costs a retry for a formatting lapse.
+- **Tradeoff:** A reason sent with a false boolean is dropped, because the invocation record keeps no structured
+  output; the prompts send such remarks to findings. A model that sets the boolean true with a reason that says "None…"
+  still stops the job. Agent output in the old format no longer parses. Records written earlier with a "None for…"
+  text keep reading as a misread; they are immutable.
+- **Reversal cost:** Medium; restore the field in the two output structs, the prompts, the anchor in `verify.rs` and the
+  fixtures that name it.
+- **Provenance:** Read: `crates/athena-context/src/outputs.rs`, `crates/athena-core/src/run/planning.rs` (`end_round`),
+  `crates/athena-core/src/verify.rs` (`judge`), `crates/athena-core/src/run/verification.rs`,
+  `crates/athena-data/src/records.rs` and `records/plan.rs` (the stored fields) and D93. Measured: `cargo test -p
+  athena-core a_critique_whose_reason_starts_with_none_does_not_stop_planning`, `the_sza7`, `a_true_request_misread`
+  and `cargo test -p athena-context request_misread`. Not measured: the full recorded texts of pbvc and sza7, which
+  are not in the working copy (only their openings are replayed, mapped into the reason with the boolean false);
+  whether the models set the boolean as the prompts ask.

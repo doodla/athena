@@ -468,7 +468,8 @@ mod left_to_athena_tests {
                 commands: vec![],
             }],
             findings: vec![],
-            request_reading_mismatch: None,
+            request_misread: false,
+            request_misread_reason: None,
             summary: "ok".into(),
         };
         let checks = [failed];

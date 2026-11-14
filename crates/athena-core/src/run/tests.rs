@@ -18,7 +18,8 @@ mod critic_soundness_tests {
                 "evidence": "The rule matches words that common requests contain.",
                 "fix": "Read the request's structure instead of matching words."
             }],
-            "request_reading_mismatch": null,
+            "request_misread": false,
+            "request_misread_reason": null,
             "summary": "A crude heuristic."
         }))
         .unwrap()
@@ -264,7 +265,8 @@ mod produce_and_verify_order_tests {
                         { "criterion": CRITERION, "met": true, "evidence": "checked", "commands": [] }
                     ],
                     "findings": [],
-                    "request_reading_mismatch": null,
+                    "request_misread": false,
+                    "request_misread_reason": null,
                     "summary": "Checked."
                 })),
                 Role::Planner | Role::Critic => unreachable!("planning is off in this repository"),
@@ -1176,7 +1178,8 @@ mod produce_and_verify_order_tests {
 
     fn accepting_critique() -> serde_json::Value {
         json!({
-            "verdict": "accept", "findings": [], "request_reading_mismatch": null,
+            "verdict": "accept", "findings": [],
+            "request_misread": false, "request_misread_reason": null,
             "summary": "The plan is sound."
         })
     }
@@ -1191,7 +1194,8 @@ mod produce_and_verify_order_tests {
                 "evidence": "It only reads the file.",
                 "fix": "Name a check that fails without the change."
             }],
-            "request_reading_mismatch": null,
+            "request_misread": false,
+            "request_misread_reason": null,
             "summary": "The critic asks for a revision."
         })
     }
@@ -1608,6 +1612,204 @@ mod produce_and_verify_order_tests {
             critic[0].contains("## Plan under review (round 1)"),
             "the first plan the critic sees is round 1: {}",
             critic[0]
+        );
+    }
+
+    /// An accepting critique with one minor finding and this misread flag and reason.
+    fn critique_with_misread(misread: bool, reason: serde_json::Value) -> serde_json::Value {
+        json!({
+            "verdict": "accept",
+            "findings": [{
+                "severity": "minor",
+                "summary": "A factual slip in the plan's dependents list",
+                "location": "dependents",
+                "evidence": "The list names a reader that does not exist.",
+                "fix": "Drop the entry."
+            }],
+            "request_misread": misread,
+            "request_misread_reason": reason,
+            "summary": "The plan is sound."
+        })
+    }
+
+    /// Runs a planned job over `repo` and returns the outcome, every call and the stored critiques.
+    fn run_planned_with_critiques(
+        repo: &tempfile::TempDir,
+        critic: Vec<serde_json::Value>,
+    ) -> (Box<Finished>, Vec<(Role, String)>, Vec<Critique>) {
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let athena = athena_with(
+            repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            planning_script(vec![good_plan()], critic, calls.clone()),
+        );
+        let (job, finished) = finished_job(&athena);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let critiques = records.jobs[job.as_str()].critiques.clone();
+        let calls = calls.lock().unwrap().clone();
+        (finished, calls, critiques)
+    }
+
+    #[test]
+    fn a_critique_whose_reason_starts_with_none_does_not_stop_planning() {
+        // Replay of job 20261114-012353-pbvc: the critic accepted the plan with no blocker or major finding,
+        // and its mismatch text began "None for the plan. One factual error". Athena read that text as a
+        // misread and stopped planning. The records here are absent from this snapshot, so only that opening
+        // is the recorded text; the finding and summary around it are reconstructed. The text is mapped into
+        // `request_misread_reason` with `request_misread` false, as the new prompt asks.
+        for reason in [
+            json!(
+                "None for the plan. One factual error in the dependents list, noted in findings."
+            ),
+            json!(null),
+        ] {
+            let repo = repo_with_planning(3);
+            let (finished, calls, critiques) =
+                run_planned_with_critiques(&repo, vec![critique_with_misread(false, reason)]);
+            assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+            assert!(
+                !finished.reason.contains("misread"),
+                "no misread reason: {}",
+                finished.reason
+            );
+            assert!(!prompts_of(&calls, Role::Producer).is_empty());
+            assert_eq!(critiques.len(), 1);
+            assert_eq!(critiques[0].final_verdict, CritiqueVerdict::Accept);
+            assert_eq!(critiques[0].request_reading_mismatch, None);
+        }
+    }
+
+    #[test]
+    fn a_true_request_misread_stops_planning() {
+        let repo = repo_with_planning(3);
+        let (finished, calls, critiques) = run_planned_with_critiques(
+            &repo,
+            vec![critique_with_misread(
+                true,
+                json!("It reads the request as a refactor"),
+            )],
+        );
+        assert_eq!(finished.state, OutcomeState::Failed);
+        assert!(
+            finished.reason.contains(
+                "the critic judged that the reading misread the request: It reads the request as a refactor"
+            ),
+            "{}",
+            finished.reason
+        );
+        assert!(prompts_of(&calls, Role::Producer).is_empty());
+        assert_eq!(critiques.len(), 1);
+        assert_eq!(
+            critiques[0].request_reading_mismatch.as_deref(),
+            Some("It reads the request as a refactor")
+        );
+    }
+
+    #[test]
+    fn a_true_request_misread_with_no_reason_stops_planning_with_a_fixed_explanation() {
+        let repo = repo_with_planning(3);
+        let (finished, _, critiques) =
+            run_planned_with_critiques(&repo, vec![critique_with_misread(true, json!(null))]);
+        assert_eq!(finished.state, OutcomeState::Failed);
+        assert!(
+            finished
+                .reason
+                .contains("misread the request: no explanation given"),
+            "{}",
+            finished.reason
+        );
+        assert_eq!(
+            critiques[0].request_reading_mismatch.as_deref(),
+            Some("no explanation given")
+        );
+    }
+
+    /// `base_script` whose verifier answers with this misread flag and reason.
+    fn script_with_verifier_misread(
+        misread: bool,
+        reason: serde_json::Value,
+    ) -> athena_agent::fake::Script {
+        let inner = base_script();
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            if spec.role == Role::Verifier
+                && let Some(out) = turn.structured.as_mut()
+            {
+                out["request_misread"] = misread.into();
+                out["request_misread_reason"] = reason.clone();
+            }
+            turn
+        })
+    }
+
+    /// Runs a job whose verifier answers with this flag and reason; returns the outcome and the stored
+    /// verification.
+    fn run_with_verifier_misread(
+        misread: bool,
+        reason: serde_json::Value,
+    ) -> (Box<Finished>, Verification) {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script_with_verifier_misread(misread, reason),
+        );
+        let (job, finished) = finished_job(&athena);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let stored = records.jobs[job.as_str()]
+            .verification
+            .clone()
+            .expect("the job recorded its verification");
+        (finished, stored)
+    }
+
+    #[test]
+    fn the_sza7_verifier_text_does_not_fail_verification() {
+        // Replay of job 20261029-084645-sza7: the verifier wrote "None for this change." where Athena read a
+        // misread, and verification failed with "the reading misread the request". The text is mapped into
+        // `request_misread_reason` with `request_misread` false, as the new prompt asks.
+        let (finished, stored) = run_with_verifier_misread(false, json!("None for this change."));
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let verification = finished.verification.expect("verified");
+        assert_eq!(verification.final_verdict, Verdict::Pass);
+        assert!(
+            !verification
+                .reasons
+                .iter()
+                .any(|r| r.contains("misread the request")),
+            "{:?}",
+            verification.reasons
+        );
+        assert!(verification.findings.is_empty());
+        assert_eq!(stored.request_reading_mismatch, None);
+    }
+
+    #[test]
+    fn a_true_request_misread_fails_verification() {
+        let (finished, stored) =
+            run_with_verifier_misread(true, json!("It reads the request as a refactor"));
+        assert_ne!(finished.state, OutcomeState::Landed);
+        assert_eq!(stored.final_verdict, Verdict::Fail);
+        assert!(
+            stored
+                .reasons
+                .iter()
+                .any(|r| r == "the reading misread the request"),
+            "{:?}",
+            stored.reasons
+        );
+        assert!(stored.findings.iter().any(|f| f.severity == Severity::Major
+            && f.source == FindingSource::Athena
+            && f.evidence == "It reads the request as a refactor"));
+        assert_eq!(
+            stored.request_reading_mismatch.as_deref(),
+            Some("It reads the request as a refactor")
         );
     }
 

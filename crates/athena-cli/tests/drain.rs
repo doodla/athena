@@ -4945,7 +4945,8 @@ fn rejecting_verdict() -> serde_json::Value {
             "evidence": "the change description is missing",
             "location": "README.md"
         }],
-        "request_reading_mismatch": null,
+        "request_misread": false,
+        "request_misread_reason": null,
         "summary": "Rejected."
     })
 }
