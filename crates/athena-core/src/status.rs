@@ -390,6 +390,66 @@ pub fn improvement_cycle_line(cycle: &athena_data::records::ImprovementCycle) ->
     )
 }
 
+/// Requests Athena queued for itself (channel [`crate::steward::REQUEST_CHANNEL`], which the steward and Hestia
+/// both use), split by whether the job has left the waiting states. A stuck backlog shows as a queued count
+/// that keeps growing while the run count does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SelfQueued {
+    pub week_queued: usize,
+    pub week_run: usize,
+    pub total_queued: usize,
+    pub total_run: usize,
+}
+
+impl SelfQueued {
+    /// Count the self-queued requests in `records`. The week is the 7 days up to `now`, by the request's
+    /// `received_at`. A job still queued, proposed or declined has not run; any other state has.
+    pub fn compute(records: &Records, now: jiff::Timestamp) -> SelfQueued {
+        let week_start = now - jiff::SignedDuration::from_hours(7 * 24);
+        let mut counts = SelfQueued {
+            week_queued: 0,
+            week_run: 0,
+            total_queued: 0,
+            total_run: 0,
+        };
+        for job in records.request_jobs() {
+            let Some(request) = job
+                .request
+                .as_ref()
+                .filter(|r| r.channel == crate::steward::REQUEST_CHANNEL)
+            else {
+                continue;
+            };
+            let waiting = matches!(
+                job.state(),
+                JobState::Queued | JobState::Proposed | JobState::Declined
+            );
+            let in_week = request.received_at >= week_start;
+            match (waiting, in_week) {
+                (true, true) => {
+                    counts.week_queued += 1;
+                    counts.total_queued += 1;
+                }
+                (true, false) => counts.total_queued += 1,
+                (false, true) => {
+                    counts.week_run += 1;
+                    counts.total_run += 1;
+                }
+                (false, false) => counts.total_run += 1,
+            }
+        }
+        counts
+    }
+
+    /// The line `athena status` prints; zeros are printed, never hidden.
+    pub fn text(&self) -> String {
+        format!(
+            "self-queued fixes  last 7d: {} queued, {} run · total: {} queued, {} run",
+            self.week_queued, self.week_run, self.total_queued, self.total_run
+        )
+    }
+}
+
 /// The jobs whose latest outcome is landed.
 fn landed_job_ids(records: &Records) -> Vec<athena_data::JobId> {
     records
@@ -463,6 +523,8 @@ pub struct StatusView {
     /// The latest build measurement as one printed line ([`build_measurement_line`]), or the line that says
     /// there is none yet.
     pub build_measurement: String,
+    /// Requests Athena queued for itself and how many have run ([`SelfQueued`]).
+    pub self_queued: SelfQueued,
     /// Whether the records show the final acceptance chain, as one printed line ([`improvement_cycle_line`]).
     pub improvement_cycle: String,
     /// Classes of work whose minutes per landed job fell or rose between their older and newer landed jobs,
@@ -1323,6 +1385,7 @@ impl Athena {
             build_measurement: build_measurement_line(BuildMeasurement::latest(
                 &records.build_measurements,
             )),
+            self_queued: SelfQueued::compute(&records, crate::now()),
             improvement_cycle: improvement_cycle_line(&athena_data::records::improvement_cycle(
                 &landed_job_ids(&records),
                 &records.introspections,
@@ -1893,6 +1956,106 @@ mod build_measurement_tests {
         assert!(!line.contains("not installed"), "{line}");
         let json = serde_json::to_value(&view).unwrap();
         assert_eq!(json["build_measurement"], line.as_str());
+    }
+}
+
+#[cfg(test)]
+mod self_queued_tests {
+    use super::*;
+    use athena_data::JobId;
+    use athena_data::records::{Outcome, Request};
+
+    fn at(text: &str) -> jiff::Timestamp {
+        text.parse().unwrap()
+    }
+
+    fn now() -> jiff::Timestamp {
+        at("2026-11-14T12:00:00Z")
+    }
+
+    /// A job requested on `channel` at `received`; with `run` it has a landed outcome, else it stays queued.
+    fn job(n: u32, channel: &str, received: &str, run: bool) -> JobRecords {
+        let id = JobId::parse(&format!("20261101-120000-a{n:03}")).unwrap();
+        let outcome = run.then(|| Outcome {
+            job: id.clone(),
+            state: OutcomeState::Landed,
+            reason: "r".into(),
+            at: at(received),
+            totals: None,
+            branch: None,
+            base_commit: None,
+            candidate_commit: None,
+            after_blocked: false,
+            through_commit: None,
+        });
+        JobRecords {
+            id: Some(id.clone()),
+            request: Some(Request {
+                job: id,
+                text: "fix".into(),
+                received_at: at(received),
+                channel: channel.into(),
+            }),
+            outcome,
+            ..JobRecords::default()
+        }
+    }
+
+    fn records(jobs: Vec<JobRecords>) -> Records {
+        let mut records = Records::default();
+        for j in jobs {
+            records.jobs.insert(j.id().as_str().to_string(), j);
+        }
+        records
+    }
+
+    #[test]
+    fn counts_steward_requests_by_week_and_total_and_ignores_cli_requests() {
+        let steward = crate::steward::REQUEST_CHANNEL;
+        let recent = "2026-11-12T12:00:00Z";
+        let old = "2026-10-01T12:00:00Z";
+        let counts = SelfQueued::compute(
+            &records(vec![
+                job(1, steward, recent, false),
+                job(2, steward, recent, false),
+                job(3, steward, recent, true),
+                job(4, steward, old, false),
+                job(5, steward, old, true),
+                job(6, steward, old, true),
+                job(7, "cli", recent, false),
+                job(8, "cli", old, true),
+            ]),
+            now(),
+        );
+        assert_eq!(
+            counts.text(),
+            "self-queued fixes  last 7d: 2 queued, 1 run · total: 3 queued, 3 run"
+        );
+    }
+
+    #[test]
+    fn a_request_exactly_seven_days_old_is_in_the_week() {
+        let steward = crate::steward::REQUEST_CHANNEL;
+        let counts = SelfQueued::compute(
+            &records(vec![
+                job(1, steward, "2026-11-07T12:00:00Z", false),
+                job(2, steward, "2026-11-07T11:59:59Z", false),
+            ]),
+            now(),
+        );
+        assert_eq!((counts.week_queued, counts.total_queued), (1, 2));
+    }
+
+    #[test]
+    fn with_no_steward_requests_the_line_prints_zeros() {
+        let none = SelfQueued::compute(&records(vec![]), now());
+        let expected = "self-queued fixes  last 7d: 0 queued, 0 run · total: 0 queued, 0 run";
+        assert_eq!(none.text(), expected);
+        let only_cli = SelfQueued::compute(
+            &records(vec![job(1, "cli", "2026-11-13T12:00:00Z", false)]),
+            now(),
+        );
+        assert_eq!(only_cli.text(), expected);
     }
 }
 
