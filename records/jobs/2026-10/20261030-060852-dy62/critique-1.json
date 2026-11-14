@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060852-dy62",
+  "round": 1,
+  "at": "2026-11-13T23:26:50.242603628Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "docs/system-facts.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/system-facts.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The pin stance is worded too broadly. Read literally, it condemns the repository's own Cargo dependency requirements, so readers would raise false positives on ordinary code jobs.",
+      "evidence": "Cargo.toml:38-46 (read) uses floating semver requirements: `anyhow = \"1\"`, `clap = { version = \"4.6\" ... }`, `serde = { version = \"1\" ... }`. The planned first sentence, \"Version pins stay exact and are never auto-floated; only the person running Athena bumps one, through one explicit command that sets the pin to the installed version\", has no scope and reaches every code and build reading. The reader would then either write criteria that demand exact crate pins or treat a dependency bump as needing the user. The introspection behind it (20261016-142800-y4vb, quoted in the request) limits the stance to pins in Athena-owned config, such as `claude_version` and the `[tools]` versions in athena.toml (athena.toml:59, :154). The phrase \"sets the pin to the installed version\" only makes sense for installed tools, not for crates. This is a rule with obvious false positives. Fix: Scope the first sentence to tool version pins in Athena-owned config, for example \"Tool version pins in athena.toml stay exact and are never auto-floated; ...\". Say in a later sentence that Cargo dependency requirements and Cargo.lock are not covered. Consider narrowing applies_to to config and build, while still meeting criterion 1's code, config and build if the reading requires it. Add the scope phrase (\"athena.toml\" or \"tool\") to the test's phrase table for the rendered line, so the scope cannot drift out of the first sentence.",
+      "location": "Plan step 1 / Decision 3: the first sentence of `version-pins`, applied to code, config and build",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Criterion 7 is tested on a class-filtered model that the production reader never receives. The plan's claim that the reader's defaults component is built this way is false.",
+      "evidence": "`reader_system_prompt` (crates/athena-core/src/reading.rs:241-253, read) composes `Component::new(\"defaults\", ..., jc.defaults.render())` over the whole, unfiltered model. `reader_headroom` (reading.rs:276) and `headroom_rows` (athena-context lib.rs:286) do the same. The class filter in `an_explainer_page_request_gets_the_three_standing_defaults` (defaults.rs:148-173) exists only in a test; it stands in for which defaults the reader names, not for what it loads. The plan's Test seam says \"as the reader's defaults component is built in headroom_rows and in briefs.rs:4196\", but both use the full render. Its extra assertion that \"a docs-only selection does not include it\" describes a property the reader does not have: a docs reader sees the pin line too. The demonstration names a seam the code does not provide. Fix: Run the outcome check on the real reader input. Either assert on `reader_system_prompt(...)`'s text in an athena-core test, or compose CONTRACT, READER_FRAME, the defaults from `DefaultsModel::parse(REPO_DEFAULTS).render()` and the catalog, as budgets.rs:350 does. Assert that the `- version-pins [...]:` line and its stance phrases are present. Drop the docs-only omission assertion, or relabel it as testing the class filter used for producer and verifier briefs, not the reader's input. Correct the seam description.",
+      "location": "Demonstrations, criterion 7 (`a_pin_deadlock_request_is_settled_by_the_rendered_defaults`) and its Test seam",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The reason for not bumping the version cites only the loader. The repository's own design for added defaults bumps the version once per accepted change.",
+      "evidence": "docs/design/defaults-loop.md:475-477 (read): \"The version counts accepted changes, not entries. If several proposals are accepted together they land in one job and bump the version once.\" crates/athena-core/src/proposals.rs:140-163 and :476-489 require every added default to raise the version to base plus one. Two counterpoints were not weighed. Bumping would make any pending proposal built on `from = 1` fail `build_candidate` (proposals.rs:93-97). Keeping 1 leaves the rendered header \"version 1\" unchanged even though the reader's defaults changed. The reading left this choice to the producer, so it does not block the plan. Fix: Make the decision explicitly against defaults-loop.md section 8.2. Either bump to 2 and note the effect on pending proposals, or keep 1 and record in D181 why this direct change departs from \"the version counts accepted changes\".",
+      "location": "Decision 4 (leave `version = 1`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "\"A check never depends on inherited environment or ambient tools\", applied to the `tests` and code classes, can be read as covering every test that spawns `git` or `cargo` from PATH. Its scope should be the check runner.",
+      "evidence": "The check runner already clears the environment and passes `ctx.env` explicitly (crates/athena-core/src/checks.rs:532-540, read). Many unit tests run `git` from PATH (for example run_pin_tests.rs:119 and run/tests.rs:335). The introspection is about checks the runner runs, not about test code. Under the broad wording, a reader could add hermeticity criteria to unrelated code jobs. Fix: Word the first sentence so it names checks run by Athena's check runner, meaning the athena.toml checks and gates. Consider dropping `tests` from applies_to, or say in a later sentence that test code calling tools through the runner's environment is outside the rule.",
+      "location": "Plan step 1 / Decision 3: the `hermetic-checks` statement, applied to code, config, build and tests",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan sets the budget to 2_200 before measuring anything. The design asks that the render be measured before any entry is added.",
+      "evidence": "defaults-loop.md:497-499 (read): \"Before any entry is added, a test calls `render()` alone and measures the result ... The build does not proceed on an estimate.\" The plan's figure of about 170 tokens is a labelled estimate, and step 3 fixes 2_200 before step 5 measures. My own rough count of the two example first sentences plus their prefixes is about 440 bytes, roughly 147 tokens (estimate), so 2_200 probably fits. Even so, the order of steps hard-codes a guess. Fix: Reorder the steps: add the entries, read the computed reader size from the failure of `system_facts_budgets_match_computed` or `every_role_set_is_within_its_budget`, then set the budget from that measured figure. Record the measured figure in D181.",
+      "location": "Risks, first bullet; Decision 2 (\"smallest round value\")",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan mostly matches the code. I read `Default` in defaults.rs:17-23 (with `deny_unknown_fields`) and confirmed that `render` shows the reader only the first sentence (defaults.rs:58-83). Both new phrases therefore have to sit in the first sentence, and the plan correctly uses the real field names `statement` and `applies_to`. The other claims also hold: `BudgetSet::Reader => 2_000` is at lib.rs:176, the literal \"of 2000\" is at run_pin_tests.rs:1625, the `repin` command exists in xtask/src/main.rs:50 and :686, and D180 is the last decision. Two design problems remain. First, the pin stance is worded so broadly that the reader will flag things it should not. The plan applies \"Version pins stay exact and are never auto-floated\" to code and build, but this repository's own Cargo dependency requirements are floating caret ranges (Cargo.toml:38-46). The introspection limited the stance to pins in Athena-owned config. Second, the criterion 7 demonstration filters the defaults by class and calls that the reader's input. The production reader prompt (`reader_system_prompt`, reading.rs:241-253) loads the unfiltered `render()`, so the claimed seam does not exist, and the docs-only \"omits the pin line\" assertion tests something the reader never sees. Smaller points: the version-bump reasoning ignores the defaults-loop rule that the version counts accepted changes, and the hermetic-checks stance is also broad once it is applied to `tests`. Athena's system-facts finding is already raised, and the plan justifies that edit, so I do not repeat it."
+}

@@ -1,0 +1,151 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261030-060852-dy62",
+  "base_commit": "dfcbd828fc7913b8616b0e4952f349ef2a6e0d9a",
+  "base_fingerprint": "sha256:a7a64f198021ace94aa31fd7ac3e08073ea4e09ab952ef8f1e53d9d13d14f285",
+  "previous_job": "20261113-205925-c3n6",
+  "candidate_commit": "00738233181e59f6019269766e0d5eaaa0ad8276",
+  "candidate_tree": "6992bc54f4741803b51c8bba936ec612be57eb0a",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 454619
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26815
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 87569
+    },
+    {
+      "path": "crates/athena-data/src/defaults.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8635
+    },
+    {
+      "path": "defaults.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5832
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 446182
+    },
+    {
+      "path": "docs/system-facts.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5827
+    }
+  ],
+  "fingerprint": "sha256:5f984d72fe8abe6cbc7902f97f35c111f460432ff9f6f02c9c06814f8e17fecb",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: defaults.toml was silent on pin and ambient-tool policy, so the reader had to ask in jobs 20261016-005805-p806 and 20261025-183644-t67q. I added two scoped defaults, `version-pins` and `hermetic-checks`. Each has its stance in the first sentence, because the reader sees only that sentence. I raised the reader budget from 2000 to 2200 after measuring the reader set at 2163 tokens. I added two tests: one on the real defaults file, one on the real reader system prompt. The full `cargo test --locked`, clippy and the policy scan pass.",
+    "files": [
+      "defaults.toml",
+      "crates/athena-data/src/defaults.rs",
+      "crates/athena-context/src/lib.rs",
+      "crates/athena-core/src/run_pin_tests.rs",
+      "docs/decisions.md",
+      "CHANGELOG.md",
+      "docs/system-facts.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test budgets every_role_set_is_within_its_budget (before raising the budget)",
+        "result": "fail",
+        "note": "Expected failure; it measured the reader set at 2163 tokens against 2000."
+      },
+      {
+        "command": "cargo test -p athena-data defaults",
+        "result": "pass",
+        "note": "Includes the new pin_and_ambient_tool_stances_are_written_defaults_the_reader_sees."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Whole workspace, exit 0. This includes the budgets, mirrors, proposals, refusal_corpus and run_pin_tests tests."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "Applied formatting; no separate --check run."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "defaults.toml has a new [[default]] entry for version pins whose text says pins are exact, are never auto-floated, and are bumped only by the person running Athena through one explicit command that sets the pin to the installed version; it is applied to the classes code, config and build.",
+        "status": "met",
+        "evidence": "defaults.toml has the `version-pins` entry with applies_to code, config, build. The new defaults.rs test asserts the phrases on both the full statement and the rendered line. It passed under `cargo test -p athena-data defaults`."
+      },
+      {
+        "criterion": "defaults.toml has a second new [[default]] entry saying a check never depends on inherited environment or ambient tools, that the runner passes every path a check needs explicitly, and that any preferred-versus-fallback tool choice is recorded in the check output.",
+        "status": "met",
+        "evidence": "defaults.toml has the `hermetic-checks` entry. The same test asserts its phrases on the full statement and on the rendered line. It passed."
+      },
+      {
+        "criterion": "The reader token budget in crates/athena-context/src/lib.rs is raised enough for the new entries (same file and same change as the reader budget line in crates/athena-core/src/run_pin_tests.rs line 1625, updated to match), and docs/decisions.md gets a new appended decision, with a Provenance bullet, naming the root cause, the two jobs, and the budget change; no existing entry is edited.",
+        "status": "met",
+        "evidence": "BudgetSet::Reader is now 2_200, against a measured 2163. run_pin_tests.rs now reads BudgetSet::Reader.budget() instead of the literal 2000. docs/system-facts.md was updated to match. D181 was appended with a Provenance bullet, and no earlier line was edited. The budgets and mirrors tests passed in `cargo test --locked`."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry naming the root cause (defaults silent on pin and ambient-tool policy). athena.toml, workflows and the files changed by the two earlier candidates (claude.rs, wiring.rs, live.rs, README.md, xtask, checks.rs, gh.rs) are not changed; defaults.toml is the only governance file changed.",
+        "status": "met",
+        "evidence": "A CHANGELOG bullet was added at the top of Unreleased/Added. `git status --short` lists only the seven edited files, none of them athena.toml, workflows, xtask or the earlier-candidate files."
+      },
+      {
+        "criterion": "Run `cargo test` and check that a new test in crates/athena-data/src/defaults.rs parses the real defaults.toml and asserts both new ids exist with the key phrases (exact, never auto-floated, ambient). The test fails on the base tree, where the entries are absent, and passes with the change. The same test also checks the rendered reader prompt contains both entries, so the property is checked for the class and not for one job.",
+        "status": "met",
+        "evidence": "`cargo test -p athena-data defaults` passed with pin_and_ambient_tool_stances_are_written_defaults_the_reader_sees. The test parses the real file, looks each id up with get(), and checks the phrases on the rendered line. On the base tree the first `get` panics because the entries are absent. I did not run it against the base tree."
+      },
+      {
+        "criterion": "Run `cargo test`: the reader prompt-budget test (run_pin_tests.rs) and the context budget tests pass, which shows the reader set fits its raised budget. Recorded fmt, clippy (-D warnings) and test checks pass on the final tree.",
+        "status": "met",
+        "evidence": "left to Athena's checks for the recorded runs. I also ran `cargo test --locked` (exit 0) and `cargo clippy --all-targets --locked -- -D warnings` (pass), and applied `cargo fmt --all`."
+      },
+      {
+        "criterion": "Outcome check: feeding the p806 request text through the defaults rendering shows the pin stance in the block the reader sees, so the reader can settle it without a question. This is checked by the new test's assertion on the rendered text.",
+        "status": "met",
+        "evidence": "the_reader_system_prompt_carries_the_pin_and_hermetic_check_defaults in run_pin_tests.rs drives Athena::ask with a pin-deadlock request. It asserts that the captured reader system prompt holds the version-pins line, the hermetic-checks line and the 'do not ask the user about them unless the request says otherwise' sentence. It passed in the full run. The p806 request text is not in the snapshot, so the test uses a request of the same shape. The fake reader does not read the prompt, so this does not show that a live model skips the question."
+      }
+    ],
+    "open_issues": [
+      "docs/system-facts.md is not a listed deliverable, but I changed its reader budget line because system_facts_budgets_match_computed requires it.",
+      "defaults.toml version stays 1. This departs from defaults-loop.md section 8.2; D181 gives the reasons.",
+      "I did not run `cargo fmt --all --check` separately; I only ran `cargo fmt --all`.",
+      "I did not run `cargo test -p athena-cli --test mirrors` or `--test proposals` on their own. They ran inside `cargo test --locked`, which exited 0."
+    ],
+    "mistakes": [
+      "My first attempt to append the entries with a here-document was denied by the shell hook. I redid it with the Edit tool."
+    ],
+    "learnings": [
+      "The Default struct's fields are id, statement, applies_to and source (deny_unknown_fields), not the brief's classes and text.",
+      "The reader sees only the first sentence of each default, so the stance and its scope must sit before the first '. '.",
+      "docs/system-facts.md carries a computed reader budget line, and a test forces it to match the budget."
+    ],
+    "desires": []
+  }
+}
