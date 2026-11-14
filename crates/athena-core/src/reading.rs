@@ -3584,6 +3584,7 @@ mod tests {
                 reading: AcceptedReading {
                     n: 1,
                     title: "t".into(),
+                    class_of_work: String::new(),
                     summary: "s".into(),
                     assumptions: vec![],
                     criteria: vec![],
@@ -9153,6 +9154,31 @@ mod tests {
         ] {
             let reading = design_reading(&[text], &[EXISTING_CRITERION], &[NEW_DOC]);
             assert!(accept(&reading).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_producer_brief_filter_selects_what_the_design_check_reads() {
+        let sets: [&[&str]; 7] = [
+            &[EXISTING],
+            &["  existing CODE: `crates/athena-core/src/reading.rs`."],
+            &["The Existing code: crates/athena-core/src/reading.rs"],
+            &["Existing code: the reading module"],
+            &["Existing code docs/design/x.md"],
+            &[],
+            &[
+                "Existing code: a.rs",
+                "No release is tagged.",
+                "existing code: b.rs",
+            ],
+        ];
+        for set in sets {
+            let reading = design_reading(set, &[EXISTING_CRITERION], &[NEW_DOC]);
+            assert_eq!(
+                athena_context::briefs::existing_code_assumptions(&reading.assumptions),
+                surveys::existing_code_assumptions(&reading),
+                "{set:?}"
+            );
         }
     }
 

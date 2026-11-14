@@ -74,6 +74,8 @@ pub struct AppliedDefault {
 pub struct AcceptedReading {
     pub n: u32,
     pub title: String,
+    /// The reading's class of work, one of the closed list in `athena.toml`; the design sections gate on "design".
+    pub class_of_work: String,
     pub summary: String,
     pub assumptions: Vec<String>,
     pub criteria: Vec<(String, CriterionKind)>,
@@ -93,6 +95,7 @@ impl AcceptedReading {
         AcceptedReading {
             n: reading.n,
             title: reading.title.clone(),
+            class_of_work: reading.class_of_work.clone(),
             summary: reading.summary.clone(),
             assumptions: reading.assumptions.clone(),
             criteria: reading
@@ -683,6 +686,7 @@ pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&s
     let _ = writeln!(out, "# Job {}: {}\n", inputs.job, inputs.reading.title);
     let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
     reading_sections(&mut out, &inputs.reading);
+    existing_code_section(&mut out, &inputs.reading);
     retry_section(&mut out, inputs.retry_from.as_ref());
     if inputs.retry_from.is_none()
         && let Some(earlier) = &inputs.retry_findings
@@ -775,6 +779,56 @@ fn replay_while_working_section() -> String {
      up there. Narrow the rule so it refuses what it is meant to refuse; do not hide the cases. A replay \
      that cannot run says `no replay` and never counts as a pass.\n"
         .to_string()
+}
+
+/// The heading of the design producer's existing-code section.
+const EXISTING_CODE_HEADING: &str = "## Existing code to read before you design";
+
+/// The `Existing code:` assumptions: those whose trimmed text starts with that label, in any case. Kept equal to
+/// `existing_code_assumptions` in `crates/athena-core/src/reading/surveys.rs` because this crate cannot call
+/// core; a test in `crates/athena-core/src/reading.rs` pins the equality.
+pub fn existing_code_assumptions(assumptions: &[String]) -> Vec<&str> {
+    assumptions
+        .iter()
+        .map(|a| a.trim())
+        .filter(|a| a.to_lowercase().starts_with("existing code:"))
+        .collect()
+}
+
+/// The design producer's section on existing code. Written only when the reading's class of work is design.
+///
+/// Root cause: a design producer was never told to use the inventory of existing code that the reader already
+/// requires (`check_design_existing_code`). The list arrives only as one `Assumptions:` line written from the
+/// request text, with no instruction to open it, to search the repository for what it omits or to source the
+/// doc's claims, and nothing compared the doc's components with the repository, so the mismatch showed only at
+/// the final verdict. This section gives the producer that information and adds no refusal rule.
+fn existing_code_section(out: &mut String, reading: &AcceptedReading) {
+    if reading.class_of_work != "design" {
+        return;
+    }
+    let _ = writeln!(out, "{EXISTING_CODE_HEADING}\n");
+    let _ = writeln!(
+        out,
+        "The reader's `Existing code:` list is the starting point, not the full inventory. Search the repository for each further component yourself; do not rely on the list alone.\n"
+    );
+    let listed = existing_code_assumptions(&reading.assumptions);
+    if listed.is_empty() {
+        let _ = writeln!(
+            out,
+            "The reading lists no `Existing code:` assumption, so you build the inventory yourself.\n"
+        );
+    } else {
+        for item in listed {
+            let _ = writeln!(out, "{}\n", quote(item));
+        }
+    }
+    let _ = writeln!(
+        out,
+        "- Open every listed path before you write.\n\
+         - Search the repository (Grep, Glob) for each further component, client, module, fake, test, doc section, workflow step, config key, cache or limit the design builds, changes or depends on, including the `docs/decisions.md` entries that removed or replaced it. Check each cache, config or limit the design depends on against the repository before you rely on it.\n\
+         - Put an \"Existing code\" section in the doc. It names each path the design will reuse or extend, and says for each component the design proposes whether it already exists (with its path) or that the search found none.\n\
+         - Every claim about what the code or host does (a refusal, a conflict, a race outcome, a gate rule) names the file and function that produces it. Every number names its source (a record query or the note) and says whether that source calls it an estimate.\n"
+    );
 }
 
 /// The producer brief's note on the existing tests that read the output the change touches. The brief cannot
@@ -3646,6 +3700,101 @@ mod tests {
     /// The size of the planner brief's Report section with empty inputs before the real-records rule was
     /// added (bytes after the `## Report` heading).
     const PLANNER_REPORT_BASE_BYTES: usize = 1749;
+
+    fn class_producer_brief(class: &str, assumptions: &[&str]) -> String {
+        let mut r = reading();
+        r.class_of_work = class.into();
+        r.assumptions = assumptions.iter().map(|a| (*a).to_string()).collect();
+        r.acceptance_criteria.push(Criterion {
+            text: "The design has an Existing code section that reuses or extends crates/athena-core/src/jev.rs"
+                .into(),
+            kind: CriterionKind::Content,
+        });
+        let mut inputs = producer_inputs(None);
+        inputs.reading = AcceptedReading::new(&r, &defaults(), |_| false);
+        producer_brief(&inputs)
+    }
+
+    fn existing_code_slice(brief: &str) -> &str {
+        let (_, after) = brief
+            .split_once(EXISTING_CODE_HEADING)
+            .expect("the existing code section heading");
+        after.split("\n## ").next().unwrap()
+    }
+
+    #[test]
+    fn the_design_producer_brief_has_the_existing_code_section() {
+        let brief = class_producer_brief(
+            "design",
+            &[
+                "Existing code: crates/athena-core/src/jev.rs and crates/athena-core/src/labeled.rs",
+                "existing code: docs/decisions.md",
+                "No release is tagged.",
+            ],
+        );
+        let slice = existing_code_slice(&brief);
+        for needle in [
+            "crates/athena-core/src/jev.rs",
+            "> existing code: docs/decisions.md",
+            "starting point",
+            "Search the repository",
+            "reuse or extend",
+            "Existing code",
+            "whether it already exists",
+            "cache, config or limit",
+            "names the file and function",
+            "names its source",
+        ] {
+            assert!(slice.contains(needle), "{needle}: {slice}");
+        }
+        assert!(!slice.contains("No release is tagged."), "{slice}");
+        let at = brief.find(EXISTING_CODE_HEADING).unwrap();
+        assert!(at > brief.find("## User defaults that apply").unwrap());
+        assert!(at < brief.find("## Checks Athena will run").unwrap());
+    }
+
+    #[test]
+    fn the_design_producer_brief_with_no_existing_code_assumption_still_asks_for_a_search() {
+        let brief = class_producer_brief("design", &["No release is tagged."]);
+        let slice = existing_code_slice(&brief);
+        assert!(
+            slice.contains("lists no `Existing code:` assumption"),
+            "{slice}"
+        );
+        assert!(slice.contains("Search the repository"), "{slice}");
+        assert!(slice.contains("names the file and function"), "{slice}");
+    }
+
+    #[test]
+    fn other_classes_producer_briefs_have_no_existing_code_section() {
+        let assumptions = ["Existing code: crates/athena-core/src/jev.rs"];
+        let code = class_producer_brief("code", &assumptions);
+        for class in [
+            "code", "tests", "docs", "prompts", "config", "build", "other",
+        ] {
+            let brief = class_producer_brief(class, &assumptions);
+            assert!(!brief.contains(EXISTING_CODE_HEADING), "{class}");
+            assert!(!brief.contains("Search the repository (Grep"), "{class}");
+        }
+        let design = class_producer_brief("design", &assumptions);
+        let (before, after) = design.split_once(EXISTING_CODE_HEADING).unwrap();
+        let rest = after.split_once("\n## ").unwrap().1;
+        assert_eq!(format!("{before}## {rest}"), code);
+    }
+
+    #[test]
+    fn the_planner_brief_carries_the_design_plan_rule_only_for_design_readings() {
+        use super::planner::{DESIGN_PLAN_RULE, FIELD_MEANING_RULE};
+        let mut inputs = planner_inputs(None);
+        inputs.reading.class_of_work = "design".into();
+        let brief = planner_brief(&inputs);
+        assert_eq!(brief.matches(DESIGN_PLAN_RULE).count(), 1);
+        assert!(brief.find(DESIGN_PLAN_RULE).unwrap() > brief.find(FIELD_MEANING_RULE).unwrap());
+        assert!(!DESIGN_PLAN_RULE.contains('\n'));
+        assert!(DESIGN_PLAN_RULE.len() <= 500, "{}", DESIGN_PLAN_RULE.len());
+        inputs.reading.class_of_work = "docs".into();
+        assert!(!planner_brief(&inputs).contains(DESIGN_PLAN_RULE));
+    }
 
     #[test]
     fn the_planner_brief_states_the_real_records_rule_once_within_its_bound() {

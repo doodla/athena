@@ -1048,6 +1048,7 @@ fn accepted(criteria: &[&str]) -> athena_context::briefs::AcceptedReading {
     athena_context::briefs::AcceptedReading {
         n: 1,
         title: "t".into(),
+        class_of_work: String::new(),
         summary: "s".into(),
         assumptions: vec![],
         criteria: criteria

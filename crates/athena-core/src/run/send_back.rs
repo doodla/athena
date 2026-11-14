@@ -497,6 +497,7 @@ mod left_to_athena_tests {
         AcceptedReading {
             n: 1,
             title: "t".into(),
+            class_of_work: String::new(),
             summary: "s".into(),
             assumptions: vec![],
             criteria: criteria
