@@ -1622,7 +1622,7 @@ fn the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets(
     );
     assert!(brief.contains(&verifier), "{brief}");
     let reader = format!(
-        "- reader: composes contract, frame.reader, defaults, catalog; {} of 2000 tokens used",
+        "- reader: composes contract, frame.reader, defaults, catalog; {} of {} tokens used",
         athena_context::compose(&[
             athena_context::CONTRACT.into(),
             athena_context::READER_FRAME.into(),
@@ -1639,7 +1639,8 @@ fn the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets(
                 athena_context::briefs::render_catalog(&[PinningStudy.card()])
             ),
         ])
-        .estimated_tokens()
+        .estimated_tokens(),
+        athena_context::BudgetSet::Reader.budget()
     );
     assert!(brief.contains(&reader), "{brief}");
 }

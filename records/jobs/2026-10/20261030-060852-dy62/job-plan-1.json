@@ -1,0 +1,290 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-060852-dy62",
+  "round": 1,
+  "at": "2026-11-13T23:24:52.835615719Z",
+  "invocation_seq": 3,
+  "approach": "Add two entries to `defaults.toml` (`version-pins`, `hermetic-checks`) in the file's real shape: `id`, `statement`, `applies_to`, `source`. The brief says `classes` and `text`, but `Default` in `crates/athena-data/src/defaults.rs:17-23` has `deny_unknown_fields`, so those names would fail to parse. `DefaultsModel::render` (defaults.rs:58-72) shows the reader only the first sentence of each statement (`first_sentence`, defaults.rs:77-83). So each statement's first sentence carries the whole stance: exact, never auto-floated, ambient. Later sentences add detail for the producer and verifier, who get the full text through `get`. The `version-pins` entry names the existing `cargo run -p xtask -- repin` command from D154. `xtask/src/main.rs` has it (13 `repin` matches), so nothing is built. Raise `BudgetSet::Reader` from 2_000 to 2_200 in `crates/athena-context/src/lib.rs:176`, with a comment saying why. The entries add about 170 tokens against 2 tokens of headroom, and defaults are always loaded into the reader set (lib.rs:286). Make the hardcoded \"of 2000\" at `run_pin_tests.rs:1625` read `BudgetSet::Reader.budget()`. Update the `budget reader` line in `docs/system-facts.md`, because `system_facts_budgets_match_computed` (`crates/athena-cli/tests/budgets.rs:125`) fails otherwise. That file is not a listed deliverable, but the test forces the edit. Add one new test in defaults.rs that parses the real file and checks, by a table of (id, classes, key phrases), that each stance is in both the full statement and the rendered reader line. It also renders the defaults for class `code` and `config` the way the reader sees them, which covers criterion 7. Append D181 to `docs/decisions.md` and a CHANGELOG entry. The version in defaults.toml stays 1: nothing in the loader requires a bump (`parse` checks only duplicates and empties, defaults.rs:36-49), and earlier added entries did not bump it.",
+  "decisions": [
+    {
+      "choice": "Put the whole stance in each entry's first sentence. Later sentences hold only extra detail: the repin command name, and the rule for recording a tool choice.",
+      "reason": "The reader loads only the first sentence (`render` and `first_sentence`, defaults.rs:55-83). A key phrase placed after the first full stop would never reach the reader, so the reader would still ask.",
+      "rejected": [
+        {
+          "option": "One long statement with the phrases spread across several sentences",
+          "why": "The reader would see only the first sentence, so the defect that caused both jobs would remain."
+        },
+        {
+          "option": "Change `render` to show full statements",
+          "why": "That would raise the reader set by far more than 170 tokens and change every default's rendering. The existing tests pin the first-sentence form (defaults.rs:100-126, 129-145)."
+        }
+      ]
+    },
+    {
+      "choice": "Raise the reader budget to 2_200 and update `docs/system-facts.md` to the computed size. The test hardcode at run_pin_tests.rs:1625 reads `BudgetSet::Reader.budget()`.",
+      "reason": "The brief requires the raise. The set has 2 tokens of headroom (1998 of 2000, `docs/system-facts.md:25`). The two entries cost about 170 tokens by my estimate (~510 bytes at ⌈bytes/3⌉). The producer must measure the real figure and set the budget to the smallest round value above it with a small margin, not above 2_200 unless measured. D170 says budgets never rise to fit a set, so D181 records this as a deliberate exception: the content is policy that stops a user question, and nothing is left to trim.",
+      "rejected": [
+        {
+          "option": "Pay with removals from reader.md or the catalog",
+          "why": "Both are outside the listed deliverables, and D170 already trimmed the reader prompt to its limit."
+        },
+        {
+          "option": "Keep the 2000 literal in run_pin_tests.rs and edit it to 2200",
+          "why": "A literal drifts the next time the budget moves; reading the `BudgetSet` value removes the duplicate."
+        }
+      ]
+    },
+    {
+      "choice": "Apply `version-pins` to code, config and build, as the brief requires. Apply `hermetic-checks` to code, config, build and tests.",
+      "reason": "The classes are the ones the reader matches a request against. Hermetic checks are mostly tests and gates, so `tests` is named for them. `rust` and `tested` already use these class names.",
+      "rejected": [
+        {
+          "option": "`*` for both",
+          "why": "Every reading would then carry both stances as criteria, including docs-only requests, and the reader would be asked to apply them where they do not fit."
+        }
+      ]
+    },
+    {
+      "choice": "Leave `version = 1` unchanged.",
+      "reason": "`DefaultsModel::parse` does not look at the version beyond the type (defaults.rs:36-49). `behavior-evidence`, `outcome-check`, `no-empty-success` and `thrash-stop` were added without a bump. The only test that reads it asserts `>= 1` (defaults.rs:94).",
+      "rejected": [
+        {
+          "option": "Bump to 2",
+          "why": "It would change the rendered header with no consumer that needs it."
+        }
+      ]
+    },
+    {
+      "choice": "Test the class, not the job. A table of (id, classes, phrases) is asserted against the parsed file and against the rendered reader line. A separate case renders the defaults selected for class code and config.",
+      "reason": "Criteria 5 and 7 require the property to hold for the class of request, not only for p806's wording. The table also fails if a stance is moved out of the first sentence.",
+      "rejected": [
+        {
+          "option": "Assert only that the file contains the ids",
+          "why": "That checks the files exist, not what the reader sees."
+        },
+        {
+          "option": "A fixture holding the real p806 request text",
+          "why": "The snapshot has no copy of that request. A representative request would still pass for one job only."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "defaults.toml",
+      "action": "modify",
+      "purpose": "Append `version-pins` (applies_to code, config, build) and `hermetic-checks` (applies_to code, config, build, tests). Each has `source` set to job 20261016-005805-p806 (introspection 20261016-142800-y4vb) or job 20261025-183644-t67q (introspection 20261025-183726-fqgr), and the stance in the first sentence. `version` stays 1.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/defaults.rs",
+      "action": "modify",
+      "purpose": "Add the new tests: the id/classes/phrases table checked against the parsed real file and the rendered reader line, and the code, config and build selection case for the pin-deadlock request.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "purpose": "`BudgetSet::Reader` returns 2_200 (or the measured minimum), with a comment saying why the reader budget rose and that D170's statement is the exception.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "At line 1625, replace the literal `2000` in the expected reader headroom line with `BudgetSet::Reader.budget()`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Update the line `budget reader: 1998 of 2000` to the computed size and the new budget. `system_facts_budgets_match_computed` fails otherwise. Not a deliverable the brief names, and not a governance file.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D181 after D180: Case (the two jobs and introspections, root cause), Decision (the two defaults and the reader budget change, as an exception to D170), Alternatives, Tradeoff, Reversal cost, Provenance. No existing line edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet at the top of `[Unreleased]` / `### Added` naming the root cause (defaults silent on pin and ambient-tool policy), the two jobs, the budget change and the tests, and pointing to D181.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Append the two `[[default]]` entries to defaults.toml in the existing shape (id, statement, applies_to, source), keeping `version = 1`. `version-pins`: applies_to = [\"code\", \"config\", \"build\"]; first sentence like \"Version pins stay exact and are never auto-floated; only the person running Athena bumps one, through one explicit command that sets the pin to the installed version.\" A second sentence names `cargo run -p xtask -- repin` for the Claude Code pin (D154). `hermetic-checks`: applies_to = [\"code\", \"config\", \"build\", \"tests\"]; first sentence like \"A check never depends on inherited environment or ambient tools: the runner passes every path a check needs explicitly, and any preferred-versus-fallback tool choice is recorded in the check output.\" A second sentence says a silent fallback is a failure. Set `source` to the two jobs and introspection ids. Avoid banned words and email-like text.",
+    "Add the new tests to the `tests` module of crates/athena-data/src/defaults.rs: a table of (id, classes, phrases) asserted on `model.get(id)` and on `model.render()`, and a code, config and build selection test for the pin-deadlock request, with a docs-only selection asserted to omit the pin line.",
+    "In crates/athena-context/src/lib.rs, set `BudgetSet::Reader` to 2_200 and add a comment on the reader line giving the reason (policy entries that replace user questions; no removable text left; D181). Do not touch the other budgets.",
+    "In crates/athena-core/src/run_pin_tests.rs at line 1625, change the expected line to `of {} tokens used` and pass `athena_context::BudgetSet::Reader.budget()` as a second argument after the composed size.",
+    "Run `cargo test -p athena-cli --test budgets` once to read the computed reader size from the `system_facts_budgets_match_computed` failure message. Then set the line in docs/system-facts.md to `- budget reader: <size> of <budget>`. If the size exceeds 2_200, shorten the entries and rerun; do not change the other lines.",
+    "Append D181 to docs/decisions.md after D180 with the heading form `## D181 · ...`, and the Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance bullets. The Case names the root cause (defaults silent on pin and ambient-tool policy), jobs 20261016-005805-p806 and 20261025-183644-t67q, and introspections 20261016-142800-y4vb and 20261025-183726-fqgr. The Decision states the budget change and that it is an exception to D170. The Provenance bullet lists what was read and measured, with the final reader size. Edit no existing line.",
+    "Add the CHANGELOG.md bullet at the top of `## [Unreleased]` / `### Added`, in the style of the existing bullets: root cause, the two defaults, the budget change, the tests by name, D181, and the dropped candidates (patch-tolerant `accepts`, nextest) as out of scope.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. Also run `cargo test -p athena-data defaults`, `cargo test -p athena-context`, `cargo test -p athena-cli --test budgets`, `cargo test -p athena-cli --test mirrors`, `cargo test -p xtask --test policy` and the headroom test in athena-core. No refusal or matching rule is added or changed, so no refusal_corpus case is needed; the producer confirms with `cargo test -p athena-core --test refusal_corpus` that it still passes."
+  ],
+  "risks": [
+    {
+      "risk": "The two entries cost more than 200 tokens, so 2_200 is not enough.",
+      "mitigation": "The producer composes the real reader set and reads the figure the budget tests print before choosing the number. It keeps the first sentences short. Starting estimate: 1998 plus about 170 gives about 2170 of 2200. If the figure is above 2200, the producer shortens the sentences before raising the budget further, and records the final figure in D181 and `docs/system-facts.md`."
+    },
+    {
+      "risk": "A key phrase lands after the first \". \" and never reaches the reader (render shows only the first sentence).",
+      "mitigation": "The test table asserts the phrases on the rendered reader line, not only on the full statement. A phrase that sits after the first full stop fails the test."
+    },
+    {
+      "risk": "The budget rise contradicts D170 (\"budgets never rise to fit a set\") and the comment at lib.rs:177.",
+      "mitigation": "D181 states the exception: the budget rises because the content replaces a user question and the set has no removable text left. The comment in lib.rs says the same, so a later reader sees why the figure moved."
+    },
+    {
+      "risk": "The pin default names `cargo run -p xtask -- repin`, which only moves the Claude Code pin; other pins have no such command yet.",
+      "mitigation": "The default names the command and D154 as its authority, and the new test checks that \"one explicit command\" appears. The plan states in D181 that no new command is built here."
+    },
+    {
+      "risk": "Changing defaults.toml invalidates stored readings through the reading digest (run/mod.rs:94).",
+      "mitigation": "This is accepted. Readings are re-read on next dispatch, and the plan lists the digest path in dependents."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Reader token budget (BudgetSet::Reader 2_000 to 2_200) and the rendered reader defaults",
+      "dependent": "crates/athena-cli/tests/budgets.rs `every_role_set_is_within_its_budget` (line 340) and `system_facts_budgets_match_computed` (line 125), with docs/system-facts.md line 25",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets. The facts line `budget reader: <size> of 2200` is updated to the computed size in this plan. The test's own negative cases (lines 133-148) still fail on a doctored size.",
+      "reason": null
+    },
+    {
+      "name": "The headroom text `- reader: ... {} of 2000 tokens used`",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs line 1625, `the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets`",
+      "kind": "code",
+      "test": "cargo test -p athena-core the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets, with the literal replaced by `BudgetSet::Reader.budget()`.",
+      "reason": null
+    },
+    {
+      "name": "BudgetSet::Reader budget value",
+      "dependent": "crates/athena-context/src/lib.rs `check_budget` (line 226) and the headroom rows (lines 263-312); callers in crates/athena-cli/tests/budgets.rs and `headroom_rows` users in the reading brief (run_pin_tests.rs)",
+      "kind": "code",
+      "test": "cargo test -p athena-context and cargo test -p athena-cli --test budgets. `producer_and_verifier_frames_leave_room_for_capability_sections` (lib.rs:386) checks only frame sizes against the larger budget, so it still passes.",
+      "reason": null
+    },
+    {
+      "name": "defaults.toml must parse with DefaultsModel::parse",
+      "dependent": "crates/athena-core/src/admission.rs lines 908-943 (rule `configuration`: a changed defaults.toml must parse) and `governance_files_are_recognized` (line 2054)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core admission. New entries use only the four allowed fields and unique ids, so they parse; the new unit test also parses the real file.",
+      "reason": null
+    },
+    {
+      "name": "defaults.toml bytes",
+      "dependent": "crates/athena-core/src/run/mod.rs:94 and run/pin.rs:147 (the reading digest covers the bytes of defaults.toml; a changed defaults.toml makes a stored reading stale and it is read again)",
+      "kind": "code",
+      "test": null,
+      "reason": "This is intended: a reading made before the entries existed would not carry them. Any reading already stored is read again on its next dispatch. No code change is needed, and the rereading path is exercised by existing tests that use `include_str!` of the real file (run/tests.rs:339, run_pin_tests.rs:123)."
+    },
+    {
+      "name": "Governance-file change rules for defaults.toml",
+      "dependent": "crates/athena-core/src/plan.rs:49 (a defaults.toml change must list a file under crates/athena-data/) and the reading governance checks (reading/checks.rs:624, 708)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The request lists defaults.toml and crates/athena-data/src/defaults.rs as deliverables and names defaults.toml in criteria 1 and 2, so the rule is satisfied. No rule text changes. docs/system-facts.md is a doc, not a governance file (status.rs:36-38 lists it only as an owner or record path)."
+    },
+    {
+      "name": "docs/decisions.md must stay append-only with the next id and a Provenance bullet",
+      "dependent": "crates/athena-core/src/mirrors.rs `Rule::DecisionEntries` (lines 20-27, 241-265) and crates/athena-cli/tests/mirrors.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test mirrors. The new entry is D181 (D180 is the last, decisions.md:5198), is appended after it, and has a Provenance bullet. No existing line is edited.",
+      "reason": null
+    },
+    {
+      "name": "Decision reconcile rule (D156)",
+      "dependent": "docs/decision-links.toml `[[governs]]` (line 219; only D08, covering athena-git snapshot.rs and run/candidate.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "None of the changed paths is in a governed list; no link entry is needed. D170's statement that budgets never rise is not a governed path, and D181 states the exception in prose."
+    },
+    {
+      "name": "Rendered defaults block and `get` of full statements",
+      "dependent": "crates/athena-context/src/briefs.rs:4184-4213 (`an_explainer_page_request_gets_the_standing_defaults_without_a_question`) and the producer and verifier brief builders that render defaults (`AcceptedReading`, briefs.rs:1521)",
+      "kind": "code",
+      "test": "cargo test -p athena-context",
+      "reason": "The new entries add lines; they do not change the lines that test asserts (`- outcome-check [*]:` and the other two) or the other entries. The producer and verifier briefs sit outside the budgeted sets (docs/system-facts.md, Prompt sets and budgets), so the longer full statements do not touch their budgets."
+    },
+    {
+      "name": "Banned words and personal data in tracked files",
+      "dependent": "xtask/tests/policy.rs boundary scan and the `[personal_data]` allow-list in athena.toml",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test policy. The new text uses only \"the person running Athena\", the phrase D154 already uses. It contains no email-like text.",
+      "reason": null
+    },
+    {
+      "name": "Hand-written reader budget figure in a design note",
+      "dependent": "docs/design/context-engineer.md:54 (a table row stating 1997 of 2000 for the reader prompt)",
+      "kind": "code",
+      "test": null,
+      "reason": "Already out of date (system-facts says 1998), no test or mirror compares it (`grep` of crates/ and xtask/ for `context-engineer` finds nothing), and it is not a deliverable. Left as is; D181 notes it. docs/decisions.md:612 and :4929 are history, which is append-only."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of defaults.toml. Then run the new test in the next criterion, which asserts the same fields on the parsed entry.",
+      "command": "git diff -- defaults.toml",
+      "observes": "One new `[[default]]` with id `version-pins` and `applies_to = [\"code\", \"config\", \"build\"]`. Its text says pins are exact, never auto-floated, bumped only by the person running Athena through one explicit command that sets the pin to the installed version. It names `cargo run -p xtask -- repin`. The first sentence holds exact and never auto-floated.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the diff. Then the same new test asserts each phrase, and `cargo test -p xtask --test policy` shows the banned-word scan and the allow-list still pass on the new text.",
+      "command": "git diff -- defaults.toml",
+      "observes": "A second new `[[default]]`, id `hermetic-checks`. It says a check never depends on inherited environment or ambient tools, the runner passes every path a check needs explicitly, and any preferred-versus-fallback tool choice is recorded in the check output. The first sentence contains \"ambient\" and \"explicitly\".",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Run the budget tests. Then `cargo test -p athena-core the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets` and `cargo test -p athena-cli --test mirrors`. Then read the diffs of lib.rs, run_pin_tests.rs, system-facts.md and decisions.md.",
+      "command": "cargo test -p athena-cli --test budgets",
+      "observes": "`every_role_set_is_within_its_budget` and `system_facts_budgets_match_computed` pass. The reader row of `docs/system-facts.md` equals the computed size against the new budget (2200 or the producer's measured value). The run_pin_tests line is generated from `BudgetSet::Reader.budget()`. `decisions.md` is an exact byte-prefix of its old self plus a new `## D181` entry (heading, Provenance bullet), which the mirrors test judges. D181 names the root cause, jobs 20261016-005805-p806 and 20261025-183644-t67q, and the budget change.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Read the CHANGELOG diff and the list of changed paths from `git status`.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new bullet under `## [Unreleased]` / `### Added` names the root cause (defaults silent on pin and ambient-tool policy), both jobs, the two ids, the budget change and the tests. `git status` lists only the six deliverables plus `docs/system-facts.md`. `athena.toml`, `.github/`, claude.rs, wiring.rs, live.rs, README.md, `xtask/`, checks.rs and gh.rs are untouched, and `defaults.toml` is the only governance file.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "The new test in defaults.rs, `pin_and_ambient_tool_stances_are_written_defaults_the_reader_sees`, runs `DefaultsModel::parse(REPO_DEFAULTS)`, the real file through `include_str!`. For each row of a table (id, classes, phrases) it asserts the entry exists. It checks `applies_to`: code, config, build for pins. It checks the full statement holds the phrases: exact, never auto-floated, one explicit command, installed version, ambient, explicitly, recorded in the check output. It checks `model.render()` contains a line starting `- <id> [<classes>]:` that holds the key phrases. Run it with the names `version_pins` and `ambient` in the filter too if split into two tests.",
+      "command": "cargo test -p athena-data defaults",
+      "observes": "The test passes with the change and fails on the base tree, on the missing entries. The rendered line for each id is the text the reader loads, so it is the reader prompt's content that is checked.",
+      "fails_without": "On the base tree, `model.get(\"version-pins\")` is None, so the new test fails at its first lookup. The same holds for `hermetic-checks`. If the entries existed but their first sentence lacked exact, never auto-floated or ambient, the rendered-line assertions would fail.",
+      "seam": "Production entry points: `DefaultsModel::parse` and `DefaultsModel::render` in crates/athena-data/src/defaults.rs. Fixture: the real `defaults.toml` read by the existing `include_str!(\"../../../defaults.toml\")` constant `REPO_DEFAULTS` (defaults.rs:89). It exists today, and no double is involved."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the reader headroom test in athena-core and the budget tests in athena-cli. Then run the three recorded checks on the final tree: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. The producer also runs `cargo test -p athena-context` for the frame-fit tests.",
+      "command": "cargo test -p athena-core the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets",
+      "observes": "The reader row's used size is at most its budget. The brief line is `- reader: composes contract, frame.reader, defaults, catalog; <used> of 2200 tokens used`, matching the composed set. fmt, clippy and the whole test suite pass.",
+      "fails_without": "If the budget stayed 2000 with the new entries, `check_budget` in `every_role_set_is_within_its_budget` (budgets.rs:340) returns Err (\"over its budget\"). `system_facts_budgets_match_computed` also fails on the stale reader line. If the run_pin_tests literal were not updated, the brief would show the new budget and `brief.contains(&reader)` would fail.",
+      "seam": "Production entry point: `athena_context::check_budget` and `headroom_rows` (lib.rs:226, 263). The test drives `Athena::ask` with the existing fake agents and `PinningStudy`; the seam exists today (run_pin_tests.rs:1581-1645). The only change to it is the budget expression."
+    },
+    {
+      "criterion": 7,
+      "method": "A second new case in the same test module, `a_pin_deadlock_request_is_settled_by_the_rendered_defaults`. It builds a `DefaultsModel` filtered to the classes `code`, `config` and `build` (as `an_explainer_page_request_gets_the_three_standing_defaults` does for `docs`, defaults.rs:147-173). It renders that model, the text the reader's defaults component carries. It asserts the `version-pins` line is present and states exact and never auto-floated and gives the bumping rule, so the pin question the p806 request left open is answered in the reader's own input. It asserts a docs-only selection does not include it, so the selection is real. Limit: this checks the reader's input, not whether the model then skips the question; no live reader run is demonstrated.",
+      "command": "cargo test -p athena-data defaults",
+      "observes": "The rendered line is present in the code, config and build selection, and the test passes. The p806 request text is not in the snapshot; a request of the same shape stands in for it, and the property asserted does not depend on its wording.",
+      "fails_without": "Without the `version-pins` entry, the rendered text for class code and config has no pin line, so the assertion that the line is present fails. A reader given a pin-deadlock request would then have no stated stance and would have to ask.",
+      "seam": "Production entry point: `DefaultsModel::render` over a model filtered by `applies_to`, as the reader's defaults component is built in `headroom_rows` and in briefs.rs:4196. Fixture: the real defaults.toml through `REPO_DEFAULTS`. Exists today."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "23072676acc1b41d706c492ccfc3870836ea7e8288e06ddfc4011d8bce74e8bb"
+}
