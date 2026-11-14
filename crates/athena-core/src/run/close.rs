@@ -36,6 +36,9 @@ impl Athena {
             ))
         };
         push_closing_records(&mut closing);
+        closing
+            .files
+            .extend(self.follow_up_files(ctx.id(), ctx.reading, ctx.ui));
         let reading_path = format!("{}/reading-{}.json", id.dir(), ctx.reading.n);
         let prediction = introducing_commit(self, "HEAD", &reading_path)?
             .unwrap_or_else(|| ctx.prediction.clone());

@@ -36,6 +36,8 @@
 //!   over REST only when the opt-in setting is on;
 //! - [`introspect`]: the introspection record of an event, the class registry, and the reading code shared with
 //!   `athena backtest`;
+//! - [`followups`]: the follow-ups an accepted reading's `out_of_scope` list names ("as its own job", "as a
+//!   follow-up request"), queued once per retry chain as their own steward requests when a job closes;
 //! - [`gate_counts`]: per-gate counters read from the job records: how many jobs each check or rule ended, and
 //!   how often a later try landed the same change; shown by `athena status` and given to the introspection;
 //! - [`proposals`]: proposed defaults from repeated introspections, their validation, and the apply-as-a-job
@@ -119,6 +121,7 @@ pub mod divergence;
 pub mod evidence_labels;
 pub mod exploration;
 pub mod fake;
+pub mod followups;
 pub mod gate_counts;
 pub mod gh;
 pub mod hestia;
