@@ -1,0 +1,143 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-052309-w3zt",
+  "n": 1,
+  "at": "2026-11-14T06:55:37.25979599Z",
+  "invocation_seq": 1,
+  "base_commit": "5ab306c3fb7524d179adfb4a5b3fce5884ae8614",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Scale planner timeout when a revision round escalates effort",
+  "summary": "Retry of job 20261114-041123-hvyh, whose planning stopped at round 2 (xhigh, 606 s, 600 s deadline). In planning_round, when the planner revision setting raises effort above the planner's own, the planner time limit is multiplied (2x, a constant) instead of staying at planner_timeout_s. The prior job's follow-up-queue feature is not part of this job.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New unit tests plus cargo test and clippy criteria."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the planning step."
+    },
+    {
+      "id": "root-cause",
+      "how": "Scales the limit with the escalation instead of just raising the base timeout."
+    },
+    {
+      "id": "mechanism",
+      "how": "Enforced in code and a test."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-core/src/run/planning.rs planning_round (lines ~141-165) picks model/effort via jc.config.models.planner_revision_setting when round > 1 or mechanical_passes > 0, then passes cfg.planner_timeout_s to agent_spec; crates/athena-data/src/config.rs (planner_timeout_s at line 229, planner_revision_effort at 343, planner_revision_setting near 386, effort_rank) defines the setting; tests in crates/athena-core/src/run/tests.rs (config helper near line 1328 writes planner_revision_effort and planner_timeout_s = 600). No record or data file is added, so check_record_file/AnyRecord are not involved. The timeout is measured directly on the AgentSpec built for the planner call.",
+    "Existing code: crates/athena-core/src/run/planning.rs and crates/athena-data/src/config.rs are extended; the existing planner_revision_setting result is reused to decide whether effort was escalated, and no new config key is added.",
+    "Design call: the scale is a fixed constant (2x, so 1200 s from the base 600 s) applied only when the revision effort differs from the planner's own effort; round 1, seeded first calls and unescalated revisions keep planner_timeout_s. A config key was avoided so athena.toml and defaults.toml stay unchanged; the 2x value is an estimate, based on 606 s observed against a 600 s limit.",
+    "Job 20261114-041123-hvyh left no candidate changes, so there is no work to keep or drop. Its original deliverables (followups.rs, steward.rs and others) are dropped from this job and remain unbuilt follow-up; that request will need to be retried separately.",
+    "Audience: Sri, who runs hard jobs and judges whether a stronger revision round can finish; the planner prompt is unchanged. Consumers: none found (no config deliverable)."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new unit test in crates/athena-core/src/run/tests.rs configures planner_revision_effort higher than the planner's effort with planner_timeout_s = 600, runs a revision round (round 2), and asserts the planner AgentSpec timeout is greater than 600 s. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test asserts that round 1 and a revision without escalated effort (no planner_revision_effort set, or not stronger) still use exactly planner_timeout_s. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The diff in crates/athena-core/src/run/planning.rs scales cfg.planner_timeout_s only when the revision setting raises effort, via a named constant with a doc comment saying why (job 20261114-041123-hvyh hit 600 s at xhigh).",
+      "kind": "content"
+    },
+    {
+      "text": "The deliverables are only planning.rs, run/tests.rs and CHANGELOG.md; athena.toml, defaults.toml, hestia.rs, the prompts and records/ are unchanged in the diff.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy and cargo test pass on the final tree (recorded Athena checks count).",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry recording the planner time limit scaling and citing job 20261114-041123-hvyh.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "The follow-up queueing feature from job 20261114-041123-hvyh (followups.rs, steward.rs, manage.rs, reading.rs, lib.rs, crates/athena-cli/tests/drain.rs): dropped here, to be retried as its own request.",
+    "Backfilling lost follow-ups from job 20261114-034034-fgwz and the hestia.rs findings; hestia.rs unchanged.",
+    "A new athena.toml or defaults.toml key, changes to planner_timeout_s itself, critic timeout, planner prompts, workflows and records/.",
+    "Changing which rounds escalate effort."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.68,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.1,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1700.0,
+        "p90": 4000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6774744027303754,
+      "p_user_intervenes": 0.06286594761171031,
+      "cost_usd": {
+        "p10": 0.548195082301745,
+        "p50": 1.481907856463903,
+        "p90": 5.67432249525414
+      },
+      "wall_time_s": {
+        "p10": 605.4943596419997,
+        "p50": 2153.684957172999,
+        "p90": 4390.909508502001
+      }
+    }
+  },
+  "departures": "Slightly lower cost and time than the reference: a small change in one function, though hard planning adds a planner and critic.",
+  "urgent_reason": "Cuts failed planning attempts: a revision round at xhigh timed out at 600 s and stopped job 20261114-041123-hvyh before any code was written.",
+  "hard_reason": "Changes the run pipeline's planning step: the time limit that decides whether a planner round is stopped.",
+  "producer_effort": "high"
+}
