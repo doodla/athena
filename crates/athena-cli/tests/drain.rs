@@ -8220,6 +8220,9 @@ mod parallel {
         failing_reason: &'static str,
         /// Runs of these jobs wait, for up to five seconds, until two runs are in flight at once.
         meet: Vec<&'static str>,
+        /// The order the drain hands these jobs to its workers, when a test asserts on the order of the
+        /// `start` entries: a run does not log its start before the jobs listed ahead of it have.
+        start_order: Vec<&'static str>,
         /// How long a run takes, in milliseconds.
         run_ms: u64,
         /// Asks for a stop as soon as this job is running, after it has met its sibling.
@@ -8305,6 +8308,22 @@ mod parallel {
         fn run(&self, job: &str) -> Run {
             let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(now, Ordering::SeqCst);
+            if let Some(at) = self.start_order.iter().position(|j| *j == job) {
+                // The workers take their items in queue order, but each logs its start only after it has
+                // been scheduled, so under load a later item can log first. Hold each start until the
+                // items before it have logged theirs; the deadline only keeps a wrong list from hanging.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while self
+                    .log()
+                    .iter()
+                    .filter(|e| e.starts_with("start "))
+                    .count()
+                    < at
+                    && Instant::now() < deadline
+                {
+                    std::thread::yield_now();
+                }
+            }
             self.log.lock().unwrap().push(format!("start {job}"));
             if self.meet.contains(&job) {
                 // A barrier that gives up: a serial drain never gets a second run in flight, so it falls
@@ -8523,7 +8542,8 @@ mod parallel {
     fn a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn() {
         // Without the improvement requests named, the six urgent items are one group and start together,
         // ahead of both Steward requests.
-        let plain = six_urgent_and_two_steward();
+        let mut plain = six_urgent_and_two_steward();
+        plain.start_order = vec!["u1", "u2", "u3", "u4", "u5", "u6", "s1", "s2"];
         let report = run_with(&plain, 3, 20.0);
         let mut first_six = starts(&plain)[..6].to_vec();
         first_six.sort();
