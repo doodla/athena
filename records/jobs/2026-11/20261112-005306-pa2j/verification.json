@@ -1,0 +1,174 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261112-005306-pa2j",
+  "candidate_commit": "2b1befdc08376f94de66ab53b0fd700b3b4078d1",
+  "verified_fingerprint": "sha256:14b4a6ff74df8bd3a42c030175efeb993d55a20112f865be42f45b57c6b0d8cd",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/43560526237 for 2b1befdc08376f94de66ab53b0fd700b3b4078d1",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/43560526237 for 2b1befdc08376f94de66ab53b0fd700b3b4078d1",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/43560526237 for 2b1befdc08376f94de66ab53b0fd700b3b4078d1",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 3,
+  "criteria": [
+    {
+      "criterion": "Running `cargo test -p athena-cli --test drain a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn` repeatedly (20 times) passes every time, including while the rest of the drain test binary runs in parallel, and each run finishes in seconds (well under the shard limit).",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "I ran the whole drain binary once in the foreground: 213 passed in 187.20 s. A second full run went in the background as load; it exited 0, but the policy refused its output file because the path is outside the working directory. During that load I ran the filtered target test 20 times, partly as concurrent calls. All 20 passed, each in 0.01–0.03 s, and `parallel::` (15 tests) also passed. Limitation: base would probably also pass 20 runs, so these runs do not show the fix is needed. They show only that the candidate passes and is fast.",
+      "commands": [
+        "cargo test -p athena-cli --test drain --no-run",
+        "cargo test -p athena-cli --test drain",
+        "cargo test -p athena-cli --test drain a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn",
+        "cargo test -p athena-cli --test drain parallel::"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The diff in crates/athena-cli/tests/drain.rs removes the cause of the flake (a timing-dependent wait or scheduling-dependent assertion) and does not merely raise a timeout, add #[ignore], or delete the test; its assertions on start order (s1 among first three, at most two non-Steward starts in a row, 8 starts, improvement_turns equal to s1, s2) are kept.",
+      "kind": "content",
+      "met": false,
+      "evidence": "The fix adds no timeout and no #[ignore], deletes nothing, and keeps the assertions word for word. But it does not make the scheduling-dependent assertion sound. It makes the stub write `start` entries in the order the test expects. In `Shared::run`, a job at index k of `start_order` spins until any k `start ` entries are logged; the gate counts entries and does not check which jobs they are. In the plain case (bound 3, all eight items in one plan group, per groups_in_order in plan.rs:583), suppose the drain dispatched s1 first. s1 would hold one worker until six other starts are logged, and the other two workers would log u1..u6. So `first_six == [u1..u6]` would still pass. That assertion can no longer catch the regression it exists to catch: the log order now comes from the stub, not from the drain.",
+      "commands": [
+        "git diff HEAD~1"
+      ],
+      "commands_verified": false
+    },
+    {
+      "criterion": "CHANGELOG.md has a new entry naming the test and the measured cause, and mentioning jobs 20261029-204942-2zqw, 20261111-213010-8jgz and 20261029-233047-ab43.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The new Fixed entry names `parallel::a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn`, all three job ids, a cause (start entries are logged after the worker is scheduled), the failure counts, and that the 'did not finish' outcome was not reproduced. Its failure example is wrong, though; see findings.",
+      "commands": [
+        "git diff HEAD~1"
+      ],
+      "commands_verified": false
+    },
+    {
+      "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked` pass on the final tree (recorded Athena checks, D115).",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded checks for 2b1befdc08 (CI run 43560526237): fmt, clippy and test all succeeded. My own full run of the drain binary also passed (213/213).",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "No file under crates/ other than crates/athena-cli/tests/drain.rs changes, and no drain production code behavior changes, so the other tests are unaffected.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The diff touches only CHANGELOG.md and crates/athena-cli/tests/drain.rs. In drain.rs it adds the `start_order` field (empty by default, so other tests are unaffected), the gate in `Shared::run`, and one line in the target test.",
+      "commands": [
+        "git diff HEAD~1 --stat"
+      ],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The fix makes the stub log starts in the expected order, so the first assertion can no longer fail when the drain's order is wrong.",
+      "evidence": "The gate holds the job at index k of `start_order` until any k `start ` entries exist; it counts entries and does not check which jobs they are. With bound 3, a misplaced s1 would hold one worker while the other two logged u1..u6, and `first_six == [u1..u6]` would still pass. The test now checks the stub, not the drain. Sounder options: (a) assert on the order the drain itself decides, which is deterministic: `report.plan_groups.concat() == [u1..u6, s1, s2]`; or (b) keep a log check that the worker model makes race-free. A worker logs its item's start before it takes the next item, so with 3 workers s1 can never be among the first 4 starts. Asserting that s1's start index is at least 4 would still catch a misplaced s1.",
+      "location": "crates/athena-cli/tests/drain.rs:8311-8326 and 8546",
+      "source": "verifier"
+    },
+    {
+      "severity": "major",
+      "summary": "The CHANGELOG's failure example cannot happen with this drain and stub, which casts doubt on the measurement behind the stated cause.",
+      "evidence": "The entry gives `[\"s1\", \"u1\", \"u3\", \"u4\", \"u5\", \"u6\"]` as a measured failure. All eight items are disjoint, so the plan makes one group ordered u1..u6, s1, s2 (groups_in_order, plan.rs:583). With read_ahead 0, run_batches starts 3 workers on one VecDeque. Each worker in take_until_done (drain.rs:2770) pops an item and runs it (which logs `start`) before it pops again. So s1 is popped only after six u's were popped; at most two of those are still held by the other workers, and at least four u's have already logged a start. s1 cannot be first. The real race in the base gives s1 at index 4 or 5. The 24-thread harness that produced the 7200-run numbers likely did not exercise the test as written, for example by sharing state across threads. So the 2.8% / 0-failure numbers are not reliable evidence.",
+      "location": "CHANGELOG.md (new Fixed entry)",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "The CI failure mode named in the request, a shard that did not finish, is still unexplained.",
+      "evidence": "The entry itself says it 'did not reproduce a run that never finished'. A failing assertion reports as failed, not as unfinished, so the job that prompted this request may still be open. The entry says so plainly; it should be followed up rather than treated as closed.",
+      "location": "CHANGELOG.md",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "1 of 5 criteria unmet",
+    "2 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "Fail. The change touches only the target test, its stub helper and CHANGELOG.md. The target test passed 20 times out of 20 under load, each run taking 0.01–0.03 s. The whole drain binary passed (213 tests), and Athena's recorded fmt, clippy and test checks passed. But the fix is not sound. It adds a counting gate to the stub that holds each `start` log entry until the expected number of earlier entries exist. With 3 workers, the urgent-first assertion would then pass even if the drain dispatched s1 first, so the test can no longer catch the regression it guards. The sounder fix is to assert on the order the drain itself decides (`report.plan_groups`), plus a log check that is race-free given how workers take items (with 3 workers, s1 cannot be among the first 4 starts). Separately, the CHANGELOG's failure example (`[\"s1\",\"u1\",...]`) cannot happen with this drain and stub, according to the worker loop in drain.rs and the plan grouping. That undermines the measured cause it reports. The 'did not finish' outcome in CI also remains unexplained, which the entry admits."
+}

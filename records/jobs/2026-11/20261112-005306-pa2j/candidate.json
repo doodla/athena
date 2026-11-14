@@ -1,0 +1,100 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261112-005306-pa2j",
+  "base_commit": "920fe055dba55d19c53cb7412aacac89b48140ab",
+  "base_fingerprint": "sha256:15da8fb72e75b525100bcce3c000ea62287409636446b4af3778cd8810e0ff63",
+  "previous_job": "20261114-034034-fgwz",
+  "candidate_commit": "2b1befdc08376f94de66ab53b0fd700b3b4078d1",
+  "candidate_tree": "30c9995cb0785065e16fef5479221e34b4179ba8",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 456928
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 383721
+    }
+  ],
+  "fingerprint": "sha256:14b4a6ff74df8bd3a42c030175efeb993d55a20112f865be42f45b57c6b0d8cd",
+  "violations": [],
+  "producer_report": {
+    "summary": "The test is fast (about 0.01 s alone, at most 160 ms under load) and does not use the 5 s barriers. Under load it failed in 202 of 7200 runs (24 threads at once). Every failure was at the first assertion (the six urgent items start first), for example `[\\\"s1\\\",\\\"u1\\\",\\\"u3\\\",...]`. The cause is that each worker logs its start only after it is scheduled, so the log order can differ from the drain's hand-out order. I added a `start_order` field to the stub in drain.rs; `run` holds each start entry until the entries before it are logged. The plain case sets it, and no assertion changed. The same 7200 runs then had 0 failures. CHANGELOG.md has an entry that names the test, the cause and the three job ids. It says plainly that no hang was reproduced. The full drain test binary (213 tests), the policy test and clippy on athena-cli pass.",
+    "files": [
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test drain tmp_stress -- --nocapture (temporary test, removed afterwards; 24 threads x 300 runs of the target test)",
+        "result": "pass",
+        "note": "before the fix: 202 of 7200 failed, all at the first assertion (the six urgent items start first); worst single run 160 ms, alone 0.01 s. After the fix: 0 of 7200 failed, worst 160 ms."
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain",
+        "result": "pass",
+        "note": "213 passed"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "22 passed"
+      },
+      {
+        "command": "cargo clippy -p athena-cli --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied; no diff left"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Running `cargo test -p athena-cli --test drain a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn` repeatedly (20 times) passes every time, including while the rest of the drain test binary runs in parallel, and each run finishes in seconds (well under the shard limit).",
+        "status": "met",
+        "evidence": "A temporary stress test ran the target body 7200 times with 24 threads at once: 202 failed before the fix, 0 after. It takes about 0.01 s alone and at most 160 ms under that load. The full drain binary (213 tests) passed in one run. The stress test was removed afterwards, so the verifier can repeat the single-test command."
+      },
+      {
+        "criterion": "The diff in crates/athena-cli/tests/drain.rs removes the cause of the flake (a timing-dependent wait or scheduling-dependent assertion) and does not merely raise a timeout, add #[ignore], or delete the test; its assertions on start order (s1 among first three, at most two non-Steward starts in a row, 8 starts, improvement_turns equal to s1, s2) are kept.",
+        "status": "met",
+        "evidence": "The diff adds a `Shared::start_order` field. `run` holds each start entry until the entries before it are logged, so the log follows the drain's hand-out order. The plain case sets the order. The deadline in the new wait only guards a wrong list. All assertions are untouched."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry naming the test and the measured cause, and mentioning jobs 20261029-204942-2zqw, 20261111-213010-8jgz and 20261029-233047-ab43.",
+        "status": "met",
+        "evidence": "A new first entry under Unreleased/Fixed names the test, the measured cause and rates, and all three job ids. It also says that a hang was not reproduced."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked` pass on the final tree (recorded Athena checks, D115).",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran fmt, clippy on athena-cli, the full drain test binary and the policy test; all passed."
+      },
+      {
+        "criterion": "No file under crates/ other than crates/athena-cli/tests/drain.rs changes, and no drain production code behavior changes, so the other tests are unaffected.",
+        "status": "met",
+        "evidence": "Only crates/athena-cli/tests/drain.rs and CHANGELOG.md changed. A temporary stress.txt output file I created was removed."
+      }
+    ],
+    "open_issues": [
+      "The measured failure is an assertion failure (about 2.8% under 24-thread load), not a hang. If the CI shard's 'did not finish' is a timeout, it may have another cause. The shard log would show that."
+    ],
+    "mistakes": [],
+    "learnings": [
+      "The test takes about 0.01 s alone. The 5 s barriers (`meet`, `wait_for`) are not used by it, and the bound-1 run is serial, so those waits are not the cause.",
+      "Under heavy load the flake is an assertion failure at the first check: s1 appears among the first six `start` log entries. A worker logs its start only after being scheduled, so the log order can differ from the hand-out order.",
+      "I did not reproduce a run that never finished. Whether the shard's 'did not finish' has this cause is not shown.",
+      "Bash in this environment allows no pipes, loops or redirects to other tools."
+    ],
+    "desires": [
+      "A way to run a shell loop or pipe for repeated runs; I used a temporary in-test stress harness instead.",
+      "The shard's recorded time limit and its log of the 'did not finish' runs."
+    ]
+  }
+}
