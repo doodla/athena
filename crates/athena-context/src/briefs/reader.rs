@@ -621,8 +621,11 @@ fn verifier_can_run_section(out: &mut String, inputs: &ReaderInputs) {
             out,
             "# What the verifier can run\n\nThe verifier exercises behavior criteria only with these commands, from the repository root, \
              with no environment variables of its own, no other programs, and no writes. Write behavior criteria it can check this way. \
-             It sees the candidate diff, the repository snapshot and the recorded check output, never the producer's report, summary or \
-             claims: a criterion that cites them is refused (`check_criteria_evidence` in athena-core).\n"
+             It sees the candidate diff, the repository snapshot and the recorded check output, never the producer's report, summary, \
+             claims, transcript or log: a criterion that cites them is refused (`check_criteria_evidence` in athena-core). \
+             It sees only the final candidate tree; it cannot check out or run anything on the base commit. A before/after comparison \
+             or `fails without the fix` criterion is met only by the diff or by a recorded Athena revert-run check, never by the \
+             verifier's own base run, so write it that way.\n"
         );
         for (capability, lines) in &inputs.verifier_can_run {
             let _ = writeln!(out, "{capability}: {}", lines.join("; "));

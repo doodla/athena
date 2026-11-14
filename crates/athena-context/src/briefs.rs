@@ -4051,6 +4051,24 @@ mod tests {
     }
 
     #[test]
+    fn the_reader_brief_says_the_verifier_sees_only_the_final_tree() {
+        let brief = reader_brief(&reader_inputs(&reading()));
+        let (_, section) = brief.split_once("# What the verifier can run").unwrap();
+        let section = section.split("\n# ").next().unwrap();
+        for needle in [
+            "only the final candidate tree",
+            "base commit",
+            "before/after",
+            "fails without the fix",
+            "revert-run",
+            "never by the verifier's own base run",
+            "transcript",
+        ] {
+            assert!(section.contains(needle), "{needle}: {section}");
+        }
+    }
+
+    #[test]
     fn the_reader_brief_requires_criteria_checkable_from_the_snapshot() {
         let brief = reader_brief(&reader_inputs(&reading()));
         let heading = brief

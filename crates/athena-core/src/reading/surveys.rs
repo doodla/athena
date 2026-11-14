@@ -4,7 +4,15 @@ use super::*;
 
 /// Phrases that make the producer's own account the evidence for a criterion. Each is a whole-word
 /// phrase, lowercase, with a straight apostrophe.
-pub(super) const REPORT_NOUNS: [&str; 5] = ["report", "summary", "claims", "statement", "account"];
+pub(super) const REPORT_NOUNS: [&str; 7] = [
+    "report",
+    "summary",
+    "claims",
+    "statement",
+    "account",
+    "transcript",
+    "log",
+];
 pub(super) const PRODUCER_VERBS: [&str; 12] = [
     "states",
     "confirms",
@@ -46,6 +54,11 @@ pub(super) fn has_phrase(text: &str, phrase: &str) -> bool {
 
 /// The phrase that makes a criterion rest on the producer's own account, if it has one. Matching is on
 /// lowercase text with curly apostrophes made straight and runs of white space made single spaces.
+///
+/// Root cause behind these phrases: criteria were written without a defined list of verifier-observable
+/// evidence, so the producer's own account (its report, summary, claims, statement, account, transcript or
+/// log) was cited as if the verifier could see it. The nouns here are the part of that list the check
+/// enforces; the reader brief gives the whole list.
 pub(super) fn producer_evidence_phrase(criterion: &str) -> Option<String> {
     let text = criterion
         .to_lowercase()
@@ -106,7 +119,7 @@ pub fn check_criteria_evidence(reading: &Reading) -> Result<()> {
     }
     bail!(
         "the reading was refused because {}; the verifier sees the candidate diff, the repository snapshot and \
-         the recorded check output, never the producer's report, summary, claims or statement, so a criterion \
+         the recorded check output, never the producer's report, summary, claims, statement, transcript or log, so a criterion \
          that rests on them cannot be judged; restate each as a command or Grep the verifier can run, or a \
          file in the snapshot",
         refused.join("; and ")
