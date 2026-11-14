@@ -1,0 +1,295 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-060903-yyc1",
+  "round": 1,
+  "at": "2026-11-14T00:44:49.540612681Z",
+  "invocation_seq": 3,
+  "approach": "Add a pure `check(&Comparison) -> Vec<Gap>` in a new crates/athena-core/src/comparison.rs, modelled on mechanism_explanation.rs. A `Comparison` holds shared concepts (each with per-system entries), mechanism comparisons (each with per-system entries) and an optional essay. The three systems come from the existing `crate::lab::SYSTEMS` (lab.rs:25). Gaps come out in a fixed order: concepts, comparisons, essay. The essay must be non-blank, at most a documented word cap, and mention both `prompt` and `orchestrat` (case-insensitive). Declare the module in lib.rs between `commits` and `context_load`. Add tests/comparison.rs in the S4-01 test shape: complete and defective inputs, plus the real docs/spec.toml entry read through `parse_spec`, `measure_problem` and `spec_gaps`. Fill the S7-01 mechanism and measure in docs/spec.toml, ending `status: not shown`. Add a CHANGELOG bullet. Add one line to xtask/shard-timings.txt: it is outside the listed deliverables but required, because a new test target without that line fails `cargo test --locked` (see decision 4). Every public type derives Debug, because the workspace sets `missing_debug_implementations = \"warn\"` and the checks run clippy with `-D warnings` (Cargo.toml:60).",
+  "decisions": [
+    {
+      "choice": "Input is one `Comparison` record with concepts, mechanism comparisons and an optional essay; `check(&Comparison) -> Vec<Gap>`. Both concepts and comparisons hold `Entry { system, text }` lists, so one entry type serves both.",
+      "reason": "The requirement concerns one study with one closing essay. A single record lets the check report NoConcepts, NoComparisons and NoEssay as gaps. S4-01's slice input cannot report an empty input (mechanism_explanation.rs:12). One shared `Entry` type keeps the module small.",
+      "rejected": [
+        {
+          "option": "A slice input like S4-01's `check(&[..])`",
+          "why": "An empty slice would give no gaps, so 'no concepts' and 'no comparisons' could not be reported."
+        },
+        {
+          "option": "Read the study's files from disk",
+          "why": "That is wiring into the study capability, which is out of scope. The check stays pure and reads nothing."
+        }
+      ]
+    },
+    {
+      "choice": "Reuse `crate::lab::SYSTEMS` as the list of the three systems instead of defining a new const.",
+      "reason": "Documented meaning at crates/athena-core/src/lab.rs:24-25: 'The three systems every lab configuration must cap.' `[\"athena\", \"firstmate\", \"hermes\"]`. The requirement's 'all three systems' are those same systems, and a grep of crates/**/src finds `\"firstmate\"` only there (one definition). Matching is case-insensitive on the system name. An entry counts only when its system is in the list and its text is not blank. Entries for other names are ignored and never satisfy a required system. lab.rs is not modified.",
+      "rejected": [
+        {
+          "option": "A second `SYSTEMS` const in comparison.rs",
+          "why": "It duplicates the only list of the three systems, so the two could drift."
+        },
+        {
+          "option": "Take the system names as a parameter of `check`",
+          "why": "No caller needs it. It would make the three-system rule optional."
+        }
+      ]
+    },
+    {
+      "choice": "The measure ends `status: not shown` and names `cargo test -p athena-core --test comparison`. `measure_problem` accepts a label that starts with `not shown` (hestia.rs:1229).",
+      "reason": "No real three-system study exists and nothing runs `check` on one. S3-01, S3-02 and S4-01 use the same wording (spec.toml:2994 is the S4-01 form).",
+      "rejected": [
+        {
+          "option": "A label from `athena status` (STATUS_MEASURE_LABELS)",
+          "why": "Nothing in `athena status` reports on this check, so the label would be false."
+        }
+      ]
+    },
+    {
+      "choice": "Add the line `athena-core --test comparison 5.00` to xtask/shard-timings.txt, placed next to the S4-01 line (line 60). The file is not in the brief's deliverable list; the plan keeps it because it is required and not optional.",
+      "reason": "`checked_in_timings_cover_every_workspace_test_unit` (xtask/tests/ci_shards.rs:410-421) asserts that the set of units in the timings file equals the workspace's test targets (`oracle()`, ci_shards.rs:153-168, which includes every `tests/*.rs` file, see `discovered_sources` at 171-191). The deliverable `crates/athena-core/tests/comparison.rs` adds a target, so without the line `cargo test --locked` (acceptance criterion 4) fails. The mirrors registry reports the same drift: `Rule::TimingUnits` (mirrors.rs:58-59, 116-119) and `missing_timing_lines` (mirrors.rs:206-227), run on the real repo by `the_real_repo_has_no_mirror_drift` (crates/athena-cli/tests/mirrors.rs:22). The previous S4-01 landing touched this file too (HISTORY.txt lines 44-51). The file is a data file of estimated seconds, not athena.toml, defaults.toml, a workflow or lint configuration. Order in the file is free: lines 52-60 are not sorted, and both checks build a set. This corrects the earlier plan's 'alphabetical' claim.",
+      "rejected": [
+        {
+          "option": "Leave the timings file out because it is not a listed deliverable",
+          "why": "The new test target would fail ci_shards.rs:410-421 and the mirrors check, so criterion 4 would fail."
+        },
+        {
+          "option": "Put the tests in comparison.rs unit tests so no new test target exists",
+          "why": "The brief lists tests/comparison.rs as a deliverable and the measure names `--test comparison`."
+        }
+      ]
+    },
+    {
+      "choice": "The essay topic is matched by a case-insensitive substring test for both `prompt` and `orchestrat` in the essay text. 'Short' is `ESSAY_WORD_CAP = 800` whitespace-separated words, so 800 passes and 801 fails. Both are documented in the `Limits:` list and in the measure.",
+      "reason": "The requirement says 'a short essay on building orchestration from prompts'. A word count and two terms are a cheap, deterministic proxy, stated as a proxy as S4-01 does for 'primary'. A blank or absent essay is `NoEssay` and returns before the other essay gaps. A non-blank essay can give both `EssayTooLong` and `EssayOffTopic`, in that order.",
+      "rejected": [
+        {
+          "option": "Compare a topic label field to a fixed string",
+          "why": "A label the study sets itself would check nothing about the essay's content."
+        },
+        {
+          "option": "Judge essay quality",
+          "why": "A pure check cannot. The Limits list says so."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal_corpus case is added.",
+      "reason": "`crates/athena-core/tests/refusal_corpus.rs:1-2` runs request and reading shapes through the reading gate (`refusing_check`). The new topic match is a substring test inside a pure function over a study record, not a parser, stem list, stop list or reading check, and nothing in the gate calls it. The input forms it handles are mixed case, `orchestrating`, only one of the two terms, and whitespace-only text. Each is a unit test in tests/comparison.rs.",
+      "rejected": [
+        {
+          "option": "Add corpus cases for the essay terms",
+          "why": "The corpus drives the reading gate, which this check is not part of."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/comparison.rs",
+      "action": "create",
+      "purpose": "Pure `check(&Comparison) -> Vec<Gap>` for OLY-B-S7-01. Module doc starts `OLY-B-S7-01:` and holds a `Limits:` list. Defines `ESSAY_WORD_CAP`, `Entry`, `Concept`, `MechanismComparison`, `Essay`, `Comparison` and `Gap`, all deriving Debug. Reuses `crate::lab::SYSTEMS`.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod comparison;` between `commits` (line 110) and `context_load` (line 111), and a crate-doc bullet after the `mechanism_explanation` bullet (lines 48-49) saying it is a pure function not wired into any command.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/comparison.rs",
+      "action": "create",
+      "purpose": "Integration test: complete and defective comparisons, boundary and guard cases, the doc `Limits:` check, the real spec entry and four negative spec-helper tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "docs/spec.toml",
+      "action": "modify",
+      "purpose": "Replace the mechanism (line 3037) and measure (line 3039) of OLY-B-S7-01. Keep owner Athena, statement, kind, status and sources.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add one bullet under [Unreleased] > Added (before the first bullet at line 12), in the style of the S4-01 bullet: the mechanism, the test command, the limits including the word cap, and the timings registration.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "purpose": "Add the line `athena-core --test comparison 5.00` next to line 60. Not a listed deliverable, but needed so `checked_in_timings_cover_every_workspace_test_unit` and the mirrors check pass (decision 4). It is a data file, not governance.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Create crates/athena-core/src/comparison.rs. The module doc starts `OLY-B-S7-01: ...` and has a plain-text `Limits:` list: a mapping or comparison counts when it names a system and has non-blank text, and a concept or mechanism the study leaves out is not detected; 'short' is at most 800 whitespace-separated words; the topic is a case-insensitive match for `prompt` and `orchestrat`; nothing yet feeds `check` a real three-system study, so the spec measure ends `status: not shown`. Add `use crate::lab::SYSTEMS;`, `pub const ESSAY_WORD_CAP: usize = 800;` and the match terms. Add the types, all `#[derive(Debug, Clone, PartialEq, Eq)]`: `Entry { system, text }`, `Concept { name, entries }`, `MechanismComparison { mechanism, entries }`, `Essay { text }` and `Comparison { concepts, comparisons, essay: Option<Essay> }`. Add `enum Gap { NoConcepts, ConceptMissingSystem{concept, system}, NoComparisons, ComparisonMissingSystem{mechanism, system}, NoEssay, EssayTooLong{words, cap}, EssayOffTopic }`. Implement `check` in fixed order: concepts first (NoConcepts if empty, else a gap per concept per missing system in SYSTEMS order), then comparisons the same way, then the essay (absent or blank gives NoEssay and nothing else; otherwise EssayTooLong, then EssayOffTopic). An entry satisfies a system only when its name matches one in SYSTEMS (ignore ASCII case) and its text is not blank.",
+    "Edit crates/athena-core/src/lib.rs: add `pub mod comparison;` between `pub mod commits;` (line 110) and `pub mod context_load;` (line 111), and add a crate-doc bullet after the `mechanism_explanation` bullet (lines 48-49) for OLY-B-S7-01 saying it is a pure function not wired into any command.",
+    "Create crates/athena-core/tests/comparison.rs from the S4-01 test shape (tests/mechanism_explanation.rs): `repo_file`, `owner_problem`, `measure_label_problem`, `real_requirement`, with REQUIREMENT `OLY-B-S7-01` and TEST_COMMAND `cargo test -p athena-core --test comparison`, plus builders for entries, concepts, comparisons and essays. Tests: complete gives no gaps; each missing system in a concept (all three systems); each missing system in a mechanism comparison; no concepts; no comparisons; absent essay; blank essay; 801-word essay gives EssayTooLong and 800 words passes; essay missing `orchestrat`, essay missing `prompt`, mixed-case and `orchestrating` pass; blank entry text does not count; unknown system name does not count; extra entries are ignored; several defects give gaps in order; comparison.rs's doc comment contains `Limits:`; `spec_entry_has_a_real_mechanism`; the four negative spec-helper tests.",
+    "Edit docs/spec.toml line 3037 to a mechanism naming the `check` function in crates/athena-core/src/comparison.rs, saying it flags a study comparison that lacks shared concepts mapped for all three systems, a per-mechanism comparison covering all three, or a short closing essay on building orchestration from prompts, and that crates/athena-core/tests/comparison.rs tests it. Edit line 3039 to a measure: the test file checks complete and defective comparisons and this spec entry; Limits (mapping and comparison presence, the 800-word cap, the `prompt`/`orchestrat` match, a concept or mechanism left out is not detected, `check` not yet run on a real three-system study); then `cargo test -p athena-core --test comparison; status: not shown`. Keep `owner = \"Athena\"` and change nothing else.",
+    "Add a CHANGELOG.md bullet under [Unreleased] > Added, before line 12's bullet, in the S4-01 style: the mechanism (`check` in comparison.rs), the test command, the limits including the 800-word cap and that nothing runs it on a real study, and the shard-timings registration.",
+    "Add `athena-core --test comparison 5.00` to xtask/shard-timings.txt next to the `mechanism_explanation` line (line 60).",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-core --test comparison`, `cargo test -p xtask --test ci_shards`, `cargo test -p xtask --test spec`, `cargo test -p athena-cli --test mirrors` and `cargo test --locked`. Fix any failure. Make no change to records/, docs/decisions.md, athena.toml, defaults.toml or any workflow."
+  ],
+  "risks": [
+    {
+      "risk": "The essay's 'short' and 'topic' tests are heuristics: a whitespace word count of 800, and substring matches for `prompt` and `orchestrat`. An essay can pass and still be poor, and a good essay that avoids those words fails.",
+      "mitigation": "State both in the `Limits:` doc comment and in the measure, as S4-01 does for its proxy. The measure ends `status: not shown`, so it claims no more than the tests show."
+    },
+    {
+      "risk": "Clippy with `-D warnings` fails on a public type without Debug (`missing_debug_implementations`, Cargo.toml:60), or on needless clones.",
+      "mitigation": "Derive `Debug, Clone, PartialEq, Eq` on every public type, as mechanism_explanation.rs does. Run clippy with `--all-targets`."
+    },
+    {
+      "risk": "The timings line is missing or misnamed, which fails ci_shards.rs:410-421 and the mirrors check.",
+      "mitigation": "Add exactly `athena-core --test comparison 5.00` (same format as line 60). Both checks build a set, so position does not matter. Run the full `cargo test --locked`."
+    },
+    {
+      "risk": "A spec.toml string with a stray double quote breaks parsing of the 213 KB file, and every spec test with it.",
+      "mitigation": "Edit only the two string values at lines 3037 and 3039, as single-line double-quoted strings with backticks and no inner double quotes, as at lines 2992-2994. The new spec test parses the real file."
+    },
+    {
+      "risk": "Rust code fences in the module doc become doctests.",
+      "mitigation": "Write the module doc as plain text, as mechanism_explanation.rs does."
+    },
+    {
+      "risk": "S4-01's landing also edited docs/decisions.md (HISTORY.txt line 49), but this brief does not list it and criterion 5 forbids touching existing entries.",
+      "mitigation": "The plan adds no decision entry and edits nothing in docs/decisions.md. The CHANGELOG bullet carries the explanation."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "docs/spec.toml OLY-B-S7-01 mechanism and measure",
+      "dependent": "crates/athena-core/src/hestia.rs `spec_gaps` (line 1291) and `spec_request` (line 1321): they queue the request while the mechanism is `none` or the measure fails",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test comparison spec_entry_has_a_real_mechanism asserts `spec_gaps` no longer lists OLY-B-S7-01, which stops the repeated request.",
+      "reason": null
+    },
+    {
+      "name": "docs/spec.toml OLY-B-S7-01 mechanism and measure",
+      "dependent": "crates/athena-core/src/status.rs:1254-1255: `athena status` adds one `next` line per spec gap from `spec_gaps_at`",
+      "kind": "code",
+      "test": null,
+      "reason": "The S7-01 `next` line disappears once the entry has a mechanism and a valid measure. No test asserts a count of the real repository's spec gaps. The tests that call `spec_gaps` on the real spec (buy_first.rs:188, mechanism_explanation.rs:193, study_instance_split.rs:279, learnings_recorded.rs:306, automation_register.rs:96) filter on their own requirement id."
+    },
+    {
+      "name": "docs/spec.toml OLY-B-S7-01 mechanism, owner and measure",
+      "dependent": "xtask/tests/spec.rs:627-655 `every_active_requirement_has_a_mechanism_an_owner_and_a_measure`: every active requirement needs a non-blank mechanism, an owner that is not none, and a measure containing `status:`",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test spec. The new entry keeps owner Athena and a measure ending `status: not shown`. The test only prints the count of `none` mechanisms (lines 646-654) and asserts no count.",
+      "reason": null
+    },
+    {
+      "name": "measure label `status: not shown`",
+      "dependent": "crates/athena-core/src/hestia.rs:1219-1239 `measure_problem`, which accepts a label starting with `not shown` (line 1229)",
+      "kind": "code",
+      "test": null,
+      "reason": "The label is already accepted and S3-01, S3-02 and S4-01 use it, so no label code changes. hestia.rs is not modified."
+    },
+    {
+      "name": "docs/spec.toml (one entry's two string values changed)",
+      "dependent": "Other tests that read the real docs/spec.toml: crates/athena-core/tests/{buy_first,divergence,lab_runs,automation_register,study_instance_split,model_roster,learnings_recorded,context_compression}.rs, crates/athena-cli/src/{pushback,strategy}.rs, xtask/tests/{setup_one_command,setup_repeatable}.rs",
+      "kind": "code",
+      "test": null,
+      "reason": "Each finds its own requirement by id (for example buy_first.rs:89-93, pushback.rs:218-219). A grep of OLY-B-S7-01 outside CHANGELOG, HISTORY and docs/spec.toml:3036 finds no other reader of this id. The file still parses because only two double-quoted single-line string values change, in the form of spec.toml:2992-2994."
+    },
+    {
+      "name": "new `pub mod comparison;`",
+      "dependent": "crates/athena-core/src/lib.rs module list and crate docs",
+      "kind": "code",
+      "test": "cargo build -p athena-core and cargo test -p athena-core --test comparison",
+      "reason": "It is a new, additive public module that nothing calls. A grep of lib.rs for `omparison` finds only prose (lines 14 and 87), so the name does not clash. The module goes between `commits` (line 110) and `context_load` (line 111) to keep the list in order. Plain-text doc comments, with no Rust code fences, so no doctest is added."
+    },
+    {
+      "name": "reuse of `lab::SYSTEMS` (read only)",
+      "dependent": "crates/athena-core/src/lab.rs:25 `SYSTEMS`, read by `LabConfig::parse` (lab.rs:85, 96)",
+      "kind": "code",
+      "test": null,
+      "reason": "The plan only reads the const. lab.rs is unchanged, so lab parsing and tests/lab_runs.rs are unaffected."
+    },
+    {
+      "name": "new test target `athena-core --test comparison`",
+      "dependent": "xtask/tests/ci_shards.rs:410-421 `checked_in_timings_cover_every_workspace_test_unit`, crates/athena-core/src/mirrors.rs `Rule::TimingUnits` (lines 58-59, 116-119) with `missing_timing_lines` (206-234), and crates/athena-cli/tests/mirrors.rs:22 `the_real_repo_has_no_mirror_drift`",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test ci_shards checked_in_timings_cover_every_workspace_test_unit and cargo test -p athena-cli --test mirrors the_real_repo_has_no_mirror_drift. The plan adds the line `athena-core --test comparison 5.00` to xtask/shard-timings.txt.",
+      "reason": null
+    },
+    {
+      "name": "public types in the new module",
+      "dependent": "Cargo.toml:58-63 workspace lints (`missing_debug_implementations = warn`, `clippy::all` warn), applied through each crate's `[lints]` (crates/athena-core/Cargo.toml:35), with the checks running clippy under `-D warnings`",
+      "kind": "rule",
+      "test": "cargo clippy --all-targets --locked -- -D warnings. Every public struct and enum in comparison.rs derives Debug.",
+      "reason": null
+    },
+    {
+      "name": "text of the new files and the CHANGELOG bullet",
+      "dependent": "xtask/tests/policy.rs boundary scan (`boundary_words()`) over every tracked file, and the `[personal_data]` allow-list in athena.toml",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test policy. The new files and bullet name no host, machine or person and contain no email-like text.",
+      "reason": null
+    },
+    {
+      "name": "study comparison content (not changed)",
+      "dependent": "crates/athena-cap-study/src/rules.rs: validates a study's claims",
+      "kind": "code",
+      "test": null,
+      "reason": "It has no rule about comparison or essay content and does not call the new module. The plan does not wire `check` into it, which is out of scope, so it is unaffected."
+    },
+    {
+      "name": "refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and every crate that calls hestia classification functions",
+      "kind": "rule",
+      "test": null,
+      "reason": "The corpus drives the reading gate (`refusing_check`, refusal_corpus.rs:1-2). The plan changes no parser, stem list, stop list or reading check, and hestia.rs is unchanged. The new essay-topic substring test lives inside a pure function that nothing calls."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "The test reads the real docs/spec.toml with `parse_spec` and finds OLY-B-S7-01. It asserts: the mechanism is not `none` and contains `crates/athena-core/src/comparison.rs`, `crates/athena-core/tests/comparison.rs` and `check`; owner == \"Athena\"; `measure_problem` is None; the measure contains `cargo test -p athena-core --test comparison` and, once trimmed, ends with `status: not shown`; `spec_gaps` no longer lists OLY-B-S7-01.",
+      "command": "cargo test -p athena-core --test comparison spec_entry_has_a_real_mechanism",
+      "observes": "The test passes on the edited file. On the current entry (spec.toml:3037-3039: mechanism `none`, measure `The spec gap list; status: requirement`) it fails.",
+      "fails_without": "With mechanism `none`, the old measure label `requirement`, a measure missing the command, or an owner other than Athena, the assertions fail. The negative tests `spec_check_refuses_a_none_mechanism`, `spec_check_refuses_a_wrong_status_label`, `spec_check_refuses_a_measure_without_the_command` and `spec_check_refuses_a_wrong_owner` show each helper rejects a bad entry.",
+      "seam": "Production entry points: `athena_core::hestia::parse_spec`, `measure_problem` and `spec_gaps` (hestia.rs:1219, 1291), run over the real docs/spec.toml via `CARGO_MANIFEST_DIR/../..`. No double. The `repo_file` helper pattern exists at crates/athena-core/tests/mechanism_explanation.rs:16-22; the new test file copies it (plan step 3). The spec edit is plan step 4."
+    },
+    {
+      "criterion": 2,
+      "method": "A test calls `check` on in-memory records, one per defect, and asserts the exact gap list. The defects are: a concept lacking one system (each of the three systems in turn), `NoConcepts`, a mechanism comparison lacking one system, `NoComparisons`, `NoEssay` (absent), `NoEssay` (whitespace-only), `EssayTooLong` at 801 words, and `EssayOffTopic`. A test also reads crates/athena-core/src/comparison.rs with `repo_file` and asserts its doc comment holds a `Limits:` section. `cargo build -p athena-core` shows `pub mod comparison;` is declared, because tests/comparison.rs imports `athena_core::comparison`.",
+      "command": "cargo test -p athena-core --test comparison",
+      "observes": "Each defective input gives exactly its own `Gap` and no other. An entry for an unknown system name, or one with blank text, does not satisfy a required system. The 800-word essay gives no gap. Several defects together give gaps in the fixed order.",
+      "fails_without": "Without comparison.rs or the lib.rs declaration the test file does not compile. A `check` that skips one branch leaves that defect's test with an empty or different gap list.",
+      "seam": "Production entry point: `athena_core::comparison::check(&Comparison)`. Fixtures are in-memory `Comparison` values built by helper functions in the test. `check` is pure, so nothing is injected. The seam is added by plan step 1 and declared by step 2."
+    },
+    {
+      "criterion": 3,
+      "method": "Same test file. `complete_comparison_has_no_gaps` builds a record with all three systems in every concept and every mechanism comparison, and a short essay naming both terms, and asserts an empty Vec. One test per defect asserts exactly its gap. `essay_at_the_cap_passes_and_one_over_fails` checks the 800/801 boundary. `blank_entry_text_does_not_count` and `unknown_system_name_does_not_count` check the guards. `spec_entry_has_a_real_mechanism` and the four negative spec tests cover the real spec.",
+      "command": "cargo test -p athena-core --test comparison",
+      "observes": "All tests pass with the module and the spec entry in place. The test target is `comparison` in athena-core.",
+      "fails_without": "Reverting the spec edit makes `spec_entry_has_a_real_mechanism` fail (mechanism `none`; measure lacks the command and ending). Deleting a `check` branch makes the matching defect test fail with a gap list that is empty or differs from the expected one. Deleting comparison.rs makes the file fail to compile.",
+      "seam": "Production entry points: `comparison::check`, and `hestia::parse_spec`, `measure_problem` and `spec_gaps`. Fixtures are in-memory structs and the real docs/spec.toml; there is no double. The test file is created in plan step 3, comparison.rs in step 1."
+    },
+    {
+      "criterion": 4,
+      "method": "Run three separate commands on the final tree, as Athena's checks run them: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. Or cite the Athena-recorded fmt, clippy and test checks on the final tree. The full `cargo test --locked` includes `checked_in_timings_cover_every_workspace_test_unit` (xtask/tests/ci_shards.rs:411), `the_real_repo_has_no_mirror_drift` (crates/athena-cli/tests/mirrors.rs:22), `every_active_requirement_has_a_mechanism_an_owner_and_a_measure` (xtask/tests/spec.rs:627) and the boundary scan in xtask/tests/policy.rs.",
+      "command": "cargo test --locked",
+      "observes": "All three commands exit 0. The new public types carry `#[derive(Debug)]`, so clippy under `-D warnings` raises no `missing_debug_implementations`. The timings file lists `athena-core --test comparison`, so the ci_shards and mirrors checks agree with the workspace's test targets.",
+      "fails_without": "Without the `athena-core --test comparison 5.00` line, `checked_in_timings_cover_every_workspace_test_unit` fails and the mirrors test reports drift, so `cargo test --locked` fails. Without `pub mod comparison;` in lib.rs, tests/comparison.rs does not compile, so both `cargo test --locked` and `cargo clippy --all-targets` fail. A public type without Debug fails clippy under `-D warnings`. Unformatted code fails `cargo fmt --all --check`.",
+      "seam": "Production entry points: the `cargo fmt`, `cargo clippy` and `cargo test` commands over the whole workspace, the same commands Athena records as its fmt, clippy and test checks. The fixture is the real final working tree, read by the tests listed above with no double. The seam exists today (I read ci_shards.rs:410-421 and mirrors.rs:58-59, 206-234). The timings line is added by plan step 6 and the Debug derives by step 1."
+    },
+    {
+      "criterion": 5,
+      "method": "Run `git status` for the untracked new files, `git diff --stat` for the changed paths, and `git diff -- CHANGELOG.md docs/decisions.md` for the changelog and decision log. Look for any path under records/.",
+      "command": "git diff --stat",
+      "observes": "The changed paths are only docs/spec.toml, crates/athena-core/src/comparison.rs (new), crates/athena-core/src/lib.rs, crates/athena-core/tests/comparison.rs (new), CHANGELOG.md and xtask/shard-timings.txt. CHANGELOG.md gains one new bullet under [Unreleased] > Added. docs/decisions.md and records/ are unchanged.",
+      "fails_without": "Without the CHANGELOG bullet the diff for CHANGELOG.md is empty and the criterion fails. A decision-log edit or a records/ path in the diff would also fail it.",
+      "seam": "Production entry point: git's own diff of the working tree against the base commit. The fixture is the real tree; nothing is injected. The seam exists."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "becfc5d04c9652050a7f16503b6212bd8d0bf4cf675026433f1c1894b8daf5cb"
+}
