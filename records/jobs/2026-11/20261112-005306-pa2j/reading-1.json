@@ -1,0 +1,123 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261112-005306-pa2j",
+  "n": 1,
+  "at": "2026-11-14T05:01:54.936347346Z",
+  "invocation_seq": 1,
+  "base_commit": "945a796a724290f418d7bf64397bb095f2762a76",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Fix flaky drain test that leaves CI shard 3 unfinished",
+  "summary": "Retries/follows up jobs 20261029-204942-2zqw, 20261111-213010-8jgz and 20261029-233047-ab43: measure parallel::a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn alone and under load, find the timing-dependent cause, and fix it in crates/athena-cli/tests/drain.rs (or its helpers) without raising timeouts or skipping. Add a CHANGELOG.md entry. Audience: CI and verifiers who reject jobs on this flake.",
+  "class_of_work": "tests",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "fmt, clippy and full cargo test criteria"
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix the measured cause, not raise a timeout or skip"
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria require repeated runs under load"
+    },
+    {
+      "id": "small",
+      "how": "One focused change to one test file plus CHANGELOG"
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/tests/drain.rs mod parallel (line 8205 on): Shared stub implements Steps; run() logs start/end, and has 5-second spin barriers for `meet` and `wait_for`; the target test (line 8523) uses neither, with run_ms 0, calling drain::drain_concurrent with bounds 3, 1 and 3. The entry point is drain_concurrent; the cause must be found by running the test, not assumed. The records validation allow-list and record files are not touched.",
+    "Cause is unproven: I could not run anything. The producer must measure alone and under load (e.g. cargo test -p athena-cli --test drain repeated, plus parallel load) and state the cause from the timings. Likely candidates: the drain worker threads under CPU load, a deadline wait in the shared stub, or an order assumption that depends on thread scheduling, in assertions like started[..3] contains s1 or the run <= 2 streak.",
+    "Job 20261029-204942-2zqw: its candidate changes (docs/spec.toml, briefs.rs, planner.rs, CHANGELOG.md for OLY-8-05) are dropped, not kept; its only finding that applies here is the flaky drain test, which this job fixes. Its other findings concern a different change and no longer apply.",
+    "Job 20261111-213010-8jgz: its candidate changes (introspection.rs, status.rs, display.rs, status_build_measurement.rs, docs/spec.toml, CHANGELOG.md) are dropped; its flake finding is fixed here, and its other findings do not apply to this job.",
+    "Job 20261029-233047-ab43: landed, so its work (learning.rs, lib.rs, status.rs, display.rs, docs/spec.toml, CHANGELOG.md) is already in the tree and not touched. Only its observed flake (failed in a full parallel run, passed alone) is addressed.",
+    "Environment: the CI shard is run by xtask test-shard 3 of 6 on GitHub-hosted runners; this job only runs local cargo commands and cannot read CI or push. Shard time limit is unknown to me; the producer should record the measured time of the test."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Running `cargo test -p athena-cli --test drain a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn` repeatedly (20 times) passes every time, including while the rest of the drain test binary runs in parallel, and each run finishes in seconds (well under the shard limit).",
+      "kind": "behavior"
+    },
+    {
+      "text": "The diff in crates/athena-cli/tests/drain.rs removes the cause of the flake (a timing-dependent wait or scheduling-dependent assertion) and does not merely raise a timeout, add #[ignore], or delete the test; its assertions on start order (s1 among first three, at most two non-Steward starts in a row, 8 starts, improvement_turns equal to s1, s2) are kept.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry naming the test and the measured cause, and mentioning jobs 20261029-204942-2zqw, 20261111-213010-8jgz and 20261029-233047-ab43.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked` pass on the final tree (recorded Athena checks, D115).",
+      "kind": "behavior"
+    },
+    {
+      "text": "No file under crates/ other than crates/athena-cli/tests/drain.rs changes, and no drain production code behavior changes, so the other tests are unaffected.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.98
+    }
+  ],
+  "out_of_scope": [
+    "Changing drain production code in crates/athena-core or elsewhere unless the measured cause is there",
+    "Changes to athena.toml, defaults.toml, xtask or CI workflows, including the shard layout or time limits",
+    "docs/spec.toml, OLY-8-05, OLY-10-03 and OLY-9-09 work from the earlier jobs; these candidates are dropped",
+    "Changing other drain tests except shared helpers needed for the fix"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2200.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7375,
+      "p_verification_passes": 0.48484848484848486,
+      "p_user_intervenes": 0.08235294117647059,
+      "cost_usd": {
+        "p10": 0.4050304579193309,
+        "p50": 1.0882284601020598,
+        "p90": 2.6305583707391715
+      },
+      "wall_time_s": {
+        "p10": 849.9060451959205,
+        "p50": 1609.2096354589996,
+        "p90": 4203.074720334689
+      }
+    }
+  },
+  "departures": "Slightly above the reference median: the job must run the test many times under load and the full suite.",
+  "urgent_reason": "Removes a flake that makes verifiers reject unrelated jobs, cutting failed attempts and redo retries."
+}

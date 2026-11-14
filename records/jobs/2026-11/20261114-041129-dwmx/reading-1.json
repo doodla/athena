@@ -1,0 +1,151 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-041129-dwmx",
+  "n": 1,
+  "at": "2026-11-14T05:00:24.87803095Z",
+  "invocation_seq": 1,
+  "base_commit": "a983dc2371d018156c4dab19ee114a26eab976a4",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Rank Athena self-fix requests ahead of feature work in plan and drain",
+  "summary": "Within the same effective priority tier, plan and drain order requests that fix Athena itself (steward or Hestia root-cause, repeated-failure, blind-spot and gate-review items) before feature and content items. Steward website and study content requests do not count as fixes. Goal: the steward's filed requests stop starving behind older feature items. Audience: the owner, who runs `athena plan` and `athena drain`.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New unit and drain tests; cargo test and clippy must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the plan order and the dispatch order, not that a field exists."
+    },
+    {
+      "id": "root-cause",
+      "how": "The sort key in Plan::build_with is changed, not individual items re-prioritised."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced in the sort key and covered by tests."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-core/src/plan.rs (Plan::build_with picks the ready items with the best effective priority, then sorts them by `(e.rung, age)` at about line 783; PlanEntry struct and PlanEntry::bare; module doc 'Order' paragraph; proposal_priority), crates/athena-core/src/reading/topics.rs (plan_entry builds entries from JobRecords), crates/athena-cli/src/drain.rs (around line 4340 builds the entry and finds the approved work item through work_decisions::decision_of; calls proposal_priority), crates/athena-data/src/records/work.rs (WorkItem has role, kind BlindSpot|RepeatedFailure|Proposal, key, title, source; WorkItemKind). The entry point is `athena plan` / `athena drain` calling Plan::build_with. No new record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are untouched; any new PlanEntry field is serde-skipped when false so existing serialized plans are unchanged. Order is measured directly by the plan order vector in unit tests, not through a stand-in.",
+    "Term ladder: 'tier' means a priority level (urgent, high, normal, low); 'rung' means the requirement ladder rung used as the second sort key in Plan::build_with.",
+    "Interpretation: a request is a fix when it comes from an approved work item whose role is the steward or Hestia and whose kind is BlindSpot or RepeatedFailure, or whose key or title marks a root-cause or gate-review fix. A steward Proposal that touches only website or studies/ content is not a fix. The new key is applied only inside the best effective priority tier, so an explicit priority record, Priority: line or urgent/high cap always wins over it. Fix items sort by (not-fix, rung, age), so rung then age order is preserved within each group.",
+    "Docs: the 'Order' paragraph in the plan.rs module doc is updated. A decision recording the new rule is appended to docs/decisions.md as a new entry with a Provenance bullet; no existing entry is edited. athena.toml, defaults.toml and workflows are not changed (Consumers: none found).",
+    "Previous-result check: no earlier job is named in the request, so there is nothing to keep or exclude."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new unit test in crates/athena-core/src/plan.rs builds a plan with an older normal feature entry and a newer normal fix entry that are both ready; the plan order puts the fix entry first. Check by running `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A unit test shows an urgent or high feature item still comes before a normal fix item, and an item that depends on another still comes after it, so the fix flag never overrides priority or dependencies. Check by running `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A unit test shows a steward request for website or studies content is not flagged as a fix and keeps its age-ordered place behind older items of the same tier. Check by running `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A drain test in crates/athena-cli/tests/drain.rs (or a unit test in crates/athena-cli/src/drain.rs) has an approved steward blind-spot or repeated-failure work item and an older feature request, both normal priority. The drain dispatches the steward job first. Check by running `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The plan.rs module doc 'Order' paragraph describes the fix-first rule as applying inside a priority tier. The diff shows Plan::build_with changing the `ready.sort_by_key` key to place fix entries before others.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md gains a new appended entry stating the rule, with a Provenance bullet citing the owner's request. No existing entry changes. CHANGELOG.md records the job.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo test`, `cargo clippy` and `cargo fmt --check` pass on the final tree, using Athena's recorded checks on the same tree.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/reading/topics.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 1.0
+    }
+  ],
+  "out_of_scope": [
+    "Changing how steward or Hestia raise or classify work items",
+    "Changing priority levels, urgent/high caps, or the `athena priority` command",
+    "Editing existing entries in docs/decisions.md or anything under records/",
+    "Changes to athena.toml, defaults.toml or CI workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.6,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2200.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.676923076923077,
+      "p_user_intervenes": 0.06306027820710973,
+      "cost_usd": {
+        "p10": 0.5474499759118978,
+        "p50": 1.4791114,
+        "p90": 5.636334730806151
+      },
+      "wall_time_s": {
+        "p10": 605.3459750647277,
+        "p50": 2153.684957172999,
+        "p90": 4386.869311420753
+      }
+    }
+  },
+  "departures": "The change reaches both the core plan order and the CLI drain entry builder, with tests in two crates, so cost and time are slightly above the reference.",
+  "hard_reason": "Changes the ordering rule that decides which requests the plan and drain run first, so a mistake would be costly and hard to see.",
+  "producer_effort": "high"
+}
