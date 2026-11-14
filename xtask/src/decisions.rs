@@ -416,7 +416,8 @@ pub fn render(records: &Records) -> String {
     format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>Proposals waiting for your decision</title><style>{CSS}</style></head><body><main>{body}</main></body></html>\n"
+         <title>Proposals waiting for your decision</title><style>{CSS}</style></head><body>\
+         <a class=\"skip\" href=\"#main\">Skip to the main content</a><main id=\"main\">{body}</main></body></html>\n"
     )
 }
 
@@ -758,6 +759,7 @@ mod tests {
             .split("href=\"")
             .skip(1)
             .map(|s| s.split('"').next().unwrap())
+            .filter(|h| *h != "#main") // the skip link
             .collect();
         assert_eq!(hrefs.len(), 2);
         for href in hrefs {
@@ -1022,7 +1024,7 @@ mod tests {
         assert!(html.contains("athena/records"));
         assert!(html.contains("is missing here"));
         assert!(!html.contains("<article"));
-        assert!(!html.contains("href="));
+        assert!(!html.replace("href=\"#main\"", "").contains("href="));
         // A directory that is not a repository is the same.
         let plain = tempfile::tempdir().unwrap();
         let html = render(&locate(plain.path()));

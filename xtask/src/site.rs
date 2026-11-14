@@ -647,12 +647,76 @@ fn finish(
         escape(sha)
     );
 
+    let (numbered, path) = number_sections(body);
+    // The reading nav sits directly under the header, so later insertions land after it.
+    let page = match numbered.find("</header>") {
+        Some(at) => {
+            let end = at + "</header>".len();
+            format!("{}{}{}", &numbered[..end], path, &numbered[end..])
+        }
+        None => numbered,
+    };
+
     format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>Athena explains how {sys} handles work</title><style>{CSS}</style></head><body><main>{body}</main></body></html>\n",
+         <title>Athena explains how {sys} handles work</title><style>{CSS}</style></head><body>\
+         <a class=\"skip\" href=\"#main\">Skip to the main content</a>\
+         <input type=\"checkbox\" id=\"track-expert\" class=\"track\">\
+         <main id=\"main\">{page}</main></body></html>\n",
         sys = escape(system)
     )
+}
+
+/// Sections only the expert track shows. The claims and the glossary are never listed here: every
+/// citation and term link in the core track must reach them.
+const EXPERT_SECTIONS: [&str; 2] = ["Counters", "Transitions"];
+
+/// Gives every section an id, marks the expert ones, and returns the learning-path nav that lists
+/// every section in page order, with the control that switches to the expert track.
+fn number_sections(body: &str) -> (String, String) {
+    let mut out = String::new();
+    let mut items = String::new();
+    let mut rest = body;
+    while let Some(at) = rest.find("<section") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at..];
+        let Some(end) = after.find('>') else { break };
+        let tag = &after[..=end];
+        let tail = &after[end + 1..];
+        let title = tail
+            .split_once("<h2>")
+            .and_then(|(_, t)| t.split_once("</h2>"))
+            .map_or("", |(t, _)| t);
+        let id = match tag.split_once(" id=\"") {
+            Some((_, v)) => v.split('"').next().unwrap_or("").to_string(),
+            None => {
+                let slug: String = title
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() {
+                            c.to_ascii_lowercase()
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect();
+                format!("section-{slug}")
+            }
+        };
+        let expert = EXPERT_SECTIONS.contains(&title);
+        let class = if expert { " class=\"expert\"" } else { "" };
+        let _ = write!(out, "<section id=\"{id}\"{class}>");
+        let _ = write!(items, "<li{class}><a href=\"#{id}\">{title}</a></li>");
+        rest = tail;
+    }
+    out.push_str(rest);
+    let nav = format!(
+        "<nav id=\"learning-path\" aria-label=\"Learning path\"><p><strong>Learning path</strong> \
+         <label for=\"track-expert\" class=\"switch\">Show expert detail (core track is the default)</label></p>\
+         <ol>{items}</ol></nav>"
+    );
+    (out, nav)
 }
 
 /// Sort key for a claim id: its number when it is `c<number>`, so `c9` sorts before `c10`; other ids follow, by text.
@@ -885,9 +949,14 @@ fn evidence_section(root: &Path, job: &str) -> String {
     }
 }
 
-/// Places `section` directly under the page header.
+/// Places `section` under the page header and its learning-path nav, so the nav stays first.
 fn with_evidence(html: String, section: &str) -> String {
-    html.replacen("</header>", &format!("</header>{section}"), 1)
+    let marker = if html.contains("</nav>") {
+        "</nav>"
+    } else {
+        "</header>"
+    };
+    html.replacen(marker, &format!("{marker}{section}"), 1)
 }
 
 pub(crate) const CSS: &str = "\
@@ -908,6 +977,17 @@ dt{font-weight:600}dd{margin:0 0 .5rem}\
 .leadin{font-size:1.05rem}.summary{font-weight:600;margin:.3rem 0}\
 .deciders{margin:1rem 0}\
 .sources{color:var(--muted);font-size:.85rem}\
+.skip{position:absolute;left:-100vw;top:0;background:var(--bg);padding:.5rem 1rem;z-index:10}\
+.skip:focus{left:0}\
+.track{position:absolute;opacity:0;width:1px;height:1px}\
+.switch{cursor:pointer;border:1px solid var(--line);border-radius:1rem;padding:.1rem .6rem;color:var(--accent)}\
+.track:focus-visible~main .switch{outline:3px solid var(--accent);outline-offset:2px}\
+.expert{display:none}\
+.track:checked~main section.expert{display:block}\
+.track:checked~main li.expert{display:list-item}\
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}\
+html{scroll-behavior:smooth}\
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{animation:none!important;transition:none!important}}\
 @media (max-width:40rem){h1{font-size:1.5rem}main{padding:.6rem}}";
 
 #[cfg(test)]
@@ -1008,10 +1088,7 @@ mod evidence_tests {
         assert_ne!(PRODUCER, VERIFIER);
         // The latest reading is the one shown, and the section sits under the header.
         assert!(!html.contains("older-reading-model"));
-        assert!(
-            html.find("</header><section id=\"job-evidence\">")
-                .is_some()
-        );
+        assert!(html.find("</nav><section id=\"job-evidence\">").is_some());
     }
 
     #[test]
@@ -1703,5 +1780,123 @@ mod tests {
         let decisions = std::fs::read_to_string(out.join("decisions.html")).unwrap();
         assert!(decisions.starts_with("<!doctype html>"));
         assert!(decisions.contains("No proposals listed"));
+        assert!(decisions.contains("<a class=\"skip\" href=\"#main\">"));
+        assert!(decisions.contains("<main id=\"main\">"));
+    }
+}
+
+#[cfg(test)]
+mod track_tests {
+    use super::*;
+
+    fn page() -> String {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap()
+    }
+
+    /// Removes each element marked class expert, as the core track's CSS hides it.
+    fn without_expert(html: &str) -> String {
+        let mut out = String::new();
+        let mut rest = html;
+        while let Some(at) = rest.find("class=\"expert\"") {
+            let open = rest[..at].rfind('<').unwrap();
+            let name: String = rest[open + 1..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            out.push_str(&rest[..open]);
+            let close = format!("</{name}>");
+            let end = rest[at..].find(&close).expect("expert element is closed");
+            rest = &rest[at + end + close.len()..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn ids(html: &str) -> BTreeSet<String> {
+        html.split(" id=\"")
+            .skip(1)
+            .filter_map(|s| s.split('"').next())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn anchors(html: &str) -> Vec<String> {
+        html.split("href=\"#")
+            .skip(1)
+            .filter_map(|s| s.split('"').next())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Every in-page link in what a reader sees must reach a visible element.
+    fn dead_anchors(visible: &str) -> Vec<String> {
+        let ids = ids(visible);
+        anchors(visible)
+            .into_iter()
+            .filter(|a| !ids.contains(a))
+            .collect()
+    }
+
+    #[test]
+    fn no_track_has_a_dead_anchor_and_the_features_exist() {
+        let html = page();
+        let all_ids = ids(&html);
+        // Expert track: the checkbox shows every expert element, so all links must resolve.
+        assert!(CSS.contains(".track:checked~main section.expert{display:block}"));
+        assert!(CSS.contains(".track:checked~main li.expert{display:list-item}"));
+        let missing: Vec<_> = anchors(&html)
+            .into_iter()
+            .filter(|a| !all_ids.contains(a))
+            .collect();
+        assert!(missing.is_empty(), "expert track dead anchors: {missing:?}");
+        // Core track: expert elements are hidden, so no link may target one.
+        let core = without_expert(&html);
+        assert!(core.len() < html.len(), "some content must be expert");
+        let dead = dead_anchors(&core);
+        assert!(dead.is_empty(), "core track dead anchors: {dead:?}");
+        // The sections the page names stay visible in the core track.
+        for title in ["Claims and sources", "Glossary", "Next steps"] {
+            assert!(
+                core.contains(&format!("<h2>{title}</h2>")),
+                "{title} hidden"
+            );
+        }
+        assert!(core.contains("listed at the end"));
+        // Only the expert class hides content.
+        assert_eq!(CSS.matches("display:none").count(), 1);
+        assert!(CSS.contains(".expert{display:none}"));
+        // Every section is in the learning path, including those with an id.
+        let nav = html.split("<nav id=\"learning-path\"").nth(1).unwrap();
+        let nav = nav.split("</nav>").next().unwrap();
+        let sections = html.matches("<section ").count();
+        assert!(sections >= 8);
+        assert_eq!(nav.matches("<li").count(), sections);
+        for id in ["next-steps", "about-this-page"] {
+            assert!(nav.contains(&format!("href=\"#{id}\"")));
+        }
+        // The features exist.
+        assert!(html.contains("<a class=\"skip\" href=\"#main\">"));
+        assert!(html.contains("<main id=\"main\">"));
+        assert!(html.contains("<input type=\"checkbox\" id=\"track-expert\""));
+        assert!(html.contains("<label for=\"track-expert\""));
+        assert!(html.contains("<ol><li"));
+        assert!(html.contains("name=\"viewport\""));
+        assert!(CSS.contains("@media (prefers-reduced-motion:reduce)"));
+        assert!(CSS.contains(":focus-visible{"));
+        assert!(CSS.contains("prefers-color-scheme:dark"));
+    }
+
+    #[test]
+    fn marking_the_claims_section_expert_would_be_caught() {
+        let html = page().replace(
+            "<section id=\"section-claims-and-sources\">",
+            "<section id=\"section-claims-and-sources\" class=\"expert\">",
+        );
+        assert!(
+            html.contains("section-claims-and-sources\" class=\"expert\">"),
+            "the claims section was not marked"
+        );
+        assert!(!dead_anchors(&without_expert(&html)).is_empty());
     }
 }
