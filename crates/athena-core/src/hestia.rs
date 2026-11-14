@@ -48,6 +48,8 @@
 //! `Priority: urgent` line they write). A cause whose request a person closed with `athena close` is not queued
 //! again until a new introspection of that cause is recorded after the close ([`addressing_request`]); a
 //! request Hestia closed to queue it again, or one that was rejected or failed, does not hold the cause back.
+//! A landed request likewise stops addressing a cause once a newer introspection of it is recorded after the
+//! landing, so a failure that recurs after its fix landed is queued again; an open request still addresses it.
 //!
 //! A rule or check can be wrong. An introspection of kind `relax` or `remove` names a gate in its prevention
 //! text (`[gate: NAME] ...`, see [`crate::gate_counts`]) and is accepted only for a gate that a later try overruled
@@ -823,7 +825,9 @@ pub fn cause_key(records: &Records, i: &IntrospectionRecord) -> Option<String> {
 
 /// The request that addresses a group of introspections: an open or landed request job whose text cites one of
 /// their ids. An open one is preferred to a landed one. A request that was rejected, failed or closed does not
-/// address the cause, so the review may queue another. The exception is a request a person closed with
+/// address the cause, so the review may queue another. A landed request stops addressing the cause once an
+/// introspection of the cause is recorded after its landing (a recurrence of the failure), so the review may
+/// queue it again; an open request keeps addressing it whatever is recorded later. The exception is a request a person closed with
 /// `athena close` ([`closed_by_person`]): it keeps addressing the cause until an introspection of the cause is
 /// recorded after that close, so the review does not queue again what a person turned down. An open or landed
 /// request is preferred to such a closed one.
@@ -859,6 +863,13 @@ fn addressing_request(records: &Records, introspections: &[String]) -> Option<Ad
                 });
             }
             continue;
+        }
+        // A landed request addressed the cases before its landing; a newer introspection is a recurrence.
+        if landed {
+            let landed_at = job.outcome.as_ref().map(|o| o.at);
+            if !landed_at.is_some_and(|at| newest.is_none_or(|n| n <= at)) {
+                continue;
+            }
         }
         if found.as_ref().is_none_or(|f| f.landed && !landed) {
             found = Some(AddressingRequest {
@@ -4746,6 +4757,89 @@ mod tests {
         assert_eq!(records(&athena).request_jobs().len(), 1);
     }
 
+    /// Two introspections of one class (at 10 and 11 seconds) and a request citing both, in one set of records.
+    fn records_with_request_citing_a_cause(
+        dir: &std::path::Path,
+        athena: &Athena,
+    ) -> (JobId, Vec<String>) {
+        let c = class(1, "Reading ignores the earlier verdict");
+        let (a, b) = (
+            introspection(10, 'a', Some(&c.id), "The verdict is not read."),
+            introspection(11, 'b', Some(&c.id), "The verdict is not read."),
+        );
+        put(
+            dir,
+            athena,
+            vec![
+                AnyRecord::FailureClass(c.clone()),
+                AnyRecord::Introspection(Box::new(a.clone())),
+                AnyRecord::Introspection(Box::new(b.clone())),
+            ],
+        );
+        let text = StewardRequest::new(
+            Some(Priority::Normal),
+            "Read the verdict",
+            &format!("See introspections {} and {}.", a.id, b.id),
+            &["The verdict is read".to_string()],
+            &["crates/".to_string()],
+        )
+        .unwrap()
+        .render();
+        let (job, _) = athena.queue(&text).unwrap();
+        (job, vec![a.id.to_string(), b.id.to_string()])
+    }
+
+    #[test]
+    fn a_landed_request_stops_addressing_a_cause_that_recurs_after_the_landing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let (job, ids) = records_with_request_citing_a_cause(dir.path(), &athena);
+        put(dir.path(), &athena, vec![landed(&job)]);
+        // Landed at 500 seconds, after both introspections: it addresses the cause.
+        let found = addressing_request(&records(&athena), &ids).expect("landed after the newest");
+        assert!(found.landed);
+        assert_eq!(found.job, job.as_str());
+
+        // A new introspection of the cause, recorded after the landing: the cause recurred.
+        let class_id = records(&athena).introspections[0].failure_class.clone();
+        let mut later = introspection(
+            600,
+            'c',
+            class_id.as_ref(),
+            "The verdict is still not read.",
+        );
+        later.at = at(600);
+        put_introspection(dir.path(), &athena, &later);
+        let mut all = ids.clone();
+        all.push(later.id.to_string());
+        assert_eq!(addressing_request(&records(&athena), &all), None);
+        let causes = repeated_causes(&records(&athena));
+        assert_eq!(causes.len(), 1);
+        assert!(causes[0].request.is_none(), "the review may queue it again");
+    }
+
+    #[test]
+    fn an_open_request_still_addresses_a_cause_with_newer_introspections() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let (job, mut ids) = records_with_request_citing_a_cause(dir.path(), &athena);
+        let class_id = records(&athena).introspections[0].failure_class.clone();
+        let later = introspection(
+            600,
+            'c',
+            class_id.as_ref(),
+            "The verdict is still not read.",
+        );
+        put_introspection(dir.path(), &athena, &later);
+        ids.push(later.id.to_string());
+        let found =
+            addressing_request(&records(&athena), &ids).expect("an open request addresses it");
+        assert!(!found.landed);
+        assert_eq!(found.job, job.as_str());
+    }
+
     /// The word for the one who runs Athena, built from fragments so no tracked file holds it.
     fn boundary_word() -> String {
         ["oper", "ator"].concat()
@@ -5125,7 +5219,12 @@ mod tests {
                 rec_id(900)
             ))
             .unwrap();
-        put(dir, athena, vec![landed(&footer)]);
+        // Landed after every introspection of the backlog, so the landed request still addresses its cause.
+        let mut done = landed(&footer);
+        if let AnyRecord::Outcome(o) = &mut done {
+            o.at = at(2000);
+        }
+        put(dir, athena, vec![done]);
         existing
     }
 

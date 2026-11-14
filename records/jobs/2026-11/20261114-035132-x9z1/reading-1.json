@@ -1,0 +1,151 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-035132-x9z1",
+  "n": 1,
+  "at": "2026-11-14T03:52:37.328589804Z",
+  "invocation_seq": 2,
+  "base_commit": "696548c8cde7cf8c3351a0b0d5834f372d12a98b",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Show login-expiry retry and full deadline in timed-out invocation",
+  "summary": "When the retry call after an expired login (401) ends at its deadline, the stop reason names the invocation's full timeout, says a retry started at N s, and gives the time left. The invocation record stores the retry, its start and the first call's wall time and cost. Goal: whoever reads the record or job outcome sees the 5400 s deadline held (616 s was only the retry's share), so no outside watchdog is built.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria 1 to 3 check the reason text and the record by running tests."
+    },
+    {
+      "id": "tested",
+      "how": "Criterion 7 requires fmt, clippy and full test to pass."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the driver, with the minimum record fields."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-agent/src/claude.rs: invoke() calls invoke_once, and on an Error outcome with api_error_status 401 calls retry_after_login_expiry; that sleeps auth_retry_wait, calls retry_spec (timeout = spec.timeout - used, so 616 s of 5400 s), runs invoke_once on the retry, and merge_outputs takes the second call's outcome and detail. The deadline reason is built at about line 612 from spec.timeout via procs::deadline_reason(secs), so on the retry it prints the retry's own timeout. crates/athena-agent/src/lib.rs AgentOutput has no field for a retry. crates/athena-agent/src/fake.rs builds AgentOutput literals. crates/athena-core/src/invocation.rs turns AgentOutput into the stored record (athena.invocation/1, schema in crates/athena-data/src/records.rs). The driver keeps the first call's wall_s and cost_usd before merging. No new record file is added under crates/, so check_record_file, AnyRecord and the round-trip test need no new coverage, but an added invocation field must be optional so old records still parse. The property is measured directly by a claude.rs unit test that runs a stand-in claude program, not by the fake driver.",
+    "Previous results. Job 20261113-112836-b7sx (timed_out) and job 20261030-060839-1njk (failed) were both about reading refusals of dropped request parts: unrelated to this fix. Their findings (request-part refusal check, alternatives, markers) do not apply to this request. The b7sx candidate 20ad310c2972 changed CHANGELOG.md, fake.rs, reading.rs, reading/checks.rs, reading/replay.rs, reading/terms.rs, reading/topics.rs, steward.rs and tests/refusal_corpus.rs. That work is dropped, not carried here, except that this job edits CHANGELOG.md and possibly crates/athena-agent/src/fake.rs afresh. Job 20261114-023201-dx2r is the identical earlier request, still queued, and is superseded by this job.",
+    "Goal and audience: the person running Athena and the introspection agents read invocation records, outcomes and progress notes; they must be able to tell a retry's leftover time from the invocation's deadline.",
+    "The job outcome and progress note already carry the invocation detail, so changing the detail text should reach them. Criterion 3 checks that with the existing run code. A small edit in crates/athena-core/src/invocation.rs and crates/athena-data/src/records.rs is needed to store the retry fields.",
+    "Governance files: setup.sh, athena.toml, defaults.toml, .gitattributes, rust-toolchain.toml, cargo and clippy configuration and .github/workflows are not changed. This job does not change setup.sh, which the request does not need. The failure class ze7x and records/ are append-only and untouched."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new unit test in crates/athena-agent/src/claude.rs uses a stand-in claude program whose first call ends with the 401 login-expiry error and whose retry runs past its share. It asserts that the detail names the full timeout (not the retry's share), says a retry after an expired login started at N s, and gives the time left. Run `cargo test -p athena-agent claude`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The same test asserts that the output and the invocation record hold both calls: a retry flag, the retry start offset in seconds, and the first call's wall time and cost. Run `cargo test -p athena-agent claude`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The text reaches the job's outcome and progress note. A test in crates/athena-core drives a fake-driver output carrying the retry text to a timed-out outcome, and asserts the outcome reason and the progress note both contain it. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Old invocation records without the new fields still parse: the added fields in crates/athena-data/src/records.rs are optional (serde default, skipped when absent). The existing records round-trip tests pass.",
+      "kind": "content"
+    },
+    {
+      "text": "A call with no retry keeps the exact stop reason 'deadline of Ns reached'. A diff check shows deadline_reason in crates/athena-agent/src/procs.rs is unchanged, and existing tests pass unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry describing the retry-aware deadline reason and the record fields. No separate watchdog or new kill path is added: the diff touches no kill_group or registry logic.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` as three separate commands; all pass, or Athena's recorded check on the final tree passes (D115).",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-agent/src/lib.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "p": 0.75
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Any outside watchdog or new deadline enforcement: the measured wall time of 5406 s shows the 5400 s deadline held",
+    "setup.sh, athena.toml, defaults.toml, .gitattributes, rust-toolchain.toml, cargo, rustfmt and clippy configuration, and .github/workflows",
+    "records/, including intervention 20261113-132803-knm6, introspection 20261113-132810-w407 and failure class ze7x; and docs/decisions.md entries",
+    "The reading-refusal work of jobs 20261113-112836-b7sx and 20261030-060839-1njk: crates/athena-core/src/steward.rs, reading.rs, reading/checks.rs, reading/replay.rs, reading/terms.rs, reading/topics.rs and tests/refusal_corpus.rs stay as they are; the b7sx candidate 20ad310c2972 is dropped",
+    "Changing the retry rules (wait, minimum run, budget split) or procs.rs stop reasons for calls with no retry"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.6,
+        "p90": 5.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2100.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6763698630136986,
+      "p_user_intervenes": 0.06315789473684211,
+      "cost_usd": {
+        "p10": 0.5467058822701585,
+        "p50": 1.481907856463903,
+        "p90": 5.64938136563624
+      },
+      "wall_time_s": {
+        "p10": 605.2717964130155,
+        "p50": 2152.4590019605225,
+        "p90": 4387.374132685111
+      }
+    }
+  },
+  "departures": "The change spans the driver and the invocation record, so slightly above the reference cost and time."
+}

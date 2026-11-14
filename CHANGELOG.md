@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Hestia no longer treats a failure cause as addressed forever by a landed request. `addressing_request` in `crates/athena-core/src/hestia.rs` had no recency check on its landed branch (an independent review's finding 2), so a cause that kept recurring after its fix landed was never queued again. A landed request now addresses a cause only if no introspection of the cause was recorded after its landing, the same comparison the closed-by-person branch makes; an open request still addresses the cause whatever is recorded later. The module and function docs say so. This lets Hestia queue more requests for recurring causes, which is intended; no refusal rule is added. Tests: `cargo test -p athena-core a_landed_request_stops_addressing` and `cargo test -p athena-core an_open_request_still_addresses`.
+
 ### Added
 
 - The explainer page has a skip link, a CSS-only core/expert track switch (a checkbox; no script), a learning-path list of every section under the header, `:focus-visible` outlines and a `prefers-reduced-motion` rule. The Counters and Transitions sections are expert-only; the claims, the glossary and the next steps stay in every track, so no in-page link is dead. The decisions page gets the skip link and shared styles only. `cargo test -p xtask site` renders the real page in both tracks and fails on a dead anchor or a hidden claims section. Spec requirement OLY-B-D2-02 now names `xtask/src/site.rs` with `status: not shown`.
