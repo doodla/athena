@@ -1,0 +1,212 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-023201-cdp5",
+  "n": 1,
+  "at": "2026-11-14T07:49:32.081029137Z",
+  "invocation_seq": 10,
+  "base_commit": "eec4ae23d72d234a2f34249dc12e0365beda1b65",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make request misread an explicit yes/no field for critic and verifier",
+  "summary": "Replace the free-text `request_reading_mismatch` in CriticOutput and VerifierOutput with a required boolean `request_misread` plus optional `request_misread_reason`. Planning end_round and verify judge act only on the boolean, so text starting \"None…\" (pbvc, sza7) no longer stops planning or fails verification. Prior jobs pbvc, pkhp and sza7 are addressed in the assumptions.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria replay the recorded pbvc and sza7 texts and check a real misread still stops and fails."
+    },
+    {
+      "id": "tested",
+      "how": "fmt, clippy and the full test run are required."
+    },
+    {
+      "id": "changelog",
+      "how": "CHANGELOG.md entry required."
+    },
+    {
+      "id": "root-cause",
+      "how": "The cause is a free-text field read as a flag; the fix is an explicit boolean for both critic and verifier."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-context/src/outputs.rs (CriticOutput near line 539 and the verifier output near line 250 both hold `request_reading_mismatch: Option<String>`), crates/athena-core/src/run/planning.rs end_round (stops on any Some before the verdict), crates/athena-core/src/verify.rs judge (same for the verifier), and crates/athena-data/src/records.rs, where Verification (line 944) and the plan record store the same field as Option<String>. The records validation is `check_record_file` (records.rs:1455) returning `AnyRecord` (records.rs:1124); it accepts the record field as it is today. Design: the stored record field `request_reading_mismatch` is kept unchanged and is set only when the boolean is true, so records.rs needs no change and existing records still pass `check_record_file` and the records round-trip tests. Only the agent-facing output structs change. Entry points are the output parse in outputs.rs, then end_round in planning.rs and judge in verify.rs. The property is measured by replaying the recorded texts through the real parse and the real end_round and judge, not through stand-ins.",
+    "Field meaning: `request_reading_mismatch` is documented in outputs.rs:538 as 'Set when the accepted reading misread the request, with how.' It fits as the stored record field once it is set only on a real misread. The agent-facing fields are new: `request_misread` (required bool) and `request_misread_reason` (optional text). Remarks about the reading that are not a misread go in findings. The live athena.toml value is not involved.",
+    "Prior jobs: pbvc (planning stopped on 'None for the plan. One factual error…') and sza7 (verification failed on 'None for this change.') are fixed by the new parse. pkhp (rejected, 7 candidate files: defaults.toml, defaults.rs, athena-context lib.rs, run_pin_tests.rs, decisions.md, system-facts.md, CHANGELOG.md) is unrelated; its work is dropped. Its flaky drain test is not addressed here. sza7's candidate files (athena.toml, checks.rs, disk.rs, run/mod.rs) are dropped, and its status.rs part (3) is not part of this job.",
+    "Consumers: none found for config. No athena.toml or defaults.toml change is needed. The prompt files crates/athena-context/prompts/critic.md and verifier.md are composed into the critic and verifier prompt sets. Critic has 298 tokens of headroom and the verifier (change) has 90 tokens left, so the verifier edit must stay within 90 tokens, which is the binding limit. Reader and other sets are untouched.",
+    "D93's rule is kept: a real misread (`request_misread` true) is recorded as a major finding, so planning stops and verification fails. The new record is appended to docs/decisions.md as a new decision with a Provenance bullet. Existing entries are not edited."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "In crates/athena-context/src/outputs.rs, CriticOutput and the verifier output each have a required bool `request_misread` and an optional `request_misread_reason`. The free-text `request_reading_mismatch` is gone from the agent output structs. The schema text matches (Grep outputs.rs).",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-context/prompts/critic.md and verifier.md say the yes/no field is true only for a real misread, that a real misread is also a major finding, and that other remarks go in findings. The verifier prompt grows by at most 90 tokens.",
+      "kind": "content"
+    },
+    {
+      "text": "end_round in crates/athena-core/src/run/planning.rs and judge in crates/athena-core/src/verify.rs read only the boolean to decide on a misread. Neither tests the reason text for Some (Grep both files).",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test`. A test replays the recorded pbvc critique text ('None for the plan. One factual error…', verdict accept, no blocker or major finding) through the new parse and end_round. Planning is not stopped and no misread reason is added.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`. A test replays the recorded sza7 verifier text ('None for this change.') through the new parse and judge. The verdict is not failed for a misread and the reason 'the reading misread the request' is not added.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`. With `request_misread` true, planning still stops and verification fails with the misread reason, and a major finding is recorded (D93).",
+      "kind": "behavior"
+    },
+    {
+      "text": "The record readers in crates/athena-cli/src/display.rs and crates/athena-core/src/status.rs show a misread only when the stored field is set, and every fixture that set the old field is updated. Existing record round-trip tests still pass `check_record_file`.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry for this change, and docs/decisions.md has a new appended decision with a Provenance bullet.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and the full `cargo test` pass. Athena's recorded checks on the final tree count as evidence.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-context/prompts/critic.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-context/prompts/verifier.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Changing the stored record field in crates/athena-data/src/records.rs: it stays Option<String>, so old records stay readable.",
+    "The pkhp work (defaults.toml version-pins and hermetic-checks entries, reader budget raise, D181): dropped.",
+    "The sza7 work (check_timeout_s, environment stop, status durations): dropped.",
+    "The flaky drain test a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn.",
+    "Changing athena.toml, defaults.toml or workflows.",
+    "Changing other planning or critic acceptance rules."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.2,
+        "p90": 6.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2700.0,
+        "p90": 5500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.676320272572402,
+      "p_user_intervenes": 0.06276923076923077,
+      "cost_usd": {
+        "p10": 0.5489412028180998,
+        "p50": 1.4791114,
+        "p90": 5.6726260751827065
+      },
+      "wall_time_s": {
+        "p10": 605.5400106532041,
+        "p50": 2155.226456717016,
+        "p90": 4390.404280449246
+      }
+    }
+  },
+  "departures": "Wider than the reference: roughly 15 files, with fixtures and two prompts under a tight token budget.",
+  "hard_reason": "Changes the rule that stops planning and fails verification on a misread, and the critic and verifier output schema and prompts, so a mistake could wrongly hold or pass jobs.",
+  "producer_effort": "high"
+}
