@@ -1,0 +1,169 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-101918-8njm",
+  "n": 1,
+  "at": "2026-11-14T10:19:59.337500359Z",
+  "invocation_seq": 1,
+  "base_commit": "57e596d6af98608cb0d0ab898eca428b63daa0b8",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Count self-queued fixes (steward and Hestia) in athena status",
+  "summary": "Retry of 20261114-041134-qwtn: add an `athena status` line counting fixes Athena queued for itself and how many ran, over 7 days and in total. This time Hestia gets its own recorded channel, because it queued on \"cli\" and the first attempt missed it. The line counts the steward channel plus that new Hestia channel.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "Hestia gets a recorded channel so it can be counted, instead of guessing from text."
+    },
+    {
+      "id": "tested",
+      "how": "New unit and wiring tests; fmt, clippy and test pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check counts rendered by tests, one fixture per writer."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comment and CHANGELOG state the counted sources and the gap exactly."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Retry of job 20261114-041134-qwtn. Its blocker (Hestia queues on channel \"cli\", so it was not counted) is fixed by giving Hestia its own channel and counting it. Its major finding (doc comment and CHANGELOG falsely said Hestia uses the steward channel) is fixed by describing the counted sources exactly as the code does. Its minor finding that display.rs was unlisted is fixed by listing it here. Its minor finding that 'run' included dropped and stale requests is fixed by reporting closed-unrun separately. Its minor finding of no display wiring test is fixed by adding one. Its candidate changes to CHANGELOG.md, display.rs and status.rs are kept as a base and corrected, not discarded wholesale.",
+    "Code survey: read crates/athena-core/src/steward.rs:335-342 (REQUEST_CHANNEL=\"steward\", USER_QUEUE_CHANNEL=\"cli\", DRAINED_CHANNELS, used at lines 417 and 470) and crates/athena-core/src/reading.rs:962-992 (Athena::queue hardcodes channel \"cli\" and is the only queue path Hestia uses). Also read the self.queue call sites in crates/athena-core/src/hestia.rs (1474, 2598, 2750, 2955, 2963, 3071, 3095) and the steward's own queue site at steward.rs:676 (REQUEST_CHANNEL). hestia.rs:5213 and 7641 are existing test fixtures that use steward channels. The Request record has only job, text, received_at and channel, so channel is the only recorded marker, and `athena ask --later` shares \"cli\". No new record type or field is needed, so records validation and AnyRecord are unchanged.",
+    "Writers of self-originated requests, to be re-verified by the producer with grep before writing the filter: (1) the steward on \"steward\" (steward.rs:676); (2) Hestia through Athena::queue on \"cli\", indistinguishable from a person's `ask --later`. Chosen design: add `Athena::queue_on(text, channel)`, with `queue` delegating with USER_QUEUE_CHANNEL. Add a `HESTIA_REQUEST_CHANNEL` constant (\"hestia\") in steward.rs and add it to DRAINED_CHANNELS. Hestia's call sites use queue_on with it, so the drain still works them. A separate channel, not REQUEST_CHANNEL, keeps the steward's open-request accounting at steward.rs:373-384 unchanged.",
+    "Requests Hestia queued before this change are on \"cli\" and cannot be told apart from a person's, so they are not counted. The CHANGELOG, doc comment and test state this gap and do not claim coverage of them.",
+    "'Run' means the job has a terminal outcome other than closed-unrun. Closed(Dropped), Stale and Abandoned count as a separate 'closed unrun' figure, so a cleared backlog is not shown as run. Queued, proposed and declined count as queued, as in the first attempt.",
+    "Goal and audience: the owner (Sri) reads `athena status` to spot a stuck backlog of self-queued fixes. The line must always print, with zeros when empty. The window is received_at within 7 days of now.",
+    "Environment: none; no CI workflow, push or records-branch access is needed, and governance files are unchanged."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A unit test in crates/athena-core/src/status.rs has one fixture request per writer: steward channel (steward::REQUEST_CHANNEL), Hestia channel (steward::HESTIA_REQUEST_CHANNEL) and a person's cli request. It also has some requests inside and some outside 7 days, and some run, queued and closed-unrun. It asserts the rendered line counts steward and Hestia but not cli, for both windows. Run `cargo test -p athena-core status`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "With no self-queued requests the line still prints with explicit zeros. A unit test covers this; run `cargo test -p athena-core status`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test over the real athena-cli rendering path shows that the status text output contains the `self-queued fixes` line, so the display wiring is covered. Run `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows Athena::queue_on with the Hestia channel records a request on that channel and that Athena::queue still records \"cli\". A test or existing drain test confirms the steward drain selection still includes the Hestia channel. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Grep of crates/athena-core/src/hestia.rs shows every production `self.queue(` call is replaced by the Hestia-channel queue path. Channel values are the constants from steward.rs, not repeated string literals, and DRAINED_CHANNELS includes the Hestia channel.",
+      "kind": "content"
+    },
+    {
+      "text": "The doc comment in status.rs and the CHANGELOG.md [Unreleased] entry describe the counted sources exactly as the code does. They name the steward and Hestia channels, say Hestia requests queued before this change are not counted, and make no other claim. The line shows queued, run and closed-unrun for both the last 7d and the total.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass, as recorded by Athena on the final tree (D115). Existing status tests and the xtask spec tests that check status labels still pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "docs/design/hestia.md notes Hestia's own request channel, if it describes how Hestia queues.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "docs/design/hestia.md",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Alerting or automatic action on a stuck backlog",
+    "Changing how the drain orders or runs requests; the only drain-side change is adding the Hestia channel to DRAINED_CHANNELS so those requests keep being drained",
+    "Adding new record types or fields",
+    "Counting or relabeling Hestia requests already recorded on \"cli\"",
+    "crates/athena-cli/src/main.rs: unchanged, the earlier deliverable was not needed",
+    "athena.toml, defaults.toml and workflows: unchanged"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2400.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6757215619694398,
+      "p_user_intervenes": 0.06257668711656442,
+      "cost_usd": {
+        "p10": 0.5504364917533153,
+        "p50": 1.4791114,
+        "p90": 5.687058881982814
+      },
+      "wall_time_s": {
+        "p10": 605.6313230013942,
+        "p50": 2159.444995015573,
+        "p90": 4396.032011170137
+      }
+    }
+  },
+  "departures": "The reading is wider than the first attempt: it touches reading.rs, hestia.rs and the drain channel list, so cost and time are above the reference.",
+  "hard_reason": "It adds a channel to steward::DRAINED_CHANNELS, which decides which queued requests the drain works, so a mistake could leave Hestia fixes undrained.",
+  "producer_effort": "high"
+}
