@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-052244-qf6e",
+  "round": 1,
+  "at": "2026-11-14T05:36:36.587702097Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/close.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/close.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "A retry queues the same follow-ups again, so criterion 3 ('closing, retrying or resuming the same job twice yields each follow-up request once') goes unmet for retries",
+      "evidence": "The key is `Out-of-scope item key: <job id> <hash>`, where the job id is the closing job's own. The plan says: 'A retry is a new job with its own reading and its own id, so its follow-ups cite the new job ... Dedupe across jobs is not planned.' The reading.rs topics doc says a retried job is linked through its `previous_job` (topics.rs:508-510). Failed jobs that a person or the drain then retries are the usual path. This job is a retry of 20261114-041123-hvyh: if hvyh had closed with this out_of_scope list, qf6e would queue every item a second time. Demonstration 3(e) covers only a held job, which queues nothing before the retry, so it would pass while the failed-then-retried case duplicates. Fix: Key dedupe on the root of the retry chain: follow `previous_job` (or `retried_job`) back to the first job, cite that job in the text and key line, and count the cap against the chain. Add a test to run/tests.rs: a job fails with a failing-verifier script and queues follow-ups, then `athena.retry` and `go` on the retry with the same out_of_scope, then assert each key appears exactly once in the records.",
+      "location": "Decision 4 (idempotence key) and Risks item 4; criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The markers match subject-matter words, not instructions. On this brief's own out_of_scope list the rule queues plain exclusions and work already filed elsewhere",
+      "evidence": "Markers include the bare words 'follow-ups', 'propose' and 'separate request'. This brief's out_of_scope list contains: 'Reprioritizing queued follow-ups ahead of or behind other work' (an exclusion; matches 'follow-ups'), 'Backfilling the follow-ups already lost from job 20261114-034034-fgwz ...' (explicitly not to be done; matches 'follow-ups'), and '... a separate request from introspection 20261114-052207-pj25' (already filed; matches 'separate request'). All three would be queued. In this codebase 'proposal', 'follow-up' and 'propose' are domain words for the feature itself, so the rule has obvious false positives. The open question pushes the filed-elsewhere case to the user, but the code can check it: the item names an id, and Records shows whether that job or record exists. Fix: Match directive phrases instead of bare words: 'as its own job' or 'as its own request', 'as a follow-up request' or 'as a follow-up job', 'propose ... as', 'queue ... as'. Skip an item that names a job or record id already present in Records (the work is filed). Add a table test built from this brief's real out_of_scope list and the fgwz items, with the expected result for each: the fgwz directives queue; 'Reprioritizing queued follow-ups', the backfill item and the pj25 item do not.",
+      "location": "Decision 5 (`is_follow_up` marker list) and Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The queued request carries little for the reader: a title cut to about 90 characters, the quoted item and generic acceptance",
+      "evidence": "The acceptance bullets are 'the named work is done with no unrelated change' and 'fmt, clippy and test pass'. An item such as 'Propose these as follow-up requests: queue order and the backlog hold' depends on the original reading for its meaning. `referenced_jobs` (topics.rs:533-560) does carry the cited job to the reader, but the cap is MAX_REFERENCED_JOBS and the request text itself does not say what the original job was about. Fix: Add the original reading's title (and request title) as a body line, for example 'Original job: <id> — <title>', so the request stands on its own. Keep the line free of follow-up phrases before the id, as decision 3 requires.",
+      "location": "Decision 3 (request text) and Step 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'Two parts in one test' spans two files, so it cannot be one test",
+      "evidence": "Part (a) is in followups.rs and part (b) is in run/tests.rs, yet the demonstration names a single test, `followups_ignore_plain_exclusions_and_an_empty_out_of_scope`, and runs it with one filter. Fix: Name the two tests separately, for example `..._pure` in followups.rs and `..._on_close` in run/tests.rs, with the same prefix, and say the filter runs both.",
+      "location": "Demonstrations, criterion 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read close.rs, steward.rs (ProposedChange, queued_work, StewardRequest::new and from_change, RequestQueue::apply), invariant.rs (closing_jobs, classify_pre_merge, landing, names_existing_work), reading/topics.rs (job_ids_in, followed_up_ids, referenced_jobs) and the drain test fixtures. The plan's claims about the code hold. close_dispatched is the one close path for a job that ran (run/mod.rs:1328, 1349, 1355, 1376). commit_hold never reaches the new line. land_or_block clones closing.files on each attempt. closing_jobs counts only candidate, verification and outcome files, so a job directory holding only request.json does not make a several-jobs landing. from_change falls back to records/ when the source is not a path. Existing fixtures use out_of_scope \"Other files\", which no marker matches. Two design problems remain. First, criterion 3 says retrying the same job yields each follow-up once, but the plan keys dedupe on the closing job's own id. A retry is a new job, so it queues the same follow-ups again, and the plan admits this in its risks. That is the common case: this job is itself a retry. Second, the marker list holds bare nouns and verbs ('follow-ups', 'propose'). On this brief's own out_of_scope list it queues three of five items, including a duplicate of work already filed under introspection 20261114-052207-pj25 and the \"Reprioritizing queued follow-ups\" item. Athena's finding about close.rs sitting outside the deliverables is not repeated here."
+}

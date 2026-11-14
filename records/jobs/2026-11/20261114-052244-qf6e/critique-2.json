@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-052244-qf6e",
+  "round": 2,
+  "at": "2026-11-14T05:44:18.128549343Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/close.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/close.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The rule that skips an item citing an existing record id drops the real fgwz follow-ups. Criterion 1 only passes because the test items contain no ids.",
+      "evidence": "Decision 4 skips any directive item where `job_ids_in(item)` names a job in `records.jobs` or an introspection id, unless the id is in the closing chain. The brief's own out_of_scope list describes the other fgwz items as 'closing 20261017-205552-y1bh and 20261030-060410-9e5h'. Those jobs exist in the records, so an fgwz-style item such as 'Propose these as follow-up requests: ... closing 20261017-205552-y1bh ...' would be skipped. Work about an existing job (close it, fix its findings) is the usual reason to cite one; citing a job does not mean the work is filed. The skip rule was added to keep the pj25 item out, but decision 3's directive matcher already rejects that item because it has no 'as ...' and no 'propose'. The criterion 1 test uses cleaned-up items with no ids ('queue order and the backlog hold', 'Plan critic memory runs as its own job'), so it never exercises the case that breaks. Fix: Drop the id-based skip. Rely on the directive matcher plus key dedupe. If a 'filed elsewhere' signal is still wanted, make it explicit wording such as 'from introspection <id>' or 'already queued as <id>', not any cited id. Add an fgwz-shaped item that cites existing job ids to the criterion 1 table and the end-to-end test, and assert it is queued.",
+      "location": "Decision 4; Demonstration for criterion 1; Risks item 1",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Retry dedupe depends on exact item wording, so real retries will queue duplicates. The criterion 3 retry test passes only because the fake reader repeats the same strings.",
+      "evidence": "The key is `<root> <sha256 of the lowercased, whitespace-collapsed item>`. A retry ('try again on <job>') gets a brand-new reading from the model, so its out_of_scope wording changes. The plan admits this in its third risk and only bounds the damage with the cap of 5. Test (3) reuses `script_with_out_of_scope(<same 3 items>)` for both jobs, so the keys match by construction and the test cannot fail on the real drift. Criterion 3 requires that 'retrying the same job twice yields each follow-up request once'. Fix: Dedupe per chain, not per wording. Once any request holds an `Out-of-scope item key: <root> ` line, later jobs in the same retry chain queue nothing. The item hash then only dedupes within one reading. Change test (3) so the retry's reading words its items differently, and assert that no new request appears.",
+      "location": "Decision 2; Risks item 3; Demonstration for criterion 3, test (3)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The context lines can feed the original job's paths into the follow-up's Files line.",
+      "evidence": "`StewardRequest::from_change` takes Files from `request_text_touches(text)` over the whole `change.request` (steward.rs:626). That text includes the 'Original job: <root> — <title>' and 'Original request: <first line>' lines. A title or request line that names a path (for example athena.toml or a .rs file) becomes the follow-up's Files instead of `records/`. The fallback described in decision 5 would then not apply, and the reader would get a wrong file hint. Fix: Build Files only from the item, for example by computing `request_text_touches(item)` in followups.rs and putting its result or `records/` in an explicit 'Files:' line. Or apply the per-line guard to path words as well. Add a unit test with a root title that names a path.",
+      "location": "Decision 6; Decision 5 (from_change fallback)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan says the job lock is held during the dedupe check, but the hook runs before the repository lock is taken.",
+      "evidence": "The new line comes after close.rs:38. `land_or_block` takes `self.state.lock_repository()` only at close.rs:257, after the hook has loaded Records and computed keys. The landing loop also retries on `Refusal::Moved` with a new HEAD (close.rs:269-320) but reuses `closing.files` built from the old HEAD. Fix: Correct the stated assumption. Either recompute the follow-ups inside each attempt against that attempt's head, as `score_on` does, or state that a concurrent writer in the same chain is out of scope and the worst case is one duplicate.",
+      "location": "Decision 2 (\"The job lock is held while a job closes\")",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Follow-ups get the drain's guaranteed improvement turn, which changes ordering. This side effect has no test and is only noted in passing.",
+      "evidence": "`hestia::improvement_of` (hestia.rs:973-976) treats every open REQUEST_CHANNEL request as one of Athena's own improvement requests, which get the guaranteed turn. Up to 5 follow-ups per chain would now compete for that turn ahead of user work, while the brief puts reprioritizing out of scope. The reading requires the steward channel, so this is a consequence of the reading, not a plan error. Fix: Name this in the CHANGELOG bullet and the change description as a known effect. Optionally add one assertion that `improvement_of` lists the follow-up, so the behavior is pinned rather than accidental.",
+      "location": "Dependents: steward-channel requests now also come from closed jobs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's code claims by reading the snapshot. Hooking into `close_dispatched` is correct: it is the only close path for a job that ran, and `closing.files` is reused by the plain commit (close.rs:135) and by every landing attempt (close.rs:272). `ProposedChange` and `RequestQueue::apply` match steward.rs:305-319 and 660-683. `retried_job`, `job_ids_in`, `followed_up_ids` and `dependency_ids_in` are public through `pub use retry::*` and `topics::*`. `closing_jobs` (invariant.rs:240-269) does not count a directory holding only request.json, so the gate claims hold. Existing fixtures use out_of_scope [\"Other files\"], which no directive matches. Two design problems remain. First, the rule that skips an item naming an existing record id would skip real fgwz follow-ups such as closing 20261017-205552-y1bh. It is also unnecessary: the directive matcher already excludes the pj25 item. Second, idempotence across retries relies on the item's exact wording, while a retry always gets a fresh model reading. The criterion 3 retry test hides this because its fake reader repeats the same strings. Lesser issues: the context lines can put the original job's paths into the Files line; the plan says a lock is held during the dedupe check, but the hook runs before close.rs takes it; and follow-ups inherit the steward's guaranteed improvement turn. Athena's finding about close.rs is justified by the plan's confirmation and is not repeated here."
+}

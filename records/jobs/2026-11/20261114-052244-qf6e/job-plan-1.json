@@ -1,0 +1,319 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-052244-qf6e",
+  "round": 1,
+  "at": "2026-11-14T05:34:47.028989486Z",
+  "invocation_seq": 3,
+  "approach": "Add one module, crates/athena-core/src/followups.rs, and call it from one line of `Athena::close_dispatched` (run/close.rs). The module holds three things. (1) A whole-word wording test, `is_follow_up(item)`. (2) `queue(records, reading, taken)`, a pure function that keeps follow-up items, drops duplicates and items already queued for this job, applies the cap of 5, and builds each request with the existing `RequestQueue::apply` on a `ProposedChange`. `apply` runs `StewardRequest::from_change`, which calls `StewardRequest::new` (steward.rs:535, 600, 663-683), and writes the `Request` record on `REQUEST_CHANNEL`. (3) A small `impl Athena { pub(crate) fn follow_up_files(&self, reading, ui) -> Vec<NewFile> }` that loads `Records` at HEAD, calls `queue`, prints one ui line per queued or skipped item and never fails the close. `close_dispatched` gets `closing.files.extend(self.follow_up_files(ctx.reading, ctx.ui));` right after `push_closing_records(&mut closing)` (close.rs:38). So the request files go into the same closing commit as the outcome, on the landed path (land_or_block clones `closing.files`, close.rs:272) and on every records-only closing. No new record type, config key, crate or dependency; the dedupe hash reuses `athena_data::sha256_hex` (athena-data/src/lib.rs:40). Answers to the two findings: (1) criterion 7 now has a fails_without and a seam. (2) run/close.rs is edited, one call line, because the reading's own instruction was to confirm where a job closes and the code shows manage.rs is not that place; the reasoning is in decision 1.",
+  "decisions": [
+    {
+      "choice": "Answer to finding 2: hook in run/close.rs `close_dispatched`, one call line, declared as an addition to the deliverable list; manage.rs, steward.rs and reading.rs stay unedited.",
+      "reason": "The brief says manage.rs is where a job closes and that the producer must confirm it. Confirmed: manage.rs `close_with` (manage.rs:82-159) is the person's `athena close` for a job that did not finish (Queued/Proposed become Dropped, Declined, Blocked becomes Abandoned, a Dispatched job with no process becomes Abandoned after `recover_interrupted`). Every job that ran closes only through `close_dispatched` (close.rs:8), reached from run/mod.rs:1328, 1349, 1355 and `finish_dispatched` (1375-1376). `commit_hold` (close.rs:216) pushes closing records on its own and never reaches the hook, so a held job queues nothing and its resume closes once. A hook in manage.rs would miss the fgwz case (a job that ran). The close path is the one place all readings pass (user default root-cause), and the edit is one line because the logic and the glue sit in followups.rs.",
+      "rejected": [
+        {
+          "option": "Hook in manage.rs `close_with`, to stay inside the listed deliverables",
+          "why": "It sees only jobs closed by hand, never a job that ran to an outcome, so criterion 1 (the fgwz case) would not hold. Queuing from a job a person abandoned would also queue work that was never started."
+        },
+        {
+          "option": "A scan in the steward (steward.rs) that queues follow-ups for every closed job with a reading",
+          "why": "It runs on a later pass, not when the job ends, and it would backfill every historical job including fgwz, which the brief puts out of scope. It cannot tell old jobs from new ones without a cutoff."
+        },
+        {
+          "option": "Queue after the closing commit as a second records commit",
+          "why": "The outcome can land without its follow-ups if the second commit fails; one commit is atomic, and the dedupe check reads records already at HEAD."
+        }
+      ]
+    },
+    {
+      "choice": "Build each request as `RequestQueue.apply(&ProposedChange{kind: WorkItemKind::Proposal, key: <item key>, title: <title>, rung: Ladder::Implementation, source: Reference::job(original), evidence: vec![Reference::job(original)], request: <text>, brief: None}, &taken)`. `taken` is the set of job ids in the loaded records plus the ids made so far.",
+      "reason": "These are all the fields of `ProposedChange` (steward.rs:305-319; the earlier plan left out `key` and `title`). `from_change` uses `title` only for its fallback acceptance and `key` only in an error message. Reusing it keeps one request-text builder and one `Request` writer, so criterion 5 holds. When the text names no path, `from_change` falls back to the source if it is a path, else `records/` (steward.rs:626-634); a job reference is not a path, so `records/` is the file, as the brief assumes.",
+      "rejected": [
+        {
+          "option": "Call `StewardRequest::new` and build the `Request` record in followups.rs",
+          "why": "It duplicates id generation, record writing and the error mapping already in `RequestQueue::apply`."
+        },
+        {
+          "option": "A new record type or marker file for follow-ups",
+          "why": "The brief rules out new record types; a key line inside the request text is enough to dedupe."
+        }
+      ]
+    },
+    {
+      "choice": "Request text: line 1 is the title (the item on one line, bullet marker stripped, cut at a char boundary to about 90 chars). Body lines: `Queued from the out_of_scope list of job <id>.`, `Item: <item on one line>`, `Out-of-scope item key: <id> <16 hex>`. Then `Acceptance:` and two `- ` bullets (the named work is done with no unrelated change; fmt, clippy and test pass). The text never uses the words 'follow up', 'follow-up', 'Depends on' or 'try again on' next to a job id.",
+      "reason": "`followed_up_ids` (reading/topics.rs:479-506) reads the id that comes right after 'follow up', 'follow-up' or 'followup' (only on, of, to, job, the, earlier may sit between). A job found there is a job the reading must account for, and a reading that ignores it is refused by `check_prior_result_and_scope` (corpus case `follow-up-on-a-job-the-reading-ignores`, refusal_corpus.rs:1938-1950). The drain would then hit refusals on its own queued requests. `dependency_ids_in` (topics.rs:25) reads only a 'Depends on' line and `retried_job` (retry/topics) a 'try again on' request. With none of those, `job_ids_in` still carries the original job to the reader as evidence (topics.rs:541, `referenced_jobs`), which is the cited-not-relied-on shape (corpus case `root-cause-cites-two-jobs-without-relying`, refusal_corpus.rs:1925). An item whose own words say 'follow up on job <id>' keeps that meaning, since the item is quoted as written.",
+      "rejected": [
+        {
+          "option": "Write 'Follow-up from job <id>.' and a `followup-<job>-<hash>` key",
+          "why": "Both put the phrase 'follow-up' in the text; the glued `followup-<id>` form is a fragile near-match for `followed_up_ids`. Avoiding the phrase removes the doubt."
+        },
+        {
+          "option": "Add a `Depends on <id>` line so the follow-up waits for the original job",
+          "why": "The original job is already closed; a dependency line would add an open question and a plan edge for no gain."
+        }
+      ]
+    },
+    {
+      "choice": "Idempotence key `Out-of-scope item key: <job id> <first 16 hex of athena_data::sha256_hex(lowercased, whitespace-collapsed item)>`. `queue` drops an item whose key is already in the text of a `REQUEST_CHANNEL` request in the loaded records, collapses duplicate items inside one reading, and counts existing requests holding `Out-of-scope item key: <job id> ` so the cap `MAX_PER_JOB = 5` holds across repeated closes.",
+      "reason": "Records at HEAD are the source of truth (the state directory is lost on a fresh clone). The job lock is held while a job closes, so no other writer adds this job's keys between the check and the commit. A re-entry of the close for the same job id (for example after the 'branch kept moving' bail, close.rs:601) finds its keys at HEAD and queues nothing. A retry is a new job with its own reading and its own id, so its follow-ups cite the new job; the brief asks for dedupe per original job and item only. `sha256_hex` already exists and core depends on data, so no new dependency.",
+      "rejected": [
+        {
+          "option": "Hand-written FNV hash (the earlier plan)",
+          "why": "`athena_data::sha256_hex` is already in the workspace; reuse over new code."
+        },
+        {
+          "option": "Dedupe on the item text alone",
+          "why": "The same wording from two jobs would collapse into one request; the brief asks for one per job and item."
+        },
+        {
+          "option": "A counter or marker file in the state directory",
+          "why": "The state directory is outside the records and does not survive a fresh clone."
+        }
+      ]
+    },
+    {
+      "choice": "`is_follow_up(item)`: lowercase the item, split on any character that is not alphanumeric or `-`, join with single spaces, pad with a space at each end, and match any marker as a whole phrase: propose, proposes, follow-up, follow-ups, followup, followups, follow up, follow ups, own job, own jobs, own request, own requests, separate job, separate jobs, separate request, separate requests. The list is one `const`. An empty out_of_scope gives an empty plan, never an error.",
+      "reason": "This is the wording rule the reading assumed ('as its own job', 'follow-up request', 'propose'). Whole-phrase matching keeps 'proposal' or 'proposed' in an exclusion like 'the proposal record format' from queuing. It runs only after a reading is accepted and never changes whether one is accepted, so it adds no refusal rule.",
+      "rejected": [
+        {
+          "option": "Queue every out_of_scope item",
+          "why": "A plain exclusion such as 'athena.toml, defaults.toml, workflows, docs/decisions.md and records/' would become a meaningless request."
+        },
+        {
+          "option": "Ask a model to classify the items",
+          "why": "It adds a role and cost, and the result is not deterministic, so dedupe and the tests would not be reliable."
+        }
+      ]
+    },
+    {
+      "choice": "Put the follow-up files in `closing.files` only; leave the `trailers` vector unchanged.",
+      "reason": "`trailers` also feeds the landing commit message (close.rs:109-117). An `Athena-Job` trailer that names a request job the landing does not add the closing records of refuses the landing (invariant.rs:406-422). The closing commit already names its own existing job, which satisfies `names_existing_work` (invariant.rs:845-859).",
+      "rejected": [
+        {
+          "option": "One `Athena-Job` trailer per queued follow-up, as the steward does",
+          "why": "The steward's commit is records-only; here the same vector is cloned into the landing commit, which would refuse."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/followups.rs",
+      "action": "create",
+      "purpose": "`MAX_PER_JOB`, the marker const, `is_follow_up`, `follow_up_key` (uses `athena_data::sha256_hex`), `queue(records, reading, taken) -> Plan{files, jobs, skipped}` that builds each request through `RequestQueue::apply`, `impl Athena { pub(crate) fn follow_up_files }`, and unit tests for classification, dedupe, cap, pathless fallback, banned-word handling, text references and `queued_work` visibility.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod followups;` between `pub mod fake;` (line 121) and `pub mod gate_counts;` (line 122).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "purpose": "One call line in `close_dispatched` after `push_closing_records(&mut closing)` (line 38): `closing.files.extend(self.follow_up_files(ctx.reading, ctx.ui));`. Not in the reading's deliverables: the reading named manage.rs as the place a job closes and told the producer to confirm; this is the confirmation (decision 1).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add `script_with_out_of_scope(items)`, make `base_script()` call it with `[\"Other files\"]`, and add the end-to-end tests for criteria 1-3 (landed close with an intervention commit on the branch, a non-landed close, a repeated close, the cap, the held-then-retried job).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add `followups_appear_in_queued_work_after_a_job_closes`, next to the queue tests at lines 4783 and 5410-5469, using `rated_scenario()` with its `reading[\"out_of_scope\"]` set.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One `### Added` bullet under `[Unreleased]` for out_of_scope follow-ups queued as their own requests citing the original job, the cap of 5, and how plain exclusions are told apart.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Create crates/athena-core/src/followups.rs. Define `MAX_PER_JOB = 5`, the marker const and `is_follow_up` (lowercase, split on anything that is not alphanumeric or `-`, join with single spaces, pad, match whole phrases). Define `follow_up_key(job, item)` as `<job id> <first 16 hex of athena_data::sha256_hex(lowercased, whitespace-collapsed item)>`. Define `queue(records, reading, taken) -> Plan{files, jobs, skipped}`: collapse each item to one line with bullet markers stripped; keep follow-up items; drop duplicate keys; drop keys already in the text of a `REQUEST_CHANNEL` request in `records`; subtract the count of existing requests holding `Out-of-scope item key: <job id> ` from `MAX_PER_JOB`; for each remaining item build a `ProposedChange` (kind Proposal, key, title cut at a char boundary to about 90 chars, rung Implementation, source and evidence `Reference::job(&reading.job)`, request text as in decision 3, brief None), call `RequestQueue.apply(&change, &taken)`, add each made job id to `taken`, and put an `Err` into `skipped`.",
+    "In the same file add `impl Athena { pub(crate) fn follow_up_files(&self, reading: &Reading, ui: &dyn Ui) -> Vec<NewFile> }`. Return early with no work when no out_of_scope item passes `is_follow_up`. Otherwise load `Records` at `self.head()` (lib.rs:273), build `taken` from `records.jobs.keys()`, call `queue`, print one ui line per queued or skipped item, and return the files. A failure to read HEAD or load records prints one line and returns an empty list; it never fails the close.",
+    "Add `pub mod followups;` to crates/athena-core/src/lib.rs between `fake` and `gate_counts`.",
+    "In crates/athena-core/src/run/close.rs add the one call line after `push_closing_records(&mut closing);` (line 38). Do not touch `trailers`, `commit_hold` or `land_or_block`. Do not edit manage.rs, steward.rs or reading.rs unless a compile error shows a need, and say so in the report.",
+    "Write the unit tests in followups.rs: a table of items (the two fgwz-style follow-up items; a plain exclusion list; 'Changes to the proposal record format'; an empty string; an empty list), dedupe by key through a second `queue` call on records that include the first call's files, the cap with 7 items, a duplicate item inside one reading, a pathless item (Files line is `records/`), the banned-word and fragment cases built from `boundary_words()` and `boundary_fragments()`, `queued_work` visibility, and the assertion that `dependency_ids_in`, `followed_up_ids` and `retried_job` find nothing in each queued text.",
+    "In crates/athena-core/src/run/tests.rs add `script_with_out_of_scope(items)`; make `base_script()` call it with `[\"Other files\"]`. Add the end-to-end tests named in the demonstrations: landed close on a branch with an intervention commit, a non-landed close using the existing failing-verifier scripts, the re-close with real records, the cap, and the held-then-retried job modelled on run/tests.rs:4390.",
+    "In crates/athena-cli/tests/drain.rs add `followups_appear_in_queued_work_after_a_job_closes`: `rated_scenario()`, set `scenario.reading[\"out_of_scope\"]`, `fx.athena(scenario.script())`, `athena.queue(FIRST)`, `athena.go(..)` twice, then assert `queued_ids(&fx)` holds the follow-up ids and not the original job.",
+    "Add the CHANGELOG.md bullet under `### Added` in `[Unreleased]`, copying the neighbouring bullets' form.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, `cargo test -p athena-core --test refusal_corpus` and `cargo test -p athena-cli --test drain`. Fix what fails without loosening any test. If the gate refuses the closing commit that carries the request files, report it instead of weakening a rule."
+  ],
+  "risks": [
+    {
+      "risk": "The wording markers can queue an item that is really a plain exclusion (for example 'the user's own request is unchanged') or work already filed elsewhere.",
+      "mitigation": "Whole-phrase matching, the cap of 5 per job, the key dedupe, and a ui line for every queued request so a person sees it. The marker list is one const covered by a table-driven test; a wrong request is closed with `athena close`."
+    },
+    {
+      "risk": "The closing commit now adds job directories that hold only a request.json. If a gate rule, the history check or `athena check` objects when the closing commit is not the steward's, the close would fail.",
+      "mitigation": "Read: `closing_jobs` counts only candidate, verification and outcome files (invariant.rs:240-269) and `landing` checks only the landed job (386-446). The end-to-end tests commit through the real gate on a branch with an intervention commit and a records-only commit; if the gate refuses, the producer reports it and does not weaken the rule."
+    },
+    {
+      "risk": "The queued text could be read by `followed_up_ids` as a request that continues the original job, and the reading of the follow-up would then be refused by `check_prior_result_and_scope` when the drain reads it.",
+      "mitigation": "The text uses no follow-up phrase before a job id (decision 3); a unit test asserts `followed_up_ids`, `dependency_ids_in` and `retried_job` find nothing; corpus cases `follow-up-on-a-job-the-reading-ignores` (refusal_corpus.rs:1938) and `root-cause-cites-two-jobs-without-relying` (1925) run in `cargo test --locked`."
+    },
+    {
+      "risk": "A retry is a new job with its own reading, so a retry whose reading repeats the same items queues them again, citing the new job.",
+      "mitigation": "The brief asks for dedupe per original job and item; a retry's follow-ups cite the retry. The cap bounds each job. Dedupe across jobs is not planned."
+    },
+    {
+      "risk": "The Files line falls back to `records/` when the item names no path, and a reader may treat `records/` as a governance area.",
+      "mitigation": "This is the brief's stated fallback and matches `from_change` (steward.rs:626-634). The reader makes its own deliverable list from the request, so Files is a hint, not a limit."
+    },
+    {
+      "risk": "run/close.rs is outside the listed deliverables, while manage.rs, steward.rs and reading.rs are listed and left unedited.",
+      "mitigation": "The edit is one call line; the logic is in followups.rs. The producer edits the three listed files only if a compile error or a test shows a need, and says so in its report. The reason for close.rs is in decision 1."
+    },
+    {
+      "risk": "The test fixtures need words from the boundary lists, and the boundary scan fails any tracked file that names them.",
+      "mitigation": "The tests build them at run time from `athena_context::briefs::boundary_words()` and `boundary_fragments()`, as briefs.rs:2369 does; `cargo test -p xtask --test policy` runs in `cargo test --locked`."
+    },
+    {
+      "risk": "Loading `Records` at HEAD in `close_dispatched` adds cost to every close.",
+      "mitigation": "`follow_up_files` returns before loading when no out_of_scope item passes `is_follow_up`; `score_on` already loads `Records` at HEAD for each closing attempt (close.rs:24)."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "closing.files of a dispatched job's closing",
+      "dependent": "crates/athena-core/src/run/close.rs `close_dispatched` and `land_or_block` (close.rs:8-168, 244-415); callers run/mod.rs:1328, 1349, 1355 and `finish_dispatched` (1375-1376)",
+      "kind": "code",
+      "test": "followups_queue_one_request_per_follow_up_item_of_a_closed_job (landed); a second test in run/tests.rs closes a job with a failing verifier script (reuse the failing-verifier scripts there) and asserts the follow-ups are queued on a non-landed close; followups_are_queued_once_per_job_and_capped part (e) covers the held job.",
+      "reason": "All five non-hold outcomes (landed, rejected, failed, blocked, stale) pass the new line before the landing branch (close.rs:105) and the plain commit (close.rs:132); `land_or_block` clones `closing.files` per attempt (close.rs:272), so the follow-up files have fixed ids across the 3 landing attempts. Hold paths (`hold_for_disk`, `hold_for_slot_wait`, `commit_hold` close.rs:216) and `retry_landing` (close.rs:461) never reach it: a held job queues nothing, and a blocked close already queued them."
+    },
+    {
+      "name": "commit shape of closing and landing commits (they now add other jobs' request.json)",
+      "dependent": "crates/athena-gate/src/invariant.rs: `closing_jobs` (240-269), `landing` (386-446), `names_existing_work` (845-878), `trailers_stopped` (825-834); history walk and pull request classification `classify_pre_merge` (320-353)",
+      "kind": "rule",
+      "test": "followups_queue_one_request_per_follow_up_item_of_a_closed_job commits through the real gate (`build_commit` inside `land_or_block`, close.rs:333; `commit_records_with` for the others) on a branch that holds an intervention commit and the ask records-only commit. The classification functions are not changed, so no other crate's tests are re-targeted; `cargo test --locked` runs athena-gate's tests anyway.",
+      "reason": "None of these functions is changed. `closing_jobs` counts only candidate.json, verification.json, outcome.json and outcome-landed.json, so a request.json-only job directory is not a closing job and adds no SeveralJobs refusal. `landing` checks only the landed job's files and an `Athena-Job` trailer, and the trailer vector is unchanged (decision 6). Commit-shape table: (1) job landing: code, closing records of the job and follow-up requests; valid, one closing job. (2) records-only closing (rejected, failed, blocked, stale): fingerprint unchanged, `Athena-Job` names the existing job, `names_existing_work` passes (or `trailers_stopped` and `touches_records` after the cutover). (3) intervention commit: unchanged, queues nothing. (4) steward records-only commit that adds request-only jobs: unchanged, the same file shape. (5) hold commit: unchanged, queues nothing. (6) retry-after-block landing (`outcome-landed.json`): not through `close_dispatched`, queues nothing; the blocked close before it queued them. (7) `athena close` of a job that never ran: unchanged."
+    },
+    {
+      "name": "a job directory that holds only request.json",
+      "dependent": "crates/athena-gate/src/jobs.rs record ordering checks (282-400: request.json received at or before the reading; `{path} has no request record`)",
+      "kind": "rule",
+      "test": "followups_queue_one_request_per_follow_up_item_of_a_closed_job (the gate accepts the commit).",
+      "reason": "The ordering rule fires on a later record that lacks `request.json`; a directory with only `request.json` is the first record a job has, exactly as `athena ask --later` and the steward write it (steward.rs:1427-1430)."
+    },
+    {
+      "name": "steward-channel requests now also come from closed jobs",
+      "dependent": "crates/athena-core/src/steward.rs `queued_work` (405), `improvement_requests` (376), `DRAINED_CHANNELS` (342); crates/athena-cli/src/drain.rs:4507; crates/athena-core/src/hestia.rs:974 (reads `improvement_requests`)",
+      "kind": "code",
+      "test": "followups_appear_in_queued_work_and_a_pathless_item_still_builds; followups_appear_in_queued_work_after_a_job_closes (crates/athena-cli/tests/drain.rs).",
+      "reason": "They read the open requests of `REQUEST_CHANNEL`; a follow-up is the same record as a steward request, so it is listed, ordered by `received_at`, and given the steward's guaranteed plan turn. Queue order and reprioritizing are out of scope, so none of this is changed; hestia.rs stays unedited."
+    },
+    {
+      "name": "the request text cites the original job id",
+      "dependent": "crates/athena-core/src/reading/topics.rs `dependency_ids_in` (25), `followed_up_ids` (479), `continued_jobs` (512), `referenced_jobs` (533); reading/retry.rs `retried_job` (201); reading/checks.rs `check_prior_result_and_scope` (6); steward.rs `interrupted_work` (450-456)",
+      "kind": "rule",
+      "test": "A unit test in followups.rs asserts `dependency_ids_in(text)` is empty, `followed_up_ids(text)` is empty and `retried_job(&records,text)` is None for each queued request of the fgwz-style items; plus the regression run of corpus cases `follow-up-on-a-job-the-reading-ignores` (refusal_corpus.rs:1938) and `root-cause-cites-two-jobs-without-relying` (1925) inside `cargo test --locked`.",
+      "reason": "The text cites the id in `Queued from the out_of_scope list of job <id>.` and in the key line, with no 'Depends on' line, no 'try again on' and no follow-up phrase before an id, so the id is a reference only (decision 3): it is shown to the reader and never holds the item, is never read as a retry (so `interrupted_work` does not treat the follow-up as a retry of the original), and the reading is not required to restate the original job's result."
+    },
+    {
+      "name": "an item that holds a banned word or a machine-path fragment",
+      "dependent": "crates/athena-core/src/steward.rs `StewardRequest::new` boundary rules (544-559) and admission's request-text boundary scan (reading/topics.rs `refuse_banned_input`, 316)",
+      "kind": "rule",
+      "test": "A unit test in followups.rs with words taken from `boundary_words()` and `boundary_fragments()` (built at run time so no tracked file names them): an item with a banned word is queued with the word reworded and `scan_request_input(text)` empty; an item whose path word is `a` plus a fragment plus `/x.rs` is skipped and the rest of the plan is returned.",
+      "reason": "`new` rewords a banned word in the title, body and acceptance (`plain_boundary_text`, athena-context briefs/boundary.rs:264) and refuses only a path that holds a hit (steward.rs:552-559). `queue` turns that `Err` into a `skipped` entry and a ui line; the close never fails."
+    },
+    {
+      "name": "base_script()'s reader output",
+      "dependent": "crates/athena-core/src/run/tests.rs `base_script()` (223-284) and every test that calls it or `athena(&repo,&state)`",
+      "kind": "code",
+      "test": "cargo test -p athena-core (the whole run/tests.rs module) in cargo test --locked.",
+      "reason": "`base_script()` becomes a call to `script_with_out_of_scope([\"Other files\"])`, producing the identical JSON, so existing tests see no change."
+    },
+    {
+      "name": "record types and config keys",
+      "dependent": "crates/athena-data `AnyRecord`, `check_record_file`, athena-gate record schemas; athena.toml and defaults.toml",
+      "kind": "rule",
+      "test": null,
+      "reason": "The change adds none. It writes the existing `athena.request/1` record through `RequestQueue`, so schema, gate and config checks are unaffected; athena-data is not edited."
+    },
+    {
+      "name": "which readings are accepted",
+      "dependent": "crates/athena-core/src/reading/checks.rs out_of_scope checks and crates/athena-core/tests/refusal_corpus.rs (cases `delivery-verb-out-of-scope-shared-helpers-refused` 989, `delivery-verb-out-of-scope-release-notes-refused` 998, `delivery-verb-out-of-scope-names-it-accepted` 1031)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus (inside cargo test --locked).",
+      "reason": "`is_follow_up` runs only on an already accepted reading and is not a `check_*` step of `refusing_check`, so `every_acceptance_check_has_a_refusing_corpus_case` and `corpus_covers_the_listed_input_forms` need no new case or form tag. The corpus is the reading gate's, so the input forms of this wording rule (follow-up phrase, own or separate job, plain list of files and rules, empty list, an item citing a job id) are covered by the table-driven tests in followups.rs, and the corpus is run as a regression check."
+    },
+    {
+      "name": "new tests and new text in tracked files",
+      "dependent": "xtask/shard-timings.txt and xtask/tests/policy.rs (boundary scan of tracked files)",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test policy (inside cargo test --locked).",
+      "reason": "No new test file is created (followups.rs holds unit tests in src; run/tests.rs and drain.rs already exist), so shard-timings needs no new line. Test fixtures build any banned word from `boundary_words()` at run time, so the scan finds none."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A test in run/tests.rs. Step 5 adds `script_with_out_of_scope(items)`, a copy of `base_script()` (run/tests.rs:223-284) whose reader output takes its out_of_scope list from `items`; `base_script()` calls it with `[\"Other files\"]`, so existing tests are unchanged. The test builds `athena_with(&repo,&state,PASSES,<the free-space fn the landing tests pass>,script_with_out_of_scope([\"Propose these as follow-up requests: queue order and the backlog hold\",\"Plan critic memory runs as its own job\",\"athena.toml, defaults.toml, workflows, docs/decisions.md and records/\"]))`. For a realistic branch it first commits one intervention with `athena.intervene(&InterveneArgs{what, why, class:\"docs\", category:\"mistake\", job:None, with_staged:false}, &Quiet)` (manage.rs:313; the same literal is used at crates/athena-cli/tests/auditor.rs:239), then runs `finished_job(&athena)` (run/tests.rs:2106). The branch then holds the ask records-only commit, the intervention commit, and the job landing with its two follow-up requests. It differs from the real repository in being a one-job temporary repository with no `athena/records` cutover (`trailers_stopped` is false, so `names_existing_work` is exercised, invariant.rs:149-153).",
+      "command": "cargo test -p athena-core followups_queue_one_request_per_follow_up_item_of_a_closed_job",
+      "observes": "The job is Landed. `Records::load(&athena.git,&athena.head()?)` holds exactly 2 new jobs besides the original and the intervention, each with a request on channel `REQUEST_CHANNEL`. Each request text contains the original job id and an `Out-of-scope item key:` line. For each text, `StewardRequest::new` accepted it (it was built by it): `request_text_acceptance(text)` is a non-empty list of `- ` bullets and `request_text_touches(text)` is non-empty. `dependency_ids_in(text)`, `followed_up_ids(text)` and `retried_job(&records,text)` are empty or None.",
+      "fails_without": "Without the call in `close_dispatched` no Request records are written, so the count of 2 steward-channel jobs fails. If `is_follow_up` ignored 'propose' or 'own job' the count would be below 2.",
+      "seam": "Production entry point: `Athena::go` (via `finished_job`) into `finish_dispatched` (run/mod.rs:1375), `close_dispatched` (run/close.rs:8) and the new `Athena::follow_up_files`. Guard: the reading must pass `check_reading_text`; the test asserts the job reaches Landed first, and the producer adjusts the item wording, not the checks, if a reading is refused. Fixture: the fake agent driver and script injected through `athena_with` (exists, run/tests.rs:190), `finished_job` (exists, 2106), `intervene` (exists, manage.rs:313). New: `script_with_out_of_scope`, added by plan step 5. The fake only returns the reader's JSON; the follow-up logic runs in production code."
+    },
+    {
+      "criterion": 2,
+      "method": "Two parts in one test. (a) In followups.rs: call `queue(&records,&reading,&taken)` with out_of_scope of `[\"athena.toml, defaults.toml, workflows, docs/decisions.md and records/\",\"the changelog\",\"Changes to the proposal record format\",\"\"]`, then with an empty list. Records and Reading are built values, as in `fixture_reading` (run/tests.rs:1996) or an equivalent in followups.rs. (b) In run/tests.rs: `finished_job` with the default `base_script()`, whose out_of_scope is `[\"Other files\"]`. The producer also runs `cargo test -p athena-core --test refusal_corpus` to show the reading gate is unchanged (see risks for the case ids).",
+      "command": "cargo test -p athena-core followups_ignore_plain_exclusions_and_an_empty_out_of_scope",
+      "observes": "For (a) the plan holds no files, no jobs and no skipped entries, and nothing is returned as an error, for the plain exclusions and for the empty list. For (b) the job is Landed and no job on `REQUEST_CHANNEL` exists after the close.",
+      "fails_without": "If `is_follow_up` matched every item, or matched 'proposal', the plain exclusion would queue a request and the assertions on files and jobs would fail. If an empty list returned an error, the empty-list call would fail.",
+      "seam": "`followups::queue` is a pure function of `Records`, `Reading` and a `taken` set, so no double is used; it is added by plan step 1. Part (b) uses `finished_job` and `athena_with` (exist, run/tests.rs:2106, 190)."
+    },
+    {
+      "criterion": 3,
+      "method": "(a) In followups.rs: call `queue` on a reading with 3 distinct follow-up items, add the returned `NewFile` requests to a `Records` through the existing record parser (or `AnyRecord::Request`), and call `queue` again with the same reading. (b) A reading with 7 follow-up items: the first call queues `MAX_PER_JOB` = 5; a second call on the records that now hold them queues 0, so the cap counts existing requests. (c) A reading that repeats one item twice queues it once. (d) In run/tests.rs: after `finished_job` with 3 follow-up items, load `Records` at the new HEAD and call `followups::queue(&records, &finished.reading, &taken)` again with the real committed records; this is the state a re-close of the same job id meets. (e) Same file: use `athena_with(...,crate::test_support::low_once_verifying, script_with_out_of_scope(...))` as in `low_disk_before_the_verifier_holds_the_job_and_a_retry_resumes_it` (run/tests.rs:4390-4401): the held job's `go` returns the `LowDisk` hold and the records hold no steward-channel job; after `athena.retry(...)` and `go` on the retry job, the follow-ups exist once and cite the retry job.",
+      "command": "cargo test -p athena-core followups_are_queued_once_per_job_and_capped",
+      "observes": "Each key appears in exactly one request. The number of steward requests citing one job equals its distinct follow-up items, at most 5. The second call and the re-close return an empty plan. A held job queues none, and the retry job's close queues once.",
+      "fails_without": "Without the key scan the second `queue` call adds duplicates and (d) fails. Without the cap, the 7-item reading queues 7. If the hook ran in `commit_hold`, the held job in (e) would already have requests.",
+      "seam": "`followups::queue(records, reading, taken)` with `Records` from `Records::load` (exists, store.rs:381). End-to-end parts use `athena_with`, `finished_job`, `low_once_verifying` and `Athena::retry` (all exist: run/tests.rs:190, 2106, 4401, 4456). `script_with_out_of_scope` is added by plan step 5. Nothing under test is inside a double."
+    },
+    {
+      "criterion": 4,
+      "method": "Two tests match this filter. (a) `followups_appear_in_queued_work_and_a_pathless_item_still_builds` in followups.rs: after `queue`, add the files to a `Records`, then call `steward::queued_work(&records)` (steward.rs:405). Also build a request from an item that names no path (`Propose a follow-up on the planner deadline`). (b) `followups_appear_in_queued_work_after_a_job_closes` in crates/athena-cli/tests/drain.rs: `let mut scenario = rated_scenario();` (drain.rs:6056), set `scenario.reading[\"out_of_scope\"] = json!([...follow-up items...])` (the `reading` field is `pub`, common/mod.rs:418, and the fake reader returns it, common/mod.rs:572-573), `fx.athena(scenario.script())`, `athena.queue(FIRST)`, `athena.go(..)` twice as `a_running_job_stays_out_of_the_queue` does (drain.rs:5459-5462), then `queued_ids(&fx)` (drain.rs:4783). The drain reads the same function: crates/athena-cli/src/drain.rs:4507.",
+      "command": "cargo test --locked followups_appear_in_queued_work",
+      "observes": "(a) The queued ids equal the follow-up job ids, each listed by `queued_work` with `read == false`; the pathless request's `request_text_touches` is `[\"records/\"]` and `StewardRequest::new` accepted it. (b) After the original job closes, `queued_ids(&fx)` lists exactly the follow-up job ids and not the original job.",
+      "fails_without": "If `queue` wrote a channel other than `REQUEST_CHANNEL`, or no files, `queued_work` would not list the ids. If the pathless item gave no Files, `StewardRequest::new` would refuse it (steward.rs:568) and the request would be missing.",
+      "seam": "`steward::queued_work` (exists, steward.rs:405). The drain test uses the existing `Fixture`, `rated_scenario`, `queued_ids` and `Scenario.reading` (all exist, see lines above). The reader script with follow-up items is set in the new test (plan step 6); no change to common/mod.rs."
+    },
+    {
+      "criterion": 5,
+      "method": "Run `git diff --stat` and `git status --short`. Read followups.rs (new, untracked, so `git status` lists it) for the only text it assembles: the `ProposedChange.request` string that `StewardRequest::from_change` parses and renders. The final request text and the `Request` record come only from steward.rs (`StewardRequest::new` line 535, `RequestQueue::apply` line 663). The dedupe hash is `athena_data::sha256_hex`.",
+      "command": "git diff --stat",
+      "observes": "No path under athena.toml, defaults.toml, .github/workflows, docs/decisions.md, records/ or crates/athena-core/src/hestia.rs. Cargo.toml and every Cargo.lock are unchanged, so no new crate or dependency. athena-data is untouched, so no new `AnyRecord` variant or `Config` key. The only changed files are the ones in the plan's files list.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Add one bullet under `### Added` in `[Unreleased]` (CHANGELOG.md:8-14), copying the form of the neighbouring bullets.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The bullet says: when a job closes, each out_of_scope item of its reading that proposes or names separate work is queued once, up to 5 per job, as its own steward request citing the original job; items that only list files or rules are told apart by their wording (propose, follow-up, own or separate job or request) and are not queued; and a repeated close queues nothing new.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "On the final tree run, in this order, the three checks Athena runs: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. `cargo test --locked` includes `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-cli --test drain` and `cargo test -p xtask --test policy` (the boundary scan over tracked files, which the new test texts must pass: banned words are built from `athena_context::briefs::boundary_words()` and `boundary_fragments()`, never written out). These supplement the behavior tests of criteria 1-4.",
+      "command": "cargo test --locked",
+      "observes": "All three commands exit 0. The run includes the new tests `followups_queue_one_request_per_follow_up_item_of_a_closed_job`, `followups_ignore_plain_exclusions_and_an_empty_out_of_scope`, `followups_are_queued_once_per_job_and_capped` and the two `followups_appear_in_queued_work...` tests, and every existing test in run/tests.rs that goes through `base_script()`.",
+      "fails_without": "Without the `close_dispatched` call, `followups_queue_one_request_per_follow_up_item_of_a_closed_job` fails and `cargo test --locked` exits non-zero. A line over rustfmt width in followups.rs, or an unused item (for example `MAX_PER_JOB` or a marker const left unused), makes `cargo fmt --all --check` or `cargo clippy ... -D warnings` exit non-zero. If the `base_script()` change altered its default reading, existing tests in run/tests.rs would fail. If followups.rs is not declared in lib.rs, its tests are not built and the criterion 1-4 filters match nothing.",
+      "seam": "The three check commands Athena runs (listed under 'Checks Athena will run'). Fixture: the whole workspace test suite, with the tests of criteria 1-4 as the new members. The seam exists today; no step adds it."
+    }
+  ],
+  "open_questions": [
+    "User: should an out_of_scope item that already cites a job id for work filed elsewhere (this brief's own item 'a separate request from introspection 20261114-052207-pj25' is one) be skipped? The plan queues it, because the wording markers decide and the cap and key dedupe bound the cost. Skipping it needs one more rule, and the code cannot tell whether the cited job is the same work."
+  ],
+  "producer_section_sha256": "13799059610fb2bebfae7f4c752e066c118342c2f9e370ce577743fff0d9e96b"
+}
