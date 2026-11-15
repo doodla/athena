@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045749-qcg2",
+  "round": 2,
+  "at": "2026-11-15T10:59:05.220028694Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The loop's list parse is looser than the backtest's, so a bad status or rival superseded link passes the loop and fails at the final verdict.",
+      "evidence": "`link_pairs` deserialises only `Pair { older, newer }` and ignores `status`. `ConfirmedLinks::parse` requires `status` to be `amended` or `superseded` (the `LinkStatus` enum) and rejects one decision superseded by two entries. A candidate link with `status = \"amend\"`, a missing status, or a second `superseded` for the same older id gives no `ListUnreadable` in the loop, but `ConfirmedLinks::load` fails in the backtest test at the final verdict. That is the gap the job is meant to close. Fix: In athena-data, validate the candidate `[[link]]` status (amended or superseded) and the one-superseder rule, or report any candidate list that `ConfirmedLinks::parse` would reject as `ListUnreadable`. Add one unit test each.",
+      "location": "Decision 1 / Step 2 (ListUnreadable) vs crates/athena-data/src/decision_links.rs:69-73 and crates/athena-cli/src/decisions.rs:75-94",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "For a change that passes, the docs listing reaches only the job log, not the producer or the verifier, so stale docs after a clean amendment are still caught only at the final verdict.",
+      "evidence": "`unreconciled_in_snapshot` returns `Option<String>` and the loop breaks on `gate.is_none()` (producer.rs:545-556). The plan prints the notes only through `ctx.ui.line` at the candidate gate, which neither the producer nor the verifier reads. The listing is meant to address job 20261010-225741-yvk0's stale docs, but it only does so when the gate is already failing. This follows from producer.rs being out of scope, and the plan states it openly. Fix: Keep the open question. State this limit plainly in D187 and the CHANGELOG entry, and name the follow-up (showing the notes in the loop or the verifier brief) as the step that actually prevents stale docs.",
+      "location": "Decision 5 / Risks (producer-visible listing absent when the gate passes)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test filters (`decisions`, `citing`, `the_real_list`) depend on test names the plan never fixes; a filter that matches nothing passes with 0 tests run.",
+      "evidence": "Criterion 7 runs `cargo test --locked -p athena-cli --lib the_real_list` and criterion 5 runs `cargo test --locked -p athena-data citing`, but step 5 only says 'Add the tests of criteria 3 and 7' and step 3 'the token-form tests' without names. cargo test exits 0 when a filter matches no test. Fix: Give every new test of criteria 1, 3, 5, 6 and 7 a name in the plan, and make each Run filter a substring of those names.",
+      "location": "Demonstrations for criteria 3, 5 and 7 (cargo test name filters); Steps 3 and 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The shifted-log unit test cannot fail: with the same lists and both logs naming every pair, any version of `link_problems` returns an empty list.",
+      "evidence": "`link_problems` takes no line numbers, and in (b) base and candidate lists are the same. The plan's own 'fails without' admits that line keying is 'not even expressible' here. The real proof that a shift is harmless is criterion 4's shifted real-log backtest test. Fix: Mark (b) as a regression check and point to the criterion 4 test as the shift demonstration, or have (b) also assert that the old line-keyed match would report the shifted hits.",
+      "location": "Demonstration for criterion 1, case (b)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The listing will include historical review documents and the lines this same change adds, which adds noise.",
+      "evidence": "docs/design/reviews/*.md cite D08 and D39 (grep: athena-v0-review-1.md, athena-v0-review-2.md, decision-sets-review-1.md). They record past reviews, not current claims. The plan's own decision-sets.md §8 rewrite, which cites D156, would also be listed back to the producer. Fix: Skip docs/design/reviews/ and lines the change itself added, or label them in the note.",
+      "location": "Step 3 (`citing_lines` scope)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "`cat_blobs` already reads many blobs in one git process.",
+      "evidence": "athena-git lib.rs:988 `cat_blobs(&[String])` uses `cat-file --batch`. docs/ has about 59 .md files, so one `cat_blob` call per file starts one git process per file. Fix: Use `cat_blobs` with the oids from `ls_tree_under`.",
+      "location": "Step 6 (docs read with one `cat_blob` per file)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan names; nothing was run. It puts the check in the right place: `decision_gate` (checks.rs:21), which has exactly two callers and is already run by the producer loop (producer.rs:498-502) and by the candidate gate. Moving the phrase parse into athena-data gives the loop and the backtest one shared parser and respects the crate rules. Keying links on (older, newer) removes the line-number root cause. The 'only what this change introduced' rule is sound because the log is append-only, and it keeps an existing break from blocking every later job. The dependents list covers the real readers of `Link.line`, the parse, the gate's message and its prefix (retry.rs:491), and the decision log's pin and mirror rules. I found no reader it omits. The demonstrations exercise real seams (`Athena::go` with the existing governed-repo helpers, and the real backtest on a shifted copy of the real log). No external service is involved and no athena.toml field is added. My findings are all minor or nit. The candidate list is parsed more loosely than `ConfirmedLinks::parse`, so a bad status still slips through to the final verdict. The docs listing reaches nobody when the gate passes, a limit the plan states openly. The test name filters are not tied to named tests. One criterion-1 case cannot fail. Plus two nits on listing noise and batching the docs read."
+}

@@ -5470,3 +5470,47 @@ should replace those estimates with its figures.
   `baseline_for`) and the introspections of the six jobs. Ran: `cargo test -p athena-core verify` and `cargo test -p
   athena-core a_failing_check_citing`. Not measured: whether verifiers or owners act on the finding, or how many past
   rejections cited a path the job did not change.
+
+## D187 · A job that edits the decision log is checked before the verifier for links that no longer resolve, and links are keyed on ids
+
+- **Case:** Jobs 20261104-153450-y72x and 20261010-225741-yvk0, in the failure class 20261104-153440-xf17, were
+  caught only at the final verdict. The first moved entries of `docs/decisions.md`, so every `line` in
+  `docs/decision-links.toml` was off by three and the backtest's condition (a) failed. The second reversed D08 and
+  left the decision, and the docs that restate it, unchanged. The introspections 20261104-153423-esay,
+  20261106-012825-ay9k, 20261106-042756-h268, 20261106-191104-tvy1 and 20261108-010633-1v8s record the same cause.
+- **Decision:** Amends D156. Root cause: a `[[link]]` carried the line of its phrase in the log, which moves
+  whenever text is added above it, and nothing resolved a link until the final verdict's backtest, so a change to
+  the log broke links that no producer step looked at. Links are now keyed on the pair of the `older` and `newer`
+  ids and carry no line; the two pairs that two phrases each named (D46 with D79, D87 with D88) are one link
+  each, and a stray `line` key in an older list is ignored. The phrase parse moved from `athena-cli` to
+  `athena_data::decision_links`, so the backtest and the producer-side check read the log through one parser.
+  `decision_gate` in `crates/athena-core/src/run/checks.rs`, which already runs in the producer loop and again at
+  the candidate, now also calls `link_problems` when the change's paths include `docs/decisions.md`. It compares
+  the candidate with the base and holds the job, before the verifier and with the one send-back, for a link no
+  phrase of the log names, for a phrase the change adds that has no link, for a statement-opening phrase with no
+  id on a line the base lacks, and for a list that does not parse. A fault already at the base is not blamed on the
+  change. The gate's sentence now tells the producer to write `Amends <id>` or `Supersedes <id>` in the new entry
+  (`Amends <id> in prose only` for a decision it checked and left standing), which the log already did in
+  practice. The gate also lists the docs lines, outside the log, that cite the id of a decision the change
+  adds a phrase for: every line for a decision a phrase supersedes, the first five and a count for one it amends.
+  The list is advisory and never fails a job: it is appended to the send-back text of a job the gate holds, and
+  printed as `decisions  note:` lines at the candidate gate. The expected share of past accepted readings newly
+  refused is 0%, as no reading rule changes.
+- **Alternatives:** Keep `line` and compare it when present: a stale number would fail as before. Judge the whole
+  candidate log against the whole list with no base comparison: a base with one broken link would hold every later
+  job that edits the log, and the producer could not fix what it did not cause. Report only a link no phrase names:
+  a new phrase with no link would still pass the loop and fail at the verdict. Fail a job on a citing docs line: the
+  list reads ids, not meaning, and a false positive would block a job. List every citation for every kind of
+  change: a checked-and-stands entry for D08 would list each line that cites D08 though nothing it says changed.
+- **Tradeoff:** The list of citing lines is a heuristic on whole-token ids and misses a sentence that restates a
+  decision without its id. A producer whose change passes the gate does not see the list in the loop; it appears in
+  the job's log. Follow-ups outside this change: show the list to the producer in the loop for a passing change
+  (`producer.rs`), reword the fixed intro of the send-back (`send_back.rs`) and the governing-decisions sentence of
+  the producer brief (`briefs.rs`), which still say "checked and stands" and not `Amends <id>`.
+- **Reversal cost:** Low; remove `link_problems`, `new_hits` and the citation functions, the call in `decision_gate`
+  and the tests, and restore a `line` to each link.
+- **Provenance:** Read: `crates/athena-data/src/decision_links.rs`, `crates/athena-core/src/run/checks.rs`
+  (`decision_gate`), `crates/athena-cli/src/backtest.rs` (condition (a)), `crates/athena-cli/src/decisions.rs` and
+  `docs/decision-links.toml`. Ran: `cargo test -p athena-data decision_links`, `cargo test -p athena-core governed`
+  and `cargo test -p athena-cli --test backtest`. Not measured: how many past jobs the check would have held, or
+  whether producers act on the list of docs lines.

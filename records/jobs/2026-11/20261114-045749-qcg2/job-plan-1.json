@@ -1,0 +1,332 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-045749-qcg2",
+  "round": 1,
+  "at": "2026-11-15T10:45:58.942585787Z",
+  "invocation_seq": 2,
+  "approach": "Extend the existing decision gate rather than add a new one. `decision_gate` in crates/athena-core/src/run/checks.rs:21 is already called from the producer loop (`unreconciled_in_snapshot`, producer.rs:499) and again at the candidate (`unreconciled_decisions`, mod.rs:1944). Beside `unreconciled`, add a pure `unresolved_links(list, log)` in athena-data. It parses the log's supersession phrases and reports every `[[link]]` whose (older, newer) pair no phrase in the log names, or whose ids are not log entries. To make that possible without a cli dependency, move the phrase parse (`parse_supersessions`, `Hit`, `HitKind`, `Parsed` and their helpers) from athena-cli backtest.rs into athena-data/decision_links.rs. backtest re-exports them, so there is one parser. `decision_gate` runs the new check only when `docs/decisions.md` is in the changed paths. It reuses `GATE_REASON_PREFIX`, so the send-back and the retry reader (reading/retry.rs:491) carry the message unchanged. Key links on ids: drop `line` from `Link` (decisions.rs:47) and from the toml, and match on (older, newer) in `Link::matches`, `unlisted` and `not_found`. Duplicate pairs in the toml (D46/D79, D87/D88) merge into one entry each. Add a pure `citing_lines(decisions, docs)` in athena-data. The candidate gate prints its hits as advisory UI lines: lines of docs/**/*.md other than decisions.md that cite the `older` id of a link the change adds. It never fails the job. Record the change as D187, which amends D156, with one new link D156→D187. Update decision-sets.md §8 step 2 and the CHANGELOG. The D08 re-queue and the failure-class record are Athena actions outside this diff.",
+  "decisions": [
+    {
+      "choice": "A link resolves when its (older, newer) pair is named by a supersession phrase of the log, using the backtest's own parse, moved into athena-data.",
+      "reason": "This is condition (a) of the backtest (backtest.rs:306), which today runs only in `cargo test` at the final verdict. Running the same rule in the producer loop removes the late catch, and one parser means the two cannot drift. Moving the parse is needed because athena-core cannot depend on athena-cli (system facts, crate reach).",
+      "rejected": [
+        {
+          "option": "Resolve only means both ids are `## D<n>` headings",
+          "why": "A link with no phrase would pass the loop and still fail the backtest at the final verdict, which is the failure being removed."
+        },
+        {
+          "option": "Reimplement a phrase scan inside athena-core",
+          "why": "A second parser would drift from the backtest's."
+        }
+      ]
+    },
+    {
+      "choice": "Drop `line` from `Link` and match on (older, newer). Parsing still ignores a stray `line` key, because neither `Link` nor `Pair` denies unknown fields.",
+      "reason": "A line number is the root cause of the shifts in jobs 20261104-153450-y72x and 20261010-225741-yvk0. The base list of a running job may still carry `line`, and it must still parse (decision_links.rs:69-73).",
+      "rejected": [
+        {
+          "option": "Keep `line` optional and still compare it when present",
+          "why": "A stale number would keep failing as before."
+        },
+        {
+          "option": "Reject a `line` key with deny_unknown_fields",
+          "why": "It would make the base list of an in-flight job unreadable."
+        }
+      ]
+    },
+    {
+      "choice": "Run the resolve check for every job whose changed paths include docs/decisions.md. It judges the candidate's list against the candidate's log, and only when the base has a readable list.",
+      "reason": "This is what the request says. It reuses the existing early return for an empty base list (checks.rs:27) and the warning-and-skip for an unreadable base list (checks.rs:641), so repos without a list and the repair path are unchanged.",
+      "rejected": [
+        {
+          "option": "Also run it when only decision-links.toml changes",
+          "why": "Outside the request. The backtest test still covers that case."
+        }
+      ]
+    },
+    {
+      "choice": "The sentence listing is advisory UI lines at the candidate gate (`unreconciled_decisions`, which has `ctx.ui`). It is built by a pure function `citing_lines` over docs/**/*.md except decisions.md, and it matches the id as a whole token.",
+      "reason": "Listing is a heuristic on ids and cannot read meaning, so it must not fail a job. Printing in the loop would need a producer.rs edit, which is out of scope.",
+      "rejected": [
+        {
+          "option": "Fail the job on a citing line",
+          "why": "A false positive would block jobs and the user asked for a list."
+        },
+        {
+          "option": "Print from producer.rs in the loop",
+          "why": "producer.rs is out of scope for this job."
+        }
+      ]
+    },
+    {
+      "choice": "Update the `reconciling_edits` fixture in run/tests.rs so the new entry says `Amends D02` and its link has no `line`. Leave the gate's existing wording unchanged.",
+      "reason": "The fixture's entry (tests.rs:3181) has no phrase, so it would now be unresolved. That is correct behavior, and the fixture should model a real reconciling entry. The exact-text test at tests.rs:3371 keeps passing because the unreconciled message is untouched.",
+      "rejected": [
+        {
+          "option": "Loosen the check so the fixture passes",
+          "why": "It would re-open the gap the request closes."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/decision_links.rs",
+      "action": "modify",
+      "purpose": "Receive the moved phrase parse (Hit, HitKind, Parsed, parse_supersessions, helpers). Add `unresolved_links` and `Unresolved`, and `citing_lines` and `Citation`. Move the four parse unit tests here and add the new tests (broken pair, shifted log, token match, advisory).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "`decision_gate` also runs `unresolved_links` when `docs/decisions.md` is in `changed`, worded under `GATE_REASON_PREFIX`. `unreconciled_decisions` prints the advisory citing lines. Read docs via `git.ls_tree_under`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Fix `reconciling_edits` (entry says `Amends D02`, link without `line`). Add the not-checked/held tests and the advisory listing test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/backtest.rs",
+      "action": "modify",
+      "purpose": "Re-export the moved parse. Drop the moved helpers and their unit tests. Remove `line` from the not-found finding text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/decisions.rs",
+      "action": "modify",
+      "purpose": "Drop `Link.line`. Match on (older, newer). Update the unit tests (unlisted/unfound fixture, no `line`). Add tests that the real list has no `line` and no duplicate pair, and that the real list resolves.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/backtest.rs",
+      "action": "modify",
+      "purpose": "Drop `line` from fixtures. Compare hit pairs with link pairs. Add the shifted-copy test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Remove every `line`, merge the duplicate D46/D79 and D87/D88 entries, rewrite the header (key is older/newer id; no line-number advice), and add the D156→D187 link.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D187 only (Provenance bullet, `Amends D156`); no existing entry is touched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/decision-sets.md",
+      "action": "modify",
+      "purpose": "§8 step 2: describe id keying, the in-loop resolve check and the advisory listing.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the check, the id keying and the listing, naming the root cause (links tied to line numbers).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-data/src/decision_links.rs, the phrase parse in athena-cli backtest.rs:45-199 and the parse unit tests at backtest.rs:600-626, and the gate in checks.rs:6-52 and 617-691.",
+    "In athena-data/decision_links.rs, move `HitKind`, `Hit`, `Parsed`, `PHRASES`, `take_id`, `target_ids`, `opens_statement`, `entry_heading` and `parse_supersessions` from backtest.rs. Move the four parse tests with them. Add `Unresolved` (older, newer and the reason: unknown older entry, unknown newer entry, or no phrase) and `unresolved_links(list_text, log_text) -> Result<Vec<Unresolved>, String>`. It uses `link_pairs` and `parse_supersessions(log)`, and `Err` means the list does not parse. Add unit tests for the broken pair, an unknown id and a log shifted by inserted lines.",
+    "Add `Citation` and `citing_lines(decisions: &[String], docs: &[(String, String)]) -> Vec<Citation>`. It matches the id as a whole token on every line and skips docs/decisions.md. Add unit tests for the token forms `D08`, `D08's`, `(D08)`, `D080`, `D8`, a prefix word.",
+    "In athena-cli/backtest.rs, `pub use athena_data::decision_links::{Hit, HitKind, Parsed, parse_supersessions}` and delete the moved code. Keep `standing`. In check_parse (backtest.rs:324-332) drop the line from the not-found reason.",
+    "In athena-cli/decisions.rs, drop `Link.line`; `Link::matches` compares older and newer only. Update the unit-test fixtures (lines 409-411, 428, 442, 536-537) and fix the unlisted/unfound test to use a pair not in the log. Add a test that an old-format list with `line` still parses, plus the real-list tests (no `line`, no duplicate pair, resolves with `unresolved_links`).",
+    "In athena-core/src/run/checks.rs, extend `decision_gate`. When the base list is non-empty and `changed` contains the log path, call `unresolved_links` on the candidate texts. Build the reason with `GATE_REASON_PREFIX`: the existing unreconciled message unchanged, a link sentence appended or alone, naming each pair and the phrase to write. An unparsable candidate list is its own finding. In `unreconciled_decisions`, after a clean or failing reason, print `decisions  note: <path>:<line> cites <id>, which this change amends: <line text>` for each `citing_lines` hit. The ids are the `older` ids of links in the candidate list that are not in the base list. Read docs through `git.ls_tree_under(candidate, \"docs/\")` and `committed_text`; skip files that are not `.md`.",
+    "In athena-core/src/run/tests.rs, fix `reconciling_edits` (entry text `Amends D02`, link without `line`). Add the broken-link list constant and the tests: edit without decisions.md lands, edit with decisions.md and a broken link closes with the prefix and producer=2/verifier=0, and a docs/guide.md citing D02 gives the note and the job lands.",
+    "Edit crates/athena-cli/tests/backtest.rs: drop `line` from LINKS, change `has(...)` to ignore the line, compare the hit-pair set with the link-pair set (not `hits.len() == links.len()`), and add the test that inserts 25 lines into a copy of the real log.",
+    "Rewrite docs/decision-links.toml: no `line`, merge D46/D79 and D87/D88, new header, add the D156→D187 link with a comment. Append D187 to docs/decisions.md (next id after D186, Provenance bullet, `Amends D156` once, no other phrase). Edit decision-sets.md §8 step 2 and add the CHANGELOG [Unreleased] entry.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix findings in the files listed."
+  ],
+  "risks": [
+    {
+      "risk": "A phrase-based resolve check refuses a legitimate entry that has a link but no `Amends`/`Supersedes` phrase, as the old test fixture did.",
+      "mitigation": "This is the same rule the backtest already applies at the final verdict (backtest.rs:306), so no new class of entry is refused, only earlier. The gate message for this case names the phrase to write. The tests.rs fixture is fixed in step 5."
+    },
+    {
+      "risk": "D187's text accidentally contains `amends`, `supersedes` or `superseded by` and creates an unlisted hit, which is a condition-a finding.",
+      "mitigation": "The entry holds the phrase `Amends D156` once and no other. The real-log backtest test catches a stray one, and step 8 runs it."
+    },
+    {
+      "risk": "The advisory listing is noisy because many docs cite D08.",
+      "mitigation": "Cap the printed lines per decision (20, then `and N more`). The listing is UI only and never fails the job."
+    },
+    {
+      "risk": "The step that moves the parse breaks a test that calls the now-private helpers or imports from backtest.",
+      "mitigation": "The helpers' tests move with them, and `backtest` re-exports every public item that other crates and tests used (decisions.rs:24, tests/backtest.rs:4)."
+    },
+    {
+      "risk": "The in-loop listing is missing: the loop sends back on a failing gate but prints no advisory lines until the candidate gate.",
+      "mitigation": "Printing in the loop would need a producer.rs edit, which is out of scope. The candidate gate runs before the PR and the verifier and prints the lines in the job log."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "decision_gate result: now also reports unresolved links when docs/decisions.md changed",
+      "dependent": "crates/athena-core/src/run/checks.rs `decision_gate` (line 21), called by `unreconciled_decisions` (checks.rs:633, from run/mod.rs:1944) and `unreconciled_in_snapshot` (checks.rs:671, from run/producer.rs:499)",
+      "kind": "code",
+      "test": "The tests/run tests at tests.rs:3264, 3301, 3313, 3356, 3790, 3808, 4343, 4393 keep passing, plus the new case A/B tests. The unreconciled-only message is byte-identical, which tests.rs:3371 pins.",
+      "reason": null
+    },
+    {
+      "name": "GATE_REASON_PREFIX closing reason",
+      "dependent": "crates/athena-core/src/reading/retry.rs:491 (`retry_findings`) and reading.rs:3664 test, which read `GATE_REASON_PREFIX`",
+      "kind": "code",
+      "test": null,
+      "reason": "The new link reason starts with the same prefix, so the retry reader carries it as one finding unchanged; the constant is not edited."
+    },
+    {
+      "name": "The gate's Option<String> send-back text",
+      "dependent": "producer.rs:498-690 send-back and the `gate.is_some()` branch (a nested run skips it, producer.rs:498)",
+      "kind": "code",
+      "test": "The case B test above.",
+      "reason": "The producer loop takes any string the gate returns and sends the producer back once. The shape is unchanged, and the loop's stop and send-back branches are not edited."
+    },
+    {
+      "name": "The candidate gate's entry condition",
+      "dependent": "run/mod.rs:1938: `recorded_checks.is_none() && self.nested.is_none()` guard (resume at verifier, nested run)",
+      "kind": "code",
+      "test": "tests.rs:4343, the resume test, still passes.",
+      "reason": "The guard is not changed; a resume and a nested run still skip the gate, including the new check and listing."
+    },
+    {
+      "name": "`Link.line` field of ConfirmedLinks (decisions.rs:47)",
+      "dependent": "crates/athena-cli/src/backtest.rs:329 (`link.line` in check_parse) and tests/backtest.rs:144 (`l.line == line`)",
+      "kind": "code",
+      "test": "The tests/backtest.rs tests are updated in step 6 and run in `cargo test --locked -p athena-cli --test backtest`.",
+      "reason": null
+    },
+    {
+      "name": "The phrase parse moved to athena-data and re-exported as `backtest::{Hit, HitKind, Parsed, parse_supersessions}`",
+      "dependent": "crates/athena-cli/src/decisions.rs:24 (`use crate::backtest::{Hit, Parsed, Status}`), decisions.rs:196, tests/backtest.rs:4 (`backtest::HitKind`, `backtest::parse_supersessions`, `backtest::standing`), backtest unit tests at backtest.rs:596-626 that call private `take_id`/`target_ids`",
+      "kind": "code",
+      "test": "The four parse unit tests move to decision_links.rs with the parse. `standing` and `Status` stay in backtest. Run `cargo test --locked -p athena-cli` and `-p athena-data`.",
+      "reason": null
+    },
+    {
+      "name": "docs/decision-links.toml format (`line` dropped)",
+      "dependent": "crates/athena-cli/src/main.rs:520 and commands.rs (`athena backtest`, which calls `backtest::run` → `ConfirmedLinks::load`)",
+      "kind": "code",
+      "test": "tests/backtest.rs real-log tests.",
+      "reason": "The loader ignores unknown keys, so an old-format list still loads. The command prints findings from `check_parse`, whose not-found message loses the line."
+    },
+    {
+      "name": "docs/decisions.md gains D187 appended at the end",
+      "dependent": "crates/athena-cli/src/decisions.rs:246-310 tests (`the_decision_log_is_well_formed_and_only_appended_to`, pin 359622 bytes) and mirrors.rs:354, 1057 (`decision_log_problems` rule `decision entries`) and design_surface.rs:759",
+      "kind": "rule",
+      "test": "decisions.rs `the_decision_log_is_well_formed_and_only_appended_to` and the mirrors tests.",
+      "reason": "Appending after the pin leaves the pinned prefix unchanged, and `PINNED_LEN` is not raised. D187 follows D186 (the last heading, decisions.md:5434) and has a Provenance bullet. design_surface.rs only needs an entry for surface changes, and this plan changes none."
+    },
+    {
+      "name": "The wording that tells a producer to add a `[[link]]`",
+      "dependent": "crates/athena-context/src/briefs.rs:1486 `governing_decisions_section` and briefs/reader.rs:613 (producer and reader text about adding a link)",
+      "kind": "code",
+      "test": null,
+      "reason": "The text stays true: it says to add a link with `older` and `newer`. Briefs are out of scope for this job, and their budget tests are unaffected because the files are not edited."
+    },
+    {
+      "name": "Config and records read by the gate",
+      "dependent": "athena.toml `[drain]`, `[parallel] max_concurrency`, role limits and records",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The gate reads only git blobs at the base and candidate commits (`committed_text`, checks.rs:694) and the snapshot blobs. It reads no config key, no record and no job state, and it keeps no shared state, so concurrent jobs do not interact. athena.toml is unchanged."
+    },
+    {
+      "name": "The prose that says each link carries its line",
+      "dependent": "docs/design/decision-sets.md:455-463 (describes `line` in the confirmed list), docs/design/context-engineer.md:101, docs/design/requirements-map.md:222",
+      "kind": "rule",
+      "test": null,
+      "reason": "decision-sets.md §8 step 2 is edited in step 7. The other two only mention the file's existence, not its `line` key, so they stay true."
+    },
+    {
+      "name": "Refusal and matching rules of the reading gate",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (the reading gate `refusing_check`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan changes no reading, plan or request parser. The new matching rules are the id-token match in `citing_lines` and the pair resolution, which are not reading checks. Input forms: id as a whole word (`D08`, `D08's`, `(D08)`, `D08.`), a longer id (`D080`), a one-digit id (`D8`), an id inside another word, and the file excluded or included by path. Each is a case in the new athena-data unit tests, not a corpus case; the corpus is run unchanged as a regression check."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New unit tests in crates/athena-data/src/decision_links.rs call `unresolved_links` on strings. One has a link whose pair no phrase names. One has a link whose newer id is not an entry. One has a good list and a log that is then shifted: ten lines are inserted before the phrase, and the same list resolves unchanged.",
+      "command": "cargo test --locked -p athena-data decision_links",
+      "observes": "The broken pair gives one Unresolved with the reason (no phrase, or unknown entry); the shifted log gives none.",
+      "fails_without": "Without the check, the pair with no phrase returns no finding and the broken-link test fails. Without id keying, the shifted-log test fails.",
+      "seam": "`unresolved_links(list_text, log_text)`, a pure function that this plan adds in step 2. The fixtures are in-test string constants, so nothing is injected and no double stands in for the rule. The production caller is `decision_gate` (checks.rs:21)."
+    },
+    {
+      "criterion": 2,
+      "method": "New tests in crates/athena-core/src/run/tests.rs use the existing `governed_repo`/`governed_job` helpers (tests.rs:3168-3222), which run `Athena::go` with the fake agent script. The base list governs only `src/` and holds a link D02→D99 that the log cannot resolve. Case A: the producer edits the README only, the verifier runs once and the job lands. Case B: the producer also appends an entry to docs/decisions.md, so the job closes with `GATE_REASON_PREFIX` naming D02→D99, the producer runs twice (one send-back) and the verifier runs 0 times.",
+      "command": "cargo test --locked -p athena-core governed",
+      "observes": "A job without docs/decisions.md in its changes is not checked. A job with it and a broken link is held before the verifier. The existing governed_* tests, with the fixture of step 5, still pass.",
+      "fails_without": "Without the check, case B's job lands (verifier count 1) and the assertion on the closing reason fails.",
+      "seam": "`Athena::go` with the fake agent `Script` (`editing`, tests.rs:3196) and `governed_repo` — all exist today. The production entry is `unreconciled_in_snapshot` → `decision_gate`. The only new piece is the broken-link list constant, which step 5 adds."
+    },
+    {
+      "criterion": 3,
+      "method": "New test in crates/athena-cli/src/decisions.rs reads the real docs/decision-links.toml as a toml table. It asserts no [[link]] table has a `line` key, that every (older, newer) pair appears once, and that the header text does not contain `update the lines`. The existing `repo_file` helper reads the file.",
+      "command": "cargo test --locked -p athena-cli decisions",
+      "observes": "The real list is keyed on ids only and has no duplicate pair.",
+      "fails_without": "The unedited toml has `line` keys and the duplicated D46/D79 and D87/D88 pairs, so the test fails.",
+      "seam": "`repo_file(path)` and `ConfirmedLinks::parse` in decisions.rs; both exist (decisions.rs:478)."
+    },
+    {
+      "criterion": 4,
+      "method": "The existing tests in crates/athena-cli/tests/backtest.rs pass after `line` is dropped. The `the_confirmed_list_has_the_known_hits` test is changed to compare (older, newer, status), and `the_real_log_has_no_condition_a_finding` compares the set of hit pairs with the set of link pairs. A new test reads the real docs/decisions.md and inserts 25 lines before the first phrase (before D11). It then runs `backtest::run_on` with the real confirmed list and the empty `Records`.",
+      "command": "cargo test --locked -p athena-cli --test backtest",
+      "observes": "No finding with condition `a`, and the decision view is the same as for the unshifted log.",
+      "fails_without": "With line-keyed matching (Link::matches today, decisions.rs:55), every hit after the insertion becomes unlisted and not_found, so the test fails.",
+      "seam": "`backtest::run_on` and `ConfirmedLinks::load`, both existing (backtest.rs:447, decisions.rs:97). The shifted text is built in the test from the real file."
+    },
+    {
+      "criterion": 5,
+      "method": "The athena-data test calls `citing_lines(&[\"D08\"], docs)` on in-test strings. The lines D08, D08's and (D08) are listed, and D080, D8 and decisions.md are not. A new core test commits docs/guide.md citing D02 into the governed repo. The producer reconciles with the fixed `reconciling_edits` and the job lands.",
+      "command": "cargo test --locked -p athena-data citing && cargo test --locked -p athena-core governed_edit_lists",
+      "observes": "The listing returns the citing path:line and text. In the job, the UI shows `decisions  note: docs/guide.md:1 cites D02` and the state is still Landed, so it is advisory.",
+      "fails_without": "Without the listing, the UI has no note line and the assertion fails. A listing that fails the job turns Landed into Failed and the second assertion fails.",
+      "seam": "`citing_lines`, a pure function added in step 3. The core test uses the existing `governed_job` with `Lines` UI capture (tests.rs:3238). The production caller is `unreconciled_decisions` (checks.rs:626), whose new note step reads docs via `git.ls_tree_under` (lib.rs:950), which exists."
+    },
+    {
+      "criterion": 6,
+      "method": "The producer appends D187 to docs/decisions.md and adds `[[link]] older=D156 newer=D187 status=amended` to the toml. D187's Provenance bullet names the read files, and it holds the phrase `Amends D156` once and no other phrase. The producer edits decision-sets.md §8 step 2 and the CHANGELOG [Unreleased] section. The existing test `the_decision_log_is_well_formed_and_only_appended_to` (decisions.rs:247) checks the pinned bytes, ascending ids and Provenance. The backtest real-log test checks the new hit is listed.",
+      "command": "cargo test --locked -p athena-cli decisions && cargo test --locked -p athena-core mirrors",
+      "observes": "The log guard passes with the first 359622 bytes untouched, there are no condition-a findings, and `git diff` of docs/decisions.md shows only added lines at the end.",
+      "fails_without": "If an existing entry is edited the pin hash differs and the guard test fails. If D187 has no phrase or link the backtest finds an unlisted hit or an unfound link.",
+      "seam": "The existing guard `check_log` and the mirror rule `decision_log_problems` (mirrors.rs:354) run on the real file. Nothing new is injected."
+    },
+    {
+      "criterion": 7,
+      "method": "A new test in decisions.rs calls `unresolved_links` on the real docs/decision-links.toml and docs/decisions.md. The backtest real-log test (tests/backtest.rs:115) runs the same list through condition (a).",
+      "command": "cargo test --locked -p athena-cli",
+      "observes": "Both give no findings on the final tree, with the D187 entry and the D156→D187 link included.",
+      "fails_without": "A link that no phrase of the final log names fails the new test.",
+      "seam": "`repo_file` and `unresolved_links`, both available after step 2. Real repository files are the inputs, not a double."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three recorded checks on the final tree. Also run `cargo test --locked -p athena-core --test refusal_corpus` as a regression check: the plan changes no reading-gate rule, so the corpus outcome should not change. This plan did not read the corpus case ids, so none are cited.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All pass; the moved parse tests keep passing in their new module, and the gate tests tests.rs:3264-4430 pass with the updated fixture.",
+      "fails_without": "A moved test left behind that calls a private helper, a missed `link.line` use at backtest.rs:329, or a changed gate message would fail the suite.",
+      "seam": "None: the whole workspace test suite."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "8377c23ae20d233a8205dfda4ee745f234ceaecd0044ff2c374eaf574ba1a228"
+}

@@ -453,14 +453,37 @@ superseded by an inactive one, and every `code-check` decision names a test that
    (id, `status` active or superseded, `superseded_by`, `amended_by`), derived from the parse plus the confirmed
    list; the log's prose is untouched. Only these four fields are derived; `kind`, `phase`, `paths` and
    `enforcement` per entry are a separate job. **The confirmed list** is `docs/decision-links.toml`: one `[[link]]`
-   per phrase the parse finds, with its line, the older and newer entry id, and the confirmed status
-   (`superseded` or `amended`). The list, not the log's wording, decides the status: D11 by D39 (line 322, the one
-   hit the user has confirmed by name) and D87 by D88 are `amended`, D46 by D79 is `superseded`, and the prose-only
-   hits from D48 on are `amended`. The other hits are the parse's own reading, listed for the user to confirm.
-   `athena backtest` condition (a) now compares the parsed hits with this list in both directions (a hit missing
-   from the list, or listed and not found, is a finding) and no longer holds a hard-coded pair list. Conditions
-   (b) to (d) are unchanged. The parse reads the first id only of "Amends D39's exemption list and D06" (line
-   1287), so D06 is not a hit there.
+   per pair of an older and a newer entry id that a phrase of the log names, with the confirmed status
+   (`superseded` or `amended`). **The pair is the key** (D187): a link carries no line of the log, because a line
+   moves whenever text is added above it and jobs 20261104-153450-y72x and 20261010-225741-yvk0 were caught at the
+   final verdict for exactly that; two phrases that name one pair (D46 with D79, D87 with D88) share one link, and a
+   `line` key left in an older list is ignored. The list, not the log's wording, decides the status: D11 by D39 (the
+   one hit the user has confirmed by name) and D87 by D88 are `amended`, D46 by D79 is `superseded`, and the
+   prose-only hits from D48 on are `amended`. The other hits are the parse's own reading, listed for the user to
+   confirm. `athena backtest` condition (a) compares the parsed pairs with this list in both directions (a pair
+   missing from the list, or listed and not named by any phrase, is a finding) and no longer holds a hard-coded
+   pair list. Conditions (b) to (d) are unchanged. The parse reads the first id only of "Amends D39's exemption
+   list and D06" (in D60), so D06 is not a hit there. The parse lives in `athena_data::decision_links`
+   (`parse_supersessions`), so the backtest and the next check read the log through one parser.
+
+   **The check in the producer loop** (D187). A job whose changed paths include `docs/decisions.md` is held
+   before the verifier, with the producer's one send-back, when `decision_gate` finds (all three are the halves of
+   condition (a), run early and blaming only what the change introduces, so a fault already at the base never
+   holds a job):
+   - a `[[link]]` whose pair no phrase of the candidate log names (the link is new, or the change removed the
+     phrase);
+   - a phrase the change adds, such as `Amends D02` in a new entry, whose pair has no `[[link]]`;
+   - a phrase that opens a statement but names no entry id, on a line the base log does not have;
+   - and a candidate list that does not parse.
+
+   A job that does not edit the log is not checked. The gate's message tells the producer to write `Amends <id>` or
+   `Supersedes <id>` in the new entry, and `Amends <id> in prose only` for a decision it checked and left
+   standing. **The advisory list** names the lines of other `docs/**/*.md` files that cite, as a whole id token,
+   the older decision of a phrase the change adds: every line (at most 40) for a decision a phrase supersedes,
+   the first five and a count for one it amends, since an amendment usually leaves what other docs say true. It
+   reads ids and not meaning, and never fails a job: a held job's send-back carries it after the finding, and
+   the candidate gate prints each line as a `decisions  note:` line in the job log. A producer whose change
+   passes sees no list in the loop; showing it there needs a change to `producer.rs` and the send-back text.
 3. Set selection by code for the reader (cap K), producer, verifier and truncation record (§3), **with the runtime
    per-job set-size check and its test**.
 4. The host-error record written by the client (§4), landing as a watcher trigger, the watcher with exact matching,

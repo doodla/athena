@@ -3178,14 +3178,14 @@ mod produce_and_verify_order_tests {
             (
                 "docs/decisions.md".into(),
                 Some(format!(
-                    "{DECISIONS}\n## D13 · The README edit\n\n- Checked D02: the edit changes nothing it decides.\n\
+                    "{DECISIONS}\n## D13 · The README edit\n\n- Amends D02 in prose only: the edit changes nothing it decides.\n\
                      - **Provenance:** c\n"
                 )),
             ),
             (
                 "docs/decision-links.toml".into(),
                 Some(format!(
-                    "{GOVERNING}\n[[link]]\nline = 1\nolder = \"D02\"\nnewer = \"D13\"\nstatus = \"amended\"\n"
+                    "{GOVERNING}\n[[link]]\nolder = \"D02\"\nnewer = \"D13\"\nstatus = \"amended\"\n"
                 )),
             ),
         ]
@@ -3367,14 +3367,15 @@ mod produce_and_verify_order_tests {
             done.reason
         );
         assert!(!done.reason.contains("D12"), "{}", done.reason);
-        // Today's message, word for word.
+        // The message, word for word.
         assert_eq!(
             done.reason,
             format!(
                 "{GATE_REASON_PREFIX} the change touches code that docs/decisions.md records decisions for: \
-                 D02 (README.md). Add an entry to docs/decisions.md that amends or supersedes each decision \
-                 (or says it was checked and stands), and a matching [[link]] in docs/decision-links.toml \
-                 whose older is the decision and whose newer is the new entry."
+                 D02 (README.md). Add an entry to docs/decisions.md that says `Amends <id>` or \
+                 `Supersedes <id>` for each decision (write `Amends <id> in prose only` for one you checked \
+                 and left standing), and a matching [[link]] in docs/decision-links.toml whose older is the \
+                 decision and whose newer is the new entry."
             )
         );
         // One send-back and no third producer run; no verifier.
@@ -3815,6 +3816,201 @@ mod produce_and_verify_order_tests {
         let (done, counts, _) = governed_job(&self::repo(), Vec::new());
         assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
         assert_eq!(counts.all().3, 1);
+    }
+
+    /// The list of a repository whose `src/` is governed by D12 and whose README is governed by nothing, so the
+    /// producer's README edit needs no entry and only the link check is under test.
+    const GOVERNING_SRC: &str = "[[governs]]\ndecision = \"D12\"\npaths = [\"src/\"]\n";
+
+    /// The new link of a producer that adds `entry` to the log and, when `link` is given, that link to the list.
+    fn log_edits(entry: &str, link: Option<(&str, &str)>) -> Vec<(String, Option<String>)> {
+        let mut edits = vec![(
+            "docs/decisions.md".to_string(),
+            Some(format!(
+                "{DECISIONS}\n## D13 · The README edit\n\n{entry}\n- **Provenance:** c\n"
+            )),
+        )];
+        if let Some((older, newer)) = link {
+            edits.push((
+                "docs/decision-links.toml".to_string(),
+                Some(format!(
+                    "{GOVERNING_SRC}\n[[link]]\nolder = \"{older}\"\nnewer = \"{newer}\"\nstatus = \"amended\"\n"
+                )),
+            ));
+        }
+        edits
+    }
+
+    #[test]
+    fn governed_link_check_does_not_run_for_a_job_that_leaves_the_log_alone() {
+        // The list gains a link no phrase names, but docs/decisions.md is not among the changed paths.
+        let repo = governed_repo(GOVERNING_SRC);
+        let list = format!(
+            "{GOVERNING_SRC}\n[[link]]\nolder = \"D02\"\nnewer = \"D99\"\nstatus = \"amended\"\n"
+        );
+        let (done, counts, said) =
+            governed_job(&repo, vec![("docs/decision-links.toml".into(), Some(list))]);
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(counts.all().3, 1, "the verifier ran once: {said:#?}");
+    }
+
+    #[test]
+    fn governed_link_check_holds_a_job_whose_log_edit_leaves_a_link_unresolved() {
+        use athena_data::decision_links::GATE_REASON_PREFIX;
+        // The entry says it checked D02 and writes no phrase, so the link from D02 to D13 names nothing.
+        let repo = governed_repo(GOVERNING_SRC);
+        let edits = log_edits("- Checked D02; it stands.", Some(("D02", "D13")));
+        let (done, counts, said) = governed_job(&repo, edits);
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            done.reason.starts_with(GATE_REASON_PREFIX),
+            "{}",
+            done.reason
+        );
+        assert!(
+            done.reason
+                .contains("[[link]] from D02 to D13 that no phrase"),
+            "{}",
+            done.reason
+        );
+        assert!(done.reason.contains("`Amends D02`"), "{}", done.reason);
+        assert!(!crate::disk::is_environment_reason(&done.reason));
+        // One send-back and no verifier.
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (2, 0), "{said:#?}");
+        assert!(
+            !said.iter().any(|l| l.starts_with("verifier   ")),
+            "{said:#?}"
+        );
+    }
+
+    #[test]
+    fn governed_link_check_holds_a_new_phrase_that_has_no_link() {
+        use athena_data::decision_links::GATE_REASON_PREFIX;
+        let repo = governed_repo(GOVERNING_SRC);
+        let edits = log_edits("- Amends D02 in prose only.", None);
+        let (done, counts, said) = governed_job(&repo, edits);
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            done.reason.starts_with(GATE_REASON_PREFIX),
+            "{}",
+            done.reason
+        );
+        assert!(
+            done.reason.contains("`Amends D02` in D13"),
+            "{}",
+            done.reason
+        );
+        assert!(
+            done.reason
+                .contains("no [[link]] with older = \"D02\" and newer = \"D13\""),
+            "{}",
+            done.reason
+        );
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (2, 0), "{said:#?}");
+    }
+
+    #[test]
+    fn governed_link_check_holds_a_new_statement_with_no_id() {
+        let repo = governed_repo(GOVERNING_SRC);
+        let edits = log_edits("- **Superseded by** nothing yet.", None);
+        let (done, counts, _) = governed_job(&repo, edits);
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            done.reason
+                .contains("supersession phrase with no decision id"),
+            "{}",
+            done.reason
+        );
+        assert_eq!((counts.all().1, counts.all().3), (2, 0));
+    }
+
+    #[test]
+    fn governed_link_check_lets_a_log_edit_that_resolves_every_link_land() {
+        let repo = governed_repo(GOVERNING_SRC);
+        let edits = log_edits("- Amends D02 in prose only.", Some(("D02", "D13")));
+        let (done, counts, said) = governed_job(&repo, edits);
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(counts.all().3, 1, "{said:#?}");
+    }
+
+    #[test]
+    fn governed_link_check_lets_a_log_edit_that_only_shifts_lines_land() {
+        // The base log already holds a phrase and its link; the producer inserts text above it.
+        let repo = governed_repo(&format!(
+            "{GOVERNING_SRC}\n[[link]]\nolder = \"D02\"\nnewer = \"D12\"\nstatus = \"amended\"\n"
+        ));
+        let log = DECISIONS.replace(
+            "- **Provenance:** b",
+            "- Amends D02 in prose only.\n- **Provenance:** b",
+        );
+        commit_file(&repo, "docs/decisions.md", &log);
+        let shifted = log.replacen(
+            "# Decisions\n",
+            "# Decisions\n\nAdded 1\nAdded 2\nAdded 3\n",
+            1,
+        );
+        let (done, counts, said) =
+            governed_job(&repo, vec![("docs/decisions.md".into(), Some(shifted))]);
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(counts.all().3, 1, "{said:#?}");
+    }
+
+    #[test]
+    fn governed_edit_lists_docs_lines_citing_an_amended_decision_and_still_lands() {
+        let repo = governed_repo(GOVERNING);
+        commit_file(
+            &repo,
+            "docs/guide.md",
+            "D02 says the README is the entry point.\n",
+        );
+        let (done, counts, said) = governed_job(&repo, reconciling_edits());
+        // The list is advisory: the job lands, and the job log shows the line.
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(counts.all().3, 1, "{said:#?}");
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("decisions  note: docs/guide.md:1 cites D02")),
+            "{said:#?}"
+        );
+        // The log itself is not listed.
+        assert!(
+            !said.iter().any(|l| l.contains("decisions.md:")),
+            "{said:#?}"
+        );
+    }
+
+    #[test]
+    fn governed_send_back_carries_the_docs_lines() {
+        let repo = governed_repo(GOVERNING);
+        commit_file(
+            &repo,
+            "docs/guide.md",
+            "D02 says the README is the entry point.\n",
+        );
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        // An entry with the phrase and no link, on every pass: the gate holds the job.
+        let edits = log_edits("- Amends D02 in prose only.", None);
+        let (done, said) =
+            governed_job_with(&repo, editing(counts.clone(), prompts.clone(), edits));
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        let prompts = prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 2, "{said:#?}");
+        assert!(!prompts[0].contains("docs/guide.md:1"), "{}", prompts[0]);
+        assert!(
+            prompts[1].contains("docs/guide.md:1 cites D02"),
+            "{}",
+            prompts[1]
+        );
+        assert!(
+            prompts[1].contains("Advisory, not a finding"),
+            "{}",
+            prompts[1]
+        );
+        // The closing reason stays short: it names the finding and not the docs lines.
+        assert!(!done.reason.contains("docs/guide.md"), "{}", done.reason);
     }
 
     /// Runs one job whose reader names the `change` capability, so `ensure_changelog` adds CHANGELOG.md and the

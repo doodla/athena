@@ -4,6 +4,7 @@
 use athena_cli::backtest::{self, HitKind, Status};
 use athena_cli::decisions::{self, ConfirmedLinks, LinkStatus};
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// A decisions log with exactly the four supersession hits the review expects, and some "Amends" entries.
@@ -60,12 +61,10 @@ fn intervention(root: &Path, id: &str, job: Option<&str>, category: &str, class:
 
 /// The confirmed list for `LOG`: every hit, with D87 amended and not superseded.
 const LINKS: &str = "\
-[[link]]\nline = 5\nolder = \"D46\"\nnewer = \"D79\"\nstatus = \"superseded\"\n\
-[[link]]\nline = 8\nolder = \"D46\"\nnewer = \"D79\"\nstatus = \"superseded\"\n\
-[[link]]\nline = 11\nolder = \"D62\"\nnewer = \"D80\"\nstatus = \"amended\"\n\
-[[link]]\nline = 11\nolder = \"D43\"\nnewer = \"D80\"\nstatus = \"amended\"\n\
-[[link]]\nline = 14\nolder = \"D87\"\nnewer = \"D88\"\nstatus = \"amended\"\n\
-[[link]]\nline = 17\nolder = \"D87\"\nnewer = \"D88\"\nstatus = \"amended\"\n";
+[[link]]\nolder = \"D46\"\nnewer = \"D79\"\nstatus = \"superseded\"\n\
+[[link]]\nolder = \"D62\"\nnewer = \"D80\"\nstatus = \"amended\"\n\
+[[link]]\nolder = \"D43\"\nnewer = \"D80\"\nstatus = \"amended\"\n\
+[[link]]\nolder = \"D87\"\nnewer = \"D88\"\nstatus = \"amended\"\n";
 
 fn links() -> ConfirmedLinks {
     ConfirmedLinks::parse(LINKS).unwrap()
@@ -128,8 +127,56 @@ fn the_real_log_has_no_condition_a_finding_against_the_confirmed_list() {
         "{:?}",
         report.lacking_target
     );
-    assert_eq!(report.hits.len(), confirmed.links.len());
+    // Several phrases may name one pair; the pair is the key.
+    let hit_pairs: BTreeSet<(&str, &str)> = report
+        .hits
+        .iter()
+        .map(|h| (h.older.as_str(), h.newer.as_str()))
+        .collect();
+    let link_pairs: BTreeSet<(&str, &str)> = confirmed
+        .links
+        .iter()
+        .map(|l| (l.older.as_str(), l.newer.as_str()))
+        .collect();
+    assert_eq!(hit_pairs, link_pairs);
+    assert_eq!(
+        link_pairs.len(),
+        confirmed.links.len(),
+        "a pair is listed twice"
+    );
     assert_eq!(report.decision_view.len(), report.entries);
+}
+
+#[test]
+fn lines_inserted_before_a_phrase_produce_no_condition_a_finding() {
+    let root = real_root();
+    let text = std::fs::read_to_string(root.join("docs/decisions.md")).unwrap();
+    let confirmed = ConfirmedLinks::load(&root).unwrap();
+    // Neutral lines after the first line, before the first entry heading, which the parse does not read.
+    let (first, rest) = text.split_once('\n').unwrap();
+    let shifted = format!(
+        "{first}\n{}{rest}",
+        "A line of the log's header.\n".repeat(25)
+    );
+    let records = backtest::Records::default();
+    let before = backtest::run_on(&text, &confirmed, &records);
+    let after = backtest::run_on(&shifted, &confirmed, &records);
+    let a: Vec<_> = after
+        .findings
+        .iter()
+        .filter(|f| f.condition == "a")
+        .collect();
+    assert!(a.is_empty(), "{a:?}");
+    // Every phrase moved by 25 lines, and the typed view of the decisions is the same.
+    assert_eq!(before.hits.len(), after.hits.len());
+    assert!(
+        before
+            .hits
+            .iter()
+            .zip(&after.hits)
+            .all(|(b, a)| a.line == b.line + 25)
+    );
+    assert_eq!(before.decision_view, after.decision_view);
 }
 
 #[test]
@@ -137,17 +184,15 @@ fn the_confirmed_list_has_the_known_hits_and_the_view_follows_it() {
     let root = real_root();
     let text = std::fs::read_to_string(root.join("docs/decisions.md")).unwrap();
     let confirmed = ConfirmedLinks::load(&root).unwrap();
-    let has = |line, older, newer, status| {
+    let has = |older, newer, status| {
         confirmed
             .links
             .iter()
-            .any(|l| l.line == line && l.older == older && l.newer == newer && l.status == status)
+            .any(|l| l.older == older && l.newer == newer && l.status == status)
     };
-    assert!(has(322, "D11", "D39", LinkStatus::Amended));
-    assert!(has(1028, "D46", "D79", LinkStatus::Superseded));
-    assert!(has(1760, "D46", "D79", LinkStatus::Superseded));
-    assert!(has(1909, "D87", "D88", LinkStatus::Amended));
-    assert!(has(1930, "D87", "D88", LinkStatus::Amended));
+    assert!(has("D11", "D39", LinkStatus::Amended));
+    assert!(has("D46", "D79", LinkStatus::Superseded));
+    assert!(has("D87", "D88", LinkStatus::Amended));
     assert!(confirmed.links.iter().any(|l| l.newer == "D48"));
 
     let parsed = backtest::parse_supersessions(&text);
