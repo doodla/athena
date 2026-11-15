@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045657-96np",
+  "round": 4,
+  "at": "2026-11-14T23:21:42.350331045Z",
+  "invocation_seq": 9,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The plan does not say whether the test-build gate `records_runs_here` comes before or after the reach check, so the unreachable-snapshot test may never reach `reach`.",
+      "evidence": "`records_runs_here` is meant to mirror `demo_runs_here`, which returns false in test and `test-support` builds unless a seam is installed. Step 3 orders the checks as package gate, then reach, then run, but never places `records_runs_here`. If it gates the whole stage, test (b) `records_loop_unreachable_snapshot_ends_the_job_before_the_verifier` installs no seam, so the stage returns early, the verifier runs, and the test fails for the wrong reason. The test would still detect a missing reach check, but only by accident. Fix: Say that `records_runs_here` gates only the process run, after the package gate and reach. Or say that test (b) installs a counting `argv_seam` and asserts it was called 0 times.",
+      "location": "Plan step 3 and the Criterion 3(b) demonstration; crates/athena-core/src/run/checks.rs:557-569",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In real jobs the request's send-back and early-end conditions will rarely fire. The plan states this, but it should not be read as having made those conditions effective.",
+      "evidence": "Dispatch writes the evidence snapshot or fails (mod.rs:1149-1154), and `agent_spec` sets `Policy.evidence` from the same `is_dir()` test (reading.rs:415-416). So the policy half of `reach` fires only when the snapshot is deleted after dispatch. Today's `status --snapshot` prints no list labelled by job ids (throughput.rs:836-844), so the constant rule cannot fire. The gate's usual criterion gives no numeric range, and its phrase (`landing time`) appears on no output line, so the range rule does not fire either. For most jobs the stage records the command and output and nothing more. That matches the request's core (run the command and record the evidence), but not the conditions it names for sending work back. Fix: No design change needed. Keep the two open questions to the user prominent. Have the CHANGELOG bullet and D183 say plainly that on current output the stage mostly records, so operators do not expect send-backs it cannot make.",
+      "location": "Approach steps 3 and 5; Known limit; Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan pulls the measure phrase from the criterion text with a narrow pattern, so many phrasings will give no phrase.",
+      "evidence": "The phrase is taken as the words after `real records`, between `the` and `it prints` / `it shows` / `is within`. Wordings such as `prints a landing time` or `the reported median` give no phrase and end up `not judged`. That fails safe (nothing is sent back), so it is only a coverage gap. Fix: Unit-test a few of the gate's other accepted wordings, taken from refusal_corpus.rs and reading.rs:8552-8584. Write down in the module docs which ones are not judged.",
+      "location": "Approach step 5 (judged lines / measure phrase)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's main claims against the snapshot. They hold.\n- The new call goes between `loop_check_failures` and `break Some(report)` (producer.rs:507-527). `spec.hook.policy_file` is in scope there (producer.rs:337).\n- The `Reported`/`Built` literals are the only ones in the code (mod.rs:818, 1810, 1848; producer.rs:678).\n- `CheckResultView` derives Default. Its literal constructors match the dependents list.\n- `evaluate` has the signature the plan states (policy.rs:90). `agent_spec` sets `evidence` only when the directory exists (reading.rs:415-416).\n- The `demo_seam`/`demo_runs_here` pattern exists as described (checks.rs:557-615).\n- The throughput lines the judge must survive are as quoted (throughput.rs:794-844).\n\nThe plan addresses the earlier findings:\n- Only the first figure in the range's unit is judged.\n- A list counts as per-job only when every label is a job id.\n- The stage runs only where the repository has an `athena-cli` package.\n- No machine path is stored.\n- The verifier must still run and cite the command itself (choice b, recorded in D183).\n\nThe demonstrations go through `Athena::go`. They use the production code end to end, and the seam replaces only the inner cargo argv. Each would fail without the new behavior.\n\nWhat remains is minor:\n- It is unclear whether the test-build gate comes before the reach check.\n- Honestly stated: on today's output and the reading gate's usual wording, the send-back rules and the policy half of the reach check will rarely fire. The plan already says this and asks the user in its open questions.\n\nNo blocker or major issue remains, so I accept the plan."
+}

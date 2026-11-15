@@ -110,6 +110,19 @@ impl Athena {
                 ..Default::default()
             });
         }
+        // Athena's own run of each real-records criterion's command, before this verifier, goes the same way:
+        // not a check, fails nothing, and the verifier still runs and cites the command itself. The text is in
+        // its stored form (the evidence path is a placeholder), so the stored brief holds no machine path and
+        // the sent brief has the real path.
+        for run in &built.records_runs {
+            inputs.checks.push(CheckResultView {
+                name: format!("records-criterion-{}", run.number),
+                command: "not a check".into(),
+                passed: true,
+                records_run: Some(run.view()),
+                ..Default::default()
+            });
+        }
         // Criteria the producer left to Athena's checks go the same way: not a check, fails nothing, and
         // the recorded check results still decide the verdict.
         if !left_criteria.is_empty() {
@@ -373,6 +386,11 @@ impl Athena {
                 f.evidence = it.next().unwrap_or_default();
                 let location = it.next().unwrap_or_default();
                 f.location = (!location.trim().is_empty()).then_some(location);
+            }
+            // The commands a criterion cites are redacted like the commands the verifier ran (below), so a
+            // command that names the evidence snapshot's path is compared in the same form on both sides.
+            for c in output.criteria.iter_mut() {
+                ctx.redactor.redact_all(&mut c.commands)?;
             }
         }
         let mut redacted_commands = commands_run.clone();
