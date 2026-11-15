@@ -1431,6 +1431,70 @@ mod produce_and_verify_order_tests {
             .collect()
     }
 
+    /// New behavior: the planner's brief states the configured deadline and its half, and the figure equals
+    /// the timeout the agent is run with. Regression guard: a planner stopped at its deadline still ends the
+    /// job as a planning stop with the unchanged reason (the reason text comes from the double).
+    #[test]
+    fn the_planner_brief_states_the_enforced_deadline_and_a_planner_deadline_still_stops_planning()
+    {
+        for n in [600u64, 4321] {
+            let repo = repo_with_config(&format!(
+                "\n[job_plan]\nenabled = true\nmode = \"all\"\nplanner_usd = 0.75\ncritic_usd = 0.75\n\
+                 planner_timeout_s = {n}\ncritic_timeout_s = 600\nmax_rounds = 1\n"
+            ));
+            let state = tempfile::tempdir().unwrap();
+            let calls = Calls::default();
+            let timeouts: Arc<Mutex<Vec<std::time::Duration>>> = Arc::default();
+            let inner = planning_script(vec![good_plan()], vec![], calls.clone());
+            let seen = timeouts.clone();
+            let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
+                if spec.role == Role::Planner {
+                    seen.lock().unwrap().push(spec.timeout);
+                }
+                let mut turn = inner(spec);
+                if spec.role == Role::Planner {
+                    turn.outcome = InvocationOutcome::TimedOut;
+                    turn.structured = None;
+                    turn.detail = Some(format!("deadline of {n}s reached"));
+                }
+                turn
+            });
+            let athena = athena_with(
+                &repo,
+                &state,
+                PASSES,
+                crate::test_support::plenty_of_space,
+                script,
+            );
+            let (_, finished) = finished_job(&athena);
+            let calls = calls.lock().unwrap().clone();
+            let prompts = prompts_of(&calls, Role::Planner);
+            let first = prompts.first().expect("a planner call");
+            assert!(first.contains(&format!("deadline of {n} seconds")));
+            assert!(first.contains(&format!("stop exploring by {} seconds", n / 2)));
+            assert_eq!(
+                *timeouts.lock().unwrap(),
+                vec![std::time::Duration::from_secs(n)]
+            );
+            assert_eq!(finished.state, OutcomeState::Failed, "{}", finished.reason);
+            assert!(
+                finished
+                    .reason
+                    .starts_with(athena_data::records::PLANNING_STOPPED_PREFIX),
+                "{}",
+                finished.reason
+            );
+            assert!(
+                finished.reason.contains(&format!(
+                    "the planner did not complete: deadline of {n}s reached"
+                )),
+                "{}",
+                finished.reason
+            );
+            assert!(prompts_of(&calls, Role::Producer).is_empty());
+        }
+    }
+
     /// The test repository with planning on for every job and these `[models] planner_revision_*` keys
     /// (a `None` leaves the key out).
     fn repo_with_revision_keys(

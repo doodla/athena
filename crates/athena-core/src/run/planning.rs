@@ -134,6 +134,7 @@ impl Athena {
             verifier_commands: athena_agent::policy::describe_commands(&verifier_commands),
             deliverable_facts: facts,
             revision,
+            deadline_s: cfg.planner_timeout_s,
         });
         let composed = compose(&[CONTRACT.into(), PLANNER_FRAME.into()]);
         crate::pin::remove_tree(&snap_dir)?;
