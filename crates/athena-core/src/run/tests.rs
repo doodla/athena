@@ -4695,6 +4695,123 @@ mod produce_and_verify_order_tests {
         assert_eq!(loop_lines(&marker).len(), 2);
     }
 
+    /// A check that passes on the base README and, once the producer's edit is in, fails with a panic site in
+    /// a file the job never touched, a message naming a docs file and a line naming the README.
+    const FAILS_CITING_PATHS: &str = "grep -q 'A demo' README.md || exit 0; \
+         echo 'panicked at xtask/tests/policy.rs:245:9:'; \
+         echo 'docs/design/job-planning.md:6: term'; \
+         echo 'see README.md:1'; exit 1";
+
+    #[test]
+    fn a_failing_check_citing_an_untouched_path_reaches_the_verifier_brief() {
+        let repo = repo();
+        commit_file(&repo, "docs/design/job-planning.md", "# Planning\n");
+        commit_file(&repo, "xtask/tests/policy.rs", "// policy\n");
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let verifier_prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let script = recording_verifier_prompts(
+            editing(counts.clone(), Arc::default(), Vec::new()),
+            verifier_prompts.clone(),
+        );
+        let (done, said, athena, job) = run_checked_job(
+            &repo,
+            &state,
+            leaked_sh_check(FAILS_CITING_PATHS.to_string()),
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        // The check fails after the producer's edit and not on the base: the job is rejected, as before.
+        assert_eq!(done.state, OutcomeState::Rejected, "{}", done.reason);
+        assert!(
+            done.reason.contains("check probe failed"),
+            "{}",
+            done.reason
+        );
+        let prompts = verifier_prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 1, "{said:#?}");
+        let summary = "Failing check probe cites paths: the job changed: README.md; the job did not change: \
+                       xtask/tests/policy.rs, docs/design/job-planning.md";
+        for text in [
+            summary,
+            "The same check passed on the base commit.",
+            "the base commit plus the job's change",
+            "does not show what caused the failure",
+            "The check still fails the verdict",
+        ] {
+            assert!(prompts[0].contains(text), "{text}\n{}", prompts[0]);
+        }
+        // The stored verdict carries the same finding, after everything judge made.
+        let verification = done.verification.as_ref().expect("the verifier ran");
+        let last = verification.findings.last().expect("a finding");
+        assert_eq!(last.severity, Severity::Minor);
+        assert_eq!(last.source, FindingSource::Athena);
+        assert!(last.summary.starts_with(summary), "{}", last.summary);
+        // The stored brief holds the text as well.
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let brief = &records.jobs[job.as_str()].briefs["brief-verifier"];
+        assert!(brief.contains(summary), "{brief}");
+    }
+
+    #[test]
+    fn a_failing_check_citing_a_changed_path_is_marked_changed_in_its_view() {
+        use super::super::verification::verifier_check_views;
+        let run = |passed: bool| CheckRun {
+            name: "probe".into(),
+            command: vec!["sh".into(), "-c".into(), "probe".into()],
+            exit_code: Some(if passed { 0 } else { 1 }),
+            passed,
+            tests_ran: None,
+            duration: athena_data::Quantity::measured(
+                1.0,
+                athena_data::Unit::Seconds,
+                "athena monotonic clock",
+            ),
+            output_tail: "panicked at README.md:1:1\ndocs/design/job-planning.md:6: term\n".into(),
+            note: None,
+            failed_tests: Vec::new(),
+            reused: false,
+            revert_for: Vec::new(),
+            queued_s: None,
+        };
+        let baseline = |entry: CheckRun| Baseline {
+            job: JobId::parse("20261018-073510-m3yh").unwrap(),
+            base_commit: "a".repeat(40),
+            before_invocation: 1,
+            checks: vec![entry],
+            note: None,
+            reused_from: None,
+        };
+        let changed = vec!["README.md".to_string()];
+        let tree = vec![
+            "README.md".to_string(),
+            "docs/design/job-planning.md".to_string(),
+        ];
+        let plain = |r: &CheckRun| crate::verify::check_result_view(r).detail;
+
+        // A failure the baseline did not have: the view names the changed and the untouched file.
+        let green_base = baseline(run(true));
+        let views = verifier_check_views(&[run(false)], &changed, &tree, Some(&green_base));
+        let detail = &views[0].detail;
+        assert!(!views[0].passed);
+        for text in [
+            "Athena's note on this failure: Failing check probe cites paths: the job changed: README.md; \
+             the job did not change: docs/design/job-planning.md.",
+            "The same check passed on the base commit.",
+        ] {
+            assert!(detail.contains(text), "{text}\n{detail}");
+        }
+        // A passing check, and a failure the base also had, keep the detail they always had.
+        let red_base = baseline(run(false));
+        let views = verifier_check_views(&[run(true)], &changed, &tree, Some(&green_base));
+        assert_eq!(views[0].detail, plain(&run(true)));
+        let views = verifier_check_views(&[run(false)], &changed, &tree, Some(&red_base));
+        assert_eq!(views[0].detail, plain(&run(false)));
+        // An unknown change list or tree adds nothing.
+        let views = verifier_check_views(&[run(false)], &[], &tree, Some(&green_base));
+        assert_eq!(views[0].detail, plain(&run(false)));
+    }
+
     #[test]
     fn all_checks_passing_means_one_producer_call_and_no_send_back() {
         let repo = repo();

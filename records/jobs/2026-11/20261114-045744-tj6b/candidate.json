@@ -1,0 +1,159 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261114-045744-tj6b",
+  "base_commit": "f759cc97799b2f9da08312350ed8083095e16dc4",
+  "base_fingerprint": "sha256:2fea387840631303be8dc9dd7d7085745b63bc7ac5a6a4545b83f0c27b49ac77",
+  "previous_job": "20261114-045738-knwg",
+  "candidate_commit": "ade98114ff3967ac6802033e1d27513305d1c50c",
+  "candidate_tree": "3606df0e7be50203d96ea7fd4a9e4a928c072413",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 484687
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 117645
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 447153
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26054
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 155776
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 468535
+    }
+  ],
+  "fingerprint": "sha256:ea863110ccb802fb860e49cfe4ec792ebd7e42ea1111357e27efb085b9d7c29f",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: the check stage keeps a baseline of base-commit failures but has no mapping from a failing test's reported file paths to the paths the job changed. A failure from a concurrent change therefore reads the same as the job's own. The verifier was also shown no output for a check Athena ran itself, because `check_result_view` fills the tail only for reused results. I fixed both inputs and added no refusal rule.\n\nIn `crates/athena-core/src/verify.rs`:\n- `failure_paths` extracts path-shaped tokens from a failed check's output tail. It keeps only tokens that name a file tracked at the base or the candidate, and splits them into files the job changed, files it did not, and names that match several files (ambiguous, never called changed or unchanged).\n- `failure_path_finding` makes one Minor Athena finding from that. It states how the failure got past the baseline and that the check ran on the base plus the job's change. It also says a cited path does not show the cause.\n- `judge_with_tree` calls the unchanged `judge` and appends those findings after every finding `judge` made. Reasons, criteria and the verdict stay `judge`'s, so 0% of past accepted readings are newly refused.\n\nIn `crates/athena-core/src/run/verification.rs`:\n- `tracked_paths` reads the tracked files of both commits from the verifier snapshot.\n- `verifier_check_views` adds the same text to the detail of each blocking failed check in the verifier's brief.\n- `verification_stage` now calls `judge_with_tree`.\n\nI also changed the `use crate::verify::{...}` import in `crates/athena-core/src/run/mod.rs`, replacing `judge` with `judge_with_tree`. It is not in the deliverables list and needed no other edit. I corrected the `is_pre_existing` doc sentence. I added a CHANGELOG entry under Unreleased/Fixed and decision D186 appended to docs/decisions.md.\n\nStatements checked against the code: a concurrent change reaches the tested tree only by being in the base, and a usable baseline then already marks it pre-existing. The check runs in a snapshot of base plus candidate.",
+    "files": [
+      "crates/athena-core/src/verify.rs",
+      "crates/athena-core/src/run/verification.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "CHANGELOG.md",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "no diff on the final tree"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "no warnings"
+      },
+      {
+        "command": "cargo test --locked -p athena-core --lib verify::tests",
+        "result": "pass",
+        "note": "75 passed, including the four new verify tests"
+      },
+      {
+        "command": "cargo test --locked -p athena-core --lib a_failing_check_citing",
+        "result": "pass",
+        "note": "2 passed"
+      },
+      {
+        "command": "cargo test --locked -p athena-context the_criteria_rules_quote_the_wording_the_enforcing_code_uses",
+        "result": "pass",
+        "note": "source-reading test still holds"
+      },
+      {
+        "command": "cargo test --locked -p xtask --test policy",
+        "result": "pass",
+        "note": "22 passed; no banned word in the changed files"
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test mirrors",
+        "result": "pass",
+        "note": "4 passed"
+      },
+      {
+        "command": "cargo test --locked -q",
+        "result": "pass",
+        "note": "full workspace suite, exit code 0 (one run, finished in the background after the 20 minute foreground limit)"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "The change description names the root cause: the check stage has a baseline of base-commit failures but no mapping from a failing test's reported file paths to the paths the job changed, so a failure from a concurrent change is indistinguishable from the job's own.",
+        "status": "met",
+        "evidence": "The new CHANGELOG.md entry under [Unreleased] / ### Fixed and the new D186 in docs/decisions.md both open with that root cause in those words and name failure_paths, failure_path_finding, judge_with_tree and verifier_check_views as the fix. Readable with `git diff -- CHANGELOG.md docs/decisions.md`."
+      },
+      {
+        "criterion": "crates/athena-core/src/verify.rs gains a function that extracts repository paths from a failing check's output and reports which of them the job changed and which it did not; the check's verdict reasons are unchanged (no new refusal rule; expected 0% of newly refused readings, because the finding is Minor and informational).",
+        "status": "met",
+        "evidence": "`failure_paths` returns FailurePaths { touched, untouched, ambiguous }. `judge_with_tree` calls the unchanged `judge` and only extends the findings. Test `failure_paths_resolves_cited_paths_against_the_tracked_files` passes, and `assert_only_findings_added` (reasons, criteria, agent and final verdict equal to judge's) runs in each case of the other new tests. `cargo test --locked -p athena-core --lib verify::tests` gave 75 passed."
+      },
+      {
+        "criterion": "A new unit test in crates/athena-core/src/verify.rs builds a failing check whose output cites a path the job did not change (e.g. docs/design/job-planning.md:6) and a baseline without it; the judgment still fails, and carries a finding naming the path as not touched by the job. It fails on the base tree and passes with the change. Run `cargo test --locked -p athena-core verify`.",
+        "status": "met",
+        "evidence": "`a_failure_citing_a_path_the_job_did_not_change_carries_that_finding` uses POLICY_FAILURE, which cites xtask/tests/policy.rs:245:9 and docs/design/job-planning.md:6, against baselines that passed, are missing, carry a note, hold no entry or are reused CI. It asserts the verdict is Fail, the reasons are exactly [\"check test failed\"], and one Minor Athena finding says `the job did not change: xtask/tests/policy.rs, docs/design/job-planning.md`. It passes. On the base tree it cannot compile, because `judge_with_tree` does not exist there."
+      },
+      {
+        "criterion": "A second unit test shows that when the cited path is in the job's changed paths, the finding says the job touched it. Run `cargo test --locked -p athena-core verify`.",
+        "status": "met",
+        "evidence": "`a_failure_citing_a_path_the_job_changed_says_so` passes. The summary contains `the job changed: README.md` when README.md is in changed_paths, and has no `did not change` clause when only the changed file is cited. An ambiguous name gets neither claim, and an empty change list gives no finding."
+      },
+      {
+        "criterion": "The verifier brief (built in crates/athena-core/src/run/verification.rs) includes the failing check's untouched-path finding so criteria are still judged; a test in the same crate asserts the brief text contains it.",
+        "status": "met",
+        "evidence": "`a_failing_check_citing_an_untouched_path_reaches_the_verifier_brief` (run/tests.rs) runs a whole job whose check passes on the base and fails after the edit. It asserts the first verifier prompt, the stored `brief-verifier` and the last stored finding all hold `Failing check probe cites paths: the job changed: README.md; the job did not change: xtask/tests/policy.rs, docs/design/job-planning.md`, and that the job is Rejected. `a_failing_check_citing_a_changed_path_is_marked_changed_in_its_view` pins `verifier_check_views` directly. Both pass under `cargo test --locked -p athena-core --lib a_failing_check_citing`."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for the change; docs/decisions.md is untouched except possibly a new appended decision with a Provenance bullet.",
+        "status": "met",
+        "evidence": "CHANGELOG.md gains one entry under [Unreleased] / ### Fixed. docs/decisions.md only gains a new `## D186` section after D185, ending in a Provenance bullet; no existing line changed. `cargo test --locked -p athena-cli --test mirrors` passed (4 tests), and `cargo test --locked -p xtask --test policy` passed (22 tests)."
+      },
+      {
+        "criterion": "cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked pass (recorded Athena checks on the final tree).",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran them on the final tree: fmt --check and clippy -D warnings produced no errors, and the full `cargo test --locked -q` finished with exit code 0."
+      }
+    ],
+    "open_issues": [
+      "The plan (decision 7) said to leave crates/athena-core/src/run/checks.rs unchanged. I did so, since take_baseline and baseline_for already record everything the finding reads.",
+      "I edited crates/athena-core/src/run/mod.rs, which neither the plan nor the deliverables list: the `use crate::verify::{...}` import now names `judge_with_tree` instead of `judge`. `judge` would otherwise be an unused import.",
+      "A cited path is not proof of cause, and only the last 200 lines of output are kept. A cut panic line gives no finding. No finding is made when the output cites no tracked path; D186 and the CHANGELOG entry state this.",
+      "I did not edit CHANGELOG.md:1652-1653. The new entry corrects that older 'not covered' note in its own text, so the older entry stays as written history."
+    ],
+    "mistakes": [
+      "I first wrote a duplicate `paths` test helper in verify.rs, which failed to compile; I removed it.",
+      "My first suffix-match case used `core/Cargo.toml`, which does not end in `/athena-core/Cargo.toml`; I corrected the test input."
+    ],
+    "learnings": [
+      "`judge` and the `//!` header of verify.rs are read as source by three tests (`drift_haystack`, the admission CI-reuse check, briefs.rs `VERIFY_SRC`), so new code was added after `judge` and neither was edited.",
+      "CheckResultView.detail is printed for every check in the verifier brief, so extra check text can go there without touching athena-context.",
+      "verify.rs tests already define a `paths(&[&str])` helper, and a verify filter run through `cargo test` also runs the heavy run:: whole-job tests (about 250 s); `--lib verify::tests` is the cheap filter.",
+      "The full `cargo test --locked` takes over 20 minutes here."
+    ],
+    "desires": [
+      "Read access to a background command's output file, so a long test run could be followed.",
+      "A way to list the tests that failed without piping, since grep, tail and wc are denied in Bash."
+    ]
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045744-tj6b",
+  "round": 1,
+  "at": "2026-11-15T09:08:23.398565674Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "When a baseline is used, a failing local check cannot come from a change merged after the base, so the planned evidence text names a cause the code rules out. The plan also never shows how the cited failures got past a baseline taken on the same base.",
+      "evidence": "`take_baseline` records `base_commit: ctx.prediction`. `verification_stage` uses the baseline only when `b.base_commit == p`, and the checks run on that same base plus the diff. So a failure that is absent from the baseline but present on the candidate comes from the diff or from a flaky environment, not from a concurrent merge into the tested tree. The plan's evidence sentence says the failure 'may come from the base or from a change merged after it'. It never says which route jobs wcwy, a5sf and 6wfq took: no usable baseline, the check-name fallback in `is_pre_existing`, a reused CI result on a different head, the tool config read from the base, or a flaky test. Fix: Find which of these routes each cited failure took, using the code (`baseline_for`, `reused`, `tool_config_from_base`, the cases where `is_pre_existing` falls back to the check-name rule). Put that fact in the finding: whether a usable baseline existed, whether the same check passed on the base, and whether the result was reused from CI and for which commit. Word the evidence so it never names a cause the run rules out, for example: 'the same check passed on the base commit, so this failure appeared with the change or is flaky'.",
+      "location": "Approach / Decision 1 / Step 3 (finding evidence); crates/athena-core/src/run/verification.rs:51-54; crates/athena-core/src/run/checks.rs:735-748",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Panic locations name the assertion's source file, not the file whose change caused the failure. In the motivating cases the finding gives the same signal for a concurrent-change failure and for a job-caused regression.",
+      "evidence": "A Rust test panics at `crates/.../tests/x.rs:L:C` or `src/...rs:L:C`, the line of the assert. In job wcwy the brief says a concurrent athena.toml change broke a drain test, and the panic would cite the drain test's `.rs` file. Any job that breaks an existing test it did not edit produces the same 'the job did not change <test file>' text. The criterion 3 fixture uses a panic location inside a `.md` file, which the compiler never emits, so the test passes on a shape real output does not have. Fix: Base the finding on information that does separate the cases, such as the baseline status above or the test files the job touched. Alternatively, say plainly that the paths are assertion locations and do not show the cause. Use realistic output in the demonstrations: a panic location in a `.rs` file, plus an assertion message that names a file.",
+      "location": "Decision 2 / Demonstration for criterion 3 (output `panicked at docs/design/job-planning.md:6:1:`)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A hard-coded extension allow-list and suffix matching guess at facts the code can read from the tree.",
+      "evidence": "Athena runs on other repositories (system facts: remotes such as `https://github.com/example/project.git`), so `.py`, `.ts`, `.go` and similar paths would be dropped silently. Under the suffix rule, a changed path `crates/a/src/lib.rs` ends with `/src/lib.rs`, so a failure in crate b that cites `src/lib.rs` is wrongly marked as touched. `verification_stage` already has `vsnap`, which holds the base and the candidate as two commits (verification.rs:398-406). Fix: Keep a token only if it names a file that exists in the candidate or base tree, by passing a set of tracked paths, or a closure, into the pure function. Resolve crate-relative paths by checking which file exists, and when more than one matches, say so instead of calling it touched. Drop the extension allow-list.",
+      "location": "Decision 2 / Step 2 (CITED_EXTENSIONS allow-list and suffix match)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan says retry never sees the new finding, but two retry readers copy all findings, of every severity, into a retry's inputs. Neither is listed or tested.",
+      "evidence": "retry.rs:423 `texts.extend(verification.findings.iter().map(finding_text))` builds the retry's findings list, and only `must_address` is filtered by `finding_blocks`. retry.rs:720 (`carry`) also extends with every finding, and these feed the retry reader brief (`attempt.findings`, briefs/reader.rs:472-480). The new Minor finding, with its 'may come from a change merged after the base' text, would steer the retry's reader and producer. Fix: Add retry.rs:423 and :720 (and the reader brief that shows them) to the dependents list. Decide whether the text belongs there. Add a test asserting what a retry of a job rejected on such a check carries, or leave the finding out of those lists on purpose.",
+      "location": "Dependents: 'finding severity filter: crates/athena-core/src/reading/retry.rs:367-369, 432, 504'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Existing end-to-end fixtures whose failing checks print file names (README.md and similar) will now get an extra finding. The plan has checked only two exact-count assertions.",
+      "evidence": "Many run/tests.rs fixtures run `sh -c` checks against README.md, and an allow-listed `README.md` in their output now adds a finding wherever `changed_paths` is not empty. The plan cites only run/tests.rs:1902 and verify.rs:2774-2779. Fix: Grep run/tests.rs and run_pin_tests.rs for assertions on `findings.len()` and `findings[` and list the ones affected, or state why their output never cites a path.",
+      "location": "Risks: 'A test fixture names ... and an existing test counts findings'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The step numbers in the test seams do not match the steps.",
+      "evidence": "The criterion 2 demonstration says 'step 1 adds' `failure_paths`, but step 2 adds it. The criteria 3 and 4 demonstrations say 'step 6 adds' `judge_changed`, but step 5 adds it. Fix: Correct the step references.",
+      "location": "Demonstrations for criteria 2-4 (test seams)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the accepted reading. It names real code: `check_result_view` fills the output tail only when a check was reused (verify.rs:75-86), `judge` loops over blocking checks at verify.rs:447-472, and `changed_paths` is computed at run/verification.rs:409-413. It adds no refusal rule, and the end-to-end test helpers it relies on exist (run/tests.rs:4493, 4547, 4561). The approach has soundness problems, though. First, the baseline is taken on the job's base commit (`take_baseline` uses `ctx.prediction`) and is used only when its `base_commit` equals the candidate's base (verification.rs:51-54). So when a baseline is used, a locally run failing check that is not in it cannot come from \"a change merged after the base\". The planned evidence text names a cause the code rules out, and the plan never traces how the six cited failures got past a baseline taken on the same base. Second, Rust panic messages cite the assertion's `.rs` file, not the config or doc whose change broke it. In the motivating cases the finding would therefore list a test file as \"not changed by the job\", which is exactly what a job-caused regression in an untouched test also produces, so the finding does not separate the two. Third, the path extractor uses a hard-coded extension allow-list and suffix matching where the tree could be read; this misses files with other extensions and wrongly marks files in other crates as touched. Fourth, the dependents list says retry never sees the new finding, but retry.rs:423 and :720 copy every finding, of any severity, into the retry reader's and producer's inputs. Verdict: revise."
+}
