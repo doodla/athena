@@ -505,7 +505,8 @@ pub struct StatusView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code_health: Option<crate::code_health::CodeHealth>,
     /// Lines of work the scope guard flagged or paused, with their signals T1 to T5 (`crate::scope_guard`).
-    /// Pauses first. Empty when no mark file exists.
+    /// Pauses first. Empty when no mark file exists. A T3 mark may be a flag for a near-complete rejection
+    /// whose pause was withheld; a stored pause that the current rule no longer reaches is not shown.
     pub lines: Vec<crate::scope_guard::LineMark>,
     /// The open repeated causes from Hestia's error review (`crate::hestia::repeated_causes`): causes that
     /// occurred in two or more distinct jobs and whose root-cause request has not landed, each with its count

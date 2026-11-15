@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045803-0hj9",
+  "round": 3,
+  "at": "2026-11-15T12:45:58.07667252Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The once-per-trip memory checks the earlier attempt against the line's current forecast, not the forecast that was in force when that attempt ended.",
+      "evidence": "line_forecast_p90 (scope_guard.rs:724-731) takes the forecast of the newest request on the line that has a finished attempt. A retry's reading re-forecasts cost (rig_build sets cost_usd in every reading). Suppose a first near-complete attempt spent 1.6 against p90 1.0 and was flagged, and the retry's reading then forecasts p90 2.0. targeted_retry re-checks the first attempt at 1.6 < 3.0, finds no Pause and grants the allowance again. If the forecast shrinks instead, the allowance can be denied for an attempt that was under the limit when it ran. Fix: State this in the t3_cost doc and the changelog as a known limit, or derive the earlier attempt's forecast from its own job's reading (forecast_p90_dollars of that job) when replaying the prefix. Either way, add one A1b case in which the forecast changes between the two attempts.",
+      "location": "Plan step 4 (targeted_retry evaluates t3_by_spend on attempts[..=i] with the current forecast)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The verifier is told to rate Major both a violated criterion and a violated applicable default, so counting verifier Majors against unmet criteria can go wrong both ways.",
+      "evidence": "crates/athena-context/prompts/verifier.md:9: 'major (a criterion or an applicable default is violated)'. A Major for a violated default, next to an unmet criterion the verifier did not file a Major for, reads as bounded. Two Majors that the verifier files for different aspects of one gap read as unbounded, which brings back the old pause. Findings carry no criterion index (records.rs:923-929). Fix: Keep the count rule, but name the 'applicable default' case in the changelog limit next to 'findings carry no criterion index'. That way a reader knows a violated default can be read as a bounded gap.",
+      "location": "Decision 1 / gaps_only rule (5): verifier Majors at most the unmet criteria",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Nothing shows that the job that prompted the request (20261103-092929-s7ts) would be classified as bounded under gaps_only.",
+      "evidence": "A grep of the snapshot for s7ts and m2aa finds nothing, and records/ is absent. If that job's verification carried extra verifier Majors or a non-Success verifier invocation, the new rule would not have changed its outcome. The fix would then be correct but would not have covered the case that prompted it. Fix: In the changelog, name re-running the guard over that job's records as a follow-up check. Alternatively, note in the CHANGELOG limit that whether the triggering job is covered depends on its verifier filing at most one Major per unmet criterion.",
+      "location": "Risks: 'The effect on past lines was not measured'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read scope_guard.rs (counted, t3_basis, t3_cost, verdict_of, attempt_of, line_state, facts, try_watch_line, line_pause, line_flag and the watcher Rig), verify.rs judge (lines 409-672), run/verification.rs (lines 255-304), the records types, gate_counts.rs and the verifier prompt. I also grepped the crates for readers of AttemptRecord, t3_cost and scope_guard. The plan's claims hold. AttemptRecord is built only in scope_guard.rs. line_state is the single path to t3_cost. judge pushes one Athena Major per Behavior criterion whose commands were not verified, and one per unassessed criterion. For a content criterion with no commands, commands_verified is true, so `judged_gaps` matches judge exactly. verifier_invocation and verdict_output are set even when the verifier's outcome is not Success, so the plan is right to read the invocation outcome. line_pause recomputes the level, so test B3 works. The rig's verifier uses content criteria with empty commands and no findings, so 4 of 5 reads as bounded and B1 and B2 behave as described. The retry refusal is in `retry`, not `ask`, so B2's third `go` errors as planned. The dependents list matches the grep. Every demonstration names a real production seam and would fail on the base. I found no blocker or major problem. Three minor points remain: the once-per-trip memory replays the earlier attempt against the current forecast; verifier Majors are tied to gaps only by count, while the verifier prompt also rates violated defaults Major; and the 0.8 share was not checked against the job that prompted the request. Each fails safe or costs at most one extra attempt."
+}

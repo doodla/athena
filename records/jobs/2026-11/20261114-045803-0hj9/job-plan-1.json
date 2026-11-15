@@ -1,0 +1,250 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-045803-0hj9",
+  "round": 1,
+  "at": "2026-11-15T12:25:59.565179004Z",
+  "invocation_seq": 2,
+  "approach": "Root cause: the scope guard reduces an attempt to a verdict, a cost and minutes (AttemptRecord, scope_guard.rs:102-119), so T3 cannot tell a rejection that is one named criterion short from a rejection that got nowhere. Environment stops are already excluded through one classifier (verdict_of at scope_guard.rs:561 calls crate::disk::is_environment_reason, disk.rs:516, which asks StopCause::of); this change keeps that and adds the missing fact. AttemptRecord gains `criteria: Option<CriteriaTally>` (met and total criterion counts). attempt_of (scope_guard.rs:580) fills it from job.verification.criteria only when the verdict is Rejected, and leaves it None for Failed, Environment and Accepted attempts. A new pub fn `near_complete(&AttemptRecord)` is true for a Rejected attempt with a tally whose total is above 0, whose met is below total and whose met/total is at least the new const NEAR_COMPLETE_SHARE = 0.8 (an estimate, labelled as such). t3_cost (scope_guard.rs:321) returns Flag instead of Pause when its computed level is Pause and the last attempt of the line is near_complete. A line with no tally behaves as before. T1, T2, T4 and T5 and their thresholds are untouched, so a line that repeats one criterion (T4) or runs past 120 minutes (T5) still pauses; only a spend-only pause on a nearly finished rejection becomes a flag, which `go`, `retry` and the drain still dispatch. Because line_pause, line_flag and live_marks recompute through line_state (scope_guard.rs:735-744), a T3 pause already stored for such a line stops blocking without any file being touched. The T3 detail in `facts` says when the pause was withheld for this reason. Doc comments on AttemptRecord and t3_cost name the root cause and say environment stops stay excluded through crate::disk::is_environment_reason with no second list. status.rs, drain.rs and disk.rs get doc-comment-only edits (no logic). CHANGELOG.md gets one entry under Unreleased / Changed. No refusal rule is added and reading.rs is not touched.",
+  "decisions": [
+    {
+      "choice": "Store met and total criterion counts on AttemptRecord and decide near-completeness in one function, near_complete, used by t3_cost.",
+      "reason": "The fault starts where an attempt is reduced to verdict, cost and minutes; the facts needed (verification.criteria, records.rs:911-942, Verification.criteria with CriterionResult.met) are already in the job records and only need carrying into the guard's attempt record. AttemptRecord is built in exactly three places, all in scope_guard.rs (line 606, test helper att at 2092, resumed test at 2435, which uses ..att), so the type change is local.",
+      "rejected": [
+        {
+          "option": "Only change t3_basis to drop spend of rejected attempts that have a kept candidate",
+          "why": "A rejected candidate is not an environment stop; dropping its spend also hides runaway spend on a line that is nowhere near done. The guard needs the progress fact, not a wider exclusion."
+        },
+        {
+          "option": "Add a second list of environment reasons or a stop-reason enum field on AttemptRecord",
+          "why": "disk::StopCause is the one classifier (disk.rs:419-443); verdict_of already maps it to Verdict::Environment. A second list is what caused the earlier expired-login pause (scope_guard.rs module doc lines 19-24)."
+        },
+        {
+          "option": "Store the counts in a new record or data file",
+          "why": "Not needed: the counts are derived from the existing verification record on each evaluation. This avoids check_record_file, AnyRecord and the round-trip test, and an old pause is recomputed under the new rule by line_state."
+        }
+      ]
+    },
+    {
+      "choice": "Downgrade T3 from Pause to Flag when the last attempt is near-complete; do not downgrade T1, T2, T4 or T5.",
+      "reason": "T4 (the same criterion rejected twice) and T5 (120 minutes) are the signals that show work that is not converging; T3 spend alone should not stop a line that is 8 of 9 criteria done. A flag still shows in status and the drain passes the item over after two failures (drain.rs doc lines 47-52), so spend stays visible. The reading's accepted design names this downgrade.",
+      "rejected": [
+        {
+          "option": "Clear T3 entirely for a near-complete attempt (Level::None)",
+          "why": "The flag keeps the spend visible to the person running Athena and to Hestia; the request asks only that the pause not fire."
+        },
+        {
+          "option": "Also require the last attempt's met share to be no lower than the previous rejected attempt's",
+          "why": "Adds a second judgement beyond the accepted reading; T4 and T5 already cover a line that repeats a failure. Can be added later if a line that regresses while spending is seen."
+        }
+      ]
+    },
+    {
+      "choice": "NEAR_COMPLETE_SHARE is the const 0.8, compared as met as f64 / total as f64 >= 0.8, and met must be below total.",
+      "reason": "It is the 80% of the accepted reading; 8 of 9 (0.889) passes and 7 of 9 (0.778) does not; 4 of 5 is exactly 0.8 and the division gives the same double as the literal, so the boundary is stable. The doc comment says it is an estimate to be tuned, like every threshold in the module (scope_guard.rs:26).",
+      "rejected": [
+        {
+          "option": "Integer test met * 5 >= total * 4",
+          "why": "Works but hides the named constant that the doc comment and the changelog cite."
+        }
+      ]
+    },
+    {
+      "choice": "No new MarkNumbers field; add the near-complete note to the T3 detail text in `facts` only.",
+      "reason": "MarkNumbers and LineMark are serialized under <state root>/scope/ and read back with serde (scope_guard.rs:432-478); a new required field would make stored marks unreadable (read_mark returns None). A text note changes no stored shape.",
+      "rejected": [
+        {
+          "option": "Add near_complete or criteria counts to MarkNumbers with #[serde(default)]",
+          "why": "A larger surface (display.rs lines_section, tests that build MarkNumbers at display.rs:2842) for a figure the reason text can carry."
+        }
+      ]
+    },
+    {
+      "choice": "Edit status.rs, drain.rs and disk.rs by doc comments only.",
+      "reason": "They are listed deliverables but read the guard only through live_marks (status.rs:1207), line_pause and line_flag (drain.rs:4420, 4435) and StopCause; none needs a logic change, since all recompute through line_state. The drain doc at drain.rs:47-52 is where a reader learns that a T3 flag now covers a near-complete line; disk.rs StopCause docs (line 419-427) are where a reader looks for why an attempt stopped, so they point to near_complete for the other case.",
+      "rejected": [
+        {
+          "option": "Add logic in drain.rs that treats a near-complete rejection specially",
+          "why": "The drain already asks the guard (line_pause, line_flag); a second rule in the drain would be a second source of the decision."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "purpose": "Add struct CriteriaTally {met,total} and AttemptRecord.criteria; const NEAR_COMPLETE_SHARE = 0.8; pub fn near_complete; fill the tally in attempt_of for Rejected only; t3_cost downgrades Pause to Flag when the last attempt is near-complete; add the note to the T3 detail in `facts`; doc comments on AttemptRecord, t3_cost and the module header name the root cause and the is_environment_reason exclusion; update the test helper att; add the two new tests (and the T3 detail note test).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One new bullet under ## [Unreleased] / ### Changed: root cause, the rule, the 0.8 estimate, limits, tests, no refusal rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Doc comment only, on the `lines` field of the status view (status.rs:507-509): a T3 level shown there may be a flag for a near-complete line. No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Doc comment only, in the module header bullet about a flagged line (drain.rs:47-52): a near-complete rejection with spend over the forecast is a T3 flag, so the item is passed over after two failures instead of being refused as paused. No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Doc comment only, on StopCause (disk.rs:419-427): says that a rejection that got most of the way is not a stop cause and is read by scope_guard::near_complete from the verification, and that environment stops stay here, in one place.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-core/src/scope_guard.rs add `pub struct CriteriaTally { pub met: u32, pub total: u32 }` (Debug, Clone, Copy, PartialEq, Eq) and the field `pub criteria: Option<CriteriaTally>` on AttemptRecord (after `resumed`). Rewrite the AttemptRecord doc comment to name the root cause (the guard treated every attempt's spend as one number and did not record how far a rejected attempt got), say the tally is set only for a rejected attempt with a verification record, and say environment stops stay excluded through crate::disk::is_environment_reason (via verdict_of) with no second list. Add `pub const NEAR_COMPLETE_SHARE: f64 = 0.8;` with a doc comment marking it an estimate and a judgement call.",
+    "Add `pub fn near_complete(a: &AttemptRecord) -> bool`: verdict is Rejected, criteria is Some with total > 0 and met < total, and f64::from(met) / f64::from(total) >= NEAR_COMPLETE_SHARE.",
+    "In attempt_of (scope_guard.rs:580-615) compute `criteria` as Some(CriteriaTally { met, total }) from job.verification.criteria (count of c.met, and len) only when verdict == Verdict::Rejected and a verification exists; None otherwise (Failed, Environment, Accepted, no verification, empty criteria list). Set it in the struct literal at line 606.",
+    "In t3_cost (scope_guard.rs:321-335) compute the level as now; when it is Pause and attempts.last() is near_complete, return Level::Flag. Rewrite its doc comment: name the root cause, say a near-complete last attempt flags and does not pause, say spend of environment stops is excluded only through t3_basis and crate::disk::is_environment_reason, and that no second list exists. Update the module header paragraph (lines 19-24) with one sentence for the progress fact.",
+    "In `facts` (scope_guard.rs:746) extend the T3 detail: when attempts.last() is near_complete and numbers.forecast_p90_usd > 0 and numbers.spend_usd >= T3_PAUSE_RATIO * numbers.forecast_p90_usd, append `; the last attempt met M of N criteria, so no pause`. Stored shapes (LineMark, MarkNumbers, SignalFact) are not changed.",
+    "In `mod tests` update helper `att` with `criteria: None` and add `rej_with(met, total, cost)`; add test `a_near_complete_rejection_does_not_pause_t3` with the cases listed in demonstration 1, and a small test that facts shows the note for the 8 of 9 line. In `mod watcher_tests` add `attempt_of_records_how_many_criteria_a_rejection_met` (demonstration 2) using the Rig, a cloned JobRecords with extra met criteria, and clones with outcome.state changed to Failed and to an environment reason. Do not change `environment_stop_is_not_counted_but_a_rejection_is` or `every_kind_of_environment_stop_is_an_environment_attempt`.",
+    "Doc-only edits: disk.rs StopCause doc (lines 419-427) gets a sentence saying near-complete rejections are not a stop cause and are read in scope_guard::near_complete; drain.rs module header bullet (lines 47-52) gets a clause about a near-complete T3 flag; status.rs doc on `lines` (507-509) gets one clause. Use plain backticks for any item not in scope so rustdoc links do not break.",
+    "Add one bullet to CHANGELOG.md under ## [Unreleased] / ### Changed (before the ### Fixed heading at line 19): root cause, fix where it originates (AttemptRecord and t3_cost), environment stops still excluded by is_environment_reason with no second list, the 0.8 estimate, a stored T3 pause for a near-complete line lifts by recompute, T1/T2/T4/T5 unchanged, no refusal rule (0% of past accepted readings refused), the follow-up that docs/design/scope-guard.md section 5 is not updated here, and the test commands.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix any dead-code or doc-link warning."
+  ],
+  "risks": [
+    {
+      "risk": "A line that keeps getting near-complete rejections could spend without a spend pause.",
+      "mitigation": "The downgrade applies only to T3 and only when the last attempt is a Rejected one with at least 80% of criteria met and one still unmet. T4 (same criterion twice), T5 (120 minutes), T1 and T2 still pause, and the downgrade leaves a flag, so the spend shows in status and the drain passes the item over after two failures. The 0.8 is a labelled estimate, a code constant easy to tune."
+    },
+    {
+      "risk": "Criteria differ in weight, so 8 of 9 met can hide a large unmet one.",
+      "mitigation": "verification.criteria is the verifier's per-criterion result (records.rs:911-942); met counts are exact. The share is not a measure of effort, so the doc says it is a judgement call. Tally is None when no verification record exists, which keeps the old behavior."
+    },
+    {
+      "risk": "A T3 pause stored for a past line is lifted by the new rule without the person deleting its file.",
+      "mitigation": "The criteria field is not serialized and no stored record is touched; line_pause recomputes from records each call, so only the recompute outcome changes. A test shows 50% (1 of 2) still pauses."
+    },
+    {
+      "risk": "docs/design/scope-guard.md section 5 is left describing T3 without the near-complete rule.",
+      "mitigation": "The design doc (docs/design/scope-guard.md) is outside the stated Files scope; the changelog entry and the module and t3_cost doc comments carry the rule."
+    },
+    {
+      "risk": "A broken intra-doc link in a doc-only edit fails clippy or rustdoc.",
+      "mitigation": "Doc-only edits to status.rs, drain.rs and disk.rs; clippy -D warnings checks the doc links (use plain backticks for names not in scope)."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "t3_cost level (Pause becomes Flag for a near-complete last attempt)",
+      "dependent": "crates/athena-core/src/scope_guard.rs: evaluate_before_attempt (line 415) and line_state (735-744), the one path that reaches t3_cost for Athena::line_pause (822), line_flag (836), live_marks (959) and try_watch_line (1005)",
+      "kind": "code",
+      "test": "New a_near_complete_rejection_does_not_pause_t3_is_unit_level (scope_guard.rs tests); existing t3_forecast_ratios (2239) still passes, since its attempts are Failed with no tally; existing watcher test t3_pause_from_reading_forecast (1912) still pauses because its verifier meets 1 of 2 criteria (50%, under 0.8).",
+      "reason": null
+    },
+    {
+      "name": "line_pause and line_flag results for a near-complete line",
+      "dependent": "crates/athena-core/src/run/mod.rs:1040 (go) and crates/athena-core/src/reading.rs:1279-1280 (retry/read) refuse a paused line via line_pause; crates/athena-cli/src/drain.rs:4411-4440 (Steps::paused, Steps::flagged) ask line_pause and line_flag",
+      "kind": "code",
+      "test": "t3_pause_from_reading_forecast (watcher test) for the unchanged pause path; a_stored_pause_that_no_longer_holds_is_not_returned_and_does_not_block_a_retry (scope_guard.rs:1771) for the recompute path.",
+      "reason": "They only read the mark through line_pause/line_flag, which recompute from line_state each time. A T3 pause that is now a flag stops refusing go and retry, and the drain treats the line as flagged (passed over after two failures, drain.rs docs 47-52) instead of paused. No signature changes; no new caller logic."
+    },
+    {
+      "name": "LineMark and MarkNumbers stored shape",
+      "dependent": "crates/athena-core/src/status.rs:1207 (live_marks used by status) and crates/athena-cli/src/display.rs:1087 lines_section, display.rs:2842 test which builds LineMark and MarkNumbers",
+      "kind": "code",
+      "test": null,
+      "reason": "No field is added to LineMark, MarkNumbers or SignalFact; only the T3 detail text may gain a sentence, so stored marks under <state root>/scope/ still parse and display.rs is unchanged."
+    },
+    {
+      "name": "AttemptRecord construction and the hold",
+      "dependent": "crates/athena-core/src/scope_guard.rs line_holds (891-932) and unlanded_jobs",
+      "kind": "code",
+      "test": "Existing two_verified_but_not_landed_attempts_on_one_line_are_two_attempts_that_did_not_land (scope_guard.rs:1585) and a_rejected_attempt_and_an_unlanded_attempt_on_one_line_are_two (1688).",
+      "reason": "line_holds reads only verdict (Rejected|Failed) from attempts; the new field does not change which attempts did not land. AttemptRecord is constructed only at scope_guard.rs:606 (production) and in its tests (2092, 2435 via ..att); no other crate names it (searched crates/ for AttemptRecord)."
+    },
+    {
+      "name": "Environment-stop classification",
+      "dependent": "crates/athena-core/src/disk.rs: StopCause::of (450), is_environment_reason (516), resumable_stop (525); scope_guard.rs verdict_of (561) and resumed_candidate (621)",
+      "kind": "code",
+      "test": "environment_stop_is_not_counted_but_a_rejection_is, every_kind_of_environment_stop_is_an_environment_attempt, a_line_of_expired_login_stops_raises_no_signal (scope_guard.rs:2293-2389), a_low_disk_job_is_read_as_an_environment_attempt (1943).",
+      "reason": "Unchanged: verdict_of is not edited, and near_complete reads only the verdict Rejected and the criteria tally, never a reason text. No second list of environment reasons is added."
+    },
+    {
+      "name": "Drain and run tests that depend on a pause or flag from the guard",
+      "dependent": "crates/athena-cli/tests/drain.rs (tests near lines 872, 903, 1002, 6046-6160) and crates/athena-core/src/run/tests.rs:7482",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain (run with the full cargo test).",
+      "reason": "They produce pauses through T4 (two rejections of one criterion) or flags through different criteria, or mark strings written by hand (drain.rs:736); T4, T1, T2 and T5 are not changed, and the rig's fake verifier judges two criteria, so a single rejection meets at most 1 of 2 (50%), under the 0.8 share. A grep of crates/ for `T3` in the cli tests finds only the hand-written mark text."
+    },
+    {
+      "name": "The documented T3 rule",
+      "dependent": "docs/design/scope-guard.md section 5 (T3 text) and CHANGELOG.md line 1713 (the StopCause entry)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The design doc sits outside the files this request lists (crates/ and CHANGELOG.md); the module header and the t3_cost doc comment in scope_guard.rs, which carry the new rule, are the source the code is read from. The changelog entry states the rule and the follow-up that the design doc is not updated here. Earlier changelog entries are history and stay as written."
+    },
+    {
+      "name": "Refusal and matching rules, prompt budgets",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs, crates/athena-core/src/reading.rs, docs/system-facts.md budgets (system_facts_budgets_match_computed)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No refusal or matching rule is added or changed and reading.rs is not edited, so no corpus case applies and `cargo test -p athena-core --test refusal_corpus` need not be a demonstration. No prompt file changes, so no budget line moves."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New unit test `a_near_complete_rejection_does_not_pause_t3` in crates/athena-core/src/scope_guard.rs `mod tests`, which builds AttemptRecord lists and calls the production fn t3_cost (and evaluate_before_attempt). Cases: one Rejected attempt, cost 3.0, 8 of 9 met, p90 2.0 gives Flag (below Pause); the same with 3 of 9 gives Pause; 7 of 9 gives Pause; 4 of 5 gives Flag (boundary of 0.8); 9 of 9 with the Rejected verdict is not near-complete (met must be below total) so it gives Pause; no tally gives Pause; a Failed attempt with a tally gives Pause; two attempts where only the earlier one is near-complete and the last is 3 of 9 gives Pause (the last attempt decides); evaluate_before_attempt on the 8 of 9 line gives t3 Flag and overall no more than Flag when T4 and T5 are quiet.",
+      "command": "cargo test -p athena-core a_near_complete_rejection_does_not_pause",
+      "observes": "t3_cost returns Flag for 8 of 9 and 4 of 5, and Pause for 3 of 9, 7 of 9, no tally and a non-rejected last attempt.",
+      "fails_without": "Without the change the 8 of 9 line returns Level::Pause from t3_cost (spend 3.0 against p90 2.0 is 1.5 times), so the assert that it is below Pause fails; the field does not exist, so the test does not even compile on the base.",
+      "seam": "Production entry point t3_cost / evaluate_before_attempt (scope_guard.rs:321, 415). Fixture: the existing test helper `att` (scope_guard.rs:2091), which the plan extends with criteria: None, plus a new helper `rej_with(met, total, cost)` that sets the tally; both are in-module and the input is an AttemptRecord value, so no logic is inside a double. The seam exists today for t3_cost; the helper is added in plan step 6."
+    },
+    {
+      "criterion": 2,
+      "method": "New unit test `attempt_of_records_how_many_criteria_a_rejection_met` in scope_guard.rs `watcher_tests` (it uses the existing Rig). Run `rig(1.0, 0.8, &[Some(0)])` (as t3_pause_from_reading_forecast at scope_guard.rs:1912 does), `r.ask` then `r.go`, which closes the job Rejected with a stored verification of CRITERIA (2 criteria, one unmet). Take the job from `r.records().jobs`, call `attempt_of(&job, false, false)` and assert the verdict is Rejected and the tally is met 1, total 2. Clone the job, push seven more met CriterionResult entries into verification.criteria, call attempt_of again and assert 8 of 9 and near_complete true. Clone the job again and set outcome.state to OutcomeState::Failed with reason `the producer returned no valid report` (Verdict::Failed) and then with `environment: free disk space below the minimum` (Verdict::Environment, built with the real disk::LowDisk text as at scope_guard.rs:2337); assert the tally is None in both although verification is still present.",
+      "command": "cargo test -p athena-core attempt_of_records_how_many_criteria",
+      "observes": "A Rejected attempt carries (met, total); a Failed attempt and an Environment attempt carry None.",
+      "fails_without": "Without the change AttemptRecord has no criteria field, so the assertions on the tally cannot hold (the test does not compile); if attempt_of did not fill the tally for Rejected, the Some(1)/Some(2) assert fails; if it filled it for Failed or Environment, the None assert fails.",
+      "seam": "Production entry point attempt_of (scope_guard.rs:580, private, reachable from the in-module test). Fixture: the existing Rig (watcher_tests, scope_guard.rs:1175) driving Athena::go with FakeAgentDriver, and JobRecords whose fields are pub (store.rs:22-45) so a clone is edited; exists today. No logic is in the double."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the diff of the doc comments of AttemptRecord and t3_cost (and the new `criteria` field and near_complete).",
+      "command": "git diff -- crates/athena-core/src/scope_guard.rs",
+      "observes": "Both doc comments state the root cause (the guard treated every attempt's spend as one number and did not record how far a rejected attempt got), and say environment stops stay excluded through crate::disk::is_environment_reason with no second list. The diff adds no list of environment reasons (grep of the diff for `environment:` string literals in non-test code finds none).",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Run the existing tests; the filter `environment_stop` matches both names (scope_guard.rs:2332 and 2389) and no others. They use att(...) with criteria: None, so their results do not depend on the new rule.",
+      "command": "cargo test -p athena-core environment_stop",
+      "observes": "Both tests pass.",
+      "fails_without": "If the change counted an environment stop as a rejection or broke the verdict mapping, `environment_stop_is_not_counted_but_a_rejection_is` or `every_kind_of_environment_stop_is_an_environment_attempt` would fail (they are unchanged except for the helper `att`).",
+      "seam": "Exists: production verdict_of, evaluate_before_attempt, t1_retries; fixtures `att` and `failed_with` already in the file."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the stat and the CHANGELOG.md hunk: one new bullet under `## [Unreleased]` / `### Changed` naming the root cause, the near-complete rule, the 0.8 estimate, the tests, and `no refusal rule is added (0% of past accepted readings refused)`. The stat lists crates/athena-core/src/scope_guard.rs, status.rs, disk.rs, crates/athena-cli/src/drain.rs and CHANGELOG.md and no crates/athena-core/src/reading.rs.",
+      "command": "git diff --stat",
+      "observes": "A changelog entry exists; reading.rs is not in the diff.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks as Athena runs them. The verifier runs them as three separate commands.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0 on the candidate tree.",
+      "fails_without": "A new pub field not set at a constructor, or an unused import or helper, would fail clippy or the build; `near_complete` and the const must be used in non-test code to avoid dead-code warnings.",
+      "seam": "Exists: the repository's own fmt, clippy and test checks."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "7c8278a17d50c72a06e626d66a8ca1c4fca92469ed881a39fded3e219d9337cf"
+}

@@ -1,0 +1,143 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-045803-0hj9",
+  "n": 1,
+  "at": "2026-11-15T12:23:08.644241Z",
+  "invocation_seq": 1,
+  "base_commit": "fe56a2b9675c1c8343a3457640c3a0ba2f647000",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make scope guard read each attempt's stop reason and near-complete",
+  "summary": "Root cause: the scope guard (crates/athena-core/src/scope_guard.rs) reduces an attempt to a verdict, a cost and minutes, so it does not know how far a rejected attempt got. Environment stops are already excluded (disk.rs StopCause), so this job adds the missing fact for the last introspection (20261103-092929-s7ts), a near-complete rejection, and pauses on spend only when work is not converging.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Criteria require new unit tests plus cargo test, clippy and fmt passing."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix is in the guard's attempt record, not at one job."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria name tests that fail without the change."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the person running Athena, and the drain, should not see a line paused on spend when the last attempt stopped for a reason that does not signal runaway work. The verifier judges the diff and tests.",
+    "Code survey: read crates/athena-core/src/scope_guard.rs (AttemptRecord, Verdict::Environment, t1_retries, t3_basis, t3_cost, t5_wall_time, verdict_of, attempt_of, request_records, evaluate_before_attempt, and the stale-pause recheck near line 1776) and crates/athena-core/src/disk.rs (StopCause, is_environment_reason, resumable_stop). Entry point: evaluate_before_attempt over attempts built by request_records from job records; attempt_of reads job.verification.criteria. No record or data file is added, so check_record_file, AnyRecord and the round-trip test are untouched. The property is measured directly on AttemptRecord lists in unit tests in scope_guard.rs.",
+    "Existing code: crates/athena-core/src/scope_guard.rs (AttemptRecord, t3_basis, t3_cost, attempt_of) and crates/athena-core/src/disk.rs (StopCause, is_environment_reason) are extended, not replaced. Environment stops (low disk, check timeout, producer auth, usage limit, build slot) are already excluded from T1, T2, T5 and kept-work T3 spend, which covers introspections 20261028-065847-kmx7 (job 20261028-055601-hg0n), 20261028-103312-b53e (job 20261028-065911-m6m5), 20261028-124847-gf2n (job 20261028-103330-3d47) and 20261029-195138-3pqb. The remaining uncovered case is 20261103-101210-m2aa (job 20261103-092929-s7ts).",
+    "Previous jobs 20261028-055601-hg0n, 20261028-065911-m6m5 and 20261028-103330-3d47 were an unrelated replay feature (athena check-reading, reading replay) that stopped on low disk or an expired login. Their findings were environment stops, not code findings, and are now classified as environment by the guard. That replay feature is not part of this request. Their candidates' changed files (CHANGELOG.md, athena-cli main.rs, briefs.rs, lib.rs, reading.rs, run/mod.rs, store.rs, verify.rs, records.rs, docs/records.md) are dropped and not kept here, except CHANGELOG.md, which is a deliverable.",
+    "Design: AttemptRecord gains the count of criteria met and the count of criteria in the last verification (None when unknown). The guard's T3 spend pause does not fire when the last attempt was rejected with at least 80% of criteria met (an estimate, a code constant) and its stop is a bounded gap; it downgrades to a flag so a targeted retry is allowed. A line with no met-criteria data behaves as before. The 80% threshold is a judgment call, labeled as such in the docs comment.",
+    "This adds a rule that holds less work, not more, so no refusal-rule share applies. It refuses no readings.",
+    "Term line: a line of work is a request, its retries and re-asks, grouped by group_lines in scope_guard.rs.",
+    "Environment: no CI workflow, push, PR or history read is involved."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new unit test in crates/athena-core/src/scope_guard.rs builds a line whose last attempt is Rejected with 8 of 9 criteria met and spend over T3_PAUSE_RATIO times the forecast, and asserts t3_cost returns a level below Pause (checked by running cargo test); the same test with 3 of 9 met asserts Pause, so it fails without the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A unit test shows an attempt record built by attempt_of from a rejected job's verification carries the met and total criterion counts (checked by running cargo test), and a Failed or Environment attempt carries none.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The doc comments of AttemptRecord and t3_cost in crates/athena-core/src/scope_guard.rs name the root cause (the guard treated every attempt's spend as one number and did not record how far a rejected attempt got), and say that environment stops stay excluded through crate::disk::is_environment_reason, with no second list of environment reasons.",
+      "kind": "content"
+    },
+    {
+      "text": "Existing scope_guard tests for environment stops (environment_stop_is_not_counted_but_a_rejection_is, every_kind_of_environment_stop_is_an_environment_attempt) still pass under cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry for this change, and no refusal rule is added to crates/athena-core/src/reading.rs.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy and cargo test pass on the candidate tree.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing athena.toml, defaults.toml or workflows",
+    "The reading replay and athena check-reading from jobs 20261028-055601-hg0n, 20261028-065911-m6m5 and 20261028-103330-3d47; their candidate files (store.rs, verify.rs, records.rs, briefs.rs, reading.rs, run/mod.rs, main.rs, lib.rs, docs/records.md) are dropped",
+    "Automatic disk cleanup or disk reservation before the verifier",
+    "Adding any refusal rule for readings",
+    "Changing the thresholds of T1, T2, T4 or T5"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.4,
+        "p90": 5.0
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1900.0,
+        "p90": 4400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6806020066889632,
+      "p_user_intervenes": 0.06135338345864661,
+      "cost_usd": {
+        "p10": 0.553581331774853,
+        "p50": 1.5003202102626094,
+        "p90": 6.125123489014347
+      },
+      "wall_time_s": {
+        "p10": 607.8917087625641,
+        "p50": 2169.3936374009995,
+        "p90": 4499.82214646697
+      }
+    }
+  },
+  "departures": null,
+  "urgent_reason": "Retries paused on spend that did not mean runaway work are repeated failed or rejected attempts; this cuts them (5 jobs so far).",
+  "hard_reason": "Changes the scope guard's rule that pauses or flags lines of work and so holds jobs, which is a gate that judges other jobs.",
+  "producer_effort": "high"
+}

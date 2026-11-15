@@ -48,7 +48,9 @@
 //!   T5, not a pause) is still dispatched, so its item gets both attempts. [`Steps::flagged`] is asked only
 //!   after the last failed attempt, when no pause was found ([`ItemEnd::Flagged`]): the item is then passed
 //!   over for the rest of the batch with the flag signals as the reason, and the batch goes on to the next
-//!   queued item. Nothing is written. A flag alone does not stop the next item, but a flagged line that also
+//!   queued item. Nothing is written. A T3 flag can also mean a near-complete rejection over the spend limit
+//!   (the guard withholds its pause once, for a targeted retry), so that item gets its second attempt and is
+//!   passed over after two failures. A flag alone does not stop the next item, but a flagged line that also
 //!   has two attempts that did not land is held (next bullet).
 //! - **A line with two attempts that did not land is held, awaiting diagnosis.** [`Steps::held`] says which
 //!   queued items are on such a line: none of its attempts was accepted and two did not land (rejected,
