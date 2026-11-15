@@ -1,0 +1,240 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261115-190156-zkg7",
+  "round": 1,
+  "at": "2026-11-15T19:08:43.945910024Z",
+  "invocation_seq": 3,
+  "approach": "Revision of round 1: the design is unchanged; only the criterion 5 demonstration was refused, so it now names its seam and what fails without the behavior. The change: in `crates/athena-core/src/introspect.rs`, `event_of_job` passes the job's stored `candidate.producer_report` to `failure_details`. For a failed verification with unmet criteria, `failure_details` adds one block after the unmet list. For each unmet criterion (at most DETAIL_CAP, text clipped to TEXT_CAP) the block shows the producer's stored status and evidence from `criteria_check`, matched by the existing `criterion_key` normalisation. An unmatched criterion gets \"no pre-verdict check recorded\". A job with no candidate or no report gets one line saying so. A passing verification, a missing verification, and a failed verdict with no unmet criterion add nothing, so existing exact-text tests stay valid. `criterion_key` moves from `run/send_back.rs` into `introspect.rs` as `pub(crate)`. `send_back.rs` imports it, because `mod send_back;` is private to `run` (run/mod.rs:71) and `run/mod.rs` is not a deliverable. The CHANGELOG gets one entry in `### Fixed` naming the root cause.",
+  "decisions": [
+    {
+      "choice": "Move `criterion_key` (body and doc unchanged) from run/send_back.rs:359-380 into introspect.rs as `pub(crate)`; send_back.rs gets `use crate::introspect::criterion_key;`.",
+      "reason": "The brief says to reuse the send-back normalisation. `send_back` is a private module of `run` (run/mod.rs:71), so `introspect.rs` cannot name `crate::run::send_back::criterion_key`, and `run/mod.rs` is not a deliverable. `pub mod introspect` is declared at lib.rs:126, so the send-back can reach `crate::introspect::criterion_key`. One definition means the two matchers cannot drift, and send_back.rs (a listed deliverable) gets a real edit, so it is not an unchanged deliverable.",
+      "rejected": [
+        {
+          "option": "Make `criterion_key` `pub(crate)` in send_back.rs only",
+          "why": "introspect still cannot name the private `send_back` module, and re-exporting it needs an edit to run/mod.rs, which is not a deliverable."
+        },
+        {
+          "option": "Write a second trim/lowercase compare in introspect.rs",
+          "why": "It would disagree with the send-back on `1.` prefixes, `[kind]` tags and trailing punctuation; the cosmetic variants in run_pin_tests.rs:1076-1099 show the normalisation producers rely on."
+        },
+        {
+          "option": "Edit run/mod.rs to re-export it",
+          "why": "run/mod.rs is outside the listed deliverables."
+        }
+      ]
+    },
+    {
+      "choice": "Add the pre-verdict block inside `failure_details` (new parameter `report: Option<&ProducerReport>`) only when the unmet list is non-empty; with no candidate or no report, add one line stating that no pre-verdict check was recorded.",
+      "reason": "Criteria 1 and 3 conflict on the no-candidate case: criterion 1 says nothing is added when no candidate or report is stored, criterion 3 requires `what` to state that no pre-verdict check was recorded. I follow criterion 3, the specific behavior criterion, and read criterion 1 as: no producer status or evidence is ever invented. The stage must be able to tell an absent check from one nobody looked up, which is the original fault. The single caller of `failure_details` is introspect.rs:1499, so no other caller changes.",
+      "rejected": [
+        {
+          "option": "Add nothing when no candidate or report is stored",
+          "why": "Contradicts criterion 3 and repeats the fault: silence is indistinguishable from the check not being looked up."
+        },
+        {
+          "option": "Add the block to every failed verdict, including one with no unmet criterion",
+          "why": "The existing early return at introspect.rs:1006-1010 and tests at 2794-2802 pin the 'lists no unmet criterion' text; the producer's check of criteria is only relevant when a criterion is unmet."
+        }
+      ]
+    },
+    {
+      "choice": "Show only the producer's status and evidence for each unmet criterion; not the report's summary, checks_run, mistakes or desires.",
+      "reason": "`ReportedCriterion {criterion, status, evidence}` (athena-data/src/records.rs:806-810) is exactly the producer's own check against one criterion. The report is stored redacted (records.rs:812), so the text is safe to carry. Counts and text are capped with DETAIL_CAP (introspect.rs:945) and `clip(.., TEXT_CAP)` (introspect.rs:947, 952). Empty evidence is shown as 'no evidence given'.",
+      "rejected": [
+        {
+          "option": "Include the whole producer report",
+          "why": "It adds size and unrelated text; the other fields are not evidence about the unmet criterion."
+        }
+      ]
+    },
+    {
+      "choice": "Use one constant phrase, `no pre-verdict check recorded`, for both the unmatched-criterion line and the no-report line, and keep the heading free of the exact phrases 'Unmet acceptance criteria' and 'Failed checks'.",
+      "reason": "Existing tests assert `!what.contains(\"Failed checks\")` (introspect.rs:2744, athena-cli/tests/introspection.rs:470) and `!what.contains(\"Unmet acceptance criteria\")` (introspect.rs:2763). One phrase keeps the new tests' asserts consistent in case.",
+      "rejected": [
+        {
+          "option": "Reword the existing headings or add the block under the unmet heading",
+          "why": "Would risk the existing exact-phrase assertions for no gain."
+        }
+      ]
+    },
+    {
+      "choice": "Do not change producer.rs, briefs.rs, run_pin_tests.rs, prompts, records or docs/decisions.md.",
+      "reason": "The stage that cannot see the check is the introspection stage, whose only input is the Event built in `event_of_job` (user_prompt, introspect.rs:1126-1135). The prior job's producer-invocation-detail reading was a different input.",
+      "rejected": [
+        {
+          "option": "Put the pre-verdict check into the producer invocation detail",
+          "why": "That was the prior job's misreading; the introspection stage never reads the invocation detail."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Add `pub(crate) fn criterion_key` (moved from send_back.rs). Add `ProducerReport` to the `athena_data::records` imports (50-59). Give `failure_details` a `report: Option<&ProducerReport>` parameter and the pre-verdict block; update its doc comment (it says the text comes from `verification.json` only). Pass the stored report in `event_of_job` (1473-1508). In the test module add `athena_with_candidate`, `what_of_with`, `candidate_with` and `producer_report` helpers and four tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Remove the private `criterion_key` (359-380 with its doc comment) and add `use crate::introspect::criterion_key;` beside the file's other `use` lines, so `unmet_criteria` and `left_to_athena` use the one function.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One new bullet at the top of `### Fixed` under `## [Unreleased]` naming the root cause, the fix, the caps, the limit, how criteria 1 and 3 were reconciled, 'no refusal rule added (0% newly refused)', and the tests.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-core/src/introspect.rs add `pub(crate) fn criterion_key(text: &str) -> String` with the exact body and doc comment now at run/send_back.rs:359-380, and add `ProducerReport` to the `athena_data::records` imports (introspect.rs:50-59). Add `const NO_PRE_VERDICT_CHECK: &str = \"no pre-verdict check recorded\";`.",
+    "In crates/athena-core/src/run/send_back.rs delete the private `criterion_key` (359-380 with its doc comment) and add `use crate::introspect::criterion_key;` beside the file's `use crate::mirrors::Drift;` line. Leave `unmet_criteria` and `left_to_athena` as they are.",
+    "In introspect.rs change `fn failure_details(v: &Verification)` (line 984) to `failure_details(v: &Verification, report: Option<&ProducerReport>)`; keep the `Verdict::Pass` early return and the 'lists no unmet criterion' return unchanged. After the unmet list and its `more` line, when `unmet` is non-empty, push a block (a small helper such as `pre_verdict_block(&unmet, report)`). If `report` is `None`, write one line: `Producer's own check of each unmet criterion, before the verdict: no pre-verdict check recorded (the job has no stored producer report).` Otherwise write the heading `Producer's own check of each unmet criterion, before the verdict:`, then for each of the first DETAIL_CAP unmet criteria find the first `report.criteria_check` entry with `criterion_key(&r.criterion) == criterion_key(&c.criterion)`. If found write `- <clip criterion>: the producer marked it <clip status>; its evidence: <clip evidence>` (evidence `no evidence given` when blank), all with `clip(.., TEXT_CAP)`. If none is found write `- <clip criterion>: no pre-verdict check recorded`. Do not use the exact phrases 'Unmet acceptance criteria' or 'Failed checks'. Update the doc comment of `failure_details`. In `event_of_job` (line 1499) replace `.map(failure_details)` with `.map(|v| failure_details(v, job_records.candidate.as_ref().and_then(|c| c.producer_report.as_ref())))`, and add a doc line to `event_of_job` that `what` carries the producer's stored pre-verdict check of each unmet criterion.",
+    "In the introspect.rs test module add `Candidate` and `ReportedCriterion` to the `athena_data::records` imports at line 1969. Add `athena_with_candidate(verification: Option<Verification>, candidate: Option<Candidate>)` holding the body of `athena_with` and also pushing `NewFile::record(&AnyRecord::Candidate(Box::new(c)))`; make `athena_with` call it with `None`. Add `what_of_with(verification, candidate) -> String`, a `candidate_with(report: Option<ProducerReport>) -> Candidate` builder (job JOB, base_commit `\"0\".repeat(40)`, candidate_commit Some, no fingerprints, no base_fingerprint or previous_job, empty changes and violations), and `producer_report(entries: &[(&str, &str, &str)]) -> ProducerReport` (empty other fields, `no_change: None`).",
+    "Add four tests: `an_unmet_criterion_shows_the_producers_pre_verdict_check` (criterion 2: plain, and a `[behavior] ... .` variant; asserts status and evidence appear, the verifier's 'must not be copied' evidence does not, and the old unmet and major-finding assertions hold); `an_unmet_criterion_with_no_pre_verdict_check_says_so` (criterion 3a: criterion absent from `criteria_check`, empty `criteria_check`, and `producer_report: None`); `a_job_without_a_candidate_says_no_pre_verdict_check_was_recorded` (criterion 3b: via `athena_with`, repeating the assertions of `an_event_carries_the_unmet_criterion_and_the_major_finding` and, in a second case with a failing check, 'Failed checks'); `the_producers_pre_verdict_evidence_is_capped` (11 unmet criteria with evidence of 3 x TEXT_CAP 'e' characters: no run of TEXT_CAP + 1 'e', and exactly DETAIL_CAP lines containing 'the producer marked it'). Leave the existing tests unchanged.",
+    "Add a bullet at the top of `### Fixed` under `## [Unreleased]` in CHANGELOG.md (CHANGELOG.md:21). State the root cause: the producer's self-check of each criterion was already stored in `candidate.producer_report.criteria_check` (a passing check too), but the introspection event built in `event_of_job` read only the outcome reason and `verification.json`, so the stage that reports the failure could not see the check. Then the fix (`failure_details` and `event_of_job` in introspect.rs, `criterion_key` shared from introspect.rs), the caps, the no-candidate line and the criterion 1/3 reading, the limit (matching is by normalised text, so a reworded criterion shows as not recorded), 'no refusal rule is added (0% newly refused)', that the prior job 20261114-160745-8e6x misread the stored event as the producer invocation detail, and the tests (`cargo test -p athena-core introspect`, `cargo test -p athena-cli --test introspection`). Do not touch docs/decisions.md, docs/design or records/.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix findings. Do not edit run/mod.rs, producer.rs, run_pin_tests.rs, briefs.rs, prompts, docs/decisions.md or records/."
+  ],
+  "risks": [
+    {
+      "risk": "Criteria 1 and 3 conflict on a job with no stored candidate (nothing added, versus a statement that no check was recorded).",
+      "mitigation": "The plan follows criterion 3, the specific behavior criterion, and reads criterion 1 as 'no producer status or evidence is invented'. The only text added for a job with no candidate is the 'no pre-verdict check recorded' line. A verdict with no unmet criterion, a passing one and a missing one add nothing. The CHANGELOG entry says so. This resolution was in the round 1 plan and the critic did not contest it."
+    },
+    {
+      "risk": "The producer's criterion text differs from the verifier's, so the match fails and the stage is told the check was not recorded.",
+      "mitigation": "The match uses `criterion_key`, the normalisation the send-back already uses (prefix, `[kind]` tag, case, spacing and trailing punctuation ignored). The criterion 2 test includes a prefixed and punctuated variant. A genuinely reworded criterion shows as 'no pre-verdict check recorded', and the CHANGELOG states this limit."
+    },
+    {
+      "risk": "Moving `criterion_key` into introspect.rs puts a send-back helper in a module with a different purpose, and send_back.rs now depends on introspect.",
+      "mitigation": "The dependency is inside one crate, the function is pure, and `crate::introspect` is already imported by other modules (proposals.rs:22, scope_guard.rs:34, labeled.rs:32). The doc comment says the function is shared. Moving it to a neutral module would mean editing run/mod.rs or lib.rs, which are not deliverables; the CHANGELOG notes it as a follow-up."
+    },
+    {
+      "risk": "A clippy `-D warnings` or fmt failure, for example a redundant import or an unused function.",
+      "mitigation": "The new tests import only `Candidate` and `ReportedCriterion` explicitly in the test module (`ProducerReport` arrives through `use super::*`), the helper names (`candidate_with`, `producer_report`) do not clash with `criterion`, `check`, `finding` or `verification`, and the producer runs `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` before finishing. `rustfmt` orders the new `use` line in send_back.rs."
+    },
+    {
+      "risk": "A job's candidate record may not be at HEAD when the introspection reads it, so a real stored check shows as absent.",
+      "mitigation": "The introspection event is built from the stored candidate at HEAD of the records read by `GitRecords::load` (introspect.rs:1474). Candidate files are written under `<job dir>/candidate.json` with the verification (records.rs:1326-1329), and lifecycle.rs:92 reads them at HEAD. When the file is missing the output is the no-candidate line, which is the stated behavior."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Event.what text built by `event_of_job`",
+      "dependent": "crates/athena-core/src/introspect.rs `introspect_job` (line 1292) and the failed-job loop in `run_pending_introspections` (line 1409), the two callers of `event_of_job`; run/mod.rs:435 calls `introspect_job` and manage.rs:513 calls `run_pending_introspections`",
+      "kind": "code",
+      "test": "`cargo test -p athena-core introspect` (the new tests plus the existing ones at introspect.rs:2715-2830) and `cargo test -p athena-cli --test introspection`. The signatures of `event_of_job`, `introspect_job` and `run_pending_introspections` do not change; only the content of the `what` string does.",
+      "reason": null
+    },
+    {
+      "name": "Event.what text in the model prompt (`user_prompt`, introspect.rs:1126-1135)",
+      "dependent": "crates/athena-cli/tests/introspection.rs:421-471 `the_prompt_for_a_rejected_job_names_the_unmet_criterion_and_the_major_finding`, and :982-993, which assert only the key set of `prompt[\"event\"]`",
+      "kind": "code",
+      "test": "`cargo test -p athena-cli --test introspection`. Lines 456-470 use `contains` on the unmet header, the criterion text and the major finding, and `!contains` on 'trailing space', 'the tests still pass' and 'Failed checks'. The fake producer reports each criterion met with evidence 'checked by the producer' (common/mod.rs:385, 592-605), so the block adds the unmet criterion's own text, 'met' and that evidence, and none of the three asserted-absent strings. The event keys at :982-993 do not change, because `what` stays one string.",
+      "reason": null
+    },
+    {
+      "name": "Event.what text and the mistake test",
+      "dependent": "crates/athena-core/src/introspect.rs:1143-1144 `is_mistake(category, &event.what)` in `user_prompt`",
+      "kind": "code",
+      "test": null,
+      "reason": "`is_mistake` (athena-data records.rs, via `InterventionCategory::parse`) applies only to an intervention category; a job event has category `rejected` or `failed` (introspect.rs:1481-1485), which does not parse as a mistake category, and the new text is appended after the title and reason, never at the start."
+    },
+    {
+      "name": "Event serialised in the kill-switch pending queue",
+      "dependent": "crates/athena-core/src/introspect.rs:1324-1340 `defer` and `pending_files` (the pending queue under `introspect_pending_dir`), which store the `Event` as JSON",
+      "kind": "code",
+      "test": null,
+      "reason": "`what` stays one `String` field (introspect.rs:812), so the stored shape is unchanged. An event queued before this change keeps its old text and is read back as is. The run of the pending queue re-reads the event through `event_of_job` (line 1409), so it gets the new text."
+    },
+    {
+      "name": "`criterion_key` location",
+      "dependent": "crates/athena-core/src/run/send_back.rs `unmet_criteria` (line 18) and `left_to_athena` (line 37), which call `criterion_key`",
+      "kind": "code",
+      "test": "`cargo test -p athena-core` run_pin_tests.rs:1076-1131 (the cosmetic variants `3.`, `3)`, `[behavior]`, case, spacing, trailing `.` and `;`) and send_back.rs `left_to_athena_tests` (576-612). The body moves unchanged, so behavior is identical; the only other reference is the doc link at send_back.rs:13, which resolves through the import. A search of crates/ shows no other use of `criterion_key`.",
+      "reason": null
+    },
+    {
+      "name": "Visibility of `criterion_key`",
+      "dependent": "crates/athena-core/src/run/mod.rs:71 `mod send_back;` and the re-export list at run/mod.rs:91-95",
+      "kind": "code",
+      "test": null,
+      "reason": "run/mod.rs is not edited. `introspect` is `pub mod` (lib.rs:126), so `pub(crate)` there is reachable from `run::send_back`; no module cycle exists at the type level, and the function is pure."
+    },
+    {
+      "name": "Event.what size",
+      "dependent": "The size of `what` in the introspection prompt (`prompt[\"event\"][\"what\"]`, introspect.rs:1129) and the prompt token budgets in docs/system-facts.md (`budget ...` lines) and athena-cli/tests/budgets.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "The added block is bounded by DETAIL_CAP (8) lines, each of at most TEXT_CAP (400) characters for the criterion and TEXT_CAP for the evidence, so roughly 8 x 800 characters at most. The budgets count prompt files, not run-time `what` data, and no prompt file changes, so no budget line in docs/system-facts.md changes."
+    },
+    {
+      "name": "Stored record shapes",
+      "dependent": "athena_data::records `Candidate`, `ProducerReport`, `ReportedCriterion` (records.rs:803-864) and the `AnyRecord` parse and round-trip allow-lists",
+      "kind": "rule",
+      "test": null,
+      "reason": "No record, field, schema or file is added or changed; the change only reads `Candidate.producer_report.criteria_check`. That field is `#[serde(default)]` (records.rs:819-821), so a record written before the pre-verification check reads as an empty list and gives the 'no pre-verdict check recorded' lines."
+    },
+    {
+      "name": "Doc and record files",
+      "dependent": "CHANGELOG.md, docs/decisions.md, records/ and the decision-log gate `decision_gate` in crates/athena-core/src/run/checks.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "Only CHANGELOG.md is edited. The decision-log gate runs only when `docs/decisions.md` is in the change, so it does not fire. Nothing under records/ or docs/design is edited, as the brief requires."
+    },
+    {
+      "name": "Exact `what` assertions",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs, crates/athena-core/src/run/tests.rs and the other tests of the introspection event",
+      "kind": "code",
+      "test": "`cargo test -p athena-core introspect::tests::a_job_without_verification_or_without_failures_keeps_the_old_what`, run in the same `cargo test -p athena-core introspect` command as the new tests.",
+      "reason": "A search for 'Unmet acceptance criteria', 'lists no unmet criterion' and 'more not shown' finds only introspect.rs:974-1014, its tests at 2733, 2763, 2801 and 2817, and athena-cli/tests/introspection.rs:457. Each is a `contains` or `!contains`, except the exact-equality test at 2782-2791 for a missing or passing verification, which gets no block."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff for the three content claims. (a) `event_of_job` passes `job_records.candidate.as_ref().and_then(|c| c.producer_report.as_ref())` into `failure_details`. (b) The block is built only after the `Verdict::Pass` early return, uses `clip(.., TEXT_CAP)` and `.take(DETAIL_CAP)`, and writes the `no pre-verdict check recorded` phrase for an unmatched criterion. (c) Nothing is added for a passing verification, and the existing 'lists no unmet criterion' return is untouched. Then run `cargo test -p athena-core introspect` to show the behavior holds.",
+      "command": "git diff crates/athena-core/src/introspect.rs crates/athena-core/src/run/send_back.rs",
+      "observes": "The diff shows exactly those pieces, plus `criterion_key` moved to introspect.rs and imported by send_back.rs. The test run (criteria 2 and 3) shows the effect.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "New unit test in the introspect.rs test module, in the style of `an_event_carries_the_unmet_criterion_and_the_major_finding` (2715). It commits a Candidate whose `producer_report.criteria_check` has `{criterion: 'Tests call event_of_job itself', status: 'met', evidence: 'ran the new test and it passed'}` and a failed Verification with that criterion unmet (via `criterion(text, false)`, whose verifier evidence is 'evidence that must not be copied'). It calls `event_of_job` and asserts: `what` contains the criterion, the producer's status and the evidence text; the old assertions still hold (`Unmet acceptance criteria (1):`, the major finding line); `what` does not contain 'must not be copied' (the verifier's evidence) or 'Failed checks'. A second case stores the producer's criterion as `[behavior] Tests call event_of_job itself.` and asserts the same match through `criterion_key`.",
+      "command": "cargo test -p athena-core introspect::tests::an_unmet_criterion_shows_the_producers_pre_verdict_check",
+      "observes": "The test passes with the change. `what` shows, under the unmet list, the criterion with the producer's status 'met' and the producer's evidence.",
+      "fails_without": "On the base tree `event_of_job` never reads `job_records.candidate`, so `what` has no text from `candidate.producer_report`. The asserts on the producer's status 'met' and the evidence 'ran the new test and it passed' fail. The `[behavior] ... .` variant case fails for the same reason.",
+      "seam": "Production entry point `Athena::event_of_job` (introspect.rs:1473), called from the in-module test. Fixture: a real temporary git repository holding committed record files, built by the test helper `athena_with` (introspect.rs:2081, exists). Step 4 adds `athena_with_candidate(verification, candidate)`, with `athena_with` delegating to it with `None`, and a `what_of_with` helper. The Candidate is committed as `AnyRecord::Candidate(Box::new(c))`, written to `<job dir>/candidate.json` (records.rs:1326-1328) and read back by `Records::load` (store.rs:207). It is a /1 record with no base_fingerprint, as records.rs:1230-1235 requires. Nothing is faked; the logic under test is production code."
+    },
+    {
+      "criterion": 3,
+      "method": "Two new tests. (a) `an_unmet_criterion_with_no_pre_verdict_check_says_so`: a Candidate whose `criteria_check` lists only other criteria (second case: empty list; third case: `producer_report: None`) and a failed Verification with criterion C unmet; assert `what` contains C and 'no pre-verdict check recorded', and does not contain the other criteria's evidence. (b) `a_job_without_a_candidate_says_no_pre_verdict_check_was_recorded`: no Candidate committed (via `athena_with`), failed Verification with C unmet, a major finding and, in a second case, a failing check; assert `what` contains 'no pre-verdict check recorded' and still contains 'Unmet acceptance criteria (1):', '- C', the 'major: ... at ...' line and 'Failed checks'. The existing exact-equality test `a_job_without_verification_or_without_failures_keeps_the_old_what` (2782-2791) stays unchanged to show a missing or passing verification adds nothing. A fourth test, `the_producers_pre_verdict_evidence_is_capped`, gives 11 unmet criteria with matching entries whose evidence is 'e' x 1200 and asserts no run of 401 'e' and exactly DETAIL_CAP producer lines.",
+      "command": "cargo test -p athena-core introspect::tests::an_unmet_criterion_with_no_pre_verdict_check_says_so",
+      "observes": "The statement appears for an unlisted criterion, for a candidate without a report, and for a job with no candidate. The old assertions on `what` hold.",
+      "fails_without": "On the base tree `what` never contains 'no pre-verdict check recorded', so the asserts on that phrase fail in all three cases: criterion absent from `criteria_check`, empty `criteria_check` or `producer_report: None`, and no stored candidate.",
+      "seam": "Production entry point `Athena::event_of_job` via `athena_with` (exists, introspect.rs:2081) for the no-candidate job, and via `athena_with_candidate` (added in plan step 4) for the other cases. Same real-git-repository fixture as criterion 2; the Candidate is a real record value with `producer_report` None or with a list of other criteria."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff of CHANGELOG.md and `git status` for the other changed paths. The diff must show one new bullet at the top of `### Fixed` under `## [Unreleased]` (CHANGELOG.md:21). The bullet states that the producer's self-check was already stored in `candidate.producer_report`, that the introspection event built in `event_of_job` read only the outcome reason and `verification.json`, so the stage that reports the failure could not see the check, and that the passing check was already stored. It names `failure_details`, the moved `criterion_key`, the caps, the matching limit, how the criterion 1/3 conflict was resolved, 'no refusal rule added (0% newly refused)', and the tests. `git status` must list no change under docs/decisions.md, docs/design or records/.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "The entry names the root cause and the fix. No other doc or record file is in the change.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run the checks Athena runs, one command each: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. The test run covers: the introspect unit tests that exist today (introspect.rs:2715-2830, which now also carry the no-candidate line where they have an unmet criterion); `run_pin_tests` and the send_back.rs test modules, which drive `unmet_criteria` and `left_to_athena` and so the moved `criterion_key`; and the end-to-end introspection tests of the CLI crate. In that CLI test the fake producer reports every criterion as met with evidence 'checked by the producer' (athena-cli/tests/common/mod.rs:385, 592-605), so the new block reads '...marked met; its evidence: checked by the producer', which holds none of the asserted-absent strings.",
+      "command": "cargo test --locked",
+      "observes": "All three commands exit 0. The 2, 3 and 4 new tests run in the same pass and pass.",
+      "fails_without": "A regression guard, so it fails when the behavior is broken. Dropping the `use crate::introspect::criterion_key;` line, or leaving `criterion_key` private, is a compile error in send_back.rs. Changing the moved normalisation breaks `a_criterion_reported_with_only_cosmetic_differences_counts_as_reported` and `a_missing_unmet_or_different_criterion_is_still_listed` (run_pin_tests.rs:1076, 1102) and the left_to_athena_tests (send_back.rs:576-612). A block added to a passing or missing verification breaks the exact-equality test at introspect.rs:2782-2791. Text containing 'Failed checks', 'trailing space' or 'the tests still pass' breaks introspect.rs:2715-2745 and athena-cli/tests/introspection.rs:421-471. A lint or format slip fails the two other check commands.",
+      "seam": "Production entry points that existing tests already reach, all existing: (1) `Athena::event_of_job` through `athena_with` and `what_of` in the introspect.rs test module (2081, 2705), with a real git repository fixture; (2) `crate::run::unmet_criteria` and `left_to_athena` (send_back.rs:18, 37), through the `report` and `accepted` helpers in run_pin_tests.rs:1063 and send_back.rs:543-570, which build a real `ProducerOutput` and `AcceptedReading` and inject nothing fake; (3) a whole job and `introspect_job` (run/mod.rs:435) in athena-cli/tests/introspection.rs:421-471, with `setup(scenario, &model)` and `run_job` injecting a fake model and a fake producer driver (common/mod.rs). The seam exists today; no step adds it."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "a87d62e62c465573f196bb35cb9b4149a54cf7ddba71b1534b762911b3353bdc"
+}
