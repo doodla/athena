@@ -5470,3 +5470,29 @@ should replace those estimates with its figures.
   `baseline_for`) and the introspections of the six jobs. Ran: `cargo test -p athena-core verify` and `cargo test -p
   athena-core a_failing_check_citing`. Not measured: whether verifiers or owners act on the finding, or how many past
   rejections cited a path the job did not change.
+
+## D187 · `athena status` shows each stage's duration and main reason for the newest landed jobs
+
+- **Case:** The owner asked to drop the stage time limits and instead measure how long things take and why. The limits
+  were raised to 24 hours by job 20261114-184053-050s; this decision is the measuring half. The throughput section gave
+  medians per stage but no reason, so a slow stage could not be explained, and its landing figure ran to hundreds of
+  minutes.
+- **Decision:** Root cause of the unreadable landing figure: `landing_record_time` took the newest landing record that
+  lists the job, and each later landing record lists earlier job landings again, so a job's landing stage ran to the
+  time of a later landing. It now takes the oldest. A new module `crates/athena-core/src/status/stages.rs` reports, for
+  the newest five landed jobs, the queue wait, reading, each planning round, producer, checks, verifier, landing and
+  disk wait, each with minutes and a reason (model and effort, tokens, turns, commands run, retries, the compile and lint
+  checks apart from the test check, the slowest check, the build-slot wait). `athena status` and `status --snapshot`
+  print it after the throughput section. A time or reason with no record prints `not recorded`, never zero. No record
+  keeps a disk wait, so that stage always prints `not recorded`. Records are read, not changed.
+- **Alternatives:** Store a stage record per job: it changes what records hold and the allow-list. Rejected. Estimate a
+  missing reason from the stage's wall time: a guess shown as a figure. Rejected. Medians only: they hide the one slow
+  job.
+- **Tradeoff:** Planning rounds are grouped by planner invocation, with the critic invocations after it. A queue wait
+  needs both the accepted reading and the dispatch record. The report adds about ten lines per job to the status output.
+- **Reversal cost:** Low; remove `stages.rs`, the `job_stages` fields and the two lines in `display.rs`.
+- **Provenance:** Time limits are dropped (raised to 24 h by job 20261114-184053-050s) and timing is measured instead,
+  at the owner's request. Read: `crates/athena-core/src/status/throughput.rs`, `crates/athena-data/src/records.rs`
+  (`Invocation`, `CheckRun`) and the evidence snapshot's landing records and history. Ran: `cargo run -p athena-cli --
+  status --snapshot <evidence directory>` and `cargo test -p athena-core a_slow_planning`. Not measured: disk wait, which
+  no record holds.

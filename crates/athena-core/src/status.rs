@@ -16,9 +16,11 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod planning;
+mod stages;
 mod throughput;
 
 pub use planning::*;
+pub use stages::*;
 pub use throughput::*;
 
 /// The paths the installed binary is built from: Athena's own code and the files that build and install it. A
@@ -460,6 +462,10 @@ pub struct StatusView {
     /// jobs that did not land, computed from the job records; absent until a request job has landed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub throughput: Option<Throughput>,
+    /// For the newest landed jobs, each stage's minutes and the main reason for them (`status/stages.rs`);
+    /// empty until a request job has landed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub job_stages: Vec<JobStages>,
     /// The latest build measurement as one printed line ([`build_measurement_line`]), or the line that says
     /// there is none yet.
     pub build_measurement: String,
@@ -1320,6 +1326,7 @@ impl Athena {
             reading_rules: ReadingRuleStats::compute(&records),
             duties,
             throughput: Throughput::compute(&records),
+            job_stages: job_stages(&records, STAGE_REPORT_JOBS),
             build_measurement: build_measurement_line(BuildMeasurement::latest(
                 &records.build_measurements,
             )),
@@ -3913,6 +3920,136 @@ pub(crate) mod planning_cost_tests {
         let window = landed_jobs(&records);
         assert_eq!(StageMinutes::median_of(&window), throughput.median_stages);
         assert_eq!(StageMinutes::median_of(&[]), StageMinutes::default());
+    }
+
+    fn stage<'a>(job: &'a JobStages, name: &str) -> &'a StageTiming {
+        job.stages
+            .iter()
+            .find(|s| s.stage == name)
+            .unwrap_or_else(|| panic!("no stage {name} in {job:?}"))
+    }
+
+    #[test]
+    fn a_slow_planning_round_and_a_slow_check_are_reported_with_their_reasons() {
+        let job = "20261029-100000-stg1";
+        let mut all = timed_job(
+            job,
+            t("2026-10-29T10:00:00Z"),
+            minutes(1.0, 40.0, 10.0, 30.0, 5.0, 2.0),
+            OutcomeState::Landed,
+        );
+        for record in &mut all {
+            match record {
+                AnyRecord::Invocation(i) if i.role == Role::Planner => {
+                    i.model = "big-model".into();
+                    i.effort = Some("max".into());
+                    i.turns = Some(61);
+                    i.tokens.output = Quantity::measured(250_000.0, Unit::Tokens, "result.usage");
+                    i.commands_run = vec!["cargo test".into(); 3];
+                }
+                AnyRecord::Verification(v) => {
+                    let mut build = queued_test_run(120.0, "athena monotonic clock", Some(45.0));
+                    build.name = "clippy".into();
+                    v.checks.insert(0, build);
+                }
+                _ => {}
+            }
+        }
+        let mut records = loaded(all);
+        records.landings = vec![landing_of(job, t("2026-10-29T11:30:00Z"))];
+        let shown = job_stages(&records, STAGE_REPORT_JOBS);
+        assert_eq!(shown.len(), 1);
+        let planning = stage(&shown[0], "planning round 1");
+        assert!((planning.minutes.unwrap() - 40.0).abs() < 1e-6);
+        let reason = planning.reason.as_deref().unwrap();
+        for expected in [
+            "big-model at max effort",
+            "250000 out",
+            "61 turns",
+            "3 commands run",
+        ] {
+            assert!(reason.contains(expected), "{expected:?} not in {reason}");
+        }
+        assert_eq!(shown[0].slowest().unwrap().stage, "planning round 1");
+
+        let checks = stage(&shown[0], "checks");
+        assert!((checks.minutes.unwrap() - 32.0).abs() < 1e-6);
+        let reason = checks.reason.as_deref().unwrap();
+        for expected in [
+            "build and lint checks 2.0 min",
+            "test 30.0 min",
+            "slowest test 30.0 min",
+            "waited 45s for a build slot",
+        ] {
+            assert!(reason.contains(expected), "{expected:?} not in {reason}");
+        }
+        // The landing runs from the verifier's end to the landing record: 1.5 hours after the start less the
+        // 86 minutes the earlier stages took.
+        assert!(stage(&shown[0], "landing").minutes.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn a_job_missing_a_reason_field_says_not_recorded_and_never_zero() {
+        let job = "20261029-100000-stg2";
+        // No planner, no checks, no dispatch record, no effort, no turns, no landing record.
+        let all = timed_job(
+            job,
+            t("2026-10-29T10:00:00Z"),
+            minutes(1.0, 0.0, 10.0, 0.0, 5.0, 2.0),
+            OutcomeState::Landed,
+        );
+        let shown = job_stages(&loaded(all), STAGE_REPORT_JOBS);
+        assert_eq!(shown.len(), 1);
+        for name in ["queue wait", "checks", "disk wait"] {
+            let s = stage(&shown[0], name);
+            assert_eq!((s.minutes, s.reason.as_deref()), (None, None), "{name}");
+        }
+        assert!(
+            shown[0]
+                .stages
+                .iter()
+                .all(|s| !s.stage.starts_with("planning"))
+        );
+        let producer = stage(&shown[0], "producer").reason.as_deref().unwrap();
+        assert!(producer.contains("effort not recorded"), "{producer}");
+        assert!(producer.contains("turns not recorded"), "{producer}");
+        let landing = stage(&shown[0], "landing").reason.as_deref().unwrap();
+        assert!(landing.contains("no landing record found"), "{landing}");
+        let text = stages_text(&shown);
+        for line in text.lines().filter(|l| {
+            ["queue wait", "checks", "disk wait"]
+                .iter()
+                .any(|n| l.trim_start().starts_with(n))
+        }) {
+            assert!(
+                line.contains("not recorded · reason: not recorded"),
+                "{line}"
+            );
+            assert!(!line.contains("0.0 min"), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_later_landing_record_that_lists_the_job_again_does_not_stretch_its_landing() {
+        let mut records = landed_job_records();
+        records.landings = vec![
+            landing_of(LANDED_JOB, t("2026-10-29T10:23:00Z")),
+            landing_of(LANDED_JOB, t("2026-10-30T10:23:00Z")),
+        ];
+        let landed = landed_jobs(&records);
+        assert!((landed[0].stages.landing_and_rebuild - 6.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_dispatch_record_gives_the_queue_wait() {
+        let wait = stages::queue_wait_between(
+            Some(t("2026-10-29T10:01:00Z")),
+            Some(t("2026-10-29T10:46:00Z")),
+        );
+        assert!((wait.minutes.unwrap() - 45.0).abs() < 1e-6, "{wait:?}");
+        assert!(wait.reason.is_some());
+        let missing = stages::queue_wait_between(None, Some(t("2026-10-29T10:46:00Z")));
+        assert_eq!((missing.minutes, missing.reason), (None, None));
     }
 }
 

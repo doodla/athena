@@ -243,6 +243,8 @@ pub struct SnapshotView {
     pub landing_records: usize,
     /// Throughput over the snapshot's records; none when no request job landed.
     pub throughput: Option<Throughput>,
+    /// Each stage's minutes and main reason for the newest landed jobs; empty when none landed.
+    pub job_stages: Vec<crate::status::JobStages>,
     /// Files under `records/` that are not acceptable records.
     pub invalid_records: Vec<String>,
 }
@@ -274,6 +276,7 @@ pub fn status(dir: &Path) -> Result<SnapshotView> {
         jobs_by_state,
         landing_records: records.landings.len(),
         throughput: Throughput::compute(&records),
+        job_stages: crate::status::job_stages(&records, crate::status::STAGE_REPORT_JOBS),
         invalid_records: records.invalid.clone(),
     })
 }
