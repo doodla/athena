@@ -1527,6 +1527,10 @@ mod produce_and_verify_order_tests {
         records: Vec<(String, Option<String>)>,
         /// The `planner    ` lines, in order.
         planner_lines: Vec<String>,
+        /// The time limit each planner call was started with, in order.
+        planner_timeouts: Vec<std::time::Duration>,
+        /// The prompt of each planner call, in order.
+        planner_prompts: Vec<String>,
     }
 
     impl RevisionRun {
@@ -1554,13 +1558,19 @@ mod produce_and_verify_order_tests {
     ) -> RevisionRun {
         let state = tempfile::tempdir().unwrap();
         let seen: Arc<Mutex<Vec<(Role, String, String)>>> = Arc::default();
-        let inner = planning_script(planner, critic, Calls::default());
+        let prompts = Calls::default();
+        let timeouts: Arc<Mutex<Vec<std::time::Duration>>> = Arc::default();
+        let inner = planning_script(planner, critic, prompts.clone());
         let (record, reader_model) = (seen.clone(), reader_model.to_string());
+        let seen_timeouts = timeouts.clone();
         let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
             record
                 .lock()
                 .unwrap()
                 .push((spec.role, spec.model.clone(), spec.effort.clone()));
+            if spec.role == Role::Planner {
+                seen_timeouts.lock().unwrap().push(spec.timeout);
+            }
             let mut turn = inner(spec);
             if spec.role == Role::Reader
                 && let Some(reading) = turn.structured.as_mut()
@@ -1603,16 +1613,94 @@ mod produce_and_verify_order_tests {
                 .cloned()
                 .collect();
         let calls = seen.lock().unwrap().clone();
+        let planner_timeouts = timeouts.lock().unwrap().clone();
+        let planner_prompts = prompts_of(&prompts.lock().unwrap(), Role::Planner)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
         RevisionRun {
             finished,
             calls,
             records,
             planner_lines,
+            planner_timeouts,
+            planner_prompts,
         }
     }
 
     const HAIKU: &str = "claude-haiku-5-5";
     const SONNET: &str = "claude-sonnet-5-5";
+
+    fn secs(list: &[u64]) -> Vec<std::time::Duration> {
+        list.iter()
+            .map(|s| std::time::Duration::from_secs(*s))
+            .collect()
+    }
+
+    /// New behavior: a planner call whose effort the revision setting raised gets the scaled time limit
+    /// (600 s becomes 1200 s), and its brief states that limit. Round 1 keeps 600 s.
+    #[test]
+    fn planner_revision_escalated_effort_scales_the_planner_time_limit() {
+        // After a critic revise (round 2).
+        let repo = repo_with_revision_keys(3, None, Some("xhigh"));
+        let run = run_for_revision(
+            &repo,
+            HAIKU,
+            vec![good_plan()],
+            vec![revising_critique(), accepting_critique()],
+        );
+        assert_eq!(
+            run.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            run.finished.reason
+        );
+        assert_eq!(run.planner(), [(HAIKU, "high"), (HAIKU, "xhigh")]);
+        assert_eq!(run.planner_timeouts, secs(&[600, 1200]));
+        assert!(run.planner_timeouts[1] > std::time::Duration::from_secs(600));
+        assert!(run.planner_prompts[0].contains("deadline of 600 seconds"));
+        assert!(run.planner_prompts[1].contains("deadline of 1200 seconds"));
+        // After a mechanical plan-rule revision in round 1.
+        let repo = repo_with_revision_keys(3, None, Some("xhigh"));
+        let run = run_for_revision(
+            &repo,
+            HAIKU,
+            vec![bad_plan(), good_plan()],
+            vec![accepting_critique()],
+        );
+        assert_eq!(run.planner(), [(HAIKU, "high"), (HAIKU, "xhigh")]);
+        assert_eq!(run.planner_timeouts, secs(&[600, 1200]));
+    }
+
+    /// A revision that does not raise the effort (key unset, weaker or equal) keeps `planner_timeout_s`
+    /// exactly, in every round; so does round 1 when the key is set. Fails if the scaling is unconditional.
+    #[test]
+    fn planner_time_limit_is_unchanged_when_the_revision_does_not_raise_the_effort() {
+        for key in [None, Some("medium"), Some("high")] {
+            let repo = repo_with_revision_keys(3, None, key);
+            let run = run_for_revision(
+                &repo,
+                HAIKU,
+                vec![bad_plan(), good_plan()],
+                vec![revising_critique(), accepting_critique()],
+            );
+            assert_eq!(
+                run.finished.state,
+                OutcomeState::Landed,
+                "{key:?}: {}",
+                run.finished.reason
+            );
+            // A mechanical pass in round 1, then round 2 after the critic's revise: three planner calls.
+            assert_eq!(run.planner(), [(HAIKU, "high"); 3], "{key:?}");
+            assert_eq!(run.planner_timeouts, secs(&[600; 3]), "{key:?}");
+            assert!(
+                run.planner_prompts
+                    .iter()
+                    .all(|p| p.contains("deadline of 600 seconds")),
+                "{key:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_critic_revise_sends_the_next_planner_call_at_the_revision_model_and_effort() {

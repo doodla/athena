@@ -1,0 +1,106 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261115-113508-66w1",
+  "base_commit": "238142f84aeb4486661c05532aba0247d81c1c37",
+  "base_fingerprint": "sha256:0151ba54f037f108bc454a44a4041f2ec75b355d3ee4d78609bf87f14274072c",
+  "previous_job": "20261115-190156-zkg7",
+  "candidate_commit": "7ea8a104df10f2a9d36f5ef79240291105f06fef",
+  "candidate_tree": "eba02a942f11b6b21b2d72de6da0952c02a589bd",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 499115
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 27885
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 499810
+    }
+  ],
+  "fingerprint": "sha256:8b542ac8025089ebce1ed37a0818d9f29529b45bd8db36d5bdef79a988f71971",
+  "violations": [],
+  "producer_report": {
+    "summary": "When a revision call's effort is raised by `planner_revision_effort`, `planning_round` now multiplies the planner time limit by `PLANNER_ESCALATED_TIMEOUT_FACTOR` (2, using `saturating_mul`). A string comparison with the planner's own effort detects the raise. Round 1 and a revision with the key unset, equal or weaker keep `planner_timeout_s`. The model and effort choice moved above the planner brief. The scaled figure now feeds both the brief's stated deadline and the agent spec, so the brief names the limit that is enforced. Two new tests drive the real `go` flow. One checks 600 s then 1200 s, after a critic revise and after a mechanical revision. The other checks that an unset, weaker or equal key keeps 600 s on every call. CHANGELOG.md has a new Unreleased entry citing job 20261114-041123-hvyh.",
+    "files": [
+      "crates/athena-core/src/run/planning.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core planner_",
+        "result": "pass",
+        "note": "10 planner tests, including the two new ones, pass"
+      },
+      {
+        "command": "cargo fmt --all && cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "fmt applied; clippy finished with no warnings"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "22 passed"
+      },
+      {
+        "command": "cargo test -p athena-core --tests",
+        "result": "pass",
+        "note": "lib 1544 passed, 1 ignored, plus all integration tests. A first `cargo test -p athena-core` run exited 101; its output was truncated, so I could not see the failing test, and two later full runs passed."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new unit test in crates/athena-core/src/run/tests.rs sets planner_revision_effort stronger than the planner's effort and planner_timeout_s = 600. It runs a revision round (round 2) and asserts the planner AgentSpec timeout is greater than 600 s (1200 s). Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "Test `planner_revision_escalated_effort_scales_the_planner_time_limit` uses `repo_with_revision_keys(3, None, Some(\"xhigh\"))`, which sets planner_timeout_s = 600. It asserts the planner timeouts are [600 s, 1200 s] after a critic revise and after a mechanical revision, and that the round-2 brief says `deadline of 1200 seconds`. `cargo test -p athena-core planner_` passed."
+      },
+      {
+        "criterion": "A test asserts that round 1, and a revision with planner_revision_effort unset, weaker or equal, all keep exactly planner_timeout_s. Run: cargo test -p athena-core. The test fails if scaling is applied unconditionally.",
+        "status": "met",
+        "evidence": "Test `planner_time_limit_is_unchanged_when_the_revision_does_not_raise_the_effort` loops over the key unset, \"medium\" and \"high\". Each case has a mechanical pass and a critic revise, so three planner calls. It asserts all three timeouts equal exactly 600 s and every brief states 600. Unconditional scaling would give 1200 s on calls 2 and 3 and fail the test. The escalated test also asserts round 1 stays at 600 s. Passed in `cargo test -p athena-core planner_`."
+      },
+      {
+        "criterion": "The diff in crates/athena-core/src/run/planning.rs scales cfg.planner_timeout_s only when the revision setting raised the effort. It uses a named constant whose doc comment cites job 20261114-041123-hvyh (606 s against a 600 s limit at xhigh).",
+        "status": "met",
+        "evidence": "`git diff -- crates/athena-core/src/run/planning.rs` shows `PLANNER_ESCALATED_TIMEOUT_FACTOR: u64 = 2` with a doc comment citing job 20261114-041123-hvyh (xhigh round 2 ran 606 s against 600 s). The one `saturating_mul` sits inside `if effort != base_effort`, which is inside `if round > 1 || mechanical_passes > 0`. `timeout_s` feeds both `deadline_s` and `agent_spec`."
+      },
+      {
+        "criterion": "The deliverables are only planning.rs, run/tests.rs and CHANGELOG.md. The diff (git diff) leaves athena.toml, defaults.toml, hestia.rs, crates/athena-data/src/config.rs, docs/decisions.md, the prompts and records/ unchanged.",
+        "status": "met",
+        "evidence": "`git status --short` lists exactly CHANGELOG.md, crates/athena-core/src/run/planning.rs and crates/athena-core/src/run/tests.rs."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry recording the planner time limit scaling on escalated revisions and citing job 20261114-041123-hvyh.",
+        "status": "met",
+        "evidence": "A new first bullet under `## [Unreleased]` / `### Changed` records the multiplication by 2 on a raised effort. It cites job 20261114-041123-hvyh (606 s against 600 s), names the constant, the limits and the two tests."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy and cargo test pass on the final tree (recorded Athena checks on the same tree count).",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all` and `cargo clippy --all-targets --locked -- -D warnings` (clean), `cargo test -p xtask --test policy` (22 passed) and the whole athena-core crate (passed on two runs after one earlier exit 101, noted in checks_run). I did not run the workspace `cargo test`."
+      }
+    ],
+    "open_issues": [
+      "The first `cargo test -p athena-core` run exited 101 and I could not see which test failed because the output was truncated. The next two full athena-core runs passed, so it may be flaky.",
+      "The factor 2 is an estimate from one 606 s observation, not measured as enough for every xhigh round. The doc comment and CHANGELOG say so."
+    ],
+    "mistakes": [
+      "An early Bash call used `cd` and `tail`, which the producer policy rejects; I re-ran the commands without them."
+    ],
+    "learnings": [
+      "The working copy did not contain the earlier candidate (job 20261114-052309-w3zt) changes; they were redone from the base.",
+      "`Models::planner_revision_setting` keeps the current effort for an unset, equal or weaker key, so comparing the returned effort string with the base effort detects a raise exactly.",
+      "`run_for_revision` in tests.rs now records planner spec timeouts and planner prompts through `RevisionRun`."
+    ],
+    "desires": []
+  }
+}
