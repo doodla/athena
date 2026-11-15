@@ -1,0 +1,176 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261115-202532-6mng",
+  "n": 1,
+  "at": "2026-11-15T23:46:55.370823749Z",
+  "invocation_seq": 1,
+  "base_commit": "beabc0009f0636a90118ded35436a6bb4c7ef391",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Send unmet verifier criteria back to the producer once before the",
+  "summary": "Root cause: only the producer's self-report is checked before verification (unmet_criteria in run/send_back.rs), so a criterion the verifier finds unmet ends the job with no repair pass. Fix in the run pipeline: after a verifier fail with unmet criteria or blocker/major findings, send the producer back once with the verifier's findings, re-verify, and store a typed event for each check. Jobs 20261014-170031-2r9b, -172342-rqgb and -174937-hrzn (prompt-rework attempts, same failure class) are dropped, not retried.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the repair behavior happening (a failed verification triggering a second producer pass and a pass), not that wiring exists."
+    },
+    {
+      "id": "tested",
+      "how": "New tests run in cargo test; fmt and clippy are named as recorded checks."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is in the pipeline, which is where the gap originates, so every job benefits, not one instance."
+    },
+    {
+      "id": "mechanism",
+      "how": "The bound and the repair step are enforced in code and tests."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the goal is that a criterion left unmet is caught and repaired before the final verdict instead of costing the whole job; the audience is the job runner and the maintainers who read stored job events to see what was checked.",
+    "Code survey: read crates/athena-core/src/run/send_back.rs (unmet_criteria, send_back_text*; unmet is computed only from the producer's own criteria_check report) and crates/athena-core/src/run/producer.rs (loop ~l.440-725: PRODUCER_SEND_BACKS, self-check, loop_check_failures, loop_records_criteria, then Flow::Go to the verifier). The verifier stage is in crates/athena-core/src/run/verification.rs and judge() in crates/athena-core/src/verify.rs; the gap is that nothing sends a verifier-found unmet criterion or blocker/major finding back to the producer. Any new record or event goes through crates/athena-data/src/records (AnyRecord, check_record_file and the round-trip test); I will reuse existing invocation records where possible and add no new record type unless the allow-list covers it.",
+    "Existing code: reuse and extend crates/athena-core/src/run/send_back.rs (send_back_text_scoped and the brief builders), crates/athena-core/src/run/producer.rs (send-back loop and ui line 'producer   sent back'), crates/athena-core/src/run/verification.rs and crates/athena-core/src/verify.rs (judge, findings). The repair pass is bounded to one round and reuses the producer stage rather than adding a new one.",
+    "Not a refusal rule: it gives the producer the verifier's findings in its brief and holds no work. No reading is newly refused; expected 0% of newly refused readings.",
+    "The earlier jobs 20261014-170031-2r9b, 20261014-172342-rqgb and 20261014-174937-hrzn addressed the same introspections by editing role prompts and a major-finding rule for request_reading_mismatch, and each failed on stale 1,800 budget mentions and line wrapping. Their findings no longer apply: that work is dropped, so none of their prompt, budget or design-doc edits are redone.",
+    "Environment: none. The change is local code and tests; no CI workflow, push, or records-branch read. No governance file (athena.toml, defaults.toml) changes; the repair-pass bound is a code constant like PRODUCER_SEND_BACKS."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The root cause is named in the new decision appended to docs/decisions.md and in the CHANGELOG.md entry: criteria are checked independently only after the producer ends, so an unmet criterion found by the verifier cannot trigger a repair. The new decision has a Provenance bullet and is appended, with no existing entry edited.",
+      "kind": "content"
+    },
+    {
+      "text": "A new unit test in crates/athena-core/src/run (run with `cargo test -p athena-core`) drives the pipeline with a fake verifier that fails once with an unmet criterion and a major finding, then passes. It asserts that the producer is run a second time with a brief containing that criterion's exact text and the finding, that the verifier runs again, and that the final verdict is pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test in the same suite asserts the repair pass is bounded: a verifier that fails twice yields exactly one repair, then a fail verdict, with no third producer run; and a verifier that passes the first time triggers no repair and no extra producer invocation.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test asserts the stored events of a repaired job show the unmet criterion, the repair send-back and the second verification, in order, before the final verdict (the check the introspections found missing). It fails when the repair step is removed from the pipeline (`cargo test -p athena-core` on the pre-change tree fails on these tests).",
+      "kind": "behavior"
+    },
+    {
+      "text": "The repair brief is built in crates/athena-core/src/run/send_back.rs by extending the existing send-back text builders, not by a new parallel builder, and the one round limit is a named constant beside PRODUCER_SEND_BACKS.",
+      "kind": "content"
+    },
+    {
+      "text": "Athena's recorded fmt, clippy and test checks pass on the final tree (`cargo fmt --check`, `cargo clippy --all-targets`, `cargo test`).",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Role prompt edits (crates/athena-context/prompts/reader.md, producer.md, verifier.md) and crates/athena-context/src/lib.rs budget changes from jobs 20261014-170031-2r9b, 20261014-172342-rqgb, 20261014-174937-hrzn: dropped, not kept.",
+    "Design-doc and records-doc edits those jobs made (docs/design/athena-v0.md, docs/design/decision-sets.md, docs/design/defaults-loop.md, docs/design/socratic-review.md, docs/records.md, crates/athena-cli/tests/budgets.rs): dropped.",
+    "The request_reading_mismatch-as-major rule in judge() from those jobs: not redone here.",
+    "New refusal or admission rules; the repair pass only gives the producer more information.",
+    "athena.toml, defaults.toml, workflows, records/ and owner files.",
+    "More than one repair round."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.45,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 1.5,
+        "p50": 4.0,
+        "p90": 9.0
+      },
+      "wall_time_s": {
+        "p10": 1500.0,
+        "p50": 3600.0,
+        "p90": 7500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6832504145936982,
+      "p_user_intervenes": 0.06080476900149031,
+      "cost_usd": {
+        "p10": 0.5537699423918236,
+        "p50": 1.5310872704595158,
+        "p90": 6.355044121167463
+      },
+      "wall_time_s": {
+        "p10": 606.5972299874452,
+        "p50": 2189.7345018759997,
+        "p90": 4505.253848604709
+      }
+    }
+  },
+  "departures": "Pipeline change with tests across athena-core and three prior rejected attempts in this class, so higher cost, longer time and lower pass odds than the reference.",
+  "urgent_reason": "It cuts rejected attempts and redo-work retries: 43 jobs in this failure class were rejected at final verification with no repair pass.",
+  "hard_reason": "It changes the run pipeline (adds a repair pass between the verifier and the final verdict) and what is recorded about each job, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
