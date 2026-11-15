@@ -365,6 +365,27 @@ mod produce_and_verify_order_tests {
             .unwrap();
     }
 
+    /// Sets `[budget] job_usd` in the test repository's `athena.toml` to `value` (a decimal text such as
+    /// `21.49`) and commits it.
+    fn set_job_usd(repo: &tempfile::TempDir, value: &str) {
+        let path = repo.path().join("athena.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut found = false;
+        let changed: String = text
+            .split_inclusive('\n')
+            .map(|line| {
+                if line.starts_with("job_usd = ") {
+                    found = true;
+                    format!("job_usd = {value}\n")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+        assert!(found, "athena.toml has no job_usd line");
+        commit_file(repo, "athena.toml", &changed);
+    }
+
     /// The configured fmt check.
     const FMT_CHECK: &[&str] = &["cargo", "fmt", "--all", "--check"];
     /// The repository's pinned toolchain, written beside every crate these tests format so that rustup picks
@@ -2101,9 +2122,26 @@ mod produce_and_verify_order_tests {
         reader: Arc<Mutex<f64>>,
         planner: f64,
     ) -> athena_agent::fake::Script {
+        costing_each(script, reader, planner, Vec::new())
+    }
+
+    /// `costing` with a chosen cost for each critic call, in order; the last cost repeats. An empty list leaves
+    /// the critic at the script's own cost.
+    fn costing_each(
+        script: athena_agent::fake::Script,
+        reader: Arc<Mutex<f64>>,
+        planner: f64,
+        critics: Vec<f64>,
+    ) -> athena_agent::fake::Script {
+        let critic_calls = Mutex::new(0usize);
         Box::new(move |spec: &AgentInvocation| {
             let mut turn = script(spec);
             match spec.role {
+                Role::Critic if !critics.is_empty() => {
+                    let mut next = critic_calls.lock().unwrap();
+                    turn.cost_usd = critics[(*next).min(critics.len() - 1)];
+                    *next += 1;
+                }
                 Role::Reader => {
                     turn.cost_usd = *reader.lock().unwrap();
                     // A reading of a retry must name the job it retries.
@@ -9648,6 +9686,556 @@ echo '--> src/x.rs:120:9' >&2"#
             format!("try again on {stopped}")
         );
     }
+
+    // The job budget is judged before every spend. Each entry point below gets a budget one cent under what
+    // `budget_reserve` asks for at its stage, and then exactly that amount. The reserves are written out as
+    // literals (not taken from `budget_reserve`), from the caps of `repo_with_planning(3)`: the reader 2.00,
+    // the planner and the critic 0.75 each, the producer 10.00 and the verifier 5.00, so one planning round
+    // is 1.50 and the producer and verifier are 15.00.
+
+    use crate::reading::{BudgetShort, ReserveStage};
+
+    /// How many times `role` was invoked so far.
+    fn called(calls: &Calls, role: Role) -> usize {
+        let all = calls.lock().unwrap().clone();
+        prompts_of(&all, role).len()
+    }
+
+    /// The [`BudgetShort`] inside `error`.
+    fn budget_short(error: &anyhow::Error) -> BudgetShort {
+        *error
+            .downcast_ref::<BudgetShort>()
+            .unwrap_or_else(|| panic!("not a BudgetShort: {error:#}"))
+    }
+
+    /// `error` is a [`BudgetShort`] at `stage` that needs `reserve` and is one cent short of it.
+    fn assert_a_cent_short(error: &anyhow::Error, stage: ReserveStage, reserve: f64) {
+        let short = budget_short(error);
+        assert_eq!(short.stage, stage, "{error:#}");
+        assert!((short.reserve - reserve).abs() < 1e-9, "{error:#}");
+        assert!((short.shortfall() - 0.01).abs() < 1e-9, "{error:#}");
+        let text = format!("{error:#}");
+        assert!(text.contains("$0.01 short"), "{text}");
+        assert!(text.contains("[budget] job_usd"), "{text}");
+    }
+
+    /// An Athena over `repo` whose reader costs `reader`, whose planner costs `planner` a call and whose
+    /// critic costs `critics` a call in turn (the last repeats). The planner always returns a good plan and
+    /// the critic always answers with `critique`.
+    fn budget_athena(
+        repo: &tempfile::TempDir,
+        state: &tempfile::TempDir,
+        calls: &Calls,
+        costs: (f64, f64, Vec<f64>),
+        critique: serde_json::Value,
+    ) -> Athena {
+        let (reader, planner, critics) = costs;
+        let script = costing_each(
+            planning_script(vec![good_plan()], vec![critique], calls.clone()),
+            Arc::new(Mutex::new(reader)),
+            planner,
+            critics,
+        );
+        athena_with(
+            repo,
+            state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        )
+    }
+
+    /// `script` whose first reader call gives no reading and costs `cost`; later reads are the script's.
+    fn failing_first_read(
+        script: athena_agent::fake::Script,
+        cost: f64,
+    ) -> athena_agent::fake::Script {
+        let reads = Mutex::new(0usize);
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = script(spec);
+            if spec.role == Role::Reader {
+                let mut seen = reads.lock().unwrap();
+                if *seen == 0 {
+                    turn.structured = None;
+                    turn.cost_usd = cost;
+                }
+                *seen += 1;
+            }
+            turn
+        })
+    }
+
+    #[test]
+    fn preflight_ask() {
+        // Admission: the reader 2.00, three planning rounds 4.50, the producer and the verifier 15.00.
+        let repo = repo_with_planning(3);
+        set_job_usd(&repo, "21.49");
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let athena = budget_athena(
+            &repo,
+            &state,
+            &calls,
+            (0.01, 0.01, vec![]),
+            accepting_critique(),
+        );
+        let head = athena.head().unwrap();
+        let error = athena
+            .ask("describe the demo", &Quiet)
+            .expect_err("one cent under the admission reserve");
+        assert_a_cent_short(&error, ReserveStage::Admission, 21.50);
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "the reader was not called"
+        );
+        assert_eq!(athena.head().unwrap(), head, "nothing was committed");
+
+        set_job_usd(&repo, "21.50");
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        assert!(proposal.reading.is_some(), "{:?}", proposal.reader_error);
+        assert_eq!(called(&calls, Role::Reader), 1);
+    }
+
+    #[test]
+    fn preflight_retry() {
+        // No `[job_plan]`: a retry needs the reader 2.00, the producer 10.00 and the verifier 5.00 (17.00).
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("repo");
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::low_once_verifying,
+            counting(counts.clone(), Some(root.clone())),
+        );
+        let first = athena.ask("describe the demo", &Quiet).unwrap().job;
+        let held = athena
+            .go(first.as_str(), AcceptedBy::User, &Quiet)
+            .expect_err("low space after the checks holds the job");
+        assert!(held.downcast_ref::<crate::disk::LowDisk>().is_some());
+        std::fs::write(root.join("freed"), b"").unwrap();
+
+        set_job_usd(&repo, "16.99");
+        let (reads, head) = (counts.all().2, athena.head().unwrap());
+        let ui = Lines::default();
+        let error = athena
+            .retry(first.as_str(), &ui)
+            .expect_err("one cent under the retry reserve");
+        assert_a_cent_short(&error, ReserveStage::Admission, 17.00);
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            !said.iter().any(|l| l.starts_with("resume     ")),
+            "a retry that cannot be afforded prints no resume note: {said:#?}"
+        );
+        assert_eq!(counts.all().2, reads, "the reader was not called");
+        assert_eq!(athena.head().unwrap(), head, "nothing was committed");
+
+        set_job_usd(&repo, "17.00");
+        let ui = Lines::default();
+        let (retry, _) = athena.retry(first.as_str(), &ui).unwrap();
+        assert!(retry.reading.is_some(), "{:?}", retry.reader_error);
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter().any(|l| l.starts_with("resume     ")),
+            "{said:#?}"
+        );
+        assert_eq!(counts.all().2, reads + 1);
+    }
+
+    #[test]
+    fn preflight_dispatch() {
+        // Dispatch of a planned job: three planning rounds 4.50 and the producer and verifier 15.00 = 19.50.
+        // The reader spends 30.51 or 30.50 of the 50.00, which leaves 19.49 or 19.50.
+        for (reader_cost, held) in [(30.51, true), (30.50, false)] {
+            let repo = repo_with_planning(3);
+            let state = tempfile::tempdir().unwrap();
+            let calls = Calls::default();
+            let athena = budget_athena(
+                &repo,
+                &state,
+                &calls,
+                (reader_cost, 0.01, vec![]),
+                accepting_critique(),
+            );
+            let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+            let head = athena.head().unwrap();
+            let result = athena.go(proposal.job.as_str(), AcceptedBy::User, &Quiet);
+            if held {
+                let error = result.expect_err("one cent under the dispatch reserve");
+                assert_a_cent_short(&error, ReserveStage::Dispatch { planned: true }, 19.50);
+                let roles: Vec<Role> = calls.lock().unwrap().iter().map(|(r, _)| *r).collect();
+                assert_eq!(roles, [Role::Reader], "only the reader ran");
+                assert_eq!(athena.head().unwrap(), head, "nothing was committed");
+            } else {
+                assert!(matches!(result.unwrap(), GoResult::Finished(_)));
+                assert!(called(&calls, Role::Planner) >= 1, "the job was planned");
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_planner_round() {
+        // Before the planner of round 2: this round and the one after it 3.00, the producer and verifier
+        // 15.00 = 18.00. The reader and the first planner cost 0.01 each and the first critic costs 31.99 or
+        // 31.98, so 17.99 or 18.00 of the 50.00 is left. The critic revises, so planning goes on.
+        for (critics, stopped) in [(vec![31.99], true), (vec![31.98, 0.01], false)] {
+            let repo = repo_with_planning(3);
+            let state = tempfile::tempdir().unwrap();
+            let calls = Calls::default();
+            let athena = budget_athena(
+                &repo,
+                &state,
+                &calls,
+                (0.01, 0.01, critics),
+                revising_critique(),
+            );
+            let (_, finished) = finished_job(&athena);
+            let reason = &finished.reason;
+            assert_eq!(finished.state, OutcomeState::Failed, "{reason}");
+            for role in [Role::Producer, Role::Verifier] {
+                assert_eq!(called(&calls, role), 0, "{role:?}: {reason}");
+            }
+            if stopped {
+                assert!(
+                    reason.starts_with(athena_data::records::PLANNING_STOPPED_PREFIX),
+                    "{reason}"
+                );
+                assert!(reason.contains("this planner call"), "{reason}");
+                assert!(reason.contains("$0.01 short"), "{reason}");
+                assert_eq!(called(&calls, Role::Planner), 1, "{reason}");
+                assert_eq!(called(&calls, Role::Critic), 1, "{reason}");
+            } else {
+                assert_eq!(called(&calls, Role::Planner), 3, "{reason}");
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_critic_round() {
+        // Before the critic of round 2: this critic 0.75, the round after it 1.50, the producer and verifier
+        // 15.00 = 17.25. The planner costs 16.00 a call, the reader 0.01 and the first critic 0.75 or 0.74,
+        // so 17.24 or 17.25 of the 50.00 is left after the second planner.
+        for (critics, stopped) in [(vec![0.75], true), (vec![0.74, 0.01], false)] {
+            let repo = repo_with_planning(3);
+            let state = tempfile::tempdir().unwrap();
+            let calls = Calls::default();
+            let athena = budget_athena(
+                &repo,
+                &state,
+                &calls,
+                (0.01, 16.00, critics),
+                revising_critique(),
+            );
+            let (_, finished) = finished_job(&athena);
+            let reason = &finished.reason;
+            assert_eq!(finished.state, OutcomeState::Failed, "{reason}");
+            assert!(
+                reason.starts_with(athena_data::records::PLANNING_STOPPED_PREFIX),
+                "{reason}"
+            );
+            assert!(reason.contains("this critic call"), "{reason}");
+            for role in [Role::Producer, Role::Verifier] {
+                assert_eq!(called(&calls, role), 0, "{role:?}: {reason}");
+            }
+            if stopped {
+                assert!(reason.contains("$0.01 short"), "{reason}");
+                assert_eq!(called(&calls, Role::Planner), 2, "{reason}");
+                assert_eq!(called(&calls, Role::Critic), 1, "{reason}");
+            } else {
+                // The round-2 critic ran; the round-3 critic is the one the reserve stops.
+                assert!(!reason.contains("$0.01 short"), "{reason}");
+                assert_eq!(called(&calls, Role::Planner), 3, "{reason}");
+                assert_eq!(called(&calls, Role::Critic), 2, "{reason}");
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_run_stage() {
+        // One round, accepted. Once planning is over the producer and verifier need 15.00. The reader and the
+        // planner cost 0.01 each and the critic 34.99 or 34.98, so 14.99 or 15.00 of the 50.00 is left.
+        for (critic_cost, stopped) in [(34.99, true), (34.98, false)] {
+            let repo = repo_with_planning(1);
+            let state = tempfile::tempdir().unwrap();
+            let calls = Calls::default();
+            let athena = budget_athena(
+                &repo,
+                &state,
+                &calls,
+                (0.01, 0.01, vec![critic_cost]),
+                accepting_critique(),
+            );
+            let (_, finished) = finished_job(&athena);
+            let reason = &finished.reason;
+            if stopped {
+                assert_eq!(finished.state, OutcomeState::Failed, "{reason}");
+                assert!(
+                    reason.starts_with(athena_data::records::PLANNING_STOPPED_PREFIX),
+                    "{reason}"
+                );
+                assert!(reason.contains("$0.01 short"), "{reason}");
+                assert!(reason.contains("the producer and the verifier"), "{reason}");
+                for role in [Role::Producer, Role::Verifier] {
+                    assert_eq!(called(&calls, role), 0, "{role:?}: {reason}");
+                }
+            } else {
+                assert_eq!(finished.state, OutcomeState::Landed, "{reason}");
+                assert_eq!(called(&calls, Role::Producer), 1, "{reason}");
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_resumed_unread_job() {
+        // The first read gave no reading and cost 28.51 or 28.50. The next `go` reads it again with that
+        // spend counted: 21.49 or 21.50 of the 50.00 is left against the admission reserve of 21.50.
+        for (first_cost, held) in [(28.51, true), (28.50, false)] {
+            let repo = repo_with_planning(3);
+            let state = tempfile::tempdir().unwrap();
+            let calls = Calls::default();
+            let script = failing_first_read(
+                planning_script(vec![good_plan()], vec![accepting_critique()], calls.clone()),
+                first_cost,
+            );
+            let athena = athena_with(
+                &repo,
+                &state,
+                PASSES,
+                crate::test_support::plenty_of_space,
+                script,
+            );
+            let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+            assert!(proposal.reading.is_none(), "the first read gave no reading");
+            assert_eq!(called(&calls, Role::Reader), 1);
+            let head = athena.head().unwrap();
+            let result = athena.go(proposal.job.as_str(), AcceptedBy::User, &Quiet);
+            if held {
+                let error = result.expect_err("one cent under the admission reserve");
+                assert_a_cent_short(&error, ReserveStage::Admission, 21.50);
+                assert_eq!(called(&calls, Role::Reader), 1, "no second read");
+                assert_eq!(athena.head().unwrap(), head, "nothing was committed");
+            } else {
+                assert!(matches!(result.unwrap(), GoResult::Reread(_)));
+                assert_eq!(called(&calls, Role::Reader), 2);
+            }
+        }
+    }
+
+    /// The shipped hard-mode caps: planner and critic 3.00, five rounds, `job_usd` 50.00. A job is planned
+    /// only when its reading is hard, so an unplanned job needs 15.00 at dispatch but 47.00 at admission
+    /// (the reader 2.00, five rounds of 6.00, and 15.00).
+    fn hard_mode_repo() -> tempfile::TempDir {
+        repo_with_config(
+            "\n[job_plan]\nenabled = true\nmode = \"hard\"\nplanner_usd = 3.00\ncritic_usd = 3.00\n\
+             planner_timeout_s = 600\ncritic_timeout_s = 600\nmax_rounds = 5\n",
+        )
+    }
+
+    /// Asks in `hard_mode_repo` with a reader that costs 4.50, so 45.50 is left: under the admission reserve
+    /// (47.00), over the dispatch reserve of an unplanned job (15.00). The reading is not planned.
+    fn ask_with_costly_reader(
+        repo: &tempfile::TempDir,
+        state: &tempfile::TempDir,
+        calls: &Calls,
+    ) -> (Athena, Arc<Mutex<f64>>, Proposal) {
+        let reader_cost = Arc::new(Mutex::new(4.50));
+        let script = costing(
+            planning_script(vec![good_plan()], vec![accepting_critique()], calls.clone()),
+            reader_cost.clone(),
+            0.01,
+        );
+        let athena = athena_with(
+            repo,
+            state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let reading = proposal.reading.as_ref().expect("a reading");
+        assert!(reading.hard_reason.is_none());
+        assert!(!asks_for_fails_without_run(reading));
+        // From here on the reader costs a cent, so only what `correct` and the re-read are judged on moves.
+        *reader_cost.lock().unwrap() = 0.01;
+        (athena, reader_cost, proposal)
+    }
+
+    #[test]
+    fn preflight_correct_is_not_gated_by_admission() {
+        // A correction spends the reader only, bounded by the reader's cap. The job is judged at dispatch
+        // (15.00 for an unplanned job), not at admission (47.00): with 45.50 left a correction is accepted.
+        let repo = hard_mode_repo();
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let (athena, _, proposal) = ask_with_costly_reader(&repo, &state, &calls);
+        let corrected = athena
+            .correct(proposal.job.as_str(), "also describe the license", &Quiet)
+            .unwrap();
+        assert_eq!(corrected.reading.as_ref().expect("a reading").n, 2);
+        for role in [Role::Planner, Role::Critic, Role::Producer, Role::Verifier] {
+            assert_eq!(called(&calls, role), 0, "{role:?} ran before `go`");
+        }
+        let GoResult::Finished(done) = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+            .unwrap()
+        else {
+            panic!("expected the job to finish");
+        };
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(called(&calls, Role::Planner), 0, "the job was not planned");
+    }
+
+    #[test]
+    fn preflight_reread_is_not_gated_by_admission() {
+        // A changed reading input (`job_usd`) makes `go` read the job again. That read spends the reader only,
+        // so with 46.50 left (under the admission reserve of 47.00) it still runs; the next `go` is judged at
+        // dispatch.
+        let repo = hard_mode_repo();
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let (athena, _, proposal) = ask_with_costly_reader(&repo, &state, &calls);
+        set_job_usd(&repo, "51.00");
+        let result = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+            .unwrap();
+        let GoResult::Reread(again) = result else {
+            panic!("expected a new reading");
+        };
+        assert_eq!(again.reading.as_ref().expect("a reading").n, 2);
+        for role in [Role::Planner, Role::Critic, Role::Producer, Role::Verifier] {
+            assert_eq!(called(&calls, role), 0, "{role:?} ran in the re-read");
+        }
+    }
+
+    /// Every stage form, its reserve for `repo_with_planning(3)` (literal), and how much that reserve rises
+    /// for +1.00 on `reader_usd`, `planner_usd`, `critic_usd`, `producer_usd` and `verifier_usd`, then for +1
+    /// on `max_rounds` (one planner and critic pair, 1.50). Written out by hand, not taken from the code.
+    fn stage_rows() -> Vec<(ReserveStage, f64, [f64; 6])> {
+        vec![
+            (
+                ReserveStage::Admission,
+                21.50,
+                [1.0, 3.0, 3.0, 1.0, 1.0, 1.5],
+            ),
+            (
+                ReserveStage::Dispatch { planned: true },
+                19.50,
+                [0.0, 3.0, 3.0, 1.0, 1.0, 1.5],
+            ),
+            (
+                ReserveStage::Dispatch { planned: false },
+                15.00,
+                [0.0, 0.0, 0.0, 1.0, 1.0, 0.0],
+            ),
+            (
+                ReserveStage::Planner { round: 1 },
+                19.50,
+                [0.0, 3.0, 3.0, 1.0, 1.0, 1.5],
+            ),
+            (
+                ReserveStage::Planner { round: 2 },
+                18.00,
+                [0.0, 2.0, 2.0, 1.0, 1.0, 1.5],
+            ),
+            (
+                ReserveStage::Planner { round: 3 },
+                16.50,
+                [0.0, 1.0, 1.0, 1.0, 1.0, 1.5],
+            ),
+            (
+                ReserveStage::Critic { round: 1 },
+                18.75,
+                [0.0, 2.0, 3.0, 1.0, 1.0, 1.5],
+            ),
+            (
+                ReserveStage::Critic { round: 2 },
+                17.25,
+                [0.0, 1.0, 2.0, 1.0, 1.0, 1.5],
+            ),
+            (
+                ReserveStage::Critic { round: 3 },
+                15.75,
+                [0.0, 0.0, 1.0, 1.0, 1.0, 1.5],
+            ),
+            (ReserveStage::Run, 15.00, [0.0, 0.0, 0.0, 1.0, 1.0, 0.0]),
+        ]
+    }
+
+    /// The job config of `repo_with_planning(3)` and an Athena to judge it with.
+    fn budget_fixture() -> (tempfile::TempDir, tempfile::TempDir, Athena, JobConfig) {
+        let repo = repo_with_planning(3);
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let jc = JobConfig::at(&athena.git, &athena.head().unwrap()).unwrap();
+        (repo, state, athena, jc)
+    }
+
+    #[test]
+    fn preflight_every_stage_error_is_a_budget_short() {
+        let (_repo, _state, athena, mut jc) = budget_fixture();
+        for (stage, reserve, _) in stage_rows() {
+            for spent in [0.0, 7.25] {
+                jc.config.budget.job_usd = reserve + spent;
+                athena
+                    .preflight(&jc, spent, stage)
+                    .unwrap_or_else(|e| panic!("{stage:?} at the reserve: {e:#}"));
+                jc.config.budget.job_usd = reserve + spent - 0.01;
+                let error = athena
+                    .preflight(&jc, spent, stage)
+                    .expect_err("one cent under the reserve");
+                assert_a_cent_short(&error, stage, reserve);
+            }
+        }
+    }
+
+    #[test]
+    fn every_cap_moves_the_reserve_and_the_threshold_by_exactly_that_amount() {
+        let (_repo, _state, athena, base) = budget_fixture();
+        let names = [
+            "reader_usd",
+            "planner_usd",
+            "critic_usd",
+            "producer_usd",
+            "verifier_usd",
+            "max_rounds",
+        ];
+        for (stage, reserve, rises) in stage_rows() {
+            assert!(
+                (crate::reading::budget_reserve(&base.config, stage) - reserve).abs() < 1e-9,
+                "{stage:?}"
+            );
+            for (knob, rise) in rises.iter().enumerate() {
+                let mut jc = base.clone();
+                let plan = jc.config.job_plan.as_mut().expect("planning is on");
+                match knob {
+                    0 => jc.config.budget.reader_usd += 1.0,
+                    1 => plan.planner_usd += 1.0,
+                    2 => plan.critic_usd += 1.0,
+                    3 => jc.config.budget.producer_usd += 1.0,
+                    4 => jc.config.budget.verifier_usd += 1.0,
+                    _ => plan.max_rounds += 1,
+                }
+                let label = format!("{stage:?}, {}", names[knob]);
+                let want = reserve + rise;
+                let got = crate::reading::budget_reserve(&jc.config, stage);
+                assert!((got - want).abs() < 1e-9, "{label}: {got} is not {want}");
+                // The threshold moves with it, whatever the job has spent already.
+                for spent in [0.0, 7.25] {
+                    jc.config.budget.job_usd = want + spent;
+                    athena
+                        .preflight(&jc, spent, stage)
+                        .unwrap_or_else(|e| panic!("{label}, spent {spent}: {e:#}"));
+                    jc.config.budget.job_usd = want + spent - 0.01;
+                    let error = athena
+                        .preflight(&jc, spent, stage)
+                        .expect_err("one cent under the moved reserve");
+                    assert_a_cent_short(&error, stage, want);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -9718,5 +10306,326 @@ mod no_change_reason_tests {
             no_change_reason(Some(&r), &gaps, "brief-2.md"),
             "the producer made no change; it reported already done: found it, and its report still had problems when sent back: gap one; gap two; the report is kept in brief-2.md"
         );
+    }
+}
+
+/// The one reserve: `reading::budget_reserve` sums the stage caps through four `Config` methods, and nothing in
+/// core adds the caps a second time. The scan parses each core source file and walks its syntax tree, so it
+/// cannot be fooled by layout, and it skips only items marked `#[cfg(test)]`, never a stretch of text.
+#[cfg(test)]
+mod budget_scan_tests {
+    use syn::spanned::Spanned;
+    use syn::visit::Visit;
+
+    /// The stage caps, as fields of `Budget` and `JobPlan`.
+    const CAP_FIELDS: [&str; 5] = [
+        "reader_usd",
+        "planner_usd",
+        "critic_usd",
+        "producer_usd",
+        "verifier_usd",
+    ];
+    /// The `Config` methods that sum caps. Only `budget_reserve` may call them in core.
+    const CONFIG_SUMS: [&str; 4] = ["planning_usd", "run_usd", "critic_usd", "budget_required"];
+
+    fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|a| {
+            a.path().is_ident("cfg")
+                && matches!(a.parse_args::<syn::Meta>(), Ok(syn::Meta::Path(p)) if p.is_ident("test"))
+        })
+    }
+
+    /// Whether an expression names one of the cap fields anywhere inside it.
+    struct Mentions(bool);
+
+    impl<'ast> Visit<'ast> for Mentions {
+        /// A call such as `config.critic_usd()` is the `Config` sum, not the field of that name: only the
+        /// receiver and the arguments count.
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.visit_expr(&call.receiver);
+            for arg in &call.args {
+                self.visit_expr(arg);
+            }
+        }
+
+        fn visit_ident(&mut self, ident: &'ast proc_macro2::Ident) {
+            if CAP_FIELDS.contains(&ident.to_string().as_str()) {
+                self.0 = true;
+            }
+        }
+    }
+
+    fn mentions_a_cap(expr: &syn::Expr) -> bool {
+        let mut found = Mentions(false);
+        found.visit_expr(expr);
+        found.0
+    }
+
+    /// What one source file holds outside test code.
+    #[derive(Default)]
+    struct Scan {
+        /// 1-based lines of an addition or a `.sum` over a cap field.
+        sums: Vec<usize>,
+        /// Definitions of a free function named `budget_reserve`.
+        reserve_defs: usize,
+        /// How deep the walk is inside `budget_reserve`.
+        in_reserve: usize,
+        /// 1-based lines of a call of a `Config` sum method outside `budget_reserve`.
+        stray_calls: Vec<usize>,
+        /// Names of `#[cfg(test)] mod name;` declarations, whose code is in another file.
+        declared_test_mods: Vec<String>,
+    }
+
+    impl<'ast> Visit<'ast> for Scan {
+        fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+            if is_cfg_test(&m.attrs) {
+                if m.content.is_none() {
+                    self.declared_test_mods.push(m.ident.to_string());
+                }
+                return;
+            }
+            syn::visit::visit_item_mod(self, m);
+        }
+
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            if is_cfg_test(&f.attrs) {
+                return;
+            }
+            if f.sig.ident == "budget_reserve" {
+                self.reserve_defs += 1;
+                self.in_reserve += 1;
+                syn::visit::visit_item_fn(self, f);
+                self.in_reserve -= 1;
+            } else {
+                syn::visit::visit_item_fn(self, f);
+            }
+        }
+
+        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+            if !is_cfg_test(&f.attrs) {
+                syn::visit::visit_impl_item_fn(self, f);
+            }
+        }
+
+        fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+            if !is_cfg_test(&f.attrs) {
+                syn::visit::visit_trait_item_fn(self, f);
+            }
+        }
+
+        fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+            if !is_cfg_test(&i.attrs) {
+                syn::visit::visit_item_impl(self, i);
+            }
+        }
+
+        fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
+            if !is_cfg_test(&t.attrs) {
+                syn::visit::visit_item_trait(self, t);
+            }
+        }
+
+        fn visit_item_const(&mut self, c: &'ast syn::ItemConst) {
+            if !is_cfg_test(&c.attrs) {
+                syn::visit::visit_item_const(self, c);
+            }
+        }
+
+        fn visit_item_static(&mut self, s: &'ast syn::ItemStatic) {
+            if !is_cfg_test(&s.attrs) {
+                syn::visit::visit_item_static(self, s);
+            }
+        }
+
+        fn visit_expr_binary(&mut self, e: &'ast syn::ExprBinary) {
+            let adds = matches!(e.op, syn::BinOp::Add(_) | syn::BinOp::AddAssign(_));
+            if adds && (mentions_a_cap(&e.left) || mentions_a_cap(&e.right)) {
+                self.sums.push(e.op.span().start().line);
+            }
+            syn::visit::visit_expr_binary(self, e);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            let name = call.method.to_string();
+            if name == "sum"
+                && (mentions_a_cap(&call.receiver) || call.args.iter().any(mentions_a_cap))
+            {
+                self.sums.push(call.method.span().start().line);
+            }
+            if CONFIG_SUMS.contains(&name.as_str()) && self.in_reserve == 0 {
+                self.stray_calls.push(call.method.span().start().line);
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+
+    fn try_scan(text: &str) -> Result<Scan, syn::Error> {
+        let file = syn::parse_file(text)?;
+        let mut scan = Scan::default();
+        scan.visit_file(&file);
+        Ok(scan)
+    }
+
+    fn scan_source(text: &str) -> Scan {
+        try_scan(text).expect("the source parses")
+    }
+
+    /// Core's own source files, less the files that only hold tests (by name, as `code_health` does).
+    fn core_sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                core_sources(&path, found);
+                continue;
+            }
+            let Some(stem) = path
+                .to_str()
+                .and_then(|p| p.strip_suffix(".rs"))
+                .and_then(|p| p.rsplit('/').next())
+            else {
+                continue;
+            };
+            if stem != "tests" && stem != "test_support" && !stem.ends_with("_tests") {
+                found.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn no_second_sum_of_stage_caps_in_core() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        core_sources(&src, &mut files);
+        assert!(files.len() > 20, "the scan found only {files:?}");
+        let (mut reserve_defs, mut problems) = (0, Vec::new());
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let scan = try_scan(&text)
+                .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+            let line = |n: usize| text.lines().nth(n - 1).unwrap_or("").trim().to_string();
+            reserve_defs += scan.reserve_defs;
+            for n in &scan.sums {
+                problems.push(format!(
+                    "{}:{n}: a second sum of stage caps: {}",
+                    path.display(),
+                    line(*n)
+                ));
+            }
+            for n in &scan.stray_calls {
+                problems.push(format!(
+                    "{}:{n}: a Config cap sum is called outside `budget_reserve`: {}",
+                    path.display(),
+                    line(*n)
+                ));
+            }
+            for name in &scan.declared_test_mods {
+                if name != "tests" && !name.ends_with("_tests") {
+                    problems.push(format!(
+                        "{}: `#[cfg(test)] mod {name};` hides code from this scan; name the module `tests` or `*_tests`",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        assert_eq!(reserve_defs, 1, "`budget_reserve` is defined once");
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    #[test]
+    fn cap_sum_scanner_flags_planted_sums_and_ignores_test_code() {
+        let sum = "a.producer_usd + a.verifier_usd";
+        let flagged = |source: &str| scan_source(source).sums;
+        // A gated declaration with no body does not hide the code after it.
+        assert_eq!(
+            flagged(&format!("#[cfg(test)]\nmod x;\nfn f(a:&B)->f64{{ {sum} }}")),
+            [3]
+        );
+        assert_eq!(
+            flagged("fn f(a:&B)->f64{ a.producer_usd+a.verifier_usd }"),
+            [1]
+        );
+        assert_eq!(
+            flagged("fn f(t:&mut f64,c:&C){ *t += c.budget.verifier_usd; }"),
+            [1]
+        );
+        assert_eq!(
+            flagged("fn f(x:f64,c:&C)->f64{ x + c.budget.producer_usd }"),
+            [1]
+        );
+        assert_eq!(
+            flagged("fn f(v:&[C])->f64{ v.iter().map(|c| c.producer_usd).sum::<f64>() }"),
+            [1]
+        );
+        // Test items are skipped, and nothing after them is.
+        assert_eq!(
+            flagged(&format!(
+                "#[cfg(test)]\nmod tests {{\nfn t(a:&B)->f64{{ {sum} }}\n}}\nfn p(a:&B)->f64{{ {sum} }}"
+            )),
+            [5]
+        );
+        assert_eq!(
+            flagged(&format!(
+                "#[cfg(test)]\nfn helper(a:&B)->f64{{ {sum} }}\nfn p(a:&B)->f64{{ {sum} }}"
+            )),
+            [3]
+        );
+        assert!(
+            flagged(&format!(
+                "#[cfg(test)]\nimpl B {{ fn s(&self)->f64{{ {sum} }} }}\nmod plain {{\n#[cfg(test)]\nmod nested {{ fn s(a:&B)->f64{{ {sum} }} }}\n}}"
+            ))
+            .is_empty()
+        );
+        // Other sums, and caps that are not added, are not a sum of caps.
+        assert!(
+            flagged("fn f(a:&B,b:f64)->f64{ let _ = a.spent + a.cost_usd; g(a.producer_usd, a.verifier_usd) }")
+                .is_empty()
+        );
+        // A Config sum method is called only inside `budget_reserve`.
+        let stray = scan_source("fn other(c:&Config)->f64{ c.run_usd() + 1.0 }");
+        assert_eq!(stray.stray_calls, [1]);
+        let inside = scan_source("pub fn budget_reserve(c:&Config)->f64{ c.run_usd() }");
+        assert!(inside.stray_calls.is_empty());
+        assert_eq!(inside.reserve_defs, 1);
+        // A test module declared in another file is reported.
+        assert_eq!(
+            scan_source("#[cfg(test)]\nmod hidden;").declared_test_mods,
+            ["hidden"]
+        );
+    }
+
+    #[test]
+    fn changelog_names_the_budget_reserve_fix() {
+        const CHANGELOG: &str = include_str!("../../../../CHANGELOG.md");
+        const MARKER: &str = "The job budget is checked before every spend, and each entry point is proved to do it.";
+        let start = CHANGELOG
+            .lines()
+            .position(|l| l.strip_prefix("- ").is_some_and(|r| r.starts_with(MARKER)))
+            .expect("CHANGELOG.md has the entry for the budget reserve");
+        let entry: Vec<&str> = std::iter::once(CHANGELOG.lines().nth(start).unwrap())
+            .chain(
+                CHANGELOG
+                    .lines()
+                    .skip(start + 1)
+                    .take_while(|l| !l.starts_with("- ") && !l.starts_with('#')),
+            )
+            .collect();
+        let entry = entry
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for needle in [
+            "20261028-082151-67fa",
+            "20261030-033434-3v30",
+            "20261030-151827-48rm",
+            "critic",
+            "after planning had already spent",
+            "0% of past accepted readings are newly refused",
+        ] {
+            assert!(
+                entry.contains(needle),
+                "the entry lacks `{needle}`: {entry}"
+            );
+        }
     }
 }

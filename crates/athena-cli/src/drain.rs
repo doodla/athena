@@ -266,7 +266,10 @@
 //!   (`athena_core::reading::budget_reserve`). When it does not, `athena go` returns
 //!   [`athena_core::reading::BudgetShort`] before spending anything. The item is left queued (outcome
 //!   `budget short`, with the shortfall and the config line, plus a note); that is not a failure, is not
-//!   retried, and the next item runs.
+//!   retried, and the next item runs. The hold is made at admission (the read of a queued item, or the read made
+//!   again with its earlier spend) and at dispatch (a job whose reader left too little for the planning rounds,
+//!   the producer and the verifier). A correction and the read after a configuration change spend the reader
+//!   only; the dispatch that follows judges the job before any other spend.
 //! - **In-limit proposals are approved, approved jobs are worked.** An open proposal whose rung the role that
 //!   raised it may change itself (its newest recorded definition decides; a role with no recorded definition
 //!   has no limit) is approved as `athena approve-work` would, which reads the job and records the decision.
