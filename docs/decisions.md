@@ -5406,3 +5406,27 @@ should replace those estimates with its figures.
   (the reading rules tests) and the introspections of the eight jobs in the evidence snapshot. Measured: `cargo test -p
   athena-context the_reader_brief_tells_the_reader_a_behavior_criterion` reads the rendered brief. Not measured:
   whether readers follow the rule.
+
+## D185 · The reader brief gives the token room of each prompt file, not only of each set
+
+- **Case:** Seven jobs in the class reading-edits-prompt-without-checking-token-budget (for example job
+  20261024-002644-1as8) planned a prompt addition past the room of a set. The shared verifier frame is composed into
+  several sets, so an addition there costs every set, and one set had little room left.
+- **Decision:** Root cause: the reader brief's "Prompt token headroom" section listed sets by component id
+  (`frame.verifier`, `capability.change.verifier`), so a reading had to map the file it meant to edit to every set that
+  composes it and take the smallest room itself. `prompt_file_path` and `file_headroom` in
+  `crates/athena-context/src/lib.rs` now derive that table from the same `HeadroomRow` list the budgets test checks, and
+  `headroom_section` prints one line per file (path, composing sets, tightest room) after the per-set rows. No refusal
+  rule is added, so the expected share of past accepted readings newly refused is 0%. Prompt files and budgets are
+  unchanged.
+- **Alternatives:** A check that refuses a reading planning growth past a file's room: the reader never saw the per-file
+  figure, so giving it that figure can prevent the failure. Rejected. A rule in `prompts/reader.md`: the reader prompt
+  has 2 tokens left. A new field in `ReaderInputs`: the table is a pure function of the rows already passed.
+- **Tradeoff:** The brief grows by about one line per prompt file. A reader can still ignore the table; the budgets test
+  remains the backstop after a producer edit. The path convention (`crates/athena-cap-<id>/prompts/<role>.md`) is pinned
+  for the present crates by a test that reads each file; a capability crate laid out differently gets no line.
+- **Reversal cost:** Low; remove the two functions, the lines in `headroom_section` and the tests.
+- **Provenance:** Read: `crates/athena-context/src/lib.rs` (`HeadroomRow`, `headroom_rows`),
+  `crates/athena-context/src/briefs/reader.rs` (`headroom_section`) and the introspections of the seven jobs. Ran:
+  `cargo test -p athena-context headroom`, `cargo test -p athena-context reader_brief` and `cargo test -p athena-core
+  token_headroom`. Not measured: whether readers act on the table.

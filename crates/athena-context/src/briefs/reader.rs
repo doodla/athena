@@ -656,6 +656,22 @@ fn headroom_section(out: &mut String, inputs: &ReaderInputs) {
                 row.left()
             );
         }
+        let files = crate::file_headroom(&inputs.headroom);
+        if !files.is_empty() {
+            let _ = writeln!(
+                out,
+                "\nBy prompt file (the tightest room across the sets that compose it; plan growth to fit the tightest):\n"
+            );
+            for file in files {
+                let _ = writeln!(
+                    out,
+                    "- {}: composed by {}; tightest room {} tokens left",
+                    file.path,
+                    file.sets.join(", "),
+                    file.left
+                );
+            }
+        }
         out.push('\n');
     }
 }

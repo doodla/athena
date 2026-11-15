@@ -4277,6 +4277,33 @@ mod tests {
     }
 
     #[test]
+    fn the_reader_brief_lists_the_tightest_room_per_prompt_file() {
+        let mut inputs = reader_inputs(&reading());
+        let row = |set: &str, used: u64| crate::HeadroomRow {
+            set: set.into(),
+            components: vec!["contract".into()],
+            used,
+            budget: 100,
+        };
+        inputs.headroom = vec![
+            row("reader", 20),
+            row("planner", 80),
+            row("verifier (change)", 59),
+        ];
+        let brief = reader_brief(&inputs);
+        assert!(brief.contains(
+            "- crates/athena-context/prompts/contract.md: composed by reader, planner, verifier (change); tightest room 20 tokens left"
+        ));
+    }
+
+    #[test]
+    fn the_reader_brief_has_no_per_file_headroom_without_rows() {
+        let brief = reader_brief(&reader_inputs(&reading()));
+        assert!(!brief.contains("By prompt file"));
+        assert!(!brief.contains("prompts/contract.md: composed by"));
+    }
+
+    #[test]
     fn the_reader_brief_says_the_verifier_never_sees_the_producers_report() {
         let brief = reader_brief(&reader_inputs(&reading()));
         let (_, section) = brief.split_once("# What the verifier can run").unwrap();
