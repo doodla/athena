@@ -1413,6 +1413,15 @@ fn a_stop_asked_for_before_any_job_starts_runs_nothing() {
     assert_eq!(report.stop, Stop::Requested);
 }
 
+/// The shipped `athena.toml` lets two jobs run at once. The build-folder slot, not a job count of 1, keeps
+/// two build folders off the disk (`docs/design/agent-and-build-slots.md` section 11), so the stopgap of one
+/// job at a time is lifted.
+#[test]
+fn the_live_config_allows_two_jobs_at_once() {
+    let config = athena_data::config::Config::parse(include_str!("../../../athena.toml")).unwrap();
+    assert_eq!(config.parallel.max_concurrency, 2);
+}
+
 #[test]
 fn the_stop_file_is_in_the_state_directory() {
     let dir = Path::new("/state/repo");

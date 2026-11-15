@@ -121,7 +121,7 @@ pub fn totals(invocations: &[Invocation], wall_time_execution: Option<f64>) -> T
             Quantity::measured(
                 s,
                 Unit::Seconds,
-                "athena clock, from dispatch to the final verdict",
+                "athena clock, from dispatch to the final verdict, less any wait for the build folder",
             )
         }),
         tokens: sums.tokens,

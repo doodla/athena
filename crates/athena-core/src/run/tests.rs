@@ -75,6 +75,7 @@ mod produce_and_verify_order_tests {
     use super::super::*;
     use crate::Quiet;
     use crate::capability::{CapabilityCard, CheckSpec, ToolGrant};
+    use crate::disk::build_folder_queue;
     use athena_agent::fake::{FakeAgentDriver, FakeTurn};
     use athena_agent::{AgentInvocation, Usage};
     use athena_data::config::CheckKind;
@@ -6472,7 +6473,9 @@ echo '--> src/x.rs:120:9' >&2"#
             .ask("describe the demo once more", &Quiet)
             .unwrap()
             .job;
-        let probe = slot_queue(&athena);
+        // The second job reads and plans, then waits for the build folder: it cannot reach the check slot
+        // while the first job's check holds it, so the first check waits for that job to queue at the folder.
+        let folder = build_folder_queue(&athena.state);
         let log: Arc<Mutex<Vec<&'static str>>> = Arc::default();
         let inside = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let claimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -6480,11 +6483,11 @@ echo '--> src/x.rs:120:9' >&2"#
             let handles: Vec<_> = [&one, &two]
                 .into_iter()
                 .map(|job| {
-                    let (athena, probe) = (&athena, probe.clone());
+                    let (athena, probe) = (&athena, folder.clone());
                     let (log, inside, claimed) = (log.clone(), inside.clone(), claimed.clone());
                     scope.spawn(move || {
-                        // The check that gets the only slot first holds it until the other job's check is
-                        // queued behind it; the other must not run before then.
+                        // The check that gets the only slot first holds it until the other job is queued
+                        // behind it; the other must not run before then.
                         let _seam =
                             check_seam::install(std::rc::Rc::new(move |spec: &CheckSpec| {
                                 use std::sync::atomic::Ordering::SeqCst;
@@ -6517,16 +6520,25 @@ echo '--> src/x.rs:120:9' >&2"#
             assert!(end.is_ok(), "{end:?}");
         }
         assert_eq!(*log.lock().unwrap(), ["first-start", "first-end", "second"]);
-        // Both checks recorded how long they waited; the one that queued behind the other waited longer.
-        let mut waits: Vec<f64> = [&one, &two]
-            .into_iter()
-            .map(|job| recorded_queued_s(&athena, job).expect("the check recorded its wait"))
-            .collect();
-        waits.sort_by(f64::total_cmp);
-        assert!(waits[1] > 0.0 && waits[1] > waits[0], "{waits:?}");
+        // Both checks ran on a free check slot: the second job did not queue behind the first at the check
+        // slot, it waited for the build folder before it got that far. The check-slot wait itself is shown by
+        // `a_check_that_waited_checks_the_disk_again`.
+        for job in [&one, &two] {
+            assert!(
+                recorded_queued_s(&athena, job).is_some(),
+                "the check recorded its wait"
+            );
+        }
         assert!(
-            take_slot_soon(&probe).queued() < std::time::Duration::from_secs(10),
-            "both slots are free again"
+            take_slot_soon(&slot_queue(&athena)).queued() < std::time::Duration::from_secs(10),
+            "the check slot is free again"
+        );
+        assert!(
+            build_folder_queue(&athena.state)
+                .try_acquire()
+                .unwrap()
+                .is_some(),
+            "the build folder is free again"
         );
     }
 
@@ -10547,6 +10559,821 @@ echo '--> src/x.rs:120:9' >&2"#
                     assert_a_cent_short(&error, stage, want);
                 }
             }
+        }
+    }
+
+    /// The build-folder slot (`docs/design/agent-and-build-slots.md` section 11): only one job at a time
+    /// holds a build folder, and a job that waits for it is neither held for low disk nor failed.
+    mod build_folder {
+        use super::*;
+        use std::path::Path;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        use std::time::{Duration, Instant};
+
+        /// A check that leaves a file in the job's build path, as a build does. It runs for real, so the
+        /// baseline leaves a real directory under `jobs/<id>/target/`.
+        const BUILDS: &[&str] = &[
+            "sh",
+            "-c",
+            "mkdir -p \"$CARGO_TARGET_DIR\" && echo built > \"$CARGO_TARGET_DIR/blob\"",
+        ];
+
+        /// A baseline check that marks the baseline as taken (see [`MARKS_BASELINE`]) and leaves a build.
+        const BASELINE_THAT_BUILDS: &[&str] = &[
+            "sh",
+            "-c",
+            "touch ../baseline-ran; mkdir -p \"$CARGO_TARGET_DIR\"; echo x > \"$CARGO_TARGET_DIR/blob\"",
+        ];
+
+        /// Polls `ready` every 5 ms, for at most 10 s.
+        fn wait_for(what: &str, ready: impl Fn() -> bool) {
+            let start = Instant::now();
+            while !ready() {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "timed out waiting for {what}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        /// How many jobs hold a build folder right now: a real directory (not a link) directly under
+        /// `jobs/<id>/target/`. It looks at the disk, not at the slot, so it checks the slot's work.
+        fn holders(root: &Path) -> usize {
+            let Ok(jobs) = std::fs::read_dir(root.join("jobs")) else {
+                return 0;
+            };
+            jobs.flatten()
+                .filter(|job| {
+                    std::fs::read_dir(job.path().join("target")).is_ok_and(|entries| {
+                        entries
+                            .flatten()
+                            .any(|e| std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_dir()))
+                    })
+                })
+                .count()
+        }
+
+        /// Writes a small file at `path` under the job's directory in `root`.
+        fn write_in_job(root: &Path, job: &str, path: &str) {
+            let full = root.join("jobs").join(job).join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, b"built").unwrap();
+        }
+
+        /// A file of `bytes` length that takes no disk blocks here: the simulated free space counts lengths.
+        fn sparse(path: &Path, bytes: u64) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(path).unwrap().set_len(bytes).unwrap();
+        }
+
+        /// The total length of the files under `dir`, by a walk of its own (not `disk::dir_bytes`).
+        fn file_lengths(dir: &Path) -> u64 {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return 0;
+            };
+            entries
+                .flatten()
+                .map(|e| match std::fs::symlink_metadata(e.path()) {
+                    Ok(m) if m.is_dir() => file_lengths(&e.path()),
+                    Ok(m) if m.is_file() => m.len(),
+                    _ => 0,
+                })
+                .sum()
+        }
+
+        /// What every job's `target/` holds, by length.
+        fn builds(root: &Path) -> u64 {
+            std::fs::read_dir(root.join("jobs"))
+                .map(|jobs| {
+                    jobs.flatten()
+                        .map(|job| file_lengths(&job.path().join("target")))
+                        .sum()
+                })
+                .unwrap_or(0)
+        }
+
+        /// The disk of the free-space tests: 12 GB, of which the jobs' build folders take their lengths.
+        const DISK: u64 = 12 * crate::disk::GB;
+
+        fn disk_of_twelve(root: &Path) -> std::io::Result<u64> {
+            Ok(DISK.saturating_sub(builds(root)))
+        }
+
+        /// The same disk with a ballast file in the state root: something that is not a job's build folder.
+        fn disk_of_twelve_with_ballast(root: &Path) -> std::io::Result<u64> {
+            let ballast = std::fs::metadata(root.join("ballast.bin")).map_or(0, |m| m.len());
+            Ok(DISK.saturating_sub(builds(root)).saturating_sub(ballast))
+        }
+
+        /// `turn` with the reading's deliverable, the plan's file and the producer's edit all being a note
+        /// named for the job: two jobs built from the same base change different files. A reading of a retry
+        /// names the job it retries, as a reader that read the request would.
+        fn with_own_note(spec: &AgentInvocation, mut turn: FakeTurn) -> FakeTurn {
+            let path = format!("notes/{}.md", spec.job);
+            match spec.role {
+                Role::Reader => {
+                    if let Some(reading) = turn.structured.as_mut() {
+                        reading["deliverables"][0]["path"] = json!(path);
+                        reading["deliverables"][0]["action"] = json!("create");
+                        // A retry lists the files of the job it retries as its deliverables.
+                        if let Some((_, after)) = spec.user_prompt.split_once("try again on ") {
+                            let earlier: String = after
+                                .chars()
+                                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                                .collect();
+                            reading["deliverables"][0]["path"] =
+                                json!(format!("notes/{earlier}.md"));
+                            reading["summary"] = json!(format!(
+                                "Describe the demo in README.md, as job {earlier} did."
+                            ));
+                        }
+                    }
+                }
+                Role::Planner => {
+                    if let Some(plan) = turn.structured.as_mut() {
+                        plan["files"][0]["path"] = json!(path);
+                        plan["files"][0]["action"] = json!("create");
+                        plan["demonstrations"][0]["command"] = json!(format!("cat {path}"));
+                    }
+                }
+                Role::Producer => {
+                    turn.edits = vec![(path.to_string(), Some(format!("A note: {path}.\n")))];
+                    if let Some(report) = turn.structured.as_mut() {
+                        report["files"] = json!([path]);
+                    }
+                }
+                _ => {}
+            }
+            turn
+        }
+
+        /// What the two-job script saw.
+        #[derive(Default)]
+        struct Seen {
+            log: Mutex<Vec<String>>,
+            planning: AtomicUsize,
+            producers: AtomicUsize,
+            first: Mutex<Option<String>>,
+        }
+
+        impl Seen {
+            fn say(&self, text: &str) {
+                self.log.lock().unwrap().push(text.to_string());
+            }
+        }
+
+        /// Fake agents for two jobs run side by side. Each planner marks itself and waits until both are
+        /// inside planning. The first producer waits until the other job is queued at the build folder, then
+        /// builds for a second; the second producer asserts the first job's build folder is gone.
+        fn two_job_script(seen: Arc<Seen>, root: PathBuf) -> athena_agent::fake::Script {
+            let folder = build_folder_queue(&crate::state::StateDir::new(root.clone()));
+            let inner = planning_script(
+                vec![good_plan()],
+                vec![accepting_critique()],
+                Calls::default(),
+            );
+            Box::new(move |spec: &AgentInvocation| {
+                match spec.role {
+                    Role::Planner => {
+                        seen.say("planning");
+                        seen.planning.fetch_add(1, SeqCst);
+                        wait_for("both jobs inside planning", || {
+                            seen.planning.load(SeqCst) >= 2
+                        });
+                    }
+                    Role::Producer => {
+                        if seen.producers.fetch_add(1, SeqCst) == 0 {
+                            *seen.first.lock().unwrap() = Some(spec.job.clone());
+                            seen.say("first-start");
+                            wait_for("the other job to queue at the build folder", || {
+                                folder.waiting() >= 1
+                            });
+                            std::thread::sleep(Duration::from_millis(1000));
+                            write_in_job(&root, &spec.job, "target/produce/blob");
+                            seen.say("first-end");
+                        } else {
+                            let first = seen.first.lock().unwrap().clone().expect("a first job");
+                            assert!(
+                                !root.join("jobs").join(&first).join("target").exists(),
+                                "the second producer started while the first job still held its build folder"
+                            );
+                            seen.say("second-start");
+                        }
+                    }
+                    Role::Verifier => {
+                        write_in_job(&root, &spec.job, "target/verify/blob");
+                        let first = seen.first.lock().unwrap().clone();
+                        seen.say(if first.as_deref() == Some(spec.job.as_str()) {
+                            "first-verifier"
+                        } else {
+                            "second-verifier"
+                        });
+                    }
+                    _ => {}
+                }
+                with_own_note(spec, inner(spec))
+            })
+        }
+
+        /// One `go` as a drain worker makes it: its lines, its result and how long it took.
+        fn go_timed(
+            athena: &Athena,
+            job: &JobId,
+        ) -> (std::result::Result<Finished, String>, Duration, Vec<String>) {
+            let ui = Lines::default();
+            let start = Instant::now();
+            let result = athena
+                .go(job.as_str(), AcceptedBy::User, &ui)
+                .map(finished)
+                .map_err(|e| format!("{e:#}"));
+            let took = start.elapsed();
+            (result, took, ui.0.into_inner().unwrap())
+        }
+
+        /// The state and reason a job ends in. A job that ended stale (the branch moved while it ran) is
+        /// retried, which merges its verified candidate onto the branch; the retry's end is returned.
+        fn settle(
+            athena: &Athena,
+            job: &JobId,
+            ended: &std::result::Result<Finished, String>,
+        ) -> (OutcomeState, String) {
+            let done = ended.as_ref().unwrap_or_else(|e| panic!("{job}: {e}"));
+            if done.state != OutcomeState::Stale {
+                return (done.state, done.reason.clone());
+            }
+            let (retry, _) = athena.retry(job.as_str(), &Quiet).unwrap();
+            let again = finished(
+                athena
+                    .go(retry.job.as_str(), AcceptedBy::User, &Quiet)
+                    .unwrap(),
+            );
+            (again.state, again.reason)
+        }
+
+        fn wall_time_execution(athena: &Athena, job: &JobId) -> f64 {
+            let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+            records.jobs[job.as_str()]
+                .outcome
+                .as_ref()
+                .and_then(|o| o.totals.as_ref())
+                .and_then(|t| t.wall_time_execution.as_ref())
+                .and_then(|q| q.value())
+                .expect("the job recorded its execution time")
+        }
+
+        #[test]
+        fn two_jobs_plan_together_and_build_one_after_the_other() {
+            let repo = repo_with_planning(1);
+            let state = tempfile::tempdir().unwrap();
+            let root = state.path().join("repo");
+            let seen = Arc::new(Seen::default());
+            let athena = athena_with(
+                &repo,
+                &state,
+                BUILDS,
+                crate::test_support::plenty_of_space,
+                two_job_script(seen.clone(), root.clone()),
+            );
+            let one = athena.ask("describe the demo", &Quiet).unwrap().job;
+            let two = athena
+                .ask("describe the demo once more", &Quiet)
+                .unwrap()
+                .job;
+            let sampling = AtomicBool::new(true);
+            let (ended, log, settled, peak) = std::thread::scope(|scope| {
+                // Counts, every 2 ms, the jobs that hold a real build directory. The deadline ends it if a
+                // worker panics before the flag is set.
+                let sampler = scope.spawn(|| {
+                    let start = Instant::now();
+                    let mut peak = 0;
+                    while sampling.load(SeqCst) && start.elapsed() < Duration::from_secs(120) {
+                        peak = peak.max(holders(&root));
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    peak
+                });
+                let workers: Vec<_> = [&one, &two]
+                    .into_iter()
+                    .map(|job| {
+                        let athena = &athena;
+                        scope.spawn(move || go_timed(athena, job))
+                    })
+                    .collect();
+                let ended: Vec<_> = workers
+                    .into_iter()
+                    .map(|w| w.join())
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|r| {
+                        sampling.store(false, SeqCst);
+                        r.unwrap()
+                    })
+                    .collect();
+                let log = seen.log.lock().unwrap().clone();
+                // The branch moved when the first job landed, so the second ends stale (a landing rule that
+                // has nothing to do with the disk); its retry merges the candidate and lands it. The sampler
+                // keeps counting through the retry.
+                let settled: Vec<(OutcomeState, String)> = [&one, &two]
+                    .into_iter()
+                    .zip(&ended)
+                    .map(|(job, (result, _, _))| settle(&athena, job, result))
+                    .collect();
+                sampling.store(false, SeqCst);
+                (ended, log, settled, sampler.join().unwrap())
+            });
+
+            // Both jobs landed; neither was held for low disk or for a slot, and neither was discarded. The
+            // second one ended stale first, because the branch moved, and landed on its retry.
+            let first = seen.first.lock().unwrap().clone().unwrap();
+            for (((result, _, lines), job), (state, reason)) in
+                ended.iter().zip([&one, &two]).zip(&settled)
+            {
+                assert_eq!(*state, OutcomeState::Landed, "{job}: {reason}");
+                let done = result.as_ref().unwrap();
+                if job.as_str() == first {
+                    assert_eq!(done.state, OutcomeState::Landed, "{job}: {}", done.reason);
+                } else {
+                    assert_eq!(done.state, OutcomeState::Stale, "{job}: {}", done.reason);
+                }
+                assert!(!lines.iter().any(|l| l.starts_with("held ")), "{lines:#?}");
+                assert_eq!(crate::disk::read_any_hold(&athena.state, job), None);
+            }
+            // Both jobs were inside planning before either producer started; the first producer waited for the
+            // other job to queue; the second producer started after the first job's folder was gone.
+            assert_eq!(
+                log,
+                [
+                    "planning",
+                    "planning",
+                    "first-start",
+                    "first-end",
+                    "first-verifier",
+                    "second-start",
+                    "second-verifier"
+                ]
+            );
+            // Measured on the disk: never two jobs with a build folder at the same moment.
+            assert_eq!(peak, 1, "peak number of jobs holding a build folder");
+
+            // The job that waited says so; the job that did not, does not.
+            let (first_at, second_at) = if one.as_str() == first {
+                (0, 1)
+            } else {
+                (1, 0)
+            };
+            let said = |at: usize, text: &str| ended[at].2.iter().any(|l| l.contains(text));
+            assert!(said(second_at, "waiting for it before the producer builds"));
+            assert!(said(second_at, "the build folder is free after"));
+            assert!(!said(first_at, "waiting for it before the producer builds"));
+
+            // The wait is left out of the execution time. The first job built for over a second. The second
+            // job's `go` took its own run plus at least a second of waiting, so its stored figure leaves that
+            // second out.
+            let jobs = [&one, &two];
+            assert!(wall_time_execution(&athena, jobs[first_at]) >= 1.0);
+            let took = ended[second_at].1.as_secs_f64();
+            let stored = wall_time_execution(&athena, jobs[second_at]);
+            assert!(
+                stored + 0.9 <= took,
+                "stored {stored} s, but the whole `go` took {took} s with a wait of a second"
+            );
+            assert!(
+                build_folder_queue(&athena.state)
+                    .try_acquire()
+                    .unwrap()
+                    .is_some(),
+                "the folder is free again"
+            );
+        }
+
+        /// Fake agents whose first producer fills `folder` bytes of its build folder and `ballast` bytes of
+        /// the state root, then waits until `until` says go on, and removes the ballast. Other producers
+        /// edit as usual.
+        fn hogging_script(
+            root: PathBuf,
+            (folder, ballast): (u64, u64),
+            until: Box<dyn Fn() -> bool + Send + Sync>,
+            producers: Arc<AtomicUsize>,
+        ) -> athena_agent::fake::Script {
+            let inner = base_script();
+            Box::new(move |spec: &AgentInvocation| {
+                if spec.role == Role::Producer && producers.fetch_add(1, SeqCst) == 0 {
+                    sparse(
+                        &root.join("jobs").join(&spec.job).join("target/produce/hog"),
+                        folder,
+                    );
+                    if ballast > 0 {
+                        sparse(&root.join("ballast.bin"), ballast);
+                    }
+                    wait_for("the test to let the first producer go on", &until);
+                    let _ = std::fs::remove_file(root.join("ballast.bin"));
+                }
+                with_own_note(spec, inner(spec))
+            })
+        }
+
+        #[test]
+        fn a_job_waiting_for_the_build_folder_is_not_held_for_low_disk() {
+            let repo = repo();
+            let state = tempfile::tempdir().unwrap();
+            let root = state.path().join("repo");
+            let producers = Arc::new(AtomicUsize::new(0));
+            let folder = build_folder_queue(&crate::state::StateDir::new(root.clone()));
+            // The first job's folder takes 8 GB of a 12 GB disk: free space is below the 10 GB gate.
+            let athena = athena_with(
+                &repo,
+                &state,
+                PASSES,
+                disk_of_twelve,
+                hogging_script(
+                    root.clone(),
+                    (8 * crate::disk::GB, 0),
+                    Box::new(move || folder.waiting() >= 1),
+                    producers.clone(),
+                ),
+            );
+            let one = athena.ask("describe the demo", &Quiet).unwrap().job;
+            let two = athena
+                .ask("describe the demo once more", &Quiet)
+                .unwrap()
+                .job;
+            let (first, second) = std::thread::scope(|scope| {
+                let worker = scope.spawn(|| go_timed(&athena, &one));
+                let hog = root
+                    .join("jobs")
+                    .join(one.as_str())
+                    .join("target/produce/hog");
+                wait_for("the first job's build folder", || hog.exists());
+                let free = athena.state.free_bytes().unwrap();
+                assert!(
+                    free < 10 * crate::disk::GB,
+                    "free space {free} is below the gate while the first job builds"
+                );
+                // The second job starts while the first holds the folder: it queues, it is not held.
+                let second = go_timed(&athena, &two);
+                (worker.join().unwrap(), second)
+            });
+            // The first job landed. The second one's producer ran after the folder was freed; it ended stale
+            // because the branch moved, and its retry lands it.
+            let done = first.0.as_ref().unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+            let (state, reason) = settle(&athena, &two, &second.0);
+            assert_eq!(state, OutcomeState::Landed, "{reason}");
+            let said = &second.2;
+            assert!(
+                said.iter().any(|l| l.starts_with("disk       ")
+                    && l.contains(one.as_str())
+                    && l.contains("holds the build folder")),
+                "the credit names the holder: {said:#?}"
+            );
+            assert!(
+                said.iter()
+                    .any(|l| l.contains("waiting for it before the producer builds")),
+                "{said:#?}"
+            );
+            assert!(!said.iter().any(|l| l.starts_with("held ")), "{said:#?}");
+            assert!(
+                !first.2.iter().any(|l| l.starts_with("held ")),
+                "{:#?}",
+                first.2
+            );
+            for job in [&one, &two] {
+                assert_eq!(crate::disk::read_any_hold(&athena.state, job), None);
+            }
+            assert_eq!(producers.load(SeqCst), 2, "both producers ran");
+        }
+
+        #[test]
+        fn a_job_short_of_disk_for_its_own_reasons_is_still_held_at_dispatch() {
+            let repo = repo();
+            let state = tempfile::tempdir().unwrap();
+            let root = state.path().join("repo");
+            let producers = Arc::new(AtomicUsize::new(0));
+            let released = Arc::new(AtomicBool::new(false));
+            let go_on = released.clone();
+            // The first job's folder takes 2 GB and something else takes 5 GB: free space is 5 GB, and the
+            // holder's folder explains only 2 GB of the 5 GB missing.
+            let athena = athena_with(
+                &repo,
+                &state,
+                PASSES,
+                disk_of_twelve_with_ballast,
+                hogging_script(
+                    root.clone(),
+                    (2 * crate::disk::GB, 5 * crate::disk::GB),
+                    Box::new(move || go_on.load(SeqCst)),
+                    producers.clone(),
+                ),
+            );
+            let one = athena.ask("describe the demo", &Quiet).unwrap().job;
+            let two = athena
+                .ask("describe the demo once more", &Quiet)
+                .unwrap()
+                .job;
+            let (first, second) = std::thread::scope(|scope| {
+                let worker = scope.spawn(|| go_timed(&athena, &one));
+                let ballast = root.join("ballast.bin");
+                wait_for("the ballast", || ballast.exists());
+                let second = go_timed(&athena, &two);
+                released.store(true, SeqCst);
+                (worker.join().unwrap(), second)
+            });
+            let error = second
+                .0
+                .as_ref()
+                .expect_err("the second job is held for low disk");
+            assert!(
+                error.contains("environment: low disk: 5.0 GB free"),
+                "{error}"
+            );
+            assert!(
+                second
+                    .2
+                    .iter()
+                    .any(|l| l.starts_with("held       environment: low disk: 5.0 GB free")),
+                "{:#?}",
+                second.2
+            );
+            let hold = crate::disk::read_hold(&athena.state, &two).expect("a hold marker");
+            assert_eq!(hold.free, 5 * crate::disk::GB);
+            assert_eq!(hold.required, 10 * crate::disk::GB);
+            assert!(
+                !second
+                    .2
+                    .iter()
+                    .any(|l| l.contains("holds the build folder")),
+                "no credit is given: {:#?}",
+                second.2
+            );
+            // Only the first job's producer ran; the first job landed once the ballast was gone.
+            assert_eq!(producers.load(SeqCst), 1);
+            let done = first.0.as_ref().unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+            assert_eq!(crate::disk::read_any_hold(&athena.state, &one), None);
+        }
+
+        /// The folder is free and the job left nothing behind: nobody queues, a request takes it at once, the
+        /// job's build directory and the holder file are gone.
+        fn assert_folder_free(athena: &Athena, job: &JobId, ending: &str) {
+            let queue = build_folder_queue(&athena.state);
+            assert_eq!(queue.waiting(), 0, "{ending}: a ticket is left");
+            drop(take_slot_soon(&queue));
+            assert!(
+                !athena.state.job_dir(job).join("target").exists(),
+                "{ending}: the job's build directory is left"
+            );
+            assert!(
+                !athena.state.build_folder_holder_file().exists(),
+                "{ending}: the holder file is left"
+            );
+        }
+
+        /// `inner`, with the producer making no edit.
+        fn editing_nothing(inner: athena_agent::fake::Script) -> athena_agent::fake::Script {
+            Box::new(move |spec: &AgentInvocation| {
+                let mut turn = inner(spec);
+                if spec.role == Role::Producer {
+                    turn.edits.clear();
+                }
+                turn
+            })
+        }
+
+        #[test]
+        fn the_build_folder_is_freed_on_every_way_a_job_ends() {
+            // A job that lands, one the checks reject, and one that changed nothing: each frees the folder
+            // and the next job runs its producer.
+            for (ending, check, edits) in [
+                ("landed", PASSES, true),
+                ("rejected", FAILS_ON_EDIT, true),
+                ("failed with no change", PASSES, false),
+            ] {
+                let repo = repo();
+                let state = tempfile::tempdir().unwrap();
+                let counts = Arc::new(Counts::default());
+                let script = each_job_its_own_edit(counting(
+                    counts.clone(),
+                    Some(state.path().join("repo")),
+                ));
+                let athena = athena_with(
+                    &repo,
+                    &state,
+                    check,
+                    crate::test_support::plenty_of_space,
+                    if edits {
+                        script
+                    } else {
+                        editing_nothing(script)
+                    },
+                );
+                let first = athena.ask("describe the demo", &Quiet).unwrap().job;
+                let done = finished(athena.go(first.as_str(), AcceptedBy::User, &Quiet).unwrap());
+                assert_eq!(
+                    done.state == OutcomeState::Landed,
+                    ending == "landed",
+                    "{ending}: {:?} {}",
+                    done.state,
+                    done.reason
+                );
+                assert_folder_free(&athena, &first, ending);
+                let producers_before = counts.all().1;
+                assert!(producers_before >= 1, "{ending}: the first producer ran");
+                let second = athena
+                    .ask("describe the demo once more", &Quiet)
+                    .unwrap()
+                    .job;
+                let next = finished(
+                    athena
+                        .go(second.as_str(), AcceptedBy::User, &Quiet)
+                        .unwrap(),
+                );
+                assert_eq!(next.state, done.state, "{ending}: {}", next.reason);
+                assert!(
+                    counts.all().1 > producers_before,
+                    "{ending}: the second job's producer ran"
+                );
+                assert_folder_free(&athena, &second, ending);
+            }
+        }
+
+        #[test]
+        fn the_build_folder_is_freed_when_a_job_is_held_for_low_disk_before_its_producer() {
+            let repo = repo();
+            let state = tempfile::tempdir().unwrap();
+            let root = state.path().join("repo");
+            let counts = Arc::new(Counts::default());
+            let athena = athena_with(
+                &repo,
+                &state,
+                BASELINE_THAT_BUILDS,
+                crate::test_support::low_once_baselined,
+                counting(counts.clone(), Some(root.clone())),
+            );
+            let first = athena.ask("describe the demo", &Quiet).unwrap().job;
+            let error = athena
+                .go(first.as_str(), AcceptedBy::User, &Quiet)
+                .expect_err("low space before the producer holds the job");
+            assert!(error.downcast_ref::<crate::disk::LowDisk>().is_some());
+            assert_eq!(counts.all().1, 0, "the producer never started");
+            assert_folder_free(&athena, &first, "held for low disk");
+            // Space is back: the next job takes the folder and lands.
+            std::fs::write(root.join("freed"), b"").unwrap();
+            let second = athena
+                .ask("describe the demo once more", &Quiet)
+                .unwrap()
+                .job;
+            let done = finished(
+                athena
+                    .go(second.as_str(), AcceptedBy::User, &Quiet)
+                    .unwrap(),
+            );
+            assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+            assert_folder_free(&athena, &second, "landed after a hold");
+        }
+
+        #[test]
+        fn a_job_killed_while_it_waits_for_the_build_folder_leaves_no_ticket() {
+            let repo = repo();
+            let state = tempfile::tempdir().unwrap();
+            let counts = Arc::new(Counts::default());
+            let athena = athena_with(
+                &repo,
+                &state,
+                PASSES,
+                crate::test_support::plenty_of_space,
+                counting(counts.clone(), None),
+            );
+            let queue = build_folder_queue(&athena.state);
+            let probe = take_slot_soon(&queue);
+            let first = athena.ask("describe the demo", &Quiet).unwrap().job;
+            let stop = athena.state.registry().stop_file().to_path_buf();
+            let error = std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    wait_until_waiting(&queue, 1);
+                    std::fs::create_dir_all(stop.parent().unwrap()).unwrap();
+                    std::fs::write(&stop, "").unwrap();
+                });
+                athena
+                    .go(first.as_str(), AcceptedBy::User, &Quiet)
+                    .expect_err("the kill switch ends the wait")
+            });
+            assert!(format!("{error:#}").contains("kill switch"), "{error:#}");
+            assert_eq!(queue.waiting(), 0, "no ticket is left");
+            assert_eq!(counts.all().1, 0, "the producer never started");
+            // The switch is lifted and the folder is freed: the next job proceeds.
+            athena.state.registry().start().unwrap();
+            drop(probe);
+            let second = athena
+                .ask("describe the demo once more", &Quiet)
+                .unwrap()
+                .job;
+            let done = finished(
+                athena
+                    .go(second.as_str(), AcceptedBy::User, &Quiet)
+                    .unwrap(),
+            );
+            assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+            assert_folder_free(&athena, &second, "landed after a kill");
+        }
+
+        #[test]
+        fn a_resumed_job_takes_the_build_folder_before_its_checks() {
+            let repo = repo();
+            let state = tempfile::tempdir().unwrap();
+            let root = state.path().join("repo");
+            let counts = Arc::new(Counts::default());
+            let athena = athena_with(
+                &repo,
+                &state,
+                PASSES,
+                low_while_checking,
+                counting(counts.clone(), Some(root.clone())),
+            );
+            let first = athena.ask("describe the demo", &Quiet).unwrap().job;
+            let error = athena
+                .go(first.as_str(), AcceptedBy::User, &Quiet)
+                .expect_err("low space before the checks holds the job");
+            assert!(error.downcast_ref::<crate::disk::LowDisk>().is_some());
+            assert_folder_free(&athena, &first, "held before the checks");
+            // Space is back. The retry resumes the kept candidate, but another job holds the folder.
+            std::fs::write(root.join("freed"), b"").unwrap();
+            let (retry, _) = athena.retry(first.as_str(), &Quiet).unwrap();
+            let queue = build_folder_queue(&athena.state);
+            let probe = take_slot_soon(&queue);
+            let checks_run = Arc::new(AtomicUsize::new(0));
+            let done = std::thread::scope(|scope| {
+                let ran = checks_run.clone();
+                let worker = scope.spawn(|| {
+                    let _seam = check_seam::install(std::rc::Rc::new(move |spec: &CheckSpec| {
+                        ran.fetch_add(1, SeqCst);
+                        passed_run(spec)
+                    }));
+                    athena.go(retry.job.as_str(), AcceptedBy::User, &Quiet)
+                });
+                wait_until_waiting(&queue, 1);
+                std::thread::sleep(Duration::from_millis(300));
+                assert_eq!(
+                    checks_run.load(SeqCst),
+                    0,
+                    "a check ran while another job held the build folder"
+                );
+                drop(probe);
+                finished(worker.join().unwrap().unwrap())
+            });
+            assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+            assert!(
+                checks_run.load(SeqCst) >= 1,
+                "the checks ran after the wait"
+            );
+            assert_folder_free(&athena, &retry.job, "resumed and landed");
+        }
+
+        #[test]
+        fn a_stale_holder_file_naming_the_waiting_job_is_removed_before_it_queues() {
+            let repo = repo();
+            let state = tempfile::tempdir().unwrap();
+            let athena = athena(&repo, &state);
+            let queue = build_folder_queue(&athena.state);
+            let probe = take_slot_soon(&queue);
+            let job = athena.ask("describe the demo", &Quiet).unwrap().job;
+            // A run of this job that died left its name in the holder file.
+            std::fs::write(athena.state.build_folder_holder_file(), job.as_str()).unwrap();
+            let folder = std::thread::scope(|scope| {
+                let worker = scope.spawn(|| athena.take_build_folder(&job, &Quiet));
+                wait_until_waiting(&queue, 1);
+                assert!(
+                    !athena.state.build_folder_holder_file().exists(),
+                    "the stale file is gone before the job queues"
+                );
+                drop(probe);
+                worker.join().unwrap().unwrap()
+            });
+            assert!(folder.waited().is_some());
+            assert_eq!(
+                std::fs::read_to_string(athena.state.build_folder_holder_file()).unwrap(),
+                job.as_str(),
+                "the holder file names the job that holds the folder"
+            );
+            drop(folder);
+            assert!(!athena.state.build_folder_holder_file().exists());
+        }
+
+        #[test]
+        fn the_run_clock_leaves_out_the_folder_wait() {
+            let clock = RunClock::start();
+            std::thread::sleep(Duration::from_millis(250));
+            let before = clock.elapsed();
+            assert!(before >= Duration::from_millis(250), "{before:?}");
+            clock.exclude(Duration::from_millis(200));
+            let after = clock.elapsed();
+            assert!(
+                after < Duration::from_millis(200) && after >= before - Duration::from_millis(200),
+                "the excluded 200 ms came off: {before:?} then {after:?}"
+            );
+            // More excluded than has passed leaves zero, never a negative or a wrapped figure.
+            clock.exclude(Duration::from_secs(3600));
+            assert_eq!(clock.elapsed(), Duration::ZERO);
         }
     }
 }

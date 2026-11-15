@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261115-115319-npx1",
+  "round": 1,
+  "at": "2026-11-15T14:08:33.753492868Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The slot is freed before the checks and verifier, but the verifier builds its own per-job folder (target/verify), so two jobs can each have a build folder at once.",
+      "evidence": "The verifier agent runs with Side::Verify (verification.rs:243). Its CARGO_TARGET_DIR is `{job_dir}/target/{side}` (config.rs:1782; env.rs:141). A BuildLink points that path at a shared warm slot only during each check command (checks.rs:193-199, env.rs:139-184), and the link is removed afterwards. The verifier has no cargo shim (env.rs:208-210). Its prompt says 'exercise behavior criteria yourself… Build output goes to the CARGO_TARGET_DIR Athena sets' (cap-change/prompts/verifier.md:3). So the verifier's cargo test is a cold build of a real target/verify folder. Once the plan frees the slot, job B's producer can build target/produce while job A's verifier builds target/verify. The plan's own Risks entry says A can then be held for low disk at checks.rs:174/189 or disk.rs:376. The reading defines the slot as 'freed when the job lands, is rejected or is discarded'. The resumed-job path (mod.rs:842) also reaches the verifier without taking the slot. Fix: Keep the build-folder slot until the verifier has finished and target/verify is removed, and have resumed jobs (mod.rs:842) take it before check_and_verify. Avoid the deadlock in the existing test 6459 by changing that test, since its expectation (the second job's check queues while the first holds a check slot) no longer applies once builds are serialised. Alternatively, take the folder slot a second time before the verifier. List 6459 as a dependent whose test changes, and record the choice in D188.",
+      "location": "Decision 2 / Step 5 (release before check_and_verify); run/mod.rs:842 resume path",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The criterion-2 fixture would make job A, the job holding the slot, hit a low-disk hold at its checks gate in a race. The test either becomes flaky or never checks that A is spared a hold.",
+      "evidence": "The free-space function reports 3 GB while any `jobs/*/target/produce` exists. Under the plan, A frees its folder before check_and_verify, and B then starts producing and creates target/produce (counting writes it, run/tests.rs:3120-3128). A's first check runs `disk_gate` (checks.rs:173-176). If B's folder exists by then, A returns LowDisk. The demonstration asserts only B's outcome, so it neither catches nor rules out a held A. The request says low-disk holds caused by the other job's folder should not happen. Fix: Once the slot covers checks and the verifier (previous finding), assert that A also finishes Landed with no hold marker (`read_hold` is None). Otherwise make the free-space function key on a marker the test controls, so the result does not depend on thread timing.",
+      "location": "Demonstrations, Criterion 2 (`low_while_a_build_folder_exists`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion-1 sampler counts only `target/produce`, which is a proxy for 'jobs holding a build folder'.",
+      "evidence": "The reading asks for a direct measure: the count of jobs holding a build folder at the same moment. A job's build folders are `target/produce` and `target/verify` (state.rs:271-273, 797; env.rs:141). A sampler limited to produce cannot see the overlap described in the first finding. Fix: Sample `jobs/*/target/*` (any non-link directory) or count holders of the slot itself. Have the fake verifier write into target/verify so the overlap would be detected.",
+      "location": "Demonstrations, Criterion 1 (sampler of `jobs/*/target/produce`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The dispatch rule blames any shortfall on the other job's folder whenever one is held or queued for. This is a heuristic, and figures for a better test already exist in the code.",
+      "evidence": "While a folder is busy, a disk that is short for unrelated reasons lets a job spend planner money before the post-acquire gate holds it (the plan's own Risk 2). disk.rs already has figures for the expected size of a build folder: the measured T from the latest build-measurement record, or `ESTIMATE_T_BYTES` (disk.rs:638-649, used by `start_hold` at :763-782). The plan rejected crediting bytes only because the folder's current size is still small at dispatch. Fix: Skip the hold only when free space plus the expected folder size (T, measured or estimated) meets min_free_gb. Otherwise hold as today. The simulated test can still drive this through the free-space function and the T estimate.",
+      "location": "Decision 3 / `dispatch_disk_gate`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The dispatch probe takes the folder lock briefly through `try_acquire`, which perturbs the queue it is only meant to read.",
+      "evidence": "The plan's Risks accept that a real waiter can miss a poll. A probe that wins the lock, even for microseconds, briefly holds the build folder from a job that has not planned yet. `SlotQueue::waiting()` (slots.rs:166) is a read-only signal that already exists. Fix: Use `waiting() > 0`, or add a read-only `is_held()` on SlotQueue (test the lock without keeping it), instead of acquiring and dropping a Slot.",
+      "location": "Step 3 (`dispatch_disk_gate` probes the queue)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "While a job waits for the folder, status still shows its earlier stage.",
+      "evidence": "`Stage::Producer` is entered in producer.rs:349, which runs after the planned wait. The only other stages entered in run/ are Checks, Verifier and Landing (mod.rs:2031, verification.rs:196, mod.rs:465). A job queued for hours behind another producer looks stuck in its previous stage. Fix: Keep the 'waiting for the build folder' line, and say in agent-and-build-slots.md how a waiting job appears in status. A Stage is optional, since the plan rules out new Stages.",
+      "location": "Step 5 / Stage board",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the snapshot to check the plan. Most of it holds up. The hook points exist: `produce_and_verify` (run/mod.rs:1803), the dispatch gate at :1088 and the pre-producer gate at :1821. So do `free_producer_build` (checks.rs:840) and `SlotQueue::new/try_acquire/acquire/waiting` (slots.rs:132-190). Every test fixture the plan names also exists. The plan is right that holding the folder through `check_and_verify` would deadlock `two_jobs_with_one_build_slot_run_one_after_the_other`. The problem is the release point. The plan frees the folder just before `check_and_verify`, but the verifier agent then builds into its own per-job folder, `{job_dir}/target/verify`, and it does so outside any build slot. So job A's verifier folder and job B's producer folder can exist at the same time. That is the two-folders-at-once failure the request is meant to remove, and it breaks the reading's own definition (the slot is freed when the job lands, is rejected or is discarded). The plan's risk list admits that A can then be held for low disk because of B's folder. Its own criterion-2 fixture would trigger that hold in a race. Two more weak spots: the criterion-1 measure counts only `target/produce`, and the dispatch rule blames any shortfall on the folder. I recommend revise: keep the slot through the verifier (including resumed jobs), widen what the tests measure, and assert that the job holding the slot is not held for low disk either."
+}

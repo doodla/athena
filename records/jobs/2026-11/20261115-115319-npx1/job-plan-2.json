@@ -1,0 +1,406 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261115-115319-npx1",
+  "round": 2,
+  "at": "2026-11-15T14:17:20.762789417Z",
+  "invocation_seq": 7,
+  "approach": "Root cause (read): with `[parallel] max_concurrency = 2` (athena.toml:205, `Parallel` doc at config.rs:275-277) two jobs pass the dispatch disk gate (run/mod.rs:1088) while the disk is still empty, and each then builds in its own folder `<job dir>/target`. Nothing orders those builds. This revision answers the major finding by reading the code. A job's folder is not only `target/produce`. The baseline checks run `run_check` with the `Side::Verify` environment and no slot link (checks.rs:1298-1321), so they leave a real `target/verify`. The \"fails without\" demonstrations do the same (checks.rs:1034). The verifier agent runs `cargo build/test` (athena.toml:86) with `CARGO_TARGET_DIR={job_dir}/target/verify` (verification.rs:243, env.rs:141), and that folder is linked to a shared slot only for one check command (env.rs:139-185, checks.rs:193-199). Everything is removed together only when the job closes (`clean_job`, close.rs:151 and 438). Fix: one build-folder slot, held from just before `baseline_stage` until the job is closed. In `dispatch` (run/mod.rs) the guard is taken after planning, before `resume_candidate` (1353) or `produce_and_verify` (1387). It is dropped after `finish_dispatched` returns, and its `Drop` removes the job's `target/` before the lock is released. So a free slot always means this job holds no build folder, on every exit path, and a resumed job (mod.rs:842 → check_and_verify) takes the slot too. The slot is `slots::SlotQueue` with one entry over its own directory `<state>/build-folder/`, so it never shares a count with the check slots in `<state>/slots/`. The second job reads and plans, then waits at the slot with no hold, no attempt used and no discard. At dispatch, a shortfall is not a hold only when free space plus the bytes that other running jobs' `target/` folders hold meets the minimum (the same `dir_bytes` quantity `start_hold` already counts, disk.rs:779-784). Every other low-disk case holds as today. `max_concurrency` stays 2. The one existing test that needs the second job's check queued behind the first's (run/tests.rs:6459) is changed.",
+  "decisions": [
+    {
+      "choice": "Hold the build-folder slot for the whole of a job's build life: take it in `dispatch` after planning and before `baseline_stage` (before `resume_candidate` for a resumed job), drop it after `finish_dispatched` has closed the job. The guard's `Drop` first calls `StateDir::remove_target(job)` (state.rs:260, idempotent), then the file lock is released.",
+      "reason": "Answers finding 2 and 4. Every build-environment site (producer.rs:197 and 360, checks.rs:484, 1034 and 1304, records_criteria.rs:820, verification.rs:243, mod.rs:2011) is reached only through `produce_and_verify` or `resume_candidate`, both called from `dispatch`. So one guard in `dispatch` covers all of them, and the resume path (mod.rs:842 and 1353) with it. `target/verify` is a real cold folder in the baseline and in the verifier, so the slot cannot be freed before the checks or the verifier. Removing `target` on drop makes 'slot free' mean 'no folder held' for held jobs as well, whose job directory is not cleaned (close.rs:170-189 commits records only). Nothing in run/tests.rs asserts that `target` survives a hold (grep of `join(\"target\")`).",
+      "rejected": [
+        {
+          "option": "Release the slot after `free_producer_build`, just before `check_and_verify` (the round 1 plan).",
+          "why": "The baseline folder, the checks' demonstrations and the verifier's `cargo test` all build in real `target/verify` folders afterwards, so job B's producer could build while job A's verifier does (finding 2)."
+        },
+        {
+          "option": "Take the slot a second time before the verifier.",
+          "why": "Job B could take it in between and A's verifier would then wait behind B's whole producer run. A's baseline folder would also be unprotected, and a second wait needs a second hold path."
+        },
+        {
+          "option": "Guard only `produce_and_verify`.",
+          "why": "It misses the resume path and the folder removal done by `finish_dispatched`, so the next job could start while the closing job's folder is still on disk."
+        }
+      ]
+    },
+    {
+      "choice": "Implement the slot with `slots::SlotQueue::new(state.build_folder_dir(), 1, BUILD_FOLDER_WAIT, 600 s)`, a separate directory `<state>/build-folder`, and a `BuildFolder` guard in disk.rs.",
+      "reason": "`SlotQueue` already gives an exclusive file lock released on drop or process death (slots.rs:5-9), first-in-first-out tickets, a `stop` callback on every poll for the kill switch (slots.rs:187-196) and cross-process tests. A separate directory keeps it out of `max_check_slots` (slots.rs:143-152). The check slots are taken per cargo command by the producer's shim (producer.rs:377) and by every check (checks.rs:184).",
+      "rejected": [
+        {
+          "option": "Take `Class::Producer` from the existing `<state>/slots/` queue for the whole job.",
+          "why": "Its count is `max_check_slots` (default 1, config.rs:165), and the holder's own cargo shim and checks need that same slot, so the job would wait on itself."
+        },
+        {
+          "option": "A bare `try_lock` loop on a lock file.",
+          "why": "It re-implements ticket order, and with up to 16 workers (config.rs:269) a waiter could starve."
+        }
+      ]
+    },
+    {
+      "choice": "At dispatch only, add `Athena::dispatch_disk_gate`. It runs `disk_gate` (idle-target sweep included). On a shortfall it adds `held` = the sum of `dir_bytes(<job dir>/target)` over other jobs whose job lock is held (`job_lock_held`, state.rs:159). If `free + held >= required` it prints one `disk` line naming the figures and returns `None`, so the job reads and plans and then waits at the slot. Otherwise it returns the `LowDisk` as today. The gates inside the run (mod.rs:1821, checks.rs:174 and 189, verification.rs:175, mod.rs:2344 and 2373) stay unchanged.",
+      "reason": "Answers finding 5 and 6. `held` is the bytes that return to free space when the holder ends, measured the way `start_hold` already counts held bytes (disk.rs:779-784), so a shortfall that the other job's folder does not explain is still held. It needs no probe of the lock. I use measured bytes, not the build-measurement T or `ESTIMATE_T_BYTES` (disk.rs:639, 6 GB): the request puts a folder at 15-24 GB, and the holder's real size is available. The run's later gates see no other job's folder, because the slot covers every build.",
+      "rejected": [
+        {
+          "option": "Credit the expected folder size T (measured or estimated) instead of the real bytes.",
+          "why": "T is an expectation: the 6 GB estimate is below the 15-24 GB folders the request names, and the holder's actual bytes are what free space regains."
+        },
+        {
+          "option": "Skip the dispatch gate whenever the slot is held or queued for (probe `try_acquire` or `waiting()`).",
+          "why": "It blames any shortfall on the other job, and a `try_acquire` probe briefly takes the lock from a real waiter (finding 6)."
+        },
+        {
+          "option": "Set `max_concurrency` to 1 or check free disk only.",
+          "why": "That is the part 1 stopgap: it serialises reading and planning too."
+        },
+        {
+          "option": "Use `[drain.pipeline] max_in_flight` and `start_hold` (disk.rs:763).",
+          "why": "It is a size estimate that holds the start, and it is off at the default of 1 (config.rs:164)."
+        }
+      ]
+    },
+    {
+      "choice": "The wait is bounded only by a 7-day `BUILD_FOLDER_WAIT` and the kill switch (`refuse_if_stopped`, lib.rs:301). A `SlotWait` from it goes through `hold_for_slot_wait` (close.rs:200), as the producer's slot wait does (mod.rs:1844-1847). Print the 'waiting' line from the `stop` closure on its second call (the first look failed), and print the time waited after the acquire when `slot.waited()`.",
+      "reason": "`build_wait_s` (1800 s, config.rs:166) is shorter than one job's producer, checks and verifier together, and the request rules out a hold for waiting. The holder is bounded by its own deadlines. The closure `stop` runs before every attempt (slots.rs:195), so a line printed from its second call needs no probe and no change to slots.rs.",
+      "rejected": [
+        {
+          "option": "Use `build_wait_s`.",
+          "why": "The second job would be held after 30 minutes."
+        },
+        {
+          "option": "Add an `on_wait` callback to `SlotQueue::acquire`.",
+          "why": "It edits slots.rs, which is not a deliverable, for a line the `stop` closure already allows."
+        }
+      ]
+    },
+    {
+      "choice": "No new config key, record type or `Stage`. The slot count is fixed at 1. A waiting job is shown by its `disk` line in the job's log, and agent-and-build-slots.md says how it looks in status.",
+      "reason": "Out of scope forbids more than one slot. `reading_inputs` ignores `[parallel]` (config.rs:1354-1357), and the stage board writes a row only when a stage is entered (`TableSink::enter`, drain.rs:940-952; `Stage` has four variants, state.rs:18-23). A waiting job therefore shows no row, like a job that is planning. This answers finding 7: a new stage would change the table and the serialised `Stage`, for no other gain.",
+      "rejected": [
+        {
+          "option": "Add `Stage::WaitingForBuildFolder`.",
+          "why": "It changes `Stage::as_str`, the in-flight table and their tests, and the request does not ask for it."
+        },
+        {
+          "option": "A `[parallel] build_folder_slots` key defaulting to 1.",
+          "why": "It adds validation, a ceiling and tests for a count the design fixes."
+        }
+      ]
+    },
+    {
+      "choice": "Leave the wall-time measure alone: `wall_time_execution_s` stays `ctx.clock.elapsed()` from dispatch (mod.rs:2518, verification.rs:457), so the second job's folder wait is part of it, as a check's slot wait already is.",
+      "reason": "The measure's definition is not changed and no record is re-computed. D188 states the effect, so nobody reads a long wait as slow execution.",
+      "rejected": [
+        {
+          "option": "Shift the clock by the wait.",
+          "why": "It changes how a score input is computed and needs a records run to show the range."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "purpose": "Add `StateDir::build_folder_dir()` (`<state>/build-folder`; asking creates nothing) with a unit test beside state.rs:913.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Add `BUILD_FOLDER_WAIT` (7 days), `build_folder_queue(&StateDir)`, the `BuildFolder` guard (drop removes the job's `target`, then frees the lock), `Athena::take_build_folder`, `other_jobs_build_bytes` and `Athena::dispatch_disk_gate`. Update the module docs that list the gate places. Unit tests for the queue (a second acquire waits until the guard drops), the guard's folder removal and the byte count.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "The producer-start path, outside the listed deliverables because `dispatch` lives here and drain.rs only calls the blocking `go`. Add `take_build_folder_or_hold`, call it in `dispatch` before `resume_candidate` (1353) and before `produce_and_verify` (1387), drop the guard after `finish_dispatched`, and use `dispatch_disk_gate` at 1088. About 25 lines.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "New `mod build_folder` with the tests of criteria 1 to 3 (including the resume test and the counter test), a new check constant that writes into `$CARGO_TARGET_DIR`, the two free-space functions and the sampler. Change `two_jobs_with_one_build_slot_run_one_after_the_other` (6459).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Module-doc paragraph only: a job waiting for the build folder is neither held for low disk nor failed; `max_concurrency` bounds jobs and the build-folder slot bounds builds.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add `the_live_config_allows_two_jobs_at_once`, which parses the shipped athena.toml and asserts `max_concurrency` is 2.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Doc comment of `Parallel::max_concurrency` only (config.rs:275-277): jobs run side by side but one holds the build folder at a time. No key, value or validation changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "Governance file, a listed deliverable: edit only the three comment lines above `[parallel]` (201-203) so `max_concurrency = 2` stays at line 205. If the base has 1, set it to 2.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "action": "modify",
+      "purpose": "New section 11, 'The build-folder slot': what it guards, where it is taken and freed, the dispatch rule, the fixed count of 1, the check slots as a separate queue, and how a waiting job appears.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D188 with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance. No existing entry is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a `### Changed` bullet under `[Unreleased]`: build-folder slot added, the `max_concurrency = 1` stopgap lifted, root cause, limits and tests.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read slots.rs `SlotQueue::new`, `try_acquire` and `acquire` (172-218), run/mod.rs `dispatch` (1029-1389) and `finish_dispatched` (1394), and the test at run/tests.rs:6459 once more in the working copy, to confirm the line numbers cited here.",
+    "state.rs: add `StateDir::build_folder_dir()` returning `root.join(\"build-folder\")`, with a doc comment and a unit test next to `the_slots_directory_is_under_the_state_root` (913) that also asserts asking creates nothing.",
+    "disk.rs: add `const BUILD_FOLDER_WAIT: Duration` (7 days) and `pub(crate) fn build_folder_queue(state: &StateDir) -> SlotQueue` (`SlotQueue::new(state.build_folder_dir(), 1, BUILD_FOLDER_WAIT, Duration::from_secs(600))`). Add `pub(crate) struct BuildFolder { _slot: Slot, state: StateDir, job: JobId }` whose `Drop` calls `state.remove_target(&job)` and lets the slot field drop afterwards. Add `Athena::take_build_folder(&self, id, ui) -> Result<BuildFolder>`: it calls `acquire(Class::Producer, &stop)`, where `stop` runs `self.refuse_if_stopped()` and prints `disk       the build folder is held by another job; waiting for it before the producer builds` once, on its second call; after the acquire it prints the wait when `slot.waited()`. Add `fn other_jobs_build_bytes(state, except)`, the sum of `dir_bytes(<job dir>/target)` over other jobs with `job_lock_held`. Add `Athena::dispatch_disk_gate(&self, required_gb, job, ui) -> Option<LowDisk>`: it calls `disk_gate`, and on a shortfall with `free + held >= required` it prints one `disk` line with the figures and returns `None`. Update the module doc list of gate places. Add unit tests: a second `acquire` waits until the first guard drops; the guard's drop removes the job's `target`; the byte count ignores `except` and unlocked jobs.",
+    "run/mod.rs: add `fn take_build_folder_or_hold(&self, ctx: &RunContext<'_>, closing: Closing) -> Result<(BuildFolder, Closing)>`. It maps a `SlotWait` to `Err(self.hold_for_slot_wait(ctx, closing, wait))` and passes any other error on. In `dispatch`, replace the gate at 1088 with `self.dispatch_disk_gate(...)`. Before `resume_candidate` (1353) take the folder with `Closing::new()`, and before `produce_and_verify` (1387) with the planned `closing`. Run the job, call `finish_dispatched`, then `drop(folder)` and return the result.",
+    "run/tests.rs: add `mod build_folder` with the helpers (the new check constant that writes into `$CARGO_TARGET_DIR`, two free-space functions that subtract an independent file-length walk and a ballast, the `jobs/*/target/*` sampler, a planner barrier, a producer wrapper that waits for a queue waiter and one that writes sparse files). Write `two_jobs_plan_together_and_build_one_after_the_other`, `a_job_waiting_for_the_build_folder_is_not_held_for_low_disk`, `a_job_short_of_disk_for_its_own_reasons_is_still_held_at_dispatch`, `the_build_folder_is_freed_on_every_way_a_job_ends` and `a_resumed_job_takes_the_build_folder_before_its_checks`. Change `two_jobs_with_one_build_slot_run_one_after_the_other` as described in the dependents.",
+    "tests/drain.rs: add `the_live_config_allows_two_jobs_at_once`. athena.toml: reword only the three comment lines above `[parallel]` so line 205 still reads `max_concurrency = 2` (set it to 2 if the base has 1). config.rs and drain.rs: doc-only edits.",
+    "Docs: append D188 to docs/decisions.md in the existing format, add section 11 to docs/design/agent-and-build-slots.md, and add the CHANGELOG bullet under `[Unreleased]` / `### Changed`, saying the stopgap is lifted.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, then `cargo test -p athena-core build_folder`, `cargo test -p athena-core governed`, `cargo test -p athena-cli --test backtest` and `cargo test -p athena-core --test refusal_corpus`, and fix any link, budget or dead-code finding they name."
+  ],
+  "risks": [
+    {
+      "risk": "Throughput: with the slot held from baseline to close, `max_concurrency = 2` overlaps only reading and planning, not builds.",
+      "mitigation": "The slot spans the whole build life, so the second job's builds start only after the first job closes. That is what the request asks (one folder holder), and only reading and planning overlap. D188 and the CHANGELOG say so. The wait is bounded by the holder's own deadlines and the 7-day limit."
+    },
+    {
+      "risk": "Deadlock between the build-folder queue, the check slots and the repository lock.",
+      "mitigation": "Slot setup and removal are plain file locks and a `remove_target`. The wait comes after planning, when the job holds no check slot and no repository lock, and `take_build_folder` runs before `baseline_stage` takes any check slot. The tests run the two-jobs-in-threads shape."
+    },
+    {
+      "risk": "Removing `target` when a held job's guard drops could lose work a retry needs.",
+      "mitigation": "The guard's `Drop` removes `target/` and is idempotent. A held job keeps its candidate and resume mark outside its job directory (state.rs:289-296), so the retry rebuilds. The held-before-the-producer case in the criterion-3 test asserts the folder is gone."
+    },
+    {
+      "risk": "A job that is short on disk for its own reasons while another folder exists plans before it is held, which spends planner money.",
+      "mitigation": "The `disk` credit line names the figures. The post-acquire gate (mod.rs:1821) still holds a job that is short for another reason, before its producer. The counter test shows a hold when the other job's folder does not explain the shortfall. D188 names the planner spend in its Tradeoff."
+    },
+    {
+      "risk": "A very long wait occupies a drain worker.",
+      "mitigation": "A job's `go` blocks on the queue, so the drain counts it as a worker in flight for as long as it waits. The 7-day limit and the kill switch end it, and a `SlotWait` becomes a hold with no attempt used, the existing path at mod.rs:1844-1847. The mapping for the 7-day limit is shared with that existing path and is not run in a test, because a 7-day wait cannot be simulated."
+    },
+    {
+      "risk": "Thread-timing flakiness in the whole-run tests.",
+      "mitigation": "Every wait in the new tests is a bounded poll on observable state (queue `waiting()`, file existence, an atomic), with a 10 s bound, as run/tests.rs:6420 does. No fixed sleep decides a result."
+    },
+    {
+      "risk": "The decision-log link check (D187) fails on D188's wording.",
+      "mitigation": "D188 uses no `Amends` or `Supersedes` phrase. The producer runs `cargo test -p athena-core governed` and `cargo test -p athena-cli --test backtest` and fixes the wording if a check names it."
+    },
+    {
+      "risk": "Part 1 may already have changed line 205 or its comment in the base.",
+      "mitigation": "The producer reads the base's athena.toml first. If part 1 landed with 1 on line 205, set it to 2 and keep exactly three comment lines above `[parallel]`."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "The dispatch-time low-disk hold",
+      "dependent": "crates/athena-core/src/run/mod.rs:1088 `dispatch` low-disk gate (hold marker, `held` line, `Err(low)`)",
+      "kind": "code",
+      "test": "New `a_job_waiting_for_the_build_folder_is_not_held_for_low_disk` and `a_job_short_of_disk_for_its_own_reasons_is_still_held_at_dispatch`. A lone job has `held` = 0 (no other job holds a job lock), so the credit never applies and every existing low-disk-at-dispatch test in crates/athena-cli/tests/drain.rs still holds. The full `cargo test --locked` runs them.",
+      "reason": null
+    },
+    {
+      "name": "Where free space is measured while a job builds",
+      "dependent": "The gates inside the run: run/mod.rs:1821 (pre-producer `disk_gate` and `hold_for_disk`), checks.rs:174 and 189 (checks), verification.rs:175 with disk.rs:376 (`verifier_environment_problem`), mod.rs:2344 and 2373 (loop replay), the in-loop check skip tested at run/tests.rs:5170",
+      "kind": "code",
+      "test": "Their code is unchanged. They now run inside the guard window, when no other job owns a folder, so job A is not held for job B's folder. The criterion-2 test asserts A lands with no hold marker. The existing tests at run/tests.rs:6122, 6234, 6313 and 6767 still hold a lone job at each gate and drop the guard.",
+      "reason": null
+    },
+    {
+      "name": "The window in which a job holds build folders",
+      "dependent": "Every build-environment site: producer.rs:197 and 360, checks.rs:484 (in-loop check), 1034 (demonstration), 1304 (baseline), records_criteria.rs:820 (records criteria), verification.rs:243 (verifier), mod.rs:2011 (checks and verifier environment)",
+      "kind": "code",
+      "test": "The criterion-1 test samples every `jobs/*/target/*` real directory, with the baseline check and the verifier wrapper writing into `target/verify`, and asserts a peak of 1. All sites are reached only from `produce_and_verify` or `resume_candidate`, which `dispatch` calls (mod.rs:1353, 1387).",
+      "reason": null
+    },
+    {
+      "name": "Two jobs' checks queueing at the check slot",
+      "dependent": "run/tests.rs:6459 `two_jobs_with_one_build_slot_run_one_after_the_other` and helper `wait_until_waiting` (6420)",
+      "kind": "code",
+      "test": "Changed in this plan. Job B can no longer reach the check slot while A's check runs, since it waits for the build folder. The test now makes A's first check wait until the build-folder queue shows a waiter (`wait_until_waiting(&build_folder_queue(..), 1)`) and still asserts first-start, first-end, second and no overlap. The `waits[1] > waits[0]` assertion on `queued_s` is dropped. The check-slot wait stays covered by 6767 and 6822, which use one job and a probe holder.",
+      "reason": null
+    },
+    {
+      "name": "`max_check_slots` and the check-slot count",
+      "dependent": "The check-slot queue `<state>/slots/` and its users: checks.rs:184, producer.rs:377 (cargo shim), records_criteria.rs:827, mod.rs:2362, crates/athena-cli/src/slot_exec.rs and crates/athena-cli/tests/slot_exec.rs, state.rs:338",
+      "kind": "code",
+      "test": null,
+      "reason": "The new queue lives in `<state>/build-folder/` (`build_folder_dir`), a different directory, so the check-slot count and `max_check_slots` are unchanged and the holder can still take check slots. A new state.rs unit test asserts the path and that asking creates nothing, like state.rs:913-918."
+    },
+    {
+      "name": "Cleanup of build directories and the in-flight bound",
+      "dependent": "crates/athena-core/src/disk.rs:182 `sweep_idle_targets` and :217 `reclaim_interrupted_targets`; `StateDir::job_ids` (state.rs:245) and `other_jobs_in_flight` (state.rs:175); `start_hold` (disk.rs:763) and `[drain.pipeline] max_in_flight` (config.rs:164)",
+      "kind": "code",
+      "test": null,
+      "reason": "Both cleanup functions skip a job whose lock is held and touch only `jobs/<id>/target`. The new queue is outside `jobs/`, and `job_ids` reads only `jobs/`. The guard's `Drop` removes only the dropping job's `target`, as these do for a dead job. `start_hold` returns at once at the default `max_in_flight` of 1 (the value in athena.toml, which has no `[drain.pipeline]`) and runs after the dispatch gate (mod.rs:1096), so it is independent. A new disk.rs unit test covers the byte count (only locked jobs other than `except` count)."
+    },
+    {
+      "name": "How the drain classes a run's error",
+      "dependent": "crates/athena-cli/src/drain.rs:4719-4721 (a `LowDisk` or `SlotWait` error is classed as held) and the module docs at :251 and :263",
+      "kind": "code",
+      "test": null,
+      "reason": "The wait is a blocking call inside `go`, so the drain sees no new state. The only new error is the 7-day `SlotWait`, already classed as held with `environment: build slot wait`. drain.rs gets one doc paragraph and no logic change."
+    },
+    {
+      "name": "`[parallel] max_concurrency` (documented: 'The most jobs a drain runs at the same time, from 1 to 16 ... Only items of one plan group ... ever run side by side')",
+      "dependent": "crates/athena-cli/src/commands.rs:353-375 (reads `[parallel] max_concurrency` and passes it to `drain_concurrent`) and crates/athena-data/src/config.rs:275-279, 794-795",
+      "kind": "host_setting",
+      "test": "The meaning does not change: jobs run side by side, and the new slot bounds builds. Live value 2 at athena.toml:205 (this snapshot), which part 1 may have set to 1 in the base. Checked by `the_live_config_allows_two_jobs_at_once` and the existing config.rs:1819-1830 tests. The config.rs edit is a doc comment only.",
+      "reason": null
+    },
+    {
+      "name": "The pinned `max_concurrency = 1` in test configs",
+      "dependent": "crates/athena-cli/tests/common/mod.rs:46-50 `test_config` and tests/drain.rs:3757-3767, 9072, 9205",
+      "kind": "code",
+      "test": null,
+      "reason": "`test_config` replaces the first line that starts with `max_concurrency = ` and the other tests replace that pinned text, so the live value 2 never reaches them. The edited comment lines above `[parallel]` start with `#` and cannot match."
+    },
+    {
+      "name": "Reading config hash",
+      "dependent": "crates/athena-data/src/config.rs:1354-1357 (`reading_inputs`, which ignores `[parallel]` and comments) and `JobConfig::at` config_sha256 (capability.rs:25-45)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Editing comments above `[parallel]` and leaving the value alone changes no reading digest, so no queued job is re-read."
+    },
+    {
+      "name": "Parallel drain tests",
+      "dependent": "crates/athena-cli/tests/drain.rs `mod parallel` (8323-9600) and `drain_concurrent`",
+      "kind": "code",
+      "test": null,
+      "reason": "They run a stub `Steps` (drain.rs:8379), not `Athena::go`, so they never reach the build-folder queue. The real two-job behaviour is shown by the run/tests.rs tests."
+    },
+    {
+      "name": "Nested runs",
+      "dependent": "crates/athena-core/src/nested.rs:6 and 22-24 (a nested run uses a scratch state directory)",
+      "kind": "code",
+      "test": null,
+      "reason": "A nested `go` takes its own build-folder queue under its own state directory, so it cannot wait on the outer job."
+    },
+    {
+      "name": "Decision log edit check",
+      "dependent": "docs/decision-links.toml:197-201 and `decision_gate` (checks.rs, D156 and D187)",
+      "kind": "rule",
+      "test": "`cargo test -p athena-core governed` and `cargo test -p athena-cli --test backtest`",
+      "reason": "D188 uses no `Amends` or `Supersedes` phrase, and no `[[governs]]` entry lists a path this change edits."
+    },
+    {
+      "name": "Refusal corpus",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs:3470 and 3482 (reading-question text that names `max_concurrency`)",
+      "kind": "rule",
+      "test": "`cargo test -p athena-core --test refusal_corpus` as a regression run",
+      "reason": "No refusal, matching or parsing rule is added or changed. The plan holds jobs and waits at a disk slot, and the key's meaning is unchanged, so no corpus case needs adding."
+    },
+    {
+      "name": "admission.rs",
+      "dependent": "crates/athena-core/src/admission.rs (lines 439, and the max_concurrency mentions in question text)",
+      "kind": "code",
+      "test": null,
+      "reason": "It holds no disk or slot logic (`max_concurrency` appears only in planner-question strings), so it is not edited although it is a listed deliverable."
+    },
+    {
+      "name": "Prompt-set budgets",
+      "dependent": "docs/system-facts.md budgets and crates/athena-cli/tests/budgets.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt, brief or context file is edited, so no budget line changes."
+    },
+    {
+      "name": "Wall-time measure",
+      "dependent": "run/mod.rs:2518 and verification.rs:457 (`wall_time_execution_s` from `ctx.clock`), scoring.rs:42 and 176",
+      "kind": "code",
+      "test": null,
+      "reason": "Its definition stays elapsed time from dispatch. A second job's folder wait is now part of it, as a check's slot wait already is. No record is recomputed, and D188 states the effect."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "One core test over two real `Athena::go` calls on two scoped threads, as the drain's workers call it (drain.rs:4705-4721). The repository is `repo_with_planning(1)`, so both jobs plan. The check is a command that writes a file into `$CARGO_TARGET_DIR`, so the real baseline leaves a real `target/verify`. The producer wrapper logs start and end, the first one waits (3 s bound) for a waiter on the folder queue, and the verifier wrapper logs and writes `target/verify/blob`. A sampler thread polls `jobs/*/target/*` every 2 ms and counts jobs with a real (non-link) directory there.",
+      "command": "cargo test -p athena-core two_jobs_plan_together_and_build_one_after_the_other",
+      "observes": "Both planners were inside planning at once (barrier met). The log reads first-start, first-end, first-verifier, second-start. The first producer saw a waiter. The peak number of jobs holding a real build folder is 1. Both jobs end Finished with state Landed. Neither returned `LowDisk` or `SlotWait`, and neither has a hold marker.",
+      "fails_without": "Remove the `take_build_folder` call in `dispatch`. The first producer then waits its 3 s bound for a queued waiter that never appears, so the log shows `second-start` before `first-end` and the peak holders is 2. The log, waiter and peak assertions fail.",
+      "seam": "Production entry point `Athena::go` (run/mod.rs, `go_job` → `dispatch` → `produce_and_verify`). Fixture: `athena_with` (run/tests.rs:191) with `repo_with_planning(1)`, a new check constant that writes into `$CARGO_TARGET_DIR`, `plenty_of_space`, and a script that wraps `planning_script(vec![good_plan()], vec![accepting_critique()], calls)` (1321, 1266, 1292) with `counting(counts, Some(root))` (3114) and `each_job_its_own_edit` (6579). The wrappers only block, log and write files. They contain none of the gate. The folder-queue probe is `build_folder_queue(&athena.state)`, added in plan step 3. Every other piece exists today."
+    },
+    {
+      "criterion": 2,
+      "method": "Two tests with a simulated disk. The free-space function is `capacity` minus the file lengths summed by its own walker over `<root>/jobs/*/target` (an independent walker, not `dir_bytes`), minus a ballast file in the second test. Test one: capacity 12 GB, minimum 10 GB. Job A's producer writes a sparse 8 GB file under `target/produce` and waits (10 s bound) for a waiter on the folder queue. The main thread starts job B's `go` once that file exists. Test two: capacity 12 GB, A's folder 2 GB, and A's producer also writes a 5 GB ballast file in the state root and removes it only after B's `go` has returned.",
+      "command": "cargo test -p athena-core a_job_waiting_for_the_build_folder_is_not_held_for_low_disk",
+      "observes": "Test one: while A's folder keeps free space at 4 GB (below 10 GB), B prints the `disk` credit line with no `held` line, stays queued at the folder, then starts after A's close and lands. B's `read_hold` is None. A also lands with no hold marker and no `held` line, because B owns no folder while A builds. Test two: B's `go` returns `LowDisk` with free 5 GB, the `held       environment: low disk` line is printed and B's hold marker exists. B's producer never ran. A lands once the ballast is gone.",
+      "fails_without": "Without `dispatch_disk_gate`, job B's `go` returns `LowDisk` at the dispatch gate (mod.rs:1088) and the test's `expect` fails. Without the slot, job B's producer starts inside A's window and A's producer never sees a waiter. The second test (`a_job_short_of_disk_for_its_own_reasons_is_still_held_at_dispatch`) fails if the credit is unconditional.",
+      "seam": "Entry point `Athena::go` on two threads. Fixture: `athena_with(.., free_space_fn, script)` (191). The new `fn(&Path) -> io::Result<u64>` free-space functions are injected through `StateDir::with_free_space` (state.rs:233), modelled on `low_once_marked` (6758). The producer wrapper around `counting` writes sparse files. The credit is in `dispatch_disk_gate`, added in plan step 3, and the doubles hold none of it."
+    },
+    {
+      "criterion": 3,
+      "method": "For each ending, run job one through `go`, assert the folder queue is free (`take_slot_soon`, 6433) with `waiting() == 0` and that `jobs/<id>/target` is gone, then run a second job to Landed. Endings: landed (`PASSES`); rejected (`FAILS_ON_EDIT`, 104); failed with no change (a producer that edits nothing, the empty-diff failure `no_change_reason`); held for low disk before the producer (`low_once_marked`, as the test at 6234); and the kill switch set through `registry().stop_file()` while the job waits for a folder a probe holds, which returns an error with no ticket left. A separate test, `a_resumed_job_takes_the_build_folder_before_its_checks`, repeats the setup of the test ending at 6406: it holds a job for low disk before its checks, then holds the folder with a probe, runs the retry's `go` on a thread and asserts no check ran while the probe holds. After the probe drops the job resumes and lands.",
+      "command": "cargo test -p athena-core the_build_folder_is_freed_on_every_way_a_job_ends",
+      "observes": "After each ending the slot is free, the queue is empty, the job's build folder is gone, and the next job proceeds. The resumed job's checks start only after the folder is free. There is no job state named discard in the code (no match for `discard` in lib.rs, state.rs, disk.rs, run/mod.rs, run/close.rs, store.rs, manage.rs). Rejected, failed, held and killed are the not-landed endings.",
+      "fails_without": "If the guard were leaked (forgotten, or dropped only on the success path), the next `try_acquire` stays `None` and the following job's `go` hangs past the test's 10 s bound. If the `Drop` did not remove `target`, the `jobs/<id>/target` absence assertion fails for the held and killed endings.",
+      "seam": "Entry point `Athena::go` and `Athena::retry`. Fixture: `athena_with`, `PASSES`, `FAILS_ON_EDIT`, `low_once_marked`, `counting`, `check_seam` (the thread-local fake check, used at 6488), `registry().stop_file()` (used at run/tests.rs:686). A probe holder from `build_folder_queue(&athena.state).try_acquire()`, as `slot_queue` is used at 6409 and 6787. All exist except `build_folder_queue`, added in step 3."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff and Grep for the call. `Athena::take_build_folder` and `dispatch_disk_gate` are defined in disk.rs. `dispatch` in run/mod.rs calls `take_build_folder_or_hold` before `resume_candidate` and before `produce_and_verify`. Criterion 1's test fails if that call is removed, which shows the gate is code and not prose.",
+      "command": "git diff -- crates/athena-core/src/disk.rs crates/athena-core/src/run/mod.rs crates/athena-core/src/state.rs",
+      "observes": "The diff shows the call ahead of `baseline_stage` and the producer, `drop(folder)` after `finish_dispatched`, and the dispatch gate replaced by `dispatch_disk_gate`. run/mod.rs is outside the listed deliverables. It holds the producer-start path (`dispatch`), and drain.rs only calls the blocking `go`, so it cannot sit after planning. The diff there is the call sites, about 25 lines.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "The new test parses `include_str!(\"../../../athena.toml\")` with `Config::parse` (the pattern at config.rs:1819-1830) and asserts `parallel.max_concurrency == 2`. The verifier also runs `git diff -- athena.toml CHANGELOG.md`: only the three comment lines above `[parallel]` change, so line 205 still reads `max_concurrency = 2`. If the base has 1, the producer sets 2 and keeps line 205. The CHANGELOG `### Changed` bullet under `[Unreleased]` (line 8) says the stopgap is lifted.",
+      "command": "cargo test -p athena-cli --test drain the_live_config_allows_two_jobs_at_once",
+      "observes": "The shipped config parses with 2. The diff shows line 205 unchanged and the new CHANGELOG entry.",
+      "fails_without": "A live `max_concurrency = 1` (the stopgap left in place) fails the equality assertion.",
+      "seam": "Reads the shipped file through `Config::parse` (athena_data::config, exists), with no double."
+    },
+    {
+      "criterion": 6,
+      "method": "Append `## D188 · ...` after D187 (decisions.md:5474, the last entry) with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance, in the fields D187 uses (5476-5516). Alternatives name a global `max_concurrency` of 1, a free-disk check only, the release before the checks, a second take before the verifier, reuse of the check slots, the T estimate and a queue probe. It writes no `Amends` or `Supersedes` phrase, so `link_problems` (D187) needs no link, and `docs/decision-links.toml` lists no governed path this change edits (only candidate.rs for D08, lines 197-201). Add section `## 11. The build-folder slot` to agent-and-build-slots.md before `## Questions for the maintainer` (line 529). It covers what the slot guards, where it is taken and freed, the dispatch rule, the fixed count of 1, how it differs from the check slots, and how a waiting job appears (no stage row; the `disk` line). Run `cargo test -p athena-core governed` and `cargo test -p athena-cli --test backtest`.",
+      "command": "git diff -- docs/decisions.md docs/design/agent-and-build-slots.md",
+      "observes": "The diff of decisions.md shows only added lines, with a Provenance bullet. The design doc has the new section. The decision-log checks pass.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three Athena checks as separate commands (`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`). Also run `cargo test -p athena-core --test refusal_corpus`: the corpus only names `max_concurrency` in question text (refusal_corpus.rs:3470 and 3482) and no refusal or matching rule changes, so it is a regression guard.",
+      "command": "cargo test --locked",
+      "observes": "All pass. The changed test at 6459 passes in its new form and no helper is left unused (`recorded_queued_s` is still used at 6916 and 7137).",
+      "fails_without": "Any failing test, lint or format fault in the added code.",
+      "seam": "The existing check commands, no double."
+    }
+  ],
+  "open_questions": [
+    "Host: Does the owner's disk keep free space above the 10 GB low-disk gate with one build folder (15-24 GB), the check slots' warm target directories (up to `slot_max_gb` = 8 GB each, config.rs:168) and the state directory together? The tests simulate free space, and this plan does not run a live drain."
+  ],
+  "producer_section_sha256": "4c76206f831d84dfc55ccbdcd370169a6dd0abfcddc79fd1b34e3311d23d03bb"
+}

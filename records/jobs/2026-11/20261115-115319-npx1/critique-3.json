@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261115-115319-npx1",
+  "round": 3,
+  "at": "2026-11-15T14:28:40.609065381Z",
+  "invocation_seq": 10,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/scoring.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/scoring.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The credit measures apparent file length and counts hard links twice, so it can overstate the space the holder frees.",
+      "evidence": "`dir_bytes` (disk.rs:934-946) adds `metadata().len()` for every file entry, with no inode dedup. `allocated_bytes` (state.rs:544-569) counts allocated blocks once per inode, and `remove_target` (state.rs:265) reports that figure. Cargo hard-links its final artifacts from `deps/`, so `dir_bytes` of a real target counts them twice. An overstated credit lets a job that is short for its own reasons plan first and be held only at the pre-producer gate (mod.rs:1821). The plan accepts that planner cost for the stale-holder case but does not mention this source. Fix: Use `crate::state::allocated_bytes` for the credit, since it measures what freeing the folder returns. In the criterion-2 test, write real (non-sparse) files and scale the gigabyte, or have the test's free-space function and the credit both use allocated bytes. Otherwise, keep `dir_bytes` and name the double count in D188's Tradeoff.",
+      "location": "Decision 3 / disk.rs `other_jobs_build_bytes` (uses `dir_bytes`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Hestia's build measurement is a third large build outside the slot, and the plan does not name it.",
+      "evidence": "`measure_build_pass` (hestia.rs:3252-3288) runs `measure_build`, which does two full cargo builds in `<state>/measure-build` (disk.rs:1063, 1764). It checks only `min_free_gb` before it starts, and `athena hestia` reaches it through `hestia_sweep_with` (commands.rs:201). The plan lists only the self-rebuild and the warm check-slot directories as builds outside the slot. Fix: Add the build measurement to the 'outside the slot' list in section 11, D188's Tradeoff and the Host open question. No code change is needed.",
+      "location": "Risks (builds outside the slot) / Open questions / section 11 and D188",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The claim that the killed ending would catch a `Drop` that leaves `target/` behind is wrong. A job killed while waiting never builds a `BuildFolder` guard.",
+      "evidence": "In the plan, the kill switch fires from the `stop` closure inside `acquire` (slots.rs:195) before the slot is taken, so no guard exists and its `Drop` never runs for that job. Planning builds nothing in `jobs/<id>/target`. That ending only shows that no queue ticket is left (slots.rs:107-111) and that the next job can take the slot. Fix: Restate what the killed ending shows: the ticket is gone, `waiting() == 0`, and the next job lands. Name the endings that test the guard's `Drop`: landed, rejected, failed, held at the pre-producer gate after acquiring, and the resumed job.",
+      "location": "Demonstrations, criterion 3, 'Fails without the behavior'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 3 plan for a single build-folder slot. I checked its claims against the code. The cited lines match: dispatch's gate at run/mod.rs:1088, resume_candidate at 1353, plan_round at 1366, produce_and_verify at 1387, finish_dispatched at 1394, `RunContext.clock: Instant` at 1416, and the SlotWait mapping at 1844-1847. `SlotQueue::new(dir, slots, wait, promote)` and `acquire(class, &dyn Fn)` exist, with stop called before every attempt (slots.rs:132, 190-218). So do `job_lock_held` (state.rs:159), `remove_target` (state.rs:260) and `hold_for_slot_wait` (close.rs:200), and the test helpers the plan cites sit at the lines it names. athena.toml:205 reads `max_concurrency = 2`, with three comment lines above it. The design rests on facts I could read. The baseline builds in a real `target/verify` (checks.rs:1294-1321 calls `baseline_runs` with no slot link). The verifier's cargo has no shim (producer.rs:370-372). `target/produce` is freed before the checks (mod.rs:2035). So holding the slot from before the baseline until the job closes is needed, not just cautious. A stale-merge retry reaches checks only through `resume_from` (mod.rs:1145-1149), so one guard in dispatch covers every build site. The dispatch credit names a single holder and requires that job's lock to be held, which rules out crediting a job held by `land` or a manage command. The demonstrations run the real `Athena::go` on two threads with injected free space and would fail without the gate. I found no blocker or major problem. The remaining issues are minor: the size measure behind the credit, a third build the plan leaves unnamed, and one wrong \"fails without\" claim."
+}
