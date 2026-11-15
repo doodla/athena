@@ -5383,3 +5383,26 @@ should replace those estimates with its figures.
   reading, package gate, judging and send-back, and a fake `cargo run` argv; the literal lines of
   `Throughput::text()` and the real text of a landed job are judged in the tests. Not measured: the added wall time,
   whether producers act on the send-back, and how often a real criterion names a phrase that a line holds.
+
+## D184 · The reader is told that a behavior criterion names the end-to-end run, its effect and a way to fail
+
+- **Case:** Eight jobs failed in the class criteria-check-presence-not-behavior. A request for a loop-style command
+  ("works the queue within a budget") got criteria that checked that parts existed, not that queued items landed
+  (job 20261015-064153-wekz); a denial test passed without showing the write could succeed unprotected (job
+  20261015-063409-hekk); a source check passed although it left out a text-bearing input (job 20261015-152305-6h8k).
+- **Decision:** Root cause: the reader's brief never told it that a criterion for a loop, a protection or a denial, or
+  rendered or reported output must name the real production path run end to end, its observable effect (an item
+  landed, a record written, a page changed) and a demonstration that the check fails when the effect or guard is
+  absent. The reader brief's Reading rules gain one `(prose only)` line in `READING_RULES` saying so; the array grows
+  from 13 to 14. No refusal check is added and nothing in `crates/athena-core` changes, so the expected share of past
+  accepted readings newly refused is 0%. The prompt files and token budgets are unchanged.
+- **Alternatives:** A reading check that refuses a criterion lacking such wording: code cannot judge whether a command
+  exercises the real path or whether a test can fail, so it would refuse on words and miss the fault. Rejected. A rule
+  in `prompts/reader.md`: the reader prompt has 2 tokens left.
+- **Tradeoff:** A prose rule does not stop a reader from skipping it. The line adds about 210 bytes to a brief read on
+  every request.
+- **Reversal cost:** Low; delete the line, restore the array length and delete the test that pins it.
+- **Provenance:** Read: `crates/athena-context/src/briefs/reader.rs` (`READING_RULES`), `crates/athena-context/src/briefs.rs`
+  (the reading rules tests) and the introspections of the eight jobs in the evidence snapshot. Measured: `cargo test -p
+  athena-context the_reader_brief_tells_the_reader_a_behavior_criterion` reads the rendered brief. Not measured:
+  whether readers follow the rule.

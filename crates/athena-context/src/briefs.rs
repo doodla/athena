@@ -4032,7 +4032,7 @@ mod tests {
         ] {
             assert!(section.contains(check), "no rule for {check}:\n{section}");
         }
-        assert_eq!(READING_RULES.len(), 13);
+        assert_eq!(READING_RULES.len(), 14);
         // Exactly one line states the real-records rule: a records-computed measure, real records, an
         // expected range and an independent source.
         let records_lines: Vec<&&str> = lines
@@ -4089,16 +4089,22 @@ mod tests {
         // grows by that line and its newline over the 3045 bytes measured before it. The bound below is this
         // section's own limit of 3300 bytes, not the reader's prompt budget set: `BudgetSet` in `lib.rs`
         // composes only the contract, frames, defaults and catalog, so the brief text sits outside it.
-        assert!(section.len() < 3300, "{} bytes", section.len());
+        assert!(section.len() < 3600, "{} bytes", section.len());
         let field_line = lines
             .iter()
             .find(|l| l.contains("`Field meaning:`"))
             .expect("a rule line for `Field meaning:`");
+        let behavior_line = lines
+            .iter()
+            .find(|l| l.starts_with("- Behavior:"))
+            .expect("a rule line for behavior criteria");
         assert!(
-            section.len() <= READING_RULES_BASELINE_BYTES + field_line.len() + 1,
-            "the reading rules section grew past its baseline and the field-meaning line: {} > {READING_RULES_BASELINE_BYTES} + {} + 1 bytes",
+            section.len()
+                <= READING_RULES_BASELINE_BYTES + field_line.len() + 1 + behavior_line.len() + 1,
+            "the reading rules section grew past its baseline and the field-meaning and behavior lines: {} > {READING_RULES_BASELINE_BYTES} + {} + {} + 2 bytes",
             section.len(),
-            field_line.len()
+            field_line.len(),
+            behavior_line.len()
         );
         // The field-meaning rule is prose only and generic: it names no check and no field from the jobs
         // that showed the gap.
@@ -4113,6 +4119,36 @@ mod tests {
         assert!(!lower.contains("restart"), "{field_line}");
         assert!(!lower.contains("hard_producer"), "{field_line}");
         assert!(!lower.contains("check_"), "{field_line}");
+    }
+
+    #[test]
+    fn the_reader_brief_tells_the_reader_a_behavior_criterion_names_the_end_to_end_run_and_can_fail()
+     {
+        let brief = reader_brief(&reader_inputs(&reading()));
+        let (_, section) = brief.split_once(READING_RULES_HEADING).unwrap();
+        let section = section.split("\n# ").next().unwrap();
+        let line = section
+            .lines()
+            .find(|l| l.starts_with("- Behavior:"))
+            .expect("no rendered rule line for behavior criteria");
+        assert!(READING_RULES.iter().any(|r| *line == format!("- {r}")));
+        for phrase in [
+            "loop",
+            "drain",
+            "queue",
+            "protection",
+            "rendered output",
+            "real path run end to end",
+            "effect",
+            "item landed",
+            "record written",
+            "check that fails without it",
+        ] {
+            assert!(line.contains(phrase), "{phrase} missing: {line}");
+        }
+        // Information only: no check function is named, so no reading is refused for it.
+        assert!(line.ends_with("(prose only)."), "{line}");
+        assert!(!line.contains("check_"), "{line}");
     }
 
     #[test]
@@ -4408,8 +4444,8 @@ mod tests {
             "{changelog}"
         );
         assert!(changelog.contains("Scope limit rule above"), "{changelog}");
-        // One line was added, the field-meaning rule: the list holds thirteen rules.
-        assert_eq!(READING_RULES.len(), 13);
+        // One line was added, the behavior rule: the list holds fourteen rules.
+        assert_eq!(READING_RULES.len(), 14);
         assert!(
             section.lines().all(|line| !line.starts_with("# ")),
             "{section}"
