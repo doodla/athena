@@ -5576,3 +5576,48 @@ should replace those estimates with its figures.
   athena-core disk::tests`, `cargo test -p athena-cli --test drain the_live_config_allows_two_jobs_at_once`,
   `cargo test -p athena-core governed` and `cargo test -p athena-cli --test backtest`. Not measured: free space
   or the size of a build folder on the owner's disk, and how often a second job waits.
+
+## D189 · The producer brief tells the producer how to fix a flaky or racy failure: reproduce under load, name the code cause, fix once, find every site
+
+- **Case:** Four jobs fixed a flaky test or a racy fixture and were sent back or flagged: 20261106-065752-jexx,
+  20261106-095820-edjm, 20261106-080857-9daz and 20261112-005306-pa2j (failure class
+  flaky-test-fix-patches-call-sites-not-root-cause, four introspections). The fix went in call site by call site,
+  no producer reproduced the flake under load or recorded counts, and nothing listed every site of the pattern.
+  The failing stage lacked information, not permission: the change producer's brief said nothing about how to
+  reproduce a race, how to state a cause, how to fix a repeated pattern once, or that the evidence must be
+  reported. The planner frame, which shapes the design the producer follows, lacks the same guidance.
+- **Decision:** One prose paragraph in `crates/athena-cap-change/prompts/producer.md`, before the closing
+  criteria_check sentence, which becomes its own last paragraph. For an intermittent or racy failure it asks the
+  producer to reproduce it under load with a test that loops the action on threads and counts failures (the worked
+  example is `crates/athena-testkit/tests/stand_in_stress.rs`), to name the cause in code terms and fix it where it
+  starts, to fix sites that share the cause in one shared helper with a repo test that finds every site and fails
+  with the cause put back, and to report the command and counts before and after. The method is a loop inside one
+  test and not a shell loop, because the producer's Bash policy splits commands at `&&`, `;`, `|` and newlines and
+  needs each program on the role's list (`crates/athena-agent/src/policy.rs`), and `athena.toml` lists only cargo,
+  git, ls, rm, mv and chmod for the change producer. The unit test
+  `the_producer_brief_carries_the_flaky_test_guidance` in `crates/athena-cap-change/src/lib.rs` pins each element,
+  the report step as the last paragraph, that the named example file exists, and that the live producer command
+  list names no shell program, so the denial claim stays true. The larger prompt moves the computed producer set
+  from 1043 to 1194 of 1200, and `docs/system-facts.md` changes that one number because the budget drift test
+  requires it (a forced edit, not a listed deliverable). No refusal rule, gate or job step is added: 0% of past
+  accepted readings are refused. D160 and D163 stand; the testkit helper, the scan, the stress test and the drain
+  fix from the earlier jobs are untouched.
+- **Alternatives:** A job-flow step Athena runs itself (reproduce and soak before the verdict): it is a gate that
+  holds work and needs core changes, and the request prefers giving the stage information. A refusal rule on
+  call-site fixes: it would refuse work the producer could have done right with the missing facts. Another scan
+  for executable writes: one already exists and covers one pattern, not the class. The shared contract or the
+  producer frame: the frame is also read by study producers and the shared prompts have no headroom. A shell loop
+  in the guidance: the Bash policy denies it. Trimming older sentences to save room: it rewrites guidance unrelated
+  to this request.
+- **Tradeoff:** Prose compliance is not measured, and no gate checks it. The method fits only races that an
+  in-process thread loop can show; a race that needs separate processes is not covered. The margin to the budget
+  is 6 tokens, so the next edit to this prompt must pay for itself. The planner can still hand the producer a plan
+  that patches call sites. Follow-up, not made here because `crates/athena-context/prompts/planner.md` is not
+  among this reading's deliverables: one sentence in the planner frame (planner set 1105 of 1200).
+- **Reversal cost:** Low; remove the paragraph and the test, and set the producer line in `docs/system-facts.md`
+  back to 1043.
+- **Provenance:** Read: `crates/athena-cap-change/prompts/producer.md`, `crates/athena-cap-change/src/lib.rs`,
+  `crates/athena-testkit/tests/stand_in_stress.rs`, `crates/athena-cli/tests/budgets.rs` and `athena.toml`. Ran:
+  `cargo test -p athena-cap-change` and `cargo test -p athena-cli --test budgets`. The base budget line read 1043 of
+  1200; the computed value after the change is 1194 of 1200. Not measured: whether producers follow the paragraph,
+  or how often a flake needs more than an in-process thread loop.

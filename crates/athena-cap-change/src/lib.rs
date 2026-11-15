@@ -180,4 +180,70 @@ mod tests {
         }
         assert_eq!(Change.checks(&jc).len(), section.checks.len());
     }
+
+    fn live_job_config() -> JobConfig {
+        let config = athena_data::Config::parse(include_str!("../../../athena.toml")).unwrap();
+        let defaults =
+            athena_data::DefaultsModel::parse(include_str!("../../../defaults.toml")).unwrap();
+        JobConfig {
+            config,
+            defaults,
+            commit: "x".into(),
+            config_sha256: String::new(),
+            defaults_sha256: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_producer_brief_carries_the_flaky_test_guidance() {
+        const EXAMPLE: &str = "crates/athena-testkit/tests/stand_in_stress.rs";
+        let text = Change.producer_section().text;
+        let paragraphs: Vec<&str> = text.trim_end().split("\n\n").collect();
+        let at = paragraphs
+            .iter()
+            .position(|p| p.starts_with("For an intermittent or racy failure"))
+            .expect("the flaky-test guidance is a paragraph of its own");
+        let guidance = paragraphs[at];
+        for phrase in [
+            "first reproduce it under load",
+            "loops the action on threads and counts failures",
+            EXAMPLE,
+            "the Bash policy denies shell loops",
+            "in code terms",
+            "fix it where it starts",
+            "in one shared helper",
+            "finds every site",
+            "fails with the cause put back",
+            "Report the command and counts before and after",
+        ] {
+            assert!(
+                guidance.contains(phrase),
+                "the flaky-test guidance lost its phrase: {phrase}"
+            );
+        }
+        assert_eq!(
+            paragraphs.len(),
+            at + 2,
+            "exactly one paragraph follows the guidance"
+        );
+        assert!(
+            paragraphs[at + 1]
+                .starts_with("Before you report, reread the brief's criteria_check section"),
+            "the report step stays the last paragraph"
+        );
+        let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(EXAMPLE);
+        assert!(
+            example.is_file(),
+            "the prompt names {EXAMPLE}, which no longer exists; update the prompt"
+        );
+        let grant = Change.producer_grant(&live_job_config());
+        for program in ["for", "while", "until", "seq", "sh", "bash"] {
+            assert!(
+                !grant.commands.contains_key(program),
+                "the producer may now run {program}; the prompt says the Bash policy denies shell loops, so update the prompt"
+            );
+        }
+    }
 }
