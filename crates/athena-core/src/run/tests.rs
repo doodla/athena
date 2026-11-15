@@ -1086,15 +1086,8 @@ mod produce_and_verify_order_tests {
         assert!(!path.exists(), "the snapshot is cleaned with the job");
     }
 
-    /// The `## Time budget` section of a brief: from its heading to the next heading, or the end.
-    fn time_budget_of(text: &str) -> &str {
-        let start = text.find("## Time budget").expect("a time budget section");
-        let rest = &text[start..];
-        rest.find("\n## ").map_or(rest, |end| &rest[..end])
-    }
-
     #[test]
-    fn the_producer_deadline_in_the_stored_brief_is_the_one_the_invocation_runs_under() {
+    fn the_producer_runs_under_the_configured_deadline_and_its_brief_does_not_state_it() {
         let repo = repo();
         // A limit that is neither the repository's value nor a constant in the code.
         let config = std::fs::read_to_string(repo.path().join("athena.toml")).unwrap();
@@ -1156,13 +1149,14 @@ mod produce_and_verify_order_tests {
             4321
         );
 
-        // The stored brief states that same number, and not the repository's value.
+        // Neither the stored brief nor the prompt the producer received states the limit.
         let stored = &job.briefs["brief-producer"];
-        assert!(time_budget_of(stored).contains("4321 seconds"), "{stored}");
-        assert!(!stored.contains("86400"), "{stored}");
-        // The prompt the producer received carries the same section, and is the stored brief with only
-        // the evidence placeholder replaced (plus a possible tail).
-        assert_eq!(time_budget_of(&prompt), time_budget_of(stored));
+        let heading = concat!("## Time", " budget");
+        for text in [stored.as_str(), prompt.as_str()] {
+            assert!(!text.contains(heading), "{text}");
+            assert!(!text.contains("seconds of wall-clock"), "{text}");
+        }
+        // The prompt is the stored brief with only the evidence placeholder replaced (plus a possible tail).
         let placeholder = format!("<state>/jobs/{id}/evidence");
         let real = state
             .path()
@@ -1431,12 +1425,11 @@ mod produce_and_verify_order_tests {
             .collect()
     }
 
-    /// New behavior: the planner's brief states the configured deadline and its half, and the figure equals
-    /// the timeout the agent is run with. Regression guard: a planner stopped at its deadline still ends the
-    /// job as a planning stop with the unchanged reason (the reason text comes from the double).
+    /// The planner is run with the configured time limit, and its brief does not state it. A planner stopped
+    /// at its deadline still ends the job as a planning stop with the unchanged reason (the reason text comes
+    /// from the double).
     #[test]
-    fn the_planner_brief_states_the_enforced_deadline_and_a_planner_deadline_still_stops_planning()
-    {
+    fn a_planner_deadline_still_stops_planning_and_the_brief_does_not_state_it() {
         for n in [600u64, 4321] {
             let repo = repo_with_config(&format!(
                 "\n[job_plan]\nenabled = true\nmode = \"all\"\nplanner_usd = 0.75\ncritic_usd = 0.75\n\
@@ -1470,8 +1463,8 @@ mod produce_and_verify_order_tests {
             let calls = calls.lock().unwrap().clone();
             let prompts = prompts_of(&calls, Role::Planner);
             let first = prompts.first().expect("a planner call");
-            assert!(first.contains(&format!("deadline of {n} seconds")));
-            assert!(first.contains(&format!("stop exploring by {} seconds", n / 2)));
+            assert!(!first.contains("## Deadline"), "{first}");
+            assert!(!first.contains("seconds of wall-clock"), "{first}");
             assert_eq!(
                 *timeouts.lock().unwrap(),
                 vec![std::time::Duration::from_secs(n)]
@@ -1529,8 +1522,6 @@ mod produce_and_verify_order_tests {
         planner_lines: Vec<String>,
         /// The time limit each planner call was started with, in order.
         planner_timeouts: Vec<std::time::Duration>,
-        /// The prompt of each planner call, in order.
-        planner_prompts: Vec<String>,
     }
 
     impl RevisionRun {
@@ -1614,17 +1605,12 @@ mod produce_and_verify_order_tests {
                 .collect();
         let calls = seen.lock().unwrap().clone();
         let planner_timeouts = timeouts.lock().unwrap().clone();
-        let planner_prompts = prompts_of(&prompts.lock().unwrap(), Role::Planner)
-            .into_iter()
-            .map(str::to_string)
-            .collect();
         RevisionRun {
             finished,
             calls,
             records,
             planner_lines,
             planner_timeouts,
-            planner_prompts,
         }
     }
 
@@ -1638,7 +1624,7 @@ mod produce_and_verify_order_tests {
     }
 
     /// New behavior: a planner call whose effort the revision setting raised gets the scaled time limit
-    /// (600 s becomes 1200 s), and its brief states that limit. Round 1 keeps 600 s.
+    /// (600 s becomes 1200 s). Round 1 keeps 600 s.
     #[test]
     fn planner_revision_escalated_effort_scales_the_planner_time_limit() {
         // After a critic revise (round 2).
@@ -1658,8 +1644,6 @@ mod produce_and_verify_order_tests {
         assert_eq!(run.planner(), [(HAIKU, "high"), (HAIKU, "xhigh")]);
         assert_eq!(run.planner_timeouts, secs(&[600, 1200]));
         assert!(run.planner_timeouts[1] > std::time::Duration::from_secs(600));
-        assert!(run.planner_prompts[0].contains("deadline of 600 seconds"));
-        assert!(run.planner_prompts[1].contains("deadline of 1200 seconds"));
         // After a mechanical plan-rule revision in round 1.
         let repo = repo_with_revision_keys(3, None, Some("xhigh"));
         let run = run_for_revision(
@@ -1693,12 +1677,6 @@ mod produce_and_verify_order_tests {
             // A mechanical pass in round 1, then round 2 after the critic's revise: three planner calls.
             assert_eq!(run.planner(), [(HAIKU, "high"); 3], "{key:?}");
             assert_eq!(run.planner_timeouts, secs(&[600; 3]), "{key:?}");
-            assert!(
-                run.planner_prompts
-                    .iter()
-                    .all(|p| p.contains("deadline of 600 seconds")),
-                "{key:?}"
-            );
         }
     }
 

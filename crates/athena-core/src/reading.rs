@@ -3609,7 +3609,6 @@ mod tests {
                 retry_from: None,
                 retry_findings: None,
                 failure_classes: Vec::new(),
-                deadline_s: 1800,
             };
             if seeded {
                 inputs.retry_from = Some(RetrySeed {

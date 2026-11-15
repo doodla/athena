@@ -129,8 +129,7 @@ impl Athena {
         }
         // A revision call (after a critic revise or a mechanical plan-rule revision) may run at the
         // `[models] planner_revision_*` setting; round 1 and a seeded first call keep the ordinary one. When
-        // the revision raises the effort, the time limit grows by PLANNER_ESCALATED_TIMEOUT_FACTOR; the brief
-        // states the same limit the agent is run with.
+        // the revision raises the effort, the time limit grows by PLANNER_ESCALATED_TIMEOUT_FACTOR.
         let base_effort = jc.config.effort_for(Role::Planner).to_string();
         let mut model = ctx.reading.producer_model.clone();
         let mut effort = base_effort.clone();
@@ -153,7 +152,6 @@ impl Athena {
             verifier_commands: athena_agent::policy::describe_commands(&verifier_commands),
             deliverable_facts: facts,
             revision,
-            deadline_s: timeout_s,
         });
         let composed = compose(&[CONTRACT.into(), PLANNER_FRAME.into()]);
         crate::pin::remove_tree(&snap_dir)?;

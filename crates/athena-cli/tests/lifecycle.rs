@@ -3401,6 +3401,59 @@ fn a_retry_of_a_job_stopped_at_the_planning_cap_resumes_from_the_kept_plan() {
     assert!(athena.check_history().unwrap().violations.is_empty());
 }
 
+/// A plan that finds the request's problem already gone lists no file. Athena's own checks accept it, so it
+/// reaches the critic; a critic that rejects it ends the job in planning, with the critic's summary as the
+/// reason and no producer run.
+#[test]
+fn a_plan_that_finds_the_problem_gone_lists_no_file_and_ends_at_the_critic() {
+    const APPROACH: &str = "No change: the greeting is already in README.md:3.";
+    let fx = Fixture::with_config(&planned_config());
+    let mut plan = plan_with(APPROACH);
+    plan["files"] = serde_json::json!([]);
+    plan["steps"] = serde_json::json!([]);
+    let mut scenario = Scenario::default();
+    scenario.plans = vec![plan];
+    scenario.critiques = vec![critique_json("reject", &[])];
+    let calls = scenario.invocations.clone();
+    let (script, planners, critics) = recording_planning(scenario.script());
+    let athena = fx.athena(script);
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Failed, "{}", f.reason);
+    assert!(
+        f.reason
+            .starts_with(athena_data::records::PLANNING_STOPPED_PREFIX),
+        "{}",
+        f.reason
+    );
+    assert!(
+        f.reason.contains("the critic rejected the plan"),
+        "{}",
+        f.reason
+    );
+    // Admission did not send the plan back: one planner call, one critic call, and no producer.
+    assert_eq!(planners.lock().unwrap().len(), 1);
+    let critics = critics.lock().unwrap().clone();
+    assert_eq!(critics.len(), 1);
+    assert!(
+        !calls.lock().unwrap().contains(&Role::Producer),
+        "the producer must not run"
+    );
+    let stored = plan_record_of(&fx, &proposal.job, 1);
+    assert!(stored.files.is_empty());
+    assert_eq!(stored.approach, APPROACH);
+    assert!(critics[0].contains(APPROACH), "{}", critics[0]);
+    assert!(
+        critics[0].contains("A plan whose approach begins `No change:`"),
+        "{}",
+        critics[0]
+    );
+}
+
 /// Retries `first` and runs the retry; returns the retry's planner brief and the retry's first plan record.
 fn retry_and_plan(
     fx: &Fixture,
