@@ -284,7 +284,7 @@ pub const READING_RULES_HEADING: &str = "# Reading rules";
 /// Each rule a reading must pass, one short line each. A line gives the check that enforces it; a reading
 /// that breaks a checked rule is refused and read again once, with the refusal as a correction. A line
 /// ending `(prose only)` has no check and causes no refusal.
-pub const READING_RULES: [&str; 13] = [
+pub const READING_RULES: [&str; 14] = [
     "Previous result: a retry or follow-up names each earlier job, how its result is addressed, deliverables, out_of_scope, and each changed file kept or excluded (`check_prior_result_and_scope`).",
     "Criteria evidence: each criterion rests on a command, Grep or file the verifier can check, not the producer's report (`check_criteria_evidence`).",
     "Governance files: when the request names one or a deliverable implies it, list it and name it in a criterion, or in out_of_scope (`check_governance_coverage`).",
@@ -301,6 +301,12 @@ pub const READING_RULES: [&str; 13] = [
     // requirement onto it, so two readings matched a field by name (jobs 20261030-013421-tfwf and
     // 20261113-194336-scfc). The meaning of a field cannot be judged by code, so this is information only.
     "Reused field, CLI argument, record key or config key needs `Field meaning:` assumption: quote documented meaning (crates/ or config path:line), why it fits, config: live athena.toml value; or a new field (prose only).",
+    // Root cause: the reader was never told that a criterion for a loop, a protection or rendered output
+    // must name the real end-to-end run, its observable effect and a demonstration that it can fail, so
+    // criteria checked the presence of parts (jobs 20261015-064153-wekz, 20261015-063409-hekk and
+    // 20261015-152305-6h8k). Code cannot judge whether a criterion exercises the real path, so this is
+    // information only.
+    "Behavior: for a loop (drain, queue), protection or rendered output, a criterion names the real path run end to end, its effect (item landed, record written) and a check that fails without it (prose only).",
 ];
 
 /// The heading of the section that states the rules that judge a criterion once it is written.
