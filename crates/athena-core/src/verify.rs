@@ -198,8 +198,9 @@ pub struct VerdictInputs<'a> {
 /// check-name rule stands. A reused red CI check whose log named failing tests is compared test by test like a
 /// local one; its names carry an entry in parentheses (`test (shard 2) (log not read)`) when a shard's log was
 /// unread, listed nothing, or did not finish, and no base has such a name, so a partly read set of shards is
-/// never excused by the tests that were listed. A failure that comes only from a concurrent change merged after the base is not in the baseline and is
-/// not separated here.
+/// never excused by the tests that were listed. A failure that is not in the baseline is the job's own
+/// to answer for; [`failure_path_finding`] only shows which tracked files its output cites and whether the job
+/// changed them.
 pub fn is_pre_existing(check: &CheckRun, baseline: Option<&Baseline>) -> bool {
     let Some(base) = baseline.filter(|b| !check.passed && b.failed_before(&check.name)) else {
         return false;
@@ -668,6 +669,192 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
         final_verdict: if pass { Verdict::Pass } else { Verdict::Fail },
         reasons,
     }
+}
+
+/// The most paths one failing check's finding lists.
+const MAX_CITED_PATHS: usize = 10;
+
+/// The most distinct path-shaped tokens read from one failing check's output.
+const MAX_CITED_TOKENS: usize = 400;
+
+/// The tracked files a failing check's output cites, split by whether the job changed them.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FailurePaths {
+    /// Cited files the job changed.
+    pub touched: Vec<String>,
+    /// Cited files the job did not change.
+    pub untouched: Vec<String>,
+    /// Cited names that match several tracked files; none of them is called touched or untouched.
+    pub ambiguous: Vec<String>,
+}
+
+impl FailurePaths {
+    fn is_empty(&self) -> bool {
+        self.touched.is_empty() && self.untouched.is_empty() && self.ambiguous.is_empty()
+    }
+}
+
+/// The tracked files a failed check's output cites, split by whether the job changed them.
+///
+/// The root cause this serves: the check stage kept a baseline of the failures on the base commit but had no
+/// mapping from the file paths a failing test reports to the paths the job changed, so a failure from a
+/// concurrent config or test change read the same as the job's own. `tree_paths` is every file tracked at the
+/// base or the candidate; a token counts only when it names one of them, so test names, durations, URLs and
+/// build targets drop out. A token resolves by exact match first; one with a `/` may then match by suffix, and
+/// several matches make it ambiguous. The lists keep the order of first appearance and hold at most
+/// [`MAX_CITED_PATHS`] paths in all. A passed check, an empty `changed_paths` (unknown) or an empty
+/// `tree_paths` (unreadable) gives an empty result.
+pub fn failure_paths(
+    check: &CheckRun,
+    changed_paths: &[String],
+    tree_paths: &[String],
+) -> FailurePaths {
+    let mut found = FailurePaths::default();
+    if check.passed || changed_paths.is_empty() || tree_paths.is_empty() {
+        return found;
+    }
+    let tracked: std::collections::HashSet<&str> = tree_paths.iter().map(String::as_str).collect();
+    let mut seen_tokens = std::collections::HashSet::new();
+    let mut listed: Vec<String> = Vec::new();
+    let separators = |c: char| c.is_whitespace() || "()[]{}<>,;'\"`=|".contains(c);
+    for raw in check.output_tail.split(separators) {
+        let token = raw.strip_prefix("./").unwrap_or(raw);
+        let token = token.split(':').next().unwrap_or(token);
+        let token = token.trim_end_matches('.');
+        if !path_shaped(token) || !seen_tokens.insert(token.to_string()) {
+            continue;
+        }
+        if seen_tokens.len() > MAX_CITED_TOKENS || listed.len() >= MAX_CITED_PATHS {
+            break;
+        }
+        let resolved = if tracked.contains(token) {
+            token.to_string()
+        } else if token.contains('/') {
+            let suffix = format!("/{token}");
+            let mut matches = tree_paths.iter().filter(|p| p.ends_with(&suffix));
+            match (matches.next(), matches.next()) {
+                (Some(only), None) => only.clone(),
+                (Some(_), Some(_)) => {
+                    found.ambiguous.push(token.to_string());
+                    listed.push(token.to_string());
+                    continue;
+                }
+                _ => continue,
+            }
+        } else {
+            continue;
+        };
+        if listed.contains(&resolved) {
+            continue;
+        }
+        listed.push(resolved.clone());
+        if changed_paths.contains(&resolved) {
+            found.touched.push(resolved);
+        } else {
+            found.untouched.push(resolved);
+        }
+    }
+    found
+}
+
+/// A token that could name a repository file: it has a `.`, uses only path characters and has no `..`
+/// segment, and is not absolute or home-relative.
+fn path_shaped(token: &str) -> bool {
+    !token.is_empty()
+        && token.contains('.')
+        && !token.starts_with(['/', '~'])
+        && !token.split('/').any(|segment| segment == "..")
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-'))
+}
+
+/// How a failure got past the baseline, in one sentence, from what the check and the baseline hold.
+fn baseline_route(check: &CheckRun, baseline: Option<&Baseline>) -> String {
+    if check.reused {
+        return "Its result was read from the CI run for the candidate commit; Athena did not run it here."
+            .into();
+    }
+    let Some(base) = baseline else {
+        return "No usable baseline exists for this job's base commit, so nothing shows whether the check passed there."
+            .into();
+    };
+    if let Some(note) = &base.note {
+        return format!(
+            "The baseline for this base has a note ({note}), so it shows nothing about this check."
+        );
+    }
+    match base.checks.iter().find(|c| c.name == check.name) {
+        Some(entry) if entry.passed => match &base.reused_from {
+            Some(run) => format!("The same check passed on the base commit (read from {run})."),
+            None => "The same check passed on the base commit.".into(),
+        },
+        Some(_) => "The same check failed on the base commit too, but not with these tests.".into(),
+        None => "The baseline holds no result for this check.".into(),
+    }
+}
+
+/// A Minor finding that links a failing check's output to the job's change: which tracked files the output
+/// cites, which of them the job changed, and how the failure got past the baseline.
+///
+/// `None` when the check passed or is pre-existing, or when its output cites no tracked file (see
+/// [`failure_paths`]). It states facts only and names no cause: a cited path is where a test panicked or a
+/// file its message names, and the check still fails the verdict.
+pub fn failure_path_finding(
+    check: &CheckRun,
+    baseline: Option<&Baseline>,
+    changed_paths: &[String],
+    tree_paths: &[String],
+) -> Option<Finding> {
+    if check.passed || is_pre_existing(check, baseline) {
+        return None;
+    }
+    let paths = failure_paths(check, changed_paths, tree_paths);
+    if paths.is_empty() {
+        return None;
+    }
+    let mut clauses = Vec::new();
+    if !paths.touched.is_empty() {
+        clauses.push(format!("the job changed: {}", paths.touched.join(", ")));
+    }
+    if !paths.untouched.is_empty() {
+        clauses.push(format!(
+            "the job did not change: {}",
+            paths.untouched.join(", ")
+        ));
+    }
+    if !paths.ambiguous.is_empty() {
+        clauses.push(format!(
+            "name matches several files: {}",
+            paths.ambiguous.join(", ")
+        ));
+    }
+    Some(athena_finding(
+        Severity::Minor,
+        format!(
+            "Failing check {} cites paths: {}",
+            check.name,
+            clauses.join("; ")
+        ),
+        format!(
+            "{} The check ran on the candidate commit, which is the base commit plus the job's change. A path in a failing check's output is where a test panicked or a file its message names; it does not show what caused the failure.",
+            baseline_route(check, baseline)
+        ),
+    ))
+}
+
+/// [`judge`] plus one [`failure_path_finding`] for each blocking failed check, after every finding `judge`
+/// made, so the verifier's own findings keep their place. Reasons, criteria and both verdicts are `judge`'s:
+/// the finding is informational and adds no rule. This is the entry point for the stored verdict.
+/// `tree_paths` is every file tracked at the base or the candidate.
+pub fn judge_with_tree(inputs: &VerdictInputs<'_>, tree_paths: &[String]) -> Judgment {
+    let mut judgment = judge(inputs);
+    judgment
+        .findings
+        .extend(inputs.checks.iter().filter_map(|check| {
+            failure_path_finding(check, inputs.baseline, inputs.changed_paths, tree_paths)
+        }));
+    judgment
 }
 
 /// Constructs [`Verified`] from a judgment: `Some` only on a final verdict of pass.
@@ -3189,6 +3376,358 @@ mod tests {
             .final_verdict,
             Verdict::Pass
         );
+    }
+
+    /// The tracked files of a repository with a root and a crate `Cargo.toml` and one `src/verify.rs` in
+    /// each of two crates.
+    fn tree() -> Vec<String> {
+        paths(&[
+            "Cargo.toml",
+            "README.md",
+            "crates/athena-cli/src/verify.rs",
+            "crates/athena-core/Cargo.toml",
+            "crates/athena-core/src/verify.rs",
+            "docs/design/job-planning.md",
+            "xtask/tests/policy.rs",
+        ])
+    }
+
+    /// A failed `test` check whose output tail is `output`.
+    fn cited(output: &str) -> CheckRun {
+        CheckRun {
+            output_tail: output.into(),
+            ..check(false)
+        }
+    }
+
+    /// What a failing policy test prints: a panic site and a message that names a docs file.
+    const POLICY_FAILURE: &str = "---- policy::docs stdout ----\nthread 'policy::docs' panicked at xtask/tests/policy.rs:245:9:\ndocs/design/job-planning.md:6: term\n";
+
+    /// `judge` and `judge_with_tree` on one set of inputs: a passing verifier output citing `cargo test`.
+    fn judge_both(
+        baseline: Option<&Baseline>,
+        checks: &[CheckRun],
+        changed: &[String],
+        tree: &[String],
+        findings: Vec<FindingOutput>,
+    ) -> (Judgment, Judgment) {
+        let ran = ["cargo test".to_string()];
+        let criteria = criteria();
+        let out = output(vec!["cargo test"], findings);
+        let inputs = VerdictInputs {
+            criteria: &criteria,
+            checks,
+            output: Some(&out),
+            commands_run: &ran,
+            changed_paths: changed,
+            candidate_tree: None,
+            checks_tree: None,
+            system_fault: None,
+            verifier_failure: None,
+            map_base: None,
+            map_candidate: None,
+            baseline,
+            replay: None,
+        };
+        (judge(&inputs), judge_with_tree(&inputs, tree))
+    }
+
+    /// The path finding adds a finding and nothing else: criteria, verdicts and reasons are `judge`'s.
+    fn assert_only_findings_added(plain: &Judgment, with_tree: &Judgment) {
+        assert_eq!(plain.criteria, with_tree.criteria);
+        assert_eq!(plain.agent_verdict, with_tree.agent_verdict);
+        assert_eq!(plain.final_verdict, with_tree.final_verdict);
+        assert_eq!(plain.reasons, with_tree.reasons);
+    }
+
+    /// The one finding `judge_with_tree` added to `plain`, which must be Minor and from Athena.
+    fn the_added_finding(plain: &Judgment, with_tree: &Judgment) -> Finding {
+        assert_only_findings_added(plain, with_tree);
+        assert_eq!(
+            with_tree.findings[..plain.findings.len()],
+            plain.findings[..],
+            "the findings judge made keep their place"
+        );
+        let added = &with_tree.findings[plain.findings.len()..];
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert_eq!(added[0].severity, Severity::Minor);
+        assert_eq!(added[0].source, FindingSource::Athena);
+        assert!(!finding_blocks(&added[0]));
+        added[0].clone()
+    }
+
+    #[test]
+    fn failure_paths_resolves_cited_paths_against_the_tracked_files() {
+        let output = "---- tests::a stdout ----\n\
+            thread 'tests::a' panicked at xtask/tests/policy.rs:245:9:\n\
+            docs/design/job-planning.md:6: term\n\
+            \x20 --> src/verify.rs:3:1\n\
+            see `./README.md` and Cargo.toml, again xtask/tests/policy.rs:300:1\n\
+            took 1.5s\n\
+            https://example.org/docs/a.md\n\
+            /rustc/abc/library/core/src/fmt.rs:1:1\n\
+            target/debug/x.rs:1\n\
+            ../x.rs:1\n\
+            crates/ghost/src/none.rs:9\n";
+        let found = failure_paths(&cited(output), &paths(&["README.md"]), &tree());
+        assert_eq!(found.touched, ["README.md"]);
+        // First appearance order, no line numbers, no duplicates; the exact root Cargo.toml wins over the
+        // crate one.
+        assert_eq!(
+            found.untouched,
+            [
+                "xtask/tests/policy.rs",
+                "docs/design/job-planning.md",
+                "Cargo.toml"
+            ]
+        );
+        // Two tracked files end in `/src/verify.rs`: the name is neither touched nor untouched.
+        assert_eq!(found.ambiguous, ["src/verify.rs"]);
+
+        // A suffix that matches one file resolves to it, and a changed file is touched.
+        let one = failure_paths(
+            &cited("at athena-core/Cargo.toml:3\n"),
+            &paths(&["crates/athena-core/Cargo.toml"]),
+            &tree(),
+        );
+        assert_eq!(one.touched, ["crates/athena-core/Cargo.toml"]);
+        assert!(one.untouched.is_empty() && one.ambiguous.is_empty());
+
+        // Nothing is read for a passed check, an unknown change or an unreadable tree.
+        let changed = paths(&["README.md"]);
+        let passed = CheckRun {
+            output_tail: output.into(),
+            ..check(true)
+        };
+        assert_eq!(
+            failure_paths(&passed, &changed, &tree()),
+            FailurePaths::default()
+        );
+        assert_eq!(
+            failure_paths(&cited(output), &[], &tree()),
+            FailurePaths::default()
+        );
+        assert_eq!(
+            failure_paths(&cited(output), &changed, &[]),
+            FailurePaths::default()
+        );
+
+        // At most ten paths are listed.
+        let many: Vec<String> = (0..15).map(|i| format!("f{i}.rs")).collect();
+        let long: String = many.iter().map(|p| format!("{p}:1\n")).collect();
+        let capped = failure_paths(&cited(&long), &paths(&["other"]), &many);
+        assert_eq!(capped.untouched.len(), MAX_CITED_PATHS);
+        assert_eq!(capped.untouched[0], "f0.rs");
+    }
+
+    #[test]
+    fn a_failure_citing_a_path_the_job_did_not_change_carries_that_finding() {
+        let changed = paths(&["crates/athena-core/src/verify.rs"]);
+        let failed = cited(POLICY_FAILURE);
+        let base = baseline_with(vec![check(true)], None);
+        let noted = baseline_with(vec![check(true)], Some("the base did not build"));
+        let without = baseline_with(vec![], None);
+        let cases = [
+            (
+                "passed on the base",
+                Some(&base),
+                failed.clone(),
+                "The same check passed on the base commit",
+            ),
+            (
+                "no usable baseline",
+                None,
+                failed.clone(),
+                "No usable baseline exists",
+            ),
+            (
+                "baseline with a note",
+                Some(&noted),
+                failed.clone(),
+                "the base did not build",
+            ),
+            (
+                "no entry",
+                Some(&without),
+                failed.clone(),
+                "The baseline holds no result for this check",
+            ),
+            (
+                "reused",
+                Some(&base),
+                CheckRun {
+                    output_tail: POLICY_FAILURE.into(),
+                    ..reused_from_ci(false)
+                },
+                "read from the CI run",
+            ),
+        ];
+        for (name, baseline, check, route) in cases {
+            let (plain, with_tree) = judge_both(baseline, &[check], &changed, &tree(), vec![]);
+            // The check still fails the verdict, for the same reason as before.
+            assert_eq!(with_tree.final_verdict, Verdict::Fail, "{name}");
+            assert_eq!(with_tree.reasons, ["check test failed"], "{name}");
+            let finding = the_added_finding(&plain, &with_tree);
+            assert!(
+                finding
+                    .summary
+                    .starts_with("Failing check test cites paths"),
+                "{name}: {}",
+                finding.summary
+            );
+            assert!(
+                finding.summary.contains(
+                    "the job did not change: xtask/tests/policy.rs, docs/design/job-planning.md"
+                ),
+                "{name}: {}",
+                finding.summary
+            );
+            assert!(!finding.summary.contains("the job changed"), "{name}");
+            for text in [
+                route,
+                "the base commit plus the job's change",
+                "does not show what caused the failure",
+            ] {
+                assert!(
+                    finding.evidence.contains(text),
+                    "{name}: {}",
+                    finding.evidence
+                );
+            }
+            assert!(!finding.evidence.contains("merged after"), "{name}");
+        }
+
+        // The same output on a failure the base also had: pre-existing, so no finding and no reason.
+        let before = baseline_with(vec![check(false)], None);
+        let (plain, with_tree) = judge_both(Some(&before), &[failed], &changed, &tree(), vec![]);
+        assert!(with_tree.reasons.is_empty());
+        assert_eq!(plain.findings, with_tree.findings);
+
+        // Output that cites no tracked path (or only one that is not tracked) gives no finding.
+        for output in ["thread 'a' panicked\n", "crates/ghost/src/none.rs:9\n", ""] {
+            let (plain, with_tree) =
+                judge_both(Some(&base), &[cited(output)], &changed, &tree(), vec![]);
+            assert_eq!(with_tree.reasons, ["check test failed"]);
+            assert_eq!(plain.findings, with_tree.findings, "{output:?}");
+        }
+    }
+
+    #[test]
+    fn a_failure_citing_a_path_the_job_changed_says_so() {
+        let base = baseline_with(vec![check(true)], None);
+        let readme = paths(&["README.md"]);
+
+        // One cited file the job changed and one it did not.
+        let both = cited("README.md:1: broken\ndocs/design/job-planning.md:6: term\n");
+        let (plain, with_tree) = judge_both(Some(&base), &[both], &readme, &tree(), vec![]);
+        assert_eq!(with_tree.reasons, ["check test failed"]);
+        let finding = the_added_finding(&plain, &with_tree);
+        assert!(finding.summary.contains("the job changed: README.md"));
+        assert!(
+            finding
+                .summary
+                .contains("the job did not change: docs/design/job-planning.md")
+        );
+
+        // Only a changed file: the finding does not claim anything was left alone.
+        let (plain, with_tree) = judge_both(
+            Some(&base),
+            &[cited("README.md:1\n")],
+            &readme,
+            &tree(),
+            vec![],
+        );
+        let finding = the_added_finding(&plain, &with_tree);
+        assert!(finding.summary.contains("the job changed: README.md"));
+        assert!(!finding.summary.contains("did not change"));
+
+        // A name that matches two tracked files is neither called changed nor unchanged.
+        let changed = paths(&["crates/athena-core/src/verify.rs"]);
+        let (plain, with_tree) = judge_both(
+            Some(&base),
+            &[cited("--> src/verify.rs:3:1\n")],
+            &changed,
+            &tree(),
+            vec![],
+        );
+        let finding = the_added_finding(&plain, &with_tree);
+        assert!(
+            finding
+                .summary
+                .contains("name matches several files: src/verify.rs")
+        );
+        assert!(!finding.summary.contains("the job changed"));
+        assert!(!finding.summary.contains("did not change"));
+
+        // No change list means the paths are unknown: no finding.
+        let (plain, with_tree) =
+            judge_both(Some(&base), &[cited("README.md:1\n")], &[], &tree(), vec![]);
+        assert_eq!(with_tree.reasons, ["check test failed"]);
+        assert_eq!(plain.findings, with_tree.findings);
+    }
+
+    #[test]
+    fn path_findings_follow_every_other_finding_and_leave_the_verdict_alone() {
+        let base = baseline_with(vec![check(true)], None);
+        let named = |name: &str, output: &str| CheckRun {
+            name: name.into(),
+            ..cited(output)
+        };
+        let checks = [
+            CheckRun {
+                failed_tests: vec!["xtask policy::docs".into()],
+                ..cited(POLICY_FAILURE)
+            },
+            named("clippy", "error: x\n --> README.md:1:1\n"),
+            named("fmt", "Diff in docs/design/job-planning.md:6:\n"),
+        ];
+        let verifier_findings = vec![
+            FindingOutput {
+                severity: SeverityOutput::Blocker,
+                summary: "blocker".into(),
+                evidence: "b".into(),
+                location: None,
+            },
+            FindingOutput {
+                severity: SeverityOutput::Major,
+                summary: "major".into(),
+                evidence: "m".into(),
+                location: None,
+            },
+        ];
+        let changed = paths(&["crates/athena-core/src/verify.rs"]);
+        let (plain, with_tree) =
+            judge_both(Some(&base), &checks, &changed, &tree(), verifier_findings);
+        assert_only_findings_added(&plain, &with_tree);
+        assert_eq!(
+            with_tree.reasons,
+            [
+                "check test failed",
+                "check clippy failed",
+                "check fmt failed",
+                "2 blocker or major finding(s)"
+            ]
+        );
+        // Everything judge made keeps its index; what follows is one Minor Athena finding per failed check.
+        let kept = plain.findings.len();
+        assert_eq!(with_tree.findings[..kept], plain.findings[..]);
+        let added = &with_tree.findings[kept..];
+        assert_eq!(added.len(), 3);
+        for (finding, name) in added.iter().zip(["test", "clippy", "fmt"]) {
+            assert_eq!(finding.severity, Severity::Minor);
+            assert_eq!(finding.source, FindingSource::Athena);
+            assert!(!finding_blocks(finding));
+            assert!(
+                finding
+                    .summary
+                    .starts_with(&format!("Failing check {name} cites paths"))
+            );
+        }
+        // The first five findings, which a rejected job shows the owner, still hold the verifier's.
+        let shown: Vec<&Finding> = with_tree.findings.iter().take(5).collect();
+        for severity in [Severity::Blocker, Severity::Major] {
+            assert!(shown.iter().any(|f| f.severity == severity), "{shown:?}");
+        }
     }
 
     const CHANGE_FRAGMENT: &str = include_str!("../../athena-cap-change/prompts/verifier.md");
