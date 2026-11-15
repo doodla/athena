@@ -1,0 +1,150 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-045738-knwg",
+  "n": 1,
+  "at": "2026-11-15T06:56:15.467882924Z",
+  "invocation_seq": 1,
+  "base_commit": "6ed934e00594d33be8e01b20eae52c671f68e93f",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Keep the failing section, never CI cleanup text, in failed check records",
+  "summary": "Failed CI check records still store runner cleanup text (git credential removal, \"Cleaning up orphan processes\", Node warnings) when the log has no recognised failing section, e.g. a shard that \"did not finish\". I extend `checks::failure_section` and its callers so cleanup is dropped at the one place the output is stored, and a log with no test section says so and keeps the last pre-cleanup lines. Prior jobs 20261106-022423-vdtn, 20261106-045349-f6x6 and 20261027-054225-ycks hit this noise; their own changes are not kept.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New unit tests plus fmt, clippy and test criteria."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix in the shared failure_section path, not per job."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that fail on the base tree."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in checks.rs and its callers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: a producer, verifier or person reading a failed check record (send-back brief, verdict findings, introspection) must see the failing test names and assertion output, or an explicit statement that none was found, never runner cleanup text.",
+    "Code survey: read crates/athena-core/src/checks.rs (tail, tail_lines, is_cleanup_line, is_runner_marker, failure_section, with_failure_detail, runs_from_record), crates/athena-core/src/gh/client.rs (plain_log_line, failing_units, detail_from_job_logs, failure_detail), crates/athena-core/src/routing.rs:280 (with_failure_detail applied to reused red runs), crates/athena-core/src/run/send_back.rs:297 (3000-byte tail of output_tail) and crates/athena-core/src/ci_result.rs:99. failure_section already drops a trailing cleanup block only when it finds a recognised cleanup line (Post job cleanup, Post Run, Cleaning up orphan processes) after the last runner marker or ##[error] line at index > 0; no records file or AnyRecord type is added, CheckRun fields are unchanged so the records round-trip test is unaffected. The property is measured directly on failure_section and detail_from_job_logs output.",
+    "Root cause as read: the failing section is found only by recognising a cleanup start line and a runner marker; a log with neither (a cancelled or timed-out shard, a cleanup header form not matched, or a header cut off) falls through to a plain tail, which is cleanup text. Nothing tells a reader when no failing section exists. The fix gives the storing stage that knowledge: the cleanup block is recognised by its content (git config unset, 'Removing HTTP extra header', 'Removing includeIf', 'Cleaning up orphan processes', '##[warning]Node.js' lines, Complete job) as well as by header, and a log with no test section is stored as a short explicit note plus the last non-cleanup lines.",
+    "Prior job 20261106-022423-vdtn (rejected on an unrelated xtask test whose CI output was cleanup text): its candidate files CHANGELOG.md, athena.toml, crates/athena-data/src/config.rs and three design docs are not kept here; its ceiling change is a separate request. Its finding about invisible output is what this change fixes.",
+    "Prior job 20261106-045349-f6x6 (rejected; failed shard shown as cleanup text): its 17 candidate files are not kept, and its mirrored_sources feature is dropped from this change. Its finding that the drain test failure was invisible is addressed by this fix.",
+    "Prior job 20261027-054225-ycks (rejected; check output was cleanup text; flaky drain test): its 5 candidate files (prompts, lib.rs, docs/system-facts.md, CHANGELOG.md) are not kept. The flaky drain test is a separate issue.",
+    "No refusal rule is added; nothing is newly refused, so no refused-share figure applies. The change only alters what a failed check record stores.",
+    "Environment: no CI workflow, push or records read is changed; the tests use inline log strings only, so no host access is needed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new unit test in crates/athena-core/src/checks.rs feeds failure_section the log shape seen in the failed jobs (a shard log with no runner marker or ##[error], ending in the git credential-removal lines, 'Cleaning up orphan processes' and a '##[warning]Node.js 20' line, with the 'Post job cleanup.' header absent) and asserts the result contains none of those lines. It fails on the base tree and passes with the change; run `cargo test -p athena-core failure_section`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test in crates/athena-core/src/gh/client.rs calls detail_from_job_logs with a cancelled shard whose log has only progress lines then cleanup, and asserts output_tail holds the progress lines and a note that no failing test section was found, with no cleanup text; it also asserts a shard log with a `failures:` section still keeps the test name and panicked line. Run `cargo test -p athena-core detail_from_job_logs`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test over the stored path (with_failure_detail, plus a locally run failed check via the checks.rs run path) asserts the stored output_tail and the send_back CheckFailure tail never contain the cleanup lines, so the fix holds for every producer of a failed check record and not one job. Run `cargo test -p athena-core with_failure_detail`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A reading of the diff in crates/athena-core/src/checks.rs shows the cleanup recognition (is_cleanup_line or a successor) lives in one function used by the local run, the reused-CI detail and the per-shard log paths; no second copy is added in gh/client.rs or send_back.rs.",
+      "kind": "content"
+    },
+    {
+      "text": "The CHANGELOG.md entry names the root cause (a log with no recognised failing section fell through to a plain tail of cleanup text) and what the record stores instead, and states only what the diff does.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy` and `cargo test` pass on the final tree (recorded Athena checks on the same tree count under D115).",
+      "kind": "behavior"
+    },
+    {
+      "text": "No refusal or admission rule is added or tightened: git diff shows no change to admission.rs or any gate; expected 0% of newly refused readings.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Candidate changes of job 20261106-022423-vdtn: CHANGELOG.md range entry, athena.toml, crates/athena-data/src/config.rs, docs/design/async-drain.md, docs/design/parallel-jobs.md, docs/design/agent-and-build-slots.md (dropped; the max_concurrency ceiling is a separate request)",
+    "Candidate changes of job 20261106-045349-f6x6: mirrored_sources plan feature, planner.md, critic.md, admission.rs, plan.rs, records.rs, briefs.rs, outputs.rs, reading.rs, run/mod.rs, run/planning.rs, run_pin_tests.rs, status.rs, store.rs, refusal_corpus.rs, job_plan.rs, docs/design/job-planning.md, docs/system-facts.md (dropped)",
+    "Candidate changes of job 20261027-054225-ycks: commit-shape prompt rules in planner.md, critic.md, crates/athena-context/src/lib.rs, docs/system-facts.md (dropped)",
+    "The flaky drain test status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain and the xtask repin test",
+    "Adding any refusal rule, or changing athena.toml, defaults.toml or CI workflows",
+    "Re-running a failing test on the base tree to record whether the job caused it (proposed by some introspections; a separate request)"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.6,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2100.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6789915966386555,
+      "p_user_intervenes": 0.061631419939577034,
+      "cost_usd": {
+        "p10": 0.5534961083365045,
+        "p50": 1.4872301,
+        "p90": 5.760552971221347
+      },
+      "wall_time_s": {
+        "p10": 606.9205910264187,
+        "p50": 2166.2173336760006,
+        "p90": 4446.484348992057
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass chance than the reference: the exact leak path was inferred from reading, since failure_section already exists, and cold builds of athena-core add time.",
+  "urgent_reason": "Cuts redo-work: verifier and producer retries cannot see the failing test, so jobs are rejected or retried blind."
+}

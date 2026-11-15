@@ -342,12 +342,96 @@ pub fn runs_from_record(specs: &[CheckSpec], record: &CiRecord, sha: &str) -> Ve
 pub const FAILING_UNITS_PREFIX: &str = "failing units: ";
 
 /// Whether `line` starts the CI runner's post-job cleanup (an optional `##[group]` prefix is ignored).
-fn is_cleanup_line(line: &str) -> bool {
+fn is_cleanup_header(line: &str) -> bool {
     let t = line.trim();
     let t = t.strip_prefix("##[group]").unwrap_or(t);
     t.starts_with("Post job cleanup")
         || t.starts_with("Post Run ")
         || t.starts_with("Cleaning up orphan processes")
+}
+
+/// Any line of CI runner cleanup text, not only the one that starts the block: the header forms of
+/// [`is_cleanup_header`] and the lines the runner prints while it removes the checkout's git credentials
+/// and closes the job. This is the one place that knows the text, so a local run, a reused CI log and a
+/// per-shard log are all cut the same way.
+fn is_cleanup_line(line: &str) -> bool {
+    if is_cleanup_header(line) {
+        return true;
+    }
+    let t = line.trim();
+    t.starts_with("[command]/usr/bin/git ")
+        || t.starts_with("Temporarily overriding HOME")
+        || t.starts_with("Adding repository directory to the temporary git global config")
+        || t.starts_with("Removing HTTP extra header")
+        || t.starts_with("Removing includeIf")
+        || t.starts_with("Complete job")
+        || t.starts_with("Evaluate and set job outputs")
+        || t.starts_with("##[warning]Node.js")
+}
+
+/// Whether `line` starts a step of the CI job (`##[group]Run ...`).
+fn is_step_start(line: &str) -> bool {
+    line.trim().starts_with("##[group]Run ")
+}
+
+/// How many consecutive plain lines may sit inside a cleanup block (a `git version` line between two
+/// `[command]` lines) while the block is walked back.
+const CLEANUP_GAP: usize = 1;
+
+/// The line where the cleanup block that ends `lines` starts, found by walking back from the end over blank
+/// lines, cleanup lines and at most [`CLEANUP_GAP`] plain lines in a row. The walk stops at `floor`, at a
+/// step start, or at the second plain line in a row. `None` when the last lines are not cleanup.
+fn cleanup_start(lines: &[&str], floor: usize) -> Option<usize> {
+    let mut start = None;
+    let mut gap = 0;
+    for i in (floor..lines.len()).rev() {
+        let l = lines[i];
+        if l.trim().is_empty() {
+            continue;
+        }
+        if is_step_start(l) {
+            break;
+        }
+        if is_cleanup_line(l) {
+            start = Some(i);
+            gap = 0;
+        } else {
+            gap += 1;
+            if gap > CLEANUP_GAP {
+                break;
+            }
+        }
+    }
+    start
+}
+
+/// What [`failure_section`] returns when the log was not empty but held only runner cleanup text.
+pub const NO_OUTPUT_NOTE: &str = "(no output was kept: the log held only runner cleanup text)";
+
+/// What the note of [`no_test_section_note`] starts with.
+pub const NO_TEST_SECTION_PREFIX: &str = "(no failing test section was found in ";
+
+/// Whether `text` holds a line of a test runner's failing section.
+pub fn has_failing_section(text: &str) -> bool {
+    text.lines().any(is_runner_marker)
+}
+
+/// The one line, ending in a newline, that says the logs of `jobs` held no failing test section, so what is
+/// kept for each is the last of its log before the runner's cleanup.
+pub fn no_test_section_note(jobs: &[&str]) -> String {
+    const SHOWN: usize = 6;
+    let mut names = jobs
+        .iter()
+        .take(SHOWN)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if jobs.len() > SHOWN {
+        names.push_str(&format!(", +{} more", jobs.len() - SHOWN));
+    }
+    format!(
+        "{NO_TEST_SECTION_PREFIX}{names}; for each, the lines kept are the last of its log before the runner's cleanup)\n"
+    )
 }
 
 /// Whether `line` belongs to a test runner's failing section.
@@ -366,30 +450,36 @@ const SECTION_END_LINES: usize = 20;
 ///
 /// The old rule kept the last N lines whatever they were, so for a CI log the post-job cleanup text
 /// displaced the test runner's `failures:` and `panicked at` section. This drops the trailing cleanup
-/// block (cut at the first cleanup line at or after the last runner marker, else the last `##[error]`
-/// line, else anywhere), then keeps the end of what is left. When that end holds no runner marker but an
-/// earlier line does (a cleanup form not recognised), it keeps lines from the earliest marker, a `…` line
-/// and the final lines. A log with no marker and no cleanup keeps the plain tail.
+/// block: it ends at the first cleanup header at or after the last runner marker (else the last `##[error]`
+/// line, else anywhere) and starts where a walk back from there over cleanup lines ends, so a block with
+/// no header (a cancelled or cut-off log) is dropped too. A non-empty log that held only cleanup becomes
+/// [`NO_OUTPUT_NOTE`]. It then keeps the end of what is left. When that end holds no runner marker but an
+/// earlier line does, it keeps lines from the earliest marker, a `…` line and the final lines. A log with
+/// no marker and no cleanup keeps the plain tail.
 pub fn failure_section(text: &str, max_lines: usize, max_bytes: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let anchor = lines
         .iter()
         .rposition(|l| is_runner_marker(l))
-        .or_else(|| lines.iter().rposition(|l| l.starts_with("##[error]")))
-        .unwrap_or(0);
-    let cut = lines[anchor..]
+        .or_else(|| lines.iter().rposition(|l| l.starts_with("##[error]")));
+    let floor = anchor.map_or(0, |a| a + 1);
+    let end = lines[floor.min(lines.len())..]
         .iter()
-        .position(|l| is_cleanup_line(l))
-        .map(|p| p + anchor)
-        .filter(|&c| c > 0);
-    let body: String = match cut {
-        Some(c) => {
-            let mut b = lines[..c].join("\n");
-            b.push('\n');
-            b
-        }
-        None => text.to_string(),
+        .position(|l| is_cleanup_header(l))
+        .map_or(lines.len(), |p| p + floor);
+    let cut = cleanup_start(&lines[..end], floor).unwrap_or(end);
+    let body: String = if cut == lines.len() {
+        text.to_string()
+    } else if cut == 0 {
+        String::new()
+    } else {
+        let mut b = lines[..cut].join("\n");
+        b.push('\n');
+        b
     };
+    if body.trim().is_empty() && !text.trim().is_empty() {
+        return format!("{NO_OUTPUT_NOTE}\n");
+    }
     let body_lines: Vec<&str> = body.lines().collect();
     if body_lines.len() <= max_lines {
         return tail(&body, max_bytes);
@@ -930,9 +1020,192 @@ i=0; while [ $i -lt 250 ]; do echo 'Post job cleanup.'; i=$((i+1)); done; exit 1
     }
 
     #[test]
-    fn failure_section_of_only_cleanup_is_the_whole_text() {
-        let text = cleanup_text(5);
-        assert_eq!(failure_section(&text, 200, 65536), text);
+    fn failure_section_of_only_cleanup_says_so() {
+        let note = "(no output was kept: the log held only runner cleanup text)\n";
+        assert_eq!(failure_section(&cleanup_text(5), 200, 65536), note);
+        // A block of git lines with no header at all.
+        assert_eq!(failure_section(&headerless_block(), 200, 65536), note);
+    }
+
+    #[test]
+    fn failure_section_of_empty_output_stays_empty() {
+        assert_eq!(failure_section("", 200, 65536), "");
+        assert_eq!(failure_section("  \n\n", 200, 65536), "  \n\n");
+        let run = run_script(&sh_spec("silent", "exit 3"));
+        assert_eq!(run.output_tail, "");
+    }
+
+    // Constructed: the runner's credential removal and closing lines with no `Post job cleanup.` header.
+    fn headerless_block() -> String {
+        "[command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader\n\
+Removing HTTP extra header\n\
+Removing includeIf entries pointing to credentials\n\
+Cleaning up orphan processes\n\
+##[warning]Node.js 20 actions are deprecated\n"
+            .to_string()
+    }
+
+    const CLEANUP_STRINGS: [&str; 5] = [
+        "/usr/bin/git",
+        "Removing",
+        "Cleaning up orphan",
+        "Node.js",
+        "Post job cleanup",
+    ];
+
+    fn assert_no_cleanup(text: &str) {
+        for s in CLEANUP_STRINGS {
+            assert!(!text.contains(s), "{s} kept in {text}");
+        }
+    }
+
+    fn progress(n: usize) -> String {
+        (0..n).map(|i| format!("shard progress {i}\n")).collect()
+    }
+
+    #[test]
+    fn failure_section_drops_a_headerless_cleanup_block() {
+        // Constructed: progress, then the block; no runner marker, no `##[error]`, no header.
+        let text = format!("{}{}", progress(40), headerless_block());
+        let kept = failure_section(&text, FAILED_TAIL_LINES, FAILED_TAIL_BYTES);
+        assert!(kept.contains("shard progress 39\n"));
+        assert_no_cleanup(&kept);
+        // Without the orphan line, ending in the Node warning.
+        let no_orphan = headerless_block().replace("Cleaning up orphan processes\n", "");
+        let kept = failure_section(
+            &format!("{}{no_orphan}", progress(40)),
+            FAILED_TAIL_LINES,
+            FAILED_TAIL_BYTES,
+        );
+        assert!(kept.ends_with("shard progress 39\n"));
+        assert_no_cleanup(&kept);
+        // Plain git lines interleaved between the `[command]` lines.
+        let mixed = "[command]/usr/bin/git version\ngit version 2.52.0\n\
+[command]/usr/bin/git config --local --get-regexp http.https://github.com/.extraheader\n\
+http.https://github.com/.extraheader AUTHORIZATION: basic ***\n\
+[command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader\n\
+##[warning]Node.js 20 actions are deprecated\n";
+        let kept = failure_section(
+            &format!("{}{mixed}", progress(40)),
+            FAILED_TAIL_LINES,
+            FAILED_TAIL_BYTES,
+        );
+        assert!(kept.ends_with("shard progress 39\n"));
+        assert_no_cleanup(&kept);
+        assert!(!kept.contains("extraheader") && !kept.contains("git version"));
+    }
+
+    #[test]
+    fn failure_section_after_an_error_line_drops_a_headerless_cleanup_block() {
+        let text = format!(
+            "{}##[error]The operation was canceled.\n{}",
+            progress(10),
+            headerless_block()
+        );
+        let kept = failure_section(&text, FAILED_TAIL_LINES, FAILED_TAIL_BYTES);
+        assert!(kept.ends_with("##[error]The operation was canceled.\n"));
+        assert!(kept.contains("shard progress 9\n"));
+        assert_no_cleanup(&kept);
+    }
+
+    #[test]
+    fn failure_section_keeps_progress_after_checkout_lines_in_a_realistic_log() {
+        // Constructed: a checkout step, the test step, then a block with no header that repeats the git lines.
+        let text = String::from(
+            "##[group]Run actions/checkout@v4\n\
+[command]/usr/bin/git init\n\
+Temporarily overriding HOME='/x' before making global git config changes\n\
+##[group]Run cargo run --locked -p xtask -- test-shard 3 6\n\
+== shard 3/6: athena-core --lib\n\
+running 12 tests\n\
+test a ... ok\n\
+Temporarily overriding HOME='/x' before making global git config changes\n\
+[command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader\n\
+Removing HTTP extra header\n",
+        );
+        let kept = failure_section(&text, FAILED_TAIL_LINES, FAILED_TAIL_BYTES);
+        assert!(kept.contains("running 12 tests\ntest a ... ok\n"));
+        assert_eq!(kept.matches("Temporarily overriding HOME").count(), 1);
+        assert!(kept.contains("[command]/usr/bin/git init"));
+        assert!(!kept.contains("--unset-all"));
+        assert!(!kept.contains("Removing HTTP extra header"));
+    }
+
+    #[test]
+    fn failure_section_drops_git_lines_above_a_header_on_the_last_line() {
+        let text = format!("{}{}Post job cleanup.\n", progress(5), headerless_block());
+        let kept = failure_section(&text, FAILED_TAIL_LINES, FAILED_TAIL_BYTES);
+        assert_eq!(kept, progress(5));
+    }
+
+    #[test]
+    fn failure_section_on_a_ci_yml_shaped_log_with_the_header_present() {
+        // Constructed in the step order of the test job: setup, the test step, a failing section, then the
+        // post block after its header.
+        let text = format!(
+            "##[group]Run actions/checkout@v4\n[command]/usr/bin/git init\n\
+##[group]Run cargo run --locked -p xtask -- test-shard 1 6\n{}\
+Post job cleanup.\n[command]/usr/bin/git version\ngit version 2.52.0\n\
+[command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader\n\
+Removing HTTP extra header\nCleaning up orphan processes\n",
+            failing_section_text()
+        );
+        let kept = failure_section(&text, FAILED_TAIL_LINES, FAILED_TAIL_BYTES);
+        assert!(kept.contains("widget::breaks"));
+        assert!(kept.ends_with("##[error]Process completed with exit code 101.\n"));
+        assert!(kept.contains("[command]/usr/bin/git init"));
+        assert!(!kept.contains("Post job cleanup") && !kept.contains("--unset-all"));
+        // A second pass changes nothing.
+        assert_eq!(
+            failure_section(&kept, FAILED_TAIL_LINES, FAILED_TAIL_BYTES),
+            kept
+        );
+    }
+
+    #[test]
+    fn with_failure_detail_drops_headerless_cleanup_from_the_stored_tail() {
+        let tail = format!(
+            "{FAILING_UNITS_PREFIX}athena-core --lib\n{}{}",
+            progress(5),
+            headerless_block()
+        );
+        let keep = |s: &str| -> Result<String> { Ok(s.to_string()) };
+        let d = detail(&["athena_core a"], &tail);
+        let got = with_failure_detail(reused_failed("test"), &d, &keep);
+        assert!(got.output_tail.starts_with(FAILING_UNITS_PREFIX));
+        assert!(got.output_tail.contains("shard progress 4\n"));
+        assert_no_cleanup(&got.output_tail);
+        let again = with_failure_detail(
+            got.clone(),
+            &detail(&["athena_core a"], &got.output_tail),
+            &keep,
+        );
+        assert_eq!(again.output_tail, got.output_tail);
+    }
+
+    #[test]
+    fn with_failure_detail_and_local_run_never_store_cleanup() {
+        let script = "echo one; echo two; echo three; echo 'test demo ... FAILED'; \
+echo '[command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader'; \
+echo 'Removing HTTP extra header'; echo 'Cleaning up orphan processes'; \
+echo '##[warning]Node.js 20 actions are deprecated'; exit 1";
+        let run = run_script(&sh_spec("t", script));
+        assert!(!run.passed);
+        assert!(run.output_tail.contains("test demo ... FAILED"));
+        assert_no_cleanup(&run.output_tail);
+    }
+
+    #[test]
+    fn the_no_test_section_note_names_the_jobs_and_caps_the_list() {
+        let note = no_test_section_note(&["a", "b"]);
+        assert_eq!(
+            note,
+            "(no failing test section was found in a, b; for each, the lines kept are the last of its log before the runner's cleanup)\n"
+        );
+        let many: Vec<&str> = vec!["j"; 9];
+        assert!(no_test_section_note(&many).contains("j, +3 more;"));
+        assert!(!has_failing_section("progress\nok\n"));
+        assert!(has_failing_section("progress\nfailures:\n"));
     }
 
     #[test]

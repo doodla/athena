@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045738-knwg",
+  "round": 3,
+  "at": "2026-11-15T07:27:06.435956051Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The reduction is turned off for the log shape the post-fix sighting most likely had: a failing test with markers, followed by passing units.",
+      "evidence": "xtask runs every unit after a failure (shard.rs:315-327). Take a marker unit followed by about 1000 lines of passing units. The 200-line window holds no marker, so failure_section takes the jump case (checks.rs:402-418): about 180 lines from the first marker, a `…` line, then the last 20 lines. The verifier brief quotes only the last 60 lines (briefs.rs:1110-1116, clip_log_tail), so it shows the last 20 lines (passing units and the `units failed:` summary) plus the end of the head, which is also passing-unit output. The assertion text is not shown. Introspection 20261114-022748-gmm5 asks to keep 'the failing unit's own output (test names, assertion messages) ... and not just the shard summary'. The plan's own rejected alternative ('the passing units' lines after the failing unit fill the head and the send-back's last 3000 bytes miss the error lines') describes this same mechanism, yet the plan says marker logs need no change. The stated reason for the gate is also wrong: no existing fixture has a summary line (gh/tests.rs:386 shard_log and run/tests.rs:7724 SHARD_LOG end at `test result: FAILED` / `error: test failed`), so failed_units_only already returns None for all of them. Fix: Remove the `!has_failing_section(log)` precondition. Run failed_units_only whenever the last `units failed:` summary names a unit that has a `== shard` header. A failing unit's part is kept whole, markers included, so marker logs and mixed logs both get the reduction, and the 'mixed log keeps old behavior' limit goes away. Add a detail_tests case and a routing test: one marker unit (`---- tests::a stdout ----`, `panicked at`, `assertion ... failed`), then four passing units of 250 lines, then the summary. Assert that check_result_view(test).output_tail clipped to its last 60 lines, and CheckFailure::of(test).tail, both contain the `panicked at` line. On the base tree this fails.",
+      "location": "Plan decision 1 (failed_units_only runs only when has_failing_section is false); Rejected alternative 'Apply the reduction also when a runner marker exists'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The cancelled-shard fixture includes a bare `/usr/bin/git config ...` line, which decision 2 says is not recognised, so the line is kept and an assertion that no cleanup string remains would fail with the change.",
+      "evidence": "Decision 2 drops the bare `/usr/bin/git ` form and says 'no log cited here has a bare `/usr/bin/git ` line'. Fixture (a) lists `/usr/bin/git config ...` followed by `[command]/usr/bin/git config --local --unset-all ...`. Walking back, cleanup_start reaches the [command] line, counts the bare line as one gap, then stops at the next progress line, which is the second gap. The cut falls at the [command] line, so the bare line stays in output_tail. Fix: Remove the bare line from the fixture, or state that the assertion checks only `[command]/usr/bin/git`, `Removing`, `Cleaning up orphan` and `Node.js`.",
+      "location": "Demonstrations, criterion 2 (a) fixture",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Whether a shard gets the note depends on its stored text equalling the whole log, a rule the plan says it chose so as not to edit gh/tests.rs:589.",
+      "evidence": "The plan writes: 'The second clause leaves gh/tests.rs:578-590 as is ... That avoids editing a file outside the deliverables.' As a behavior rule it can be defended: nothing was dropped, so no note is needed. But the reason given is a file boundary, and the reading says 'a log with no test section says so'. Fix: Give the behavioral reason in the code comment and the CHANGELOG ('no note when the whole log was kept'), or add the note to every shard with no section and list gh/tests.rs as a deliverable.",
+      "location": "Plan decision 3 (note clause `conclusion != failure || section.trim_end() != log.trim_end()`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A shard counts as having a failing section if any line of its whole log is a runner marker, so a `panicked at` printed by passing output turns off the note (and, under the current gate, the reduction too).",
+      "evidence": "is_runner_marker (checks.rs:354-360) matches any line containing `panicked at`. Output that the test harness does not capture, such as the stderr of a child process, can print that in a unit that passes. Fix: Once the reduction no longer depends on markers (finding 1), compute `found` from the reduced or stored section rather than the raw log, or accept this and list it as a risk.",
+      "location": "Plan decision 3 / step 5 (`found = has_failing_section(log) || ...`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The second pass in with_failure_detail cuts at the first cleanup header after the combined text's floor. On a multi-shard text, a header kept in an earlier shard's section can sit after that floor, and the cut would then drop the later shards and the trailing note.",
+      "evidence": "In checks.rs:443-445 the second pass recomputes the anchor over the combined `== job` text. A header kept in one shard's section, because it came before that shard's own `##[error]` anchor, can come after the combined anchor taken from another shard. Fix: State this edge in Risks, or have the second pass skip the header cut when the combined text already ends in the note.",
+      "location": "Plan decision 2, idempotence claim",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is detailed and mostly sound. The files and functions it names exist: failure_section at checks.rs:373, detail_from_job_logs at client.rs:296, failing_units at client.rs:264, CheckFailure::of, run_routed_with_record, check_result_view and the Detailed/Local stubs. Its claims about the xtask shard text are right (shard.rs:317 and :333, main.rs:64 and :112-114). I traced the demonstrations through the new cut and they fail on the base tree as the plan says, and the dependents list matches every reader of failure_section that grep finds. One major soundness problem remains. failed_units_only runs only when the log has no runner marker. That leaves the most likely shape of the one sighting after fe42b01 unfixed: a test failure with assertion text, followed by several passing units in the same shard. In that log the jump case puts the failing section at the head of the stored tail. The verifier brief quotes only the last 60 lines and the send-back keeps only the last 3000 bytes, so readers see passing units plus the shard summary. That is the complaint of introspection 20261114-022748-gmm5. The plan's reason for the gate (\"the existing tests pin it\") does not hold: no existing fixture has a `units failed:` summary line, so dropping the gate changes no existing test. Smaller issues: a criterion 2 fixture contradicts the plan's own recogniser list; the note rule has a special case shaped around one test file; and the marker check runs on the whole log."
+}
