@@ -79,6 +79,16 @@ pub(super) const REAL_RECORDS_RULE: &str = "A plan that changes a measure comput
 /// cannot be judged by code. Pinned by a test in `briefs.rs`.
 pub(super) const FIELD_MEANING_RULE: &str = "A plan that reuses an existing struct field, CLI argument, record key or config key must quote its documented meaning from the code or config docs (crates/ or config path:line) and say why it matches what the requirement needs. For a config key, check the live athena.toml value for each role it affects. When the meaning differs, plan a new field instead.";
 
+/// The planner's rule for claims about existing behavior. Root cause: the brief asked the planner to settle
+/// questions and list callers but never required each claim about existing behavior (what consumes a state,
+/// which sites produce an error class, which forms a rule accepts) to cite the code read, nor a revising
+/// planner to settle a finding that names a file and function by reading it. Plans then rested on guesses or
+/// missed an adjacent path (jobs 20261030-013555-f5qm, 20261031-030119-tw3v and 20261103-075205-wbtm). This
+/// is information, not a refusal: whether a search is complete cannot be judged without the repository.
+/// Pinned by a test in `briefs.rs`.
+pub(super) const CODE_CLAIMS_RULE: &str = "Each claim about existing behavior (what consumes a state, which sites produce each error or state class, which input forms an existing rule accepts, which records a gate must reconcile, a role or config limit) names the function and file:line you read, not a guess. A plan that classifies errors or states lists every producer site (every bail!/Err site feeding the arm) with its class. \
+On a revision, settle each finding that names a file and function by reading that code and citing file:line, not by assertion or by leaving it open. Answer a finding about an unlisted adjacent path (for example the max_concurrency path, role limits, records read from the branch) by listing that path in dependents.";
+
 /// The planner's brief: the request, the reading with each criterion numbered by kind, the checks, the
 /// verifier's commands and the state of the deliverables; a revision also quotes the previous plan and every
 /// finding on it.
@@ -145,7 +155,7 @@ pub fn planner_brief(inputs: &PlannerInputs) -> String {
     }
     let _ = writeln!(
         out,
-        "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above. Each names the production entry point it calls, its guards and preconditions, the seam, fake or fixture and how it is injected, and whether that seam exists today (checked by reading the code) or which plan step adds it. Never put the logic under test inside the test double.\n\n{REFUSAL_CORPUS_RULE}\n\n{OPEN_QUESTION_RULE}\n\n{REAL_RECORDS_RULE}\n\n{FIELD_MEANING_RULE}"
+        "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above. Each names the production entry point it calls, its guards and preconditions, the seam, fake or fixture and how it is injected, and whether that seam exists today (checked by reading the code) or which plan step adds it. Never put the logic under test inside the test double.\n\n{REFUSAL_CORPUS_RULE}\n\n{OPEN_QUESTION_RULE}\n\n{REAL_RECORDS_RULE}\n\n{FIELD_MEANING_RULE}\n\n{CODE_CLAIMS_RULE}"
     );
     out
 }
