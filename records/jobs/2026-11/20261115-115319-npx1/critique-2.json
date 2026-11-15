@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261115-115319-npx1",
+  "round": 2,
+  "at": "2026-11-15T14:21:26.093360397Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The second job's folder wait is counted as execution wall time, which skews a scored quantity and the forecasts built from it",
+      "evidence": "`wall_time_execution_s` is `ctx.clock.elapsed()`, and `ctx.clock` starts at dispatch, before planning. athena-score uses this field in two places: it is scored against the forecast's `wall_time_s` quantity (lib.rs:330-336), and it feeds the empirical quantiles behind future wall-time forecasts (lib.rs:160-169). With max_concurrency = 2 and the slot held from baseline to close, about half the jobs would wait through the other job's whole producer, checks and verifier, which the request puts at 15-24 GB builds and which is likely tens of minutes or more (an estimate). Their recorded 'execution' time would then include another job's run. The plan's precedent, the check-slot wait, lasts minutes, not a whole job. Its reason for rejecting a subtraction ('needs a records run to show the range') does not apply: no past record is recomputed, and only new jobs would exclude the wait. Fix: Carry the time spent waiting for the folder (`slot.queued()` when `slot.waited()`) on `Closing` as a run-time value, not a new record field. Subtract it where `wall_time_execution_s` is set (mod.rs:2518, verification.rs:457). In the criterion-1 test, assert that the waiting job's `wall_time_execution_s` is less than its wall time from dispatch by at least the wait. If the planner prefers to keep the wait in the figure, raise it as an open question for the owner and do not decide it silently in D188.",
+      "location": "Decision 6; run/mod.rs:2518 and verification.rs:457; crates/athena-score/src/lib.rs:160-169 and 330-336",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two other large build folders outside the slot are not named: the drain's self-rebuild after a landing, and the check slots' warm directories",
+      "evidence": "After a landing that touches Athena's own code, the drain runs `setup.sh` in the checkout, which builds the checkout's own target folder (drain.rs:2656, 3651). With two jobs in flight, that build can overlap a job that holds the folder. The slot does not cover it, and the dispatch credit does not count it. The open question mentions the warm slot directories but not this rebuild. Fix: In section 11 of agent-and-build-slots.md and in D188's Tradeoff, list both builds that remain outside the slot: the self-rebuild and the warm slot directories. Add the self-rebuild to the open question about the host's free space. No code change is needed in this job.",
+      "location": "Risks / Open questions; crates/athena-cli/src/drain.rs:2645-2660 and 3651-3655",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The dispatch credit counts the target folder of any job whose lock is held, including a process that holds the lock but is not in the slot",
+      "evidence": "`job_lock_held` is also true while `athena land` (landing.rs:853) or a manage command (manage.rs:96) holds the job lock. If such a job still has a `target/` folder, for example one left by an older binary or by a removal that failed in the guard's `Drop`, the credit would let a second job read and plan on the belief that space will come back, when no holder will free it. That job is then held after planning at the gate before the producer (mod.rs:1821), so the cost is planner spend, not a wrong build. Fix: Count only the job that currently holds the build-folder slot, for example by having the guard write the holder's job id into a file under `<state>/build-folder/` while it holds the lock. Alternatively, accept the behaviour, state it in D188's Tradeoff, and add a unit test showing a locked job with no slot is (or is not) credited.",
+      "location": "Decision 3, `other_jobs_build_bytes`; state.rs:159; gh/landing.rs:853; manage.rs:96",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the plan against the code (Read and Grep only). It reads the request correctly and puts the gate where the fault starts. `dispatch` (run/mod.rs:1029-1389) is the only path into `resume_candidate` (1353) and `produce_and_verify` (1387). Every place that builds with `Side::Produce` or `Side::Verify` (producer.rs:191/360, checks.rs:478/1028/1298, records_criteria.rs:814, verification.rs:243, mod.rs:2005, and the loop-replay build at mod.rs:2490) runs inside that window. Planning and reading use `Side::Read` (planning.rs:159/363, reading.rs:673), so they build nothing. The `SlotQueue` behaviour the plan relies on is real: the `stop` closure runs before every attempt, `waited()` exists, and the lock is released on drop (slots.rs:172-218). `remove_target` exists (state.rs:260). The kept candidate and resume mark live outside the job directory (state.rs:289-296). `job_lock_held` is real (state.rs:159). `dir_bytes` counts file length and skips symbolic links (disk.rs:934-946), which matches the test's own length-based walker. `start_hold` uses the same quantity (disk.rs:779-784). The fixtures the tests use exist (run/tests.rs:191, 293, 1321, 3114, 6579, 6758). The test that changes (6459) is correctly named. D187 is the last decision entry, and section 10 plus \"Questions for the maintainer\" sit at lines 522 and 529 of the design doc. The demonstrations run the real `Athena::go` on two threads, and each would fail without the gate. One soundness problem needs a revision: the second job's wait for the folder, which can last the whole of the first job's build and verification, would be counted in `wall_time_execution_s`. That figure is scored and feeds the wall-time forecasts (athena-score lib.rs:160-169, 330-336). The plan's reason for leaving it (\"needs a records run\") does not hold, because subtracting the wait affects only new jobs. Two minor points concern parts of disk use the slot does not cover."
+}

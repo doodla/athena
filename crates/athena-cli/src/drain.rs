@@ -264,6 +264,14 @@
 //!   `environment: low disk`, plus a note); that is not a failure, uses no attempt, and stops nothing. The job
 //!   stays dispatched with no process and its kept candidate, so the next pass lists it as interrupted and
 //!   resumes it by itself.
+//! - **A wait for the build folder holds nothing.** `[parallel] max_concurrency` bounds the jobs a drain runs
+//!   side by side; the build-folder slot (`athena_core::disk::BuildFolder`) bounds the builds: only one job
+//!   at a time holds a job build folder, since the disk fits one. A second job reads and plans, and `athena
+//!   go` then waits inside its run for the folder to be freed, before the producer builds. The drain sees
+//!   one blocking `go` call: the item is neither held for low disk nor failed while it waits, and a worker
+//!   stays busy for the wait. At dispatch, free space that falls short only because the holder's folder is
+//!   in use does not hold the item. The drain's own rebuild after a landing builds the checkout's folder
+//!   outside the slot.
 //! - **A short budget holds a job.** A job's own budget (`[budget] job_usd`) must cover everything still to run
 //!   (`athena_core::reading::budget_reserve`). When it does not, `athena go` returns
 //!   [`athena_core::reading::BudgetShort`] before spending anything. The item is left queued (outcome

@@ -5514,3 +5514,110 @@ should replace those estimates with its figures.
   `docs/decision-links.toml`. Ran: `cargo test -p athena-data decision_links`, `cargo test -p athena-core governed`
   and `cargo test -p athena-cli --test backtest`. Not measured: how many past jobs the check would have held, or
   whether producers act on the list of docs lines.
+
+## D188 · One build-folder slot: two jobs run at once, only one at a time holds a build folder
+
+- **Case:** With `[parallel] max_concurrency = 2`, two jobs each kept a build folder of 15 to 24 GB under
+  `<job dir>/target` on a disk that fits one. Both passed the dispatch disk check while the disk was still empty,
+  then built side by side, so free space fell below `[disk] min_free_gb` and jobs were held or discarded for low
+  disk. A first stopgap set `max_concurrency` to 1, which also serialised reading and planning, the parts that
+  need no disk. The owner asked for the lasting fix: queue for disk and not only for running builds, let a second
+  job read and plan, and make it wait for the folder instead of being held.
+- **Decision:** One exclusive build-folder slot, `crate::disk::BuildFolder`, over its own queue directory
+  `<state>/build-folder/` (`slots::SlotQueue` with one entry: first in first out, freed on drop or on the death of
+  the process, with the kill switch read on every poll). `dispatch` in `crates/athena-core/src/run/mod.rs` takes
+  it after planning and before the baseline checks (before the checks of a resumed job), and drops it after the
+  job is closed. The guard's drop removes the job's `target/` and the holder file and only then frees the slot, so
+  a free slot means no job's build folder is held, whether the job landed, was rejected, failed, was held, was
+  killed or ended blocked by a local edit (a blocked job keeps its directory until it is closed, but no longer its
+  build folder, and `a_blocked_job_keeps_its_directory_until_it_is_closed_and_closing_reports_the_exact_space` in
+  `crates/athena-cli/tests/lifecycle.rs` now says so). The slot covers the whole build life of the job and not only the producer, because the baseline checks,
+  the demonstrations and the verifier's `cargo` all leave a real `target/verify`. A job that waits for the slot is
+  not held, uses no attempt and is not discarded; the wait ends by the holder's end, the kill switch or a limit of
+  seven days, which is held as a build-slot wait as the producer's is. At dispatch only, `dispatch_disk_gate` does
+  not hold a job when free space plus the measured bytes under `target/` of the job the holder file names, whose
+  job lock is held, meets the minimum; every other shortfall holds as before and the threshold is unchanged. The
+  wait is left out of `wall_time_execution` through a `RunClock` in the run context, so a job that queued behind
+  another job's build is not scored as slow to execute; no record shape changes. `max_concurrency` stays 2: it
+  bounds jobs, the slot bounds builds. The slot count is 1 and has no setting.
+- **Alternatives:** A global `max_concurrency` of 1 (the stopgap): it serialises reading and planning too, which
+  need no disk, and wastes the second job's model time. A free-disk check only (the existing gate, or the
+  in-flight bound `start_hold`): it is a reading taken before the builds begin, so two jobs that start together
+  both pass it, and it holds a job after planning spend instead of queueing it. Release the slot after the
+  producer, before the checks: the baseline folder, the demonstrations and the verifier's `cargo test` still build
+  in `target/verify` afterwards, so the next producer would build beside them. Take the slot a second time before
+  the verifier: the other job could take it in between, so the first job's verifier would wait behind a whole
+  producer run. Take `Class::Producer` from the check slots' queue for the whole job: that queue's count is
+  `max_check_slots` and the holder's own cargo shim and checks need the same slot, so the job would wait on
+  itself. A bare lock file loop: it rebuilds the ticket order, and a waiter could starve. Use `build_wait_s` (1800
+  s) as the limit: it is shorter than one job's producer, checks and verifier, so the second job would be held,
+  which the request rules out. Credit every other job whose job lock is held: a landing or a manage command also
+  locks a job, so a `target/` that no holder will free would be counted. Credit the expected folder size T (6 GB):
+  it is below the 15 to 24 GB folders, and the holder's actual bytes are what free space regains. Probe the slot
+  and skip the gate whenever it is held: it blames any shortfall on the other job. Keep the wait in
+  `wall_time_execution`: about half the jobs would record another job's whole build as execution time and skew the
+  forecast and its scoring.
+- **Tradeoff:** Builds are ordered, so only reading and planning overlap; a waiting job occupies a drain worker. A
+  job that is short of disk for its own reasons while the holder's folder exists plans before it is held, which
+  spends planner money. The credit reads the holder file: a holder that crashed while its job is locked by a
+  manage command can credit a folder no one frees, and the pre-producer gate then holds the job, again after
+  planning. Two builds stay outside the slot: the drain's own rebuild after a landing that touches Athena's code
+  (`rebuild_if_due`, which runs `setup.sh` in the checkout) and the check slots' warm target directories
+  (`slot_target`, up to `slot_max_gb` = 8 GB each), so free space can still fall below the gate with two jobs.
+  This was shown by tests that simulate free space, not on a real disk.
+- **Reversal cost:** Low; remove the `take_build_folder_or_hold` calls in `dispatch`, `BuildFolder`,
+  `dispatch_disk_gate` and the holder file in `crates/athena-core/src/disk.rs`, the two `StateDir` paths and
+  `RunClock`, and set `max_concurrency` to 1 again.
+- **Provenance:** Read: `crates/athena-core/src/slots.rs` (`SlotQueue`), `crates/athena-core/src/run/mod.rs`
+  (`dispatch`, `produce_and_verify`, `RunContext`), `crates/athena-core/src/run/checks.rs` (the baseline and the
+  check executor), `crates/athena-core/src/disk.rs` (`gate`, `sweep_idle_targets`, `start_hold`),
+  `crates/athena-core/src/state.rs`, `crates/athena-core/src/land.rs` (why a second job from the same base ends
+  stale) and `docs/design/agent-and-build-slots.md`. Ran: `cargo test -p athena-core build_folder`, `cargo test -p
+  athena-core disk::tests`, `cargo test -p athena-cli --test drain the_live_config_allows_two_jobs_at_once`,
+  `cargo test -p athena-core governed` and `cargo test -p athena-cli --test backtest`. Not measured: free space
+  or the size of a build folder on the owner's disk, and how often a second job waits.
+
+## D189 · The producer brief tells the producer how to fix a flaky or racy failure: reproduce under load, name the code cause, fix once, find every site
+
+- **Case:** Four jobs fixed a flaky test or a racy fixture and were sent back or flagged: 20261106-065752-jexx,
+  20261106-095820-edjm, 20261106-080857-9daz and 20261112-005306-pa2j (failure class
+  flaky-test-fix-patches-call-sites-not-root-cause, four introspections). The fix went in call site by call site,
+  no producer reproduced the flake under load or recorded counts, and nothing listed every site of the pattern.
+  The failing stage lacked information, not permission: the change producer's brief said nothing about how to
+  reproduce a race, how to state a cause, how to fix a repeated pattern once, or that the evidence must be
+  reported. The planner frame, which shapes the design the producer follows, lacks the same guidance.
+- **Decision:** One prose paragraph in `crates/athena-cap-change/prompts/producer.md`, before the closing
+  criteria_check sentence, which becomes its own last paragraph. For an intermittent or racy failure it asks the
+  producer to reproduce it under load with a test that loops the action on threads and counts failures (the worked
+  example is `crates/athena-testkit/tests/stand_in_stress.rs`), to name the cause in code terms and fix it where it
+  starts, to fix sites that share the cause in one shared helper with a repo test that finds every site and fails
+  with the cause put back, and to report the command and counts before and after. The method is a loop inside one
+  test and not a shell loop, because the producer's Bash policy splits commands at `&&`, `;`, `|` and newlines and
+  needs each program on the role's list (`crates/athena-agent/src/policy.rs`), and `athena.toml` lists only cargo,
+  git, ls, rm, mv and chmod for the change producer. The unit test
+  `the_producer_brief_carries_the_flaky_test_guidance` in `crates/athena-cap-change/src/lib.rs` pins each element,
+  the report step as the last paragraph, that the named example file exists, and that the live producer command
+  list names no shell program, so the denial claim stays true. The larger prompt moves the computed producer set
+  from 1043 to 1194 of 1200, and `docs/system-facts.md` changes that one number because the budget drift test
+  requires it (a forced edit, not a listed deliverable). No refusal rule, gate or job step is added: 0% of past
+  accepted readings are refused. D160 and D163 stand; the testkit helper, the scan, the stress test and the drain
+  fix from the earlier jobs are untouched.
+- **Alternatives:** A job-flow step Athena runs itself (reproduce and soak before the verdict): it is a gate that
+  holds work and needs core changes, and the request prefers giving the stage information. A refusal rule on
+  call-site fixes: it would refuse work the producer could have done right with the missing facts. Another scan
+  for executable writes: one already exists and covers one pattern, not the class. The shared contract or the
+  producer frame: the frame is also read by study producers and the shared prompts have no headroom. A shell loop
+  in the guidance: the Bash policy denies it. Trimming older sentences to save room: it rewrites guidance unrelated
+  to this request.
+- **Tradeoff:** Prose compliance is not measured, and no gate checks it. The method fits only races that an
+  in-process thread loop can show; a race that needs separate processes is not covered. The margin to the budget
+  is 6 tokens, so the next edit to this prompt must pay for itself. The planner can still hand the producer a plan
+  that patches call sites. Follow-up, not made here because `crates/athena-context/prompts/planner.md` is not
+  among this reading's deliverables: one sentence in the planner frame (planner set 1105 of 1200).
+- **Reversal cost:** Low; remove the paragraph and the test, and set the producer line in `docs/system-facts.md`
+  back to 1043.
+- **Provenance:** Read: `crates/athena-cap-change/prompts/producer.md`, `crates/athena-cap-change/src/lib.rs`,
+  `crates/athena-testkit/tests/stand_in_stress.rs`, `crates/athena-cli/tests/budgets.rs` and `athena.toml`. Ran:
+  `cargo test -p athena-cap-change` and `cargo test -p athena-cli --test budgets`. The base budget line read 1043 of
+  1200; the computed value after the change is 1194 of 1200. Not measured: whether producers follow the paragraph,
+  or how often a flake needs more than an in-process thread loop.

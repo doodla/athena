@@ -339,6 +339,19 @@ impl StateDir {
         self.root.join("slots")
     }
 
+    /// Where the build-folder slot lives: the one exclusive hold on a job's build folder, taken for the build
+    /// life of a job (`crate::disk::BuildFolder`). It is a directory of its own, so its count is not the
+    /// check slots' `max_check_slots`. Asking creates nothing.
+    pub fn build_folder_dir(&self) -> PathBuf {
+        self.root.join("build-folder")
+    }
+
+    /// The file that names the job holding the build-folder slot, written while it holds it. The queue reads
+    /// only its own lock and ticket files, so this file in the same directory does not disturb it.
+    pub fn build_folder_holder_file(&self) -> PathBuf {
+        self.build_folder_dir().join("holder")
+    }
+
     /// The directory that holds the build slots' warm target directories. Unlike a job's directory it is never
     /// removed when a job ends: it belongs to the slots, not to any job
     /// (`docs/design/agent-and-build-slots.md` section 5.3).
@@ -915,6 +928,19 @@ mod tests {
         let state = StateDir::new(temp.path().to_path_buf());
         assert_eq!(state.slots_dir(), temp.path().join("slots"));
         assert!(!state.slots_dir().exists(), "asking creates nothing");
+    }
+
+    #[test]
+    fn the_build_folder_slot_has_its_own_directory_apart_from_the_check_slots() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        assert_eq!(state.build_folder_dir(), temp.path().join("build-folder"));
+        assert_eq!(
+            state.build_folder_holder_file(),
+            temp.path().join("build-folder").join("holder")
+        );
+        assert_ne!(state.build_folder_dir(), state.slots_dir());
+        assert!(!state.build_folder_dir().exists(), "asking creates nothing");
     }
 
     #[test]
