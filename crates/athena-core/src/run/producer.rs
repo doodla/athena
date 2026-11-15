@@ -38,6 +38,8 @@ pub(super) struct Reported {
     /// The replay the loop measured on the last report, when it ran. The hold at verification reuses it for
     /// the same candidate tree and accepted readings.
     pub(super) loop_replay: Option<LoopReplay>,
+    /// Athena's runs of the real-records criteria on the last report, for the verifier's brief.
+    pub(super) records_runs: Vec<RecordsRun>,
     /// The sequence number the next invocation gets.
     pub(super) seq: u32,
     pub(super) snapshot: Snapshot,
@@ -277,6 +279,15 @@ impl Athena {
     /// verdict. The run is advisory: low disk, a busy build slot, an error and a change to check-tool
     /// configuration skip it with a line, and only the kill switch ends the job.
     ///
+    /// The real-records criteria run after the checks and before the loop can end ([`Athena::loop_records_criteria`]).
+    /// Root cause: a status or usage measure was checked only on fixtures, or its evidence cited no command that
+    /// ran, and nothing ran the criterion's `status --snapshot` command on the real records before the verifier,
+    /// so the whole job was rejected at the final verdict (failure class 20261111-105030-a2bc). Athena now runs
+    /// that command itself on the work tree; a measure that is constant across items, or a figure outside the
+    /// stated range, joins the one shared send-back with the command and its output. The command and output reach
+    /// the verifier's brief for every run. An evidence snapshot the producer cannot reach ends the job here, with
+    /// the snapshot named, before any verifier runs. The rules and their limits are in `records_criteria`.
+    ///
     /// The work tree is formatted by `Athena::format_stage` (see the `format` module). The format step belongs
     /// at the end of producer_loop, before the change list is taken: it is the last producer-stage act of every
     /// pass, right after the producer returned and its report was parsed. "After the producer" means after each
@@ -331,6 +342,8 @@ impl Athena {
         let mut left_criteria: Vec<String>;
         // The replay of accepted readings measured on the last report, when it ran.
         let mut loop_replay: Option<LoopReplay>;
+        // Athena's runs of the real-records criteria on the last report.
+        let mut records_runs: Vec<RecordsRun>;
         let report = loop {
             // Every pass enters the producer stage, so a send-back reports it again.
             ctx.stages.enter(&id, Stage::Producer);
@@ -504,16 +517,31 @@ impl Athena {
             // The configured checks on the work tree as it stands, before the verifier. A check that fails
             // here and did not fail on the base is a problem like an unmet criterion; a run that did not
             // happen is not.
-            let check_failures = self.loop_check_failures(
+            let loop_work = LoopWork {
+                job_dir: &job_dir,
+                snapshot: &snapshot,
+                capability_env: &capability_env,
+                changed: &changed,
+                baseline: closing.baseline.as_ref(),
+            };
+            let check_failures = self.loop_check_failures(ctx, &loop_work)?;
+            // Each behavior criterion that names real records, run on the same work tree by Athena itself.
+            // A problem is one more reason for the shared send-back; an unreachable snapshot ends the job.
+            let RecordsLoop { runs, unreachable } = self.loop_records_criteria(
                 ctx,
-                &LoopWork {
-                    job_dir: &job_dir,
-                    snapshot: &snapshot,
-                    capability_env: &capability_env,
-                    changed: &changed,
-                    baseline: closing.baseline.as_ref(),
-                },
+                &loop_work,
+                accepted,
+                spec.hook.as_ref().map(|h| h.policy_file.as_path()),
             )?;
+            if let Some(reason) = unreachable {
+                closing.happened = self.failure(ctx, &reason);
+                return Ok(Flow::Stop);
+            }
+            let records_problems: Vec<String> = runs
+                .iter()
+                .filter_map(|r| r.problem().map(str::to_string))
+                .collect();
+            records_runs = runs;
             if unmet.is_empty()
                 && unchanged.is_empty()
                 && held.is_none()
@@ -522,6 +550,7 @@ impl Athena {
                 && !changelog_missing
                 && mirror_drift.is_empty()
                 && check_failures.is_empty()
+                && records_problems.is_empty()
             {
                 break Some(report);
             }
@@ -547,6 +576,8 @@ impl Athena {
             }
             // A check that still fails at the limit reaches the verifier as a gap, flagged, not hidden.
             problems.extend(check_failures.iter().map(CheckFailure::problem));
+            // A real-records measure that is constant or out of range is handled the same way.
+            problems.extend(records_problems);
             // What the verifier is told the report still lacked at the limit; the gate's finding is not part
             // of it, because the job ends at the gate and no verifier runs.
             let report_problems = problems.clone();
@@ -667,12 +698,17 @@ impl Athena {
                 }
                 (None, None, None) => send_back_text(brief, &unmet, &unchanged),
             };
-            attempt_brief = append_check_failures(
-                append_missing_changelog(
-                    append_mirror_drift(next_brief, &mirror_drift),
-                    changelog_missing,
+            attempt_brief = append_records_problems(
+                append_check_failures(
+                    append_missing_changelog(
+                        append_mirror_drift(next_brief, &mirror_drift),
+                        changelog_missing,
+                    ),
+                    &check_failures,
                 ),
-                &check_failures,
+                &records_runs,
+                &crate::snapshot::evidence_dir(&self.state, &id),
+                id.as_str(),
             );
         };
         Ok(Flow::Go(Reported {
@@ -681,6 +717,7 @@ impl Athena {
             report_kept_in,
             left_criteria,
             loop_replay,
+            records_runs,
             seq,
             snapshot,
             work,

@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045657-96np",
+  "round": 1,
+  "at": "2026-11-14T22:56:29.438410947Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The parser for the constant and out-of-range checks assumes the command prints one value per item. `status --snapshot` prints summary lines instead, so the checks compare unrelated numbers and will send correct work back.",
+      "evidence": "`snapshot_status` prints `snapshot <path>`, `base <hash>`, `history N first-parent commit(s)`, newest and oldest lines with a hash and a date, `jobs N state · …`, `landings N landing record(s)`, then `Throughput::text`. That block holds several different minute figures (median, idle, unlanded), stage medians (`name m.1`) and per-day counts, often several on one line. With no unit, the 'first number on each line' rule takes the history count, the job count, the landing count and hash digits as 'items', and judges them against a range such as 2 to 10 minutes. With a unit, every number followed by 'minutes' counts, so idle and unlanded minutes are judged against the landing-time range. run_check also sends stdout and stderr to one file (checks.rs:522-523), so cargo warning lines such as `--> file.rs:120:9` are parsed too. The plan's own risk section says the output has no standard per-item format. A wrong send-back spends the only shared send-back (PRODUCER_SEND_BACKS = 1). Fix: Judge only the measure the criterion names. Find the line or field that holds the measure's own phrase (for example the RECORDS_MEASURE_PHRASES word such as `landing time`, or the field in `status --snapshot --json`; commands.rs:472 already has a json flag). Compare only that value with the range. Run the constant check only when the output holds a real list of items for that measure; otherwise record the output and send nothing back. Ignore stderr or cargo's own lines. State the rule in the module docs.",
+      "location": "Approach step 4 and Decision 4 (value and range parsing); crates/athena-cli/src/display.rs:1196-1249; crates/athena-core/src/status/throughput.rs:789-845; crates/athena-core/src/checks.rs:522-539",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The fake-producer tests feed the parser invented output that the real command never prints, so a pass shows nothing about real status output and hides the false send-backs.",
+      "evidence": "The seam maps the cargo command to `sh -c 'printf …'` with lines like `landing a 3.0 minutes` and `landing b 6.5 minutes`. No code path in snapshot_status or Throughput::text prints lines in that shape. The parsing that the request depends on is only ever tested against the stand-in's format. Fix: Keep the seam for the loop tests. Add unit tests in records_criteria.rs on real `status --snapshot` output: capture text in the shape snapshot_status prints, such as the output that crates/athena-cli/tests/status_snapshot.rs checks, or build it from SnapshotView and Throughput::text in core. Assert that a correct, varied measure is not sent back and that the constant and out-of-range cases fire only on the named measure. Make the seam's output in the loop tests follow that real shape too.",
+      "location": "Demonstrations for criteria 1, 2 and 3 (argv_seam printing `landing a 3.0 minutes` and similar)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan treats 'unreachable from the producer's workspace' as 'missing or unreadable from Athena's own process'. The accepted reading also counts 'not readable through the producer's permissions', and the plan explicitly drops that case.",
+      "evidence": "The reading says the snapshot is unreachable when 'the path is missing or not readable by the producer's grant'. The plan says 'Athena runs the command from its own process, so it does not depend on the grant'. The snapshot is written before the producer runs, and a failed write already stops the job (mod.rs:1149-1154). So a missing directory after the producer pass happens almost only in the plan's own test, which deletes the file after unlocking it. The real failure, a producer that cannot read the snapshot and so cites no command that ran, is never detected. The producer's read permission is in athena-agent's policy (`Policy::evidence`, policy.rs:43-52, evaluated at policy.rs:90-117 and tested at 1405-1411). Fix: Also check the producer's permissions: build or reuse the producer's Policy and test, with `athena_agent::policy::evaluate`, that a read of the evidence directory (or the criterion's `cargo run … status --snapshot <dir>` command) gets no objection. End the job with the path and the reason when it does. Consider doing this check before the producer starts, which is cheaper and ends the job earlier. Add a test for the permission case alongside the deleted-file case.",
+      "location": "Approach ('An unreachable snapshot'), Step 3, Dependents entry 'The producer's own read access to the evidence snapshot'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Sending back on a failed `cargo run` repeats what the in-loop checks already report and adds a send-back reason the request did not ask for.",
+      "evidence": "The request names two send-back reasons: a measure that gives the same answer for every item, and a value outside the range. A build failure in the producer's tree already shows up as a failing in-loop check (checks.rs:447-455). The same failure would then be reported twice, and a timeout or an environment error would spend the one send-back. Fix: Record a non-zero exit as 'not run / failed to run' evidence for the verifier and send nothing back for it. Or justify it in D183 and remove the duplicate when a check has already failed.",
+      "location": "Decision 3 (non-zero exit is a send-back problem)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The judged output is cut to the last 4 KB, so item lines at the start of a long status block could be dropped before judging.",
+      "evidence": "checks.rs:26 sets TAIL_BYTES = 4096, and checks.rs:616 keeps only the tail for a passed run. Throughput::text produces long lines, including the per-day list and the waste lines. Fix: Judge the whole stdout (read the output file directly, or keep a larger tail just for this run) and clip only what is shown to the verifier.",
+      "location": "Approach step 3 (`CheckRun.output_tail`, TAIL_BYTES 4096)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test reading's capability and class are left to be found by trial during the work.",
+      "evidence": "The plan says it did not read the reading checks and will adjust class_of_work if the reading is refused. Fix: Choose the capability and class now from an existing tests.rs case that uses a behavior criterion (the plan cites tests.rs:1368), so the fake-producer tests are fixed before work starts.",
+      "location": "Risks ('The scripted reader's behavior criterion must pass the reading checks')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan hooks in at the right place, just before `break Some(report)` (producer.rs:507-527). It reuses the in-loop executor (`SnapExec` with in_loop, then run_check), the shared send-back and the existing \"not a check\" entry pattern (verification.rs:88-127). Every file and function it names exists, and `CheckResultView` derives Default, so the new optional field breaks no constructor. Two parts are unsound. (1) The judgement of the output assumes `status --snapshot` prints one value per item. It does not: `snapshot_status` (display.rs:1196-1249) and `Throughput::text` (throughput.rs:789-845) print summary lines (path, hash, history count, job counts, several different minute figures). Also, run_check sends stdout and stderr to one file, so cargo warning lines are parsed too. The rules \"first number on each line\" and \"every number followed by the unit\" would compare unrelated figures and send correct work back. The tests hide this, because the shell stand-in prints invented lines (`landing a 3.0 minutes`) that the real command never prints. (2) \"Unreachable from the producer's workspace\" is reduced to \"the folder or history.json is missing, as seen from Athena's own process\". The snapshot is written before the producer starts and a failed write already stops the job (mod.rs:1153-1154), so this check fires almost only in the plan's own test, where the fake producer deletes the file. The producer-permission meaning in the accepted reading goes unchecked. Both can be fixed within the plan, so the verdict is revise."
+}

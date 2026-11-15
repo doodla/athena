@@ -65,12 +65,14 @@ mod format;
 mod pin;
 mod planning;
 mod producer;
+mod records_criteria;
 mod send_back;
 mod verification;
 
 use candidate::Admitted;
 use checks::{LoopWork, SnapExec, baseline_for};
 use producer::{Flow, Reported};
+use records_criteria::{RecordsLoop, RecordsRun, append_records_problems};
 use verification::Checked;
 
 /// The seam that lets another crate's tests choose the program a planned demonstration runs; see
@@ -78,6 +80,12 @@ use verification::Checked;
 #[cfg(feature = "test-support")]
 pub use checks::demo_seam::{Guard as DemoRunnerGuard, install as install_demo_runner};
 pub use close::{build_text, closing_subject};
+/// The seam that lets another crate's tests choose the program a real-records run starts; see
+/// `records_criteria::argv_seam`. Only a `test-support` build has it.
+#[cfg(feature = "test-support")]
+pub use records_criteria::argv_seam::{
+    Guard as RecordsRunnerGuard, install as install_records_runner,
+};
 pub(crate) use send_back::{
     CheckFailure, append_check_failures, append_mirror_drift, append_missing_changelog,
     left_to_athena, send_back_text, send_back_text_full, send_back_text_scoped,
@@ -156,6 +164,9 @@ struct Built {
     /// same candidate tree and the same accepted readings. `None` for a resumed candidate and for a job whose
     /// loop did not measure.
     loop_replay: Option<LoopReplay>,
+    /// Athena's runs of the real-records criteria on the producer's last report, in their stored form, for the
+    /// verifier's brief. Empty for a resumed candidate (no producer pass ran) and for a job with no such criterion.
+    records_runs: Vec<RecordsRun>,
 }
 
 /// A replay of the newest accepted readings that the producer's loop measured while the producer could still
@@ -825,6 +836,7 @@ impl Athena {
             recorded_checks: (mark.stage == ResumeStage::Verifier && same_checks)
                 .then_some(mark.check_runs),
             loop_replay: None,
+            records_runs: Vec::new(),
         };
         self.write_resume_mark(ctx, &closing, &built);
         self.check_and_verify(ctx, accepted, closing, built)
@@ -1591,7 +1603,8 @@ pub(crate) mod ci_seam {
 
 /// How many times a report with unmet criteria goes back to the producer before the verifier judges it. A
 /// configured check that fails on the work before the verifier ([`Athena::loop_check_failures`]) shares this
-/// one send-back: it adds no loop and no count.
+/// one send-back: it adds no loop and no count. So does a real-records criterion whose measure is constant
+/// across items or outside its stated range ([`Athena::loop_records_criteria`]).
 const PRODUCER_SEND_BACKS: u32 = 1;
 
 /// The paths the candidate is expected to change: the accepted plan's files (when the job was planned)
@@ -1813,6 +1826,7 @@ impl Athena {
             report_kept_in,
             left_criteria,
             loop_replay,
+            records_runs,
             seq,
             snapshot,
             work,
@@ -1854,6 +1868,7 @@ impl Athena {
             left_criteria,
             recorded_checks: None,
             loop_replay,
+            records_runs,
         };
         // The candidate is built: from here a job that stops for the environment, or whose process dies, is
         // resumed from it by `athena retry`, with no planner and no producer run.

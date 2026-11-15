@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045657-96np",
+  "round": 2,
+  "at": "2026-11-14T23:09:09.030947557Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The records run writes the real evidence path into the stored verifier brief (and possibly the stored invocation detail), breaking the placeholder rule that keeps machine paths out of records.",
+      "evidence": "mod.rs:1155-1156: 'The stored brief names the snapshot with a placeholder (no machine path is committed); the text sent to the agent has the real path.' verification.rs:179-189 stores brief-verifier.md built from the same `inputs` the plan extends with `records-criterion-<n>` entries. The plan puts the command with `the job's evidence path` and the raw stdout in those entries, and the first stdout line is `snapshot    {v.dir}` (display.rs:1198), the absolute path. Problems text joined into `attempt.detail` (producer.rs:590-594) would also carry it if it holds the command. run/tests.rs:1137-1156 shows the stored-versus-sent contract. Fix: In everything that is stored (CheckResultView.records_run, the problem text, the invocation detail), write the command and output with the real evidence path replaced by `evidence_placeholder(id)`. Use the real path only in text sent to the agent, for example by replacing the placeholder in the sent verifier brief as is already done for the evidence section. Add a test asserting the stored brief-verifier.md and the producer detail contain no real state path while the sent prompt does.",
+      "location": "Approach (3)/(5); Files: run/verification.rs, briefs.rs; Demonstration criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Soundness: the constant-measure rule has obvious false positives on the real status output and sends back correct work.",
+      "evidence": "throughput.rs:837 prints `throughput {landed_total} landed ({days})`, where days = `{day} {landed}` joined by ` · ` (throughput.rs:813-818). A criterion naming `throughput` is a gate trigger phrase (surveys.rs:506-508), for example 'on the real records the throughput it prints is within the expected range'. It makes this line judged. `2026-11-10 3 · 2026-11-11 3` is a parenthesised list of unitless `label number` items that are all equal, so the plan calls it constant and sends back. Equal daily counts (or any two coincidentally equal stage medians, since the threshold is two items) are common, so the one shared send-back is spent and a false gap reaches the verifier. Fix: Narrow what counts as an item list. Treat a list as per-item values only when it has at least three items whose labels are job ids (the `\\d{8}-\\d{6}-\\w{4}` form), or when the criterion itself says per job / for each job / every item. Otherwise record it as not judged. Add unit tests on the real `throughput N landed (day n · day n)` line and on equal stage medians that assert no send-back.",
+      "location": "Decision 1 / Approach (4): 'Items are the ` · `-separated `label number` entries in a parenthesised list on a judged line... At least two items that are all equal are a problem'",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Athena's records run does not count as a command seen running, so a verifier that cites it still fails the behavior criterion at the final verdict. That is the failure the request is about, and no demonstration shows the job gets past the verdict.",
+      "evidence": "verify.rs:411-445 builds `ran` from the verifier's own commands_run plus passing CheckRun records in `inputs.checks` (D115). verify.rs:573-603 marks a behavior criterion unmet with a D43 Major finding when a cited command is 'cited but not seen running'. The plan puts the records run only into the brief view (CheckResultView with command `not a check`), never into the check runs the verdict reads. A verifier that sees `records-criterion-1` with its command and output and cites it gets the D43 failure. The request: 'evidence that cites no command that ran, and the verifier rejects the whole job'. Fix: Choose one and test it end to end. (a) Make a finished records run count as seen running for the criterion it ran, by name or command, the way revert runs count for their criteria (verify.rs:562-572), with a test that reaches Landed when the verifier cites it. Or (b) have the rendered entry say explicitly that it is Athena's run, does not count as the verifier's command, and must be run again and cited, with a briefs test for that sentence. Name the choice in D183.",
+      "location": "Decision 5 / Demonstration criterion 2 ('The test asserts counts, prompt and lines, not `Landed`, because the verdict needs the verifier's cited commands (verify.rs:581)')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Unit matching is not specified, yet every demonstration depends on matching `minutes` in the criterion with `min` in the output.",
+      "evidence": "Demonstrations 1 and 3 use the range '2 to 10 minutes' against output `4.0 min` and `273.8 min`. throughput.rs:837 prints `min`. A literal unit match would judge nothing and the send-back assertions would fail. Fix: State a small alias table (min/minute/minutes, s/sec/second/seconds, USD) in the module docs, and unit-test each alias pair.",
+      "location": "Approach (4): 'Figures are the numbers on a judged line directly followed by the range's unit'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criteria whose command is a bare `status --snapshot evidence` or `athena status --snapshot ...` are accepted by the gate but would be skipped silently, though the request says to run each such criterion.",
+      "evidence": "reading.rs:8552-8584 tests accept criteria of the form \"Run `status --snapshot evidence`: on the real records ...\". The plan lists 'a non-`cargo run` command' as a unit-test input but never says what happens to it. Fix: Map any selected `status --snapshot <token>` command to `cargo run -p athena-cli -- status --snapshot <evidence>`, so it runs on the producer's tree. If that is not wanted, record a `not run: the criterion gives no cargo run command` entry for the verifier, and say which in the module docs.",
+      "location": "Approach (1): 'takes the first backticked `cargo run ... status --snapshot <token>` span'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The CheckSpec kind is not specified. If it were CheckKind::Test, run_check would rewrite the args and fail the run for running zero tests.",
+      "evidence": "checks.rs:526-530 adds cargo test args for CheckKind::Test, and checks.rs:594-598 sets passed=false with 'ran zero tests' for a test check with no test count. Fix: Say the spec uses a non-test kind with `skip_when_only: None`, and unit-test that a clean exit records as run.",
+      "location": "Approach (3): the CheckSpec built for the `sh -c` wrapper",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The policy check is nearly redundant with Athena's own directory check: agent_spec writes `evidence` exactly when the folder existed at spawn. The `evaluate` call as written also lacks its cwd argument.",
+      "evidence": "reading.rs:415-416 filters evidence on `dir.is_dir()`. No OS sandbox exists in athena-agent (no sandbox/bwrap/landlock). policy.rs:90 has the signature `evaluate(policy, tool, input, cwd: Option<&Path>)`. Test (c) has to forge the policy file to reach the branch. Fix: Keep the check if wanted, but state in D183 that it only catches a policy built while the folder was missing. Pass `None` or the snapshot dir as cwd. Or drop test (c) in favour of the direct unit tests of `reach` with Policy values.",
+      "location": "Decision 3 (producer-permission check through the policy file)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Telling producers to print the measure on a line holding the criterion's phrase invites changes to user-facing `status` output that exist only to satisfy Athena's check.",
+      "evidence": "The real output has no `landing time` line (display.rs:1196-1249, throughput.rs:837). The plan's risk section accepts that, for the gate's usual wording, nothing is judged unless the producer changes the output to include the phrase. Fix: Word the sentence so it describes how Athena judges and does not ask for output changes, for example: 'Athena judges only a line that holds the criterion's phrase; others are recorded for the verifier.' Do not ask the producer to reformat output.",
+      "location": "Approach: 'The producer brief gets a sentence that says ... finds the measure on the line holding the criterion's phrase'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The text says the stage still runs after each pass of a resumed job, but the resume shortcut at mod.rs:818-828 runs no producer pass at all.",
+      "evidence": "mod.rs:818-828 builds `Built` straight from the resume mark, with no producer_loop call. Fix: Say that a candidate taken through the resume shortcut gets no records run, and that a retry which runs the producer again gets one after each pass.",
+      "location": "Open question 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the stage at the right point: after loop_check_failures (producer.rs:507) and before break Some(report) (producer.rs:526). It reuses the real in-loop executor (SnapExec with in_loop, ExposedIndex, run_check), has a plausible seam modelled on demo_seam, and its readers list is mostly complete. Three design problems would leave the request's outcome unshown or cause harm. (1) The command and output carry the job's absolute evidence path into CheckResultView, which goes into the stored brief-verifier.md. The output also starts with `snapshot <dir>`. Athena deliberately keeps machine paths out of stored briefs with a placeholder (mod.rs:1155-1156, verification.rs:179-189). (2) The constant-items rule (two or more equal `label number` items in a parenthesised ` · ` list on the matched line) matches the real `throughput N landed (2026-11-10 3 · 2026-11-11 3)` line (throughput.rs:837). Days with equal counts are common, so correct work is sent back. (3) The verifier sees Athena's run only as a brief entry, but D43 counts only commands the verifier ran plus Athena's own check records (verify.rs:411-445, 573-603). A verifier that cites the records run still fails the criterion at the final verdict, the failure the request wants removed. The plan's own criterion-2 test avoids asserting Landed for this reason. Smaller issues: unit spellings (minutes vs min) are not matched, bare `status --snapshot` commands are not selected, the check kind is not specified, the policy-grant check is nearly redundant, and the text on resumed jobs contradicts itself. Verdict: revise."
+}

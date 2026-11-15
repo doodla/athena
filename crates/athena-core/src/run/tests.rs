@@ -4888,6 +4888,612 @@ mod produce_and_verify_order_tests {
         drop(holder);
     }
 
+    // ----- The real-records run before the verifier (`records_criteria`). -----
+
+    /// A behavior criterion of the shape the reading gate asks for: the command, the real records, the measure
+    /// phrase and a numeric range.
+    const RECORDS_CRITERION: &str = "Run `cargo run -p athena-cli -- status --snapshot evidence`: on the real records the landing time it prints is within the expected range 2 to 10 minutes taken from the commit times in history.json";
+    /// The package file the mapped command needs, committed to the test repository.
+    const ATHENA_CLI_MANIFEST: &str = "[package]\nname = \"athena-cli\"\nversion = \"0.1.0\"\n";
+    /// The per-job lines the seam prints, in the shape a per-job measure would print them.
+    const CONSTANT_LINE: &str = "landing time 4.0 min (20261101-101010-aaaa 3.0 \u{b7} 20261101-111111-bbbb 3.0 \u{b7} 20261101-121212-cccc 3.0)";
+    const VARIED_LINE: &str = "landing time 4.6 min (20261101-101010-aaaa 3.0 \u{b7} 20261101-111111-bbbb 6.5 \u{b7} 20261101-121212-cccc 4.2)";
+    const FAR_LINE: &str = "landing time 273.8 min (20261101-101010-aaaa 3.0 \u{b7} 20261101-111111-bbbb 600.0 \u{b7} 20261101-121212-cccc 12.5)";
+    const CLI_COMMAND: &str = "cargo run -p athena-cli -- status --snapshot";
+
+    /// The test repository with the `athena-cli` package file committed, so the package gate passes for real.
+    fn repo_with_cli_package() -> tempfile::TempDir {
+        let repo = repo();
+        commit_file(&repo, "crates/athena-cli/Cargo.toml", ATHENA_CLI_MANIFEST);
+        repo
+    }
+
+    /// `inner`, except that the reader adds each of `texts` as a behavior criterion, and the producer and the
+    /// verifier report each one when their prompt lists it. `verifier` may change the verifier's turn after.
+    fn with_behavior_criteria(
+        inner: athena_agent::fake::Script,
+        texts: Vec<String>,
+        verifier: impl Fn(&AgentInvocation, &mut FakeTurn) + Send + Sync + 'static,
+    ) -> athena_agent::fake::Script {
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            match spec.role {
+                Role::Reader => {
+                    if let Some(out) = turn.structured.as_mut() {
+                        for text in &texts {
+                            out["acceptance_criteria"]
+                                .as_array_mut()
+                                .unwrap()
+                                .push(json!({ "text": text, "kind": "behavior" }));
+                        }
+                    }
+                }
+                Role::Producer => {
+                    if let Some(out) = turn.structured.as_mut() {
+                        for text in texts
+                            .iter()
+                            .filter(|t| spec.user_prompt.contains(t.as_str()))
+                        {
+                            out["criteria_check"].as_array_mut().unwrap().push(
+                                json!({ "criterion": text, "status": "met", "evidence": "ran it" }),
+                            );
+                        }
+                    }
+                }
+                Role::Verifier => {
+                    if let Some(out) = turn.structured.as_mut() {
+                        for text in &texts {
+                            out["criteria"].as_array_mut().unwrap().push(json!({
+                                "criterion": text, "met": true, "evidence": "checked", "commands": []
+                            }));
+                        }
+                    }
+                    verifier(spec, &mut turn);
+                }
+                _ => {}
+            }
+            turn
+        })
+    }
+
+    /// A verifier hook: the last criterion cites the status command on the evidence snapshot, and the
+    /// verifier's turn says it ran it when `run_it`.
+    fn citing_verifier(run_it: bool) -> impl Fn(&AgentInvocation, &mut FakeTurn) + Send + Sync {
+        move |spec, turn| {
+            let path = evidence_path_in(&spec.user_prompt)
+                .expect("the verifier brief names the evidence snapshot");
+            let command = format!("{CLI_COMMAND} {}", path.display());
+            if run_it {
+                turn.commands_run = vec![command.clone()];
+            }
+            let out = turn.structured.as_mut().unwrap();
+            let last = out["criteria"].as_array_mut().unwrap().last_mut().unwrap();
+            last["commands"] = json!([command]);
+        }
+    }
+
+    /// The program the seam runs for the status command: a real-shaped status block whose `landing time` line
+    /// is `bad` until the producer's tree holds `FIXED.txt` and `good` after, with a cargo-style line on
+    /// standard error.
+    fn records_script(bad: &str, good: &str) -> String {
+        format!(
+            r#"printf 'snapshot    %s\n' "$1"
+printf 'history     200 commits, newest abc1234 2026-11-12\n'
+printf 'jobs        12 landed\n'
+printf 'throughput 6 landed (2026-11-10 3 · 2026-11-11 3 · 2026-11-12 3)\n'
+printf 'median per landed job over the last 3 measured: 4.0 min (reading 0.0 · planning 0.0 · producer 1.0 · checks 0.0 · verifier 1.0 · landing and rebuild 0.0)\n'
+if [ -f FIXED.txt ]; then printf '%s\n' '{good}'; else printf '%s\n' '{bad}'; fi
+echo '--> src/x.rs:120:9' >&2"#
+        )
+    }
+
+    /// The installed seam and every argv it was asked to map.
+    struct RecordsSeam {
+        calls: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>,
+        _guard: super::super::records_criteria::argv_seam::Guard,
+    }
+
+    impl RecordsSeam {
+        fn count(&self) -> usize {
+            self.calls.borrow().len()
+        }
+    }
+
+    /// Installs the seam: the mapped program prints [`records_script`]'s block, the evidence path being the
+    /// argument the status command was given.
+    fn records_seam(bad: &str, good: &str) -> RecordsSeam {
+        let calls: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>> = Default::default();
+        let script = records_script(bad, good);
+        let seen = calls.clone();
+        let guard = super::super::records_criteria::argv_seam::install(std::rc::Rc::new(
+            move |argv: &[String]| {
+                seen.borrow_mut().push(argv.to_vec());
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    script.clone(),
+                    "sh".to_string(),
+                    argv[7].clone(),
+                ]
+            },
+        ));
+        RecordsSeam {
+            calls,
+            _guard: guard,
+        }
+    }
+
+    /// The path of a job's evidence snapshot under `state`.
+    fn evidence_of(state: &tempfile::TempDir, job: &JobId) -> String {
+        state
+            .path()
+            .join("repo")
+            .join("jobs")
+            .join(job.as_str())
+            .join("evidence")
+            .display()
+            .to_string()
+    }
+
+    /// One job over `repo` with [`RECORDS_CRITERION`] added: the closing, the UI lines, the athena, the job, the
+    /// counts, the producer prompts and the verifier prompts.
+    #[allow(clippy::type_complexity)]
+    fn records_job(
+        repo: &tempfile::TempDir,
+        state: &tempfile::TempDir,
+        verifier: impl Fn(&AgentInvocation, &mut FakeTurn) + Send + Sync + 'static,
+    ) -> (
+        Finished,
+        Vec<String>,
+        Athena,
+        JobId,
+        Arc<Counts>,
+        Vec<String>,
+        Vec<String>,
+    ) {
+        let counts = Arc::new(Counts::default());
+        let producer_prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let verifier_prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let script = recording_verifier_prompts(
+            with_behavior_criteria(
+                fixing_file_on_send_back(counts.clone(), producer_prompts.clone()),
+                vec![RECORDS_CRITERION.to_string()],
+                verifier,
+            ),
+            verifier_prompts.clone(),
+        );
+        let (done, said, athena, job) = run_checked_job(
+            repo,
+            state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let producer = producer_prompts.lock().unwrap().clone();
+        let verifier = verifier_prompts.lock().unwrap().clone();
+        (done, said, athena, job, counts, producer, verifier)
+    }
+
+    #[test]
+    fn records_loop_constant_measure_is_sent_back_and_the_fix_reaches_the_verifier() {
+        let repo = repo_with_cli_package();
+        let state = tempfile::tempdir().unwrap();
+        let seam = records_seam(CONSTANT_LINE, VARIED_LINE);
+        let (done, said, _athena, job, counts, producer, verifier) =
+            records_job(&repo, &state, |_, _| {});
+        let evidence = evidence_of(&state, &job);
+        let (_, producers, _, verifiers) = counts.all();
+        assert_eq!((producers, verifiers), (2, 1), "{}\n{said:#?}", done.reason);
+        assert_eq!(seam.count(), 2, "one run after each producer pass");
+        assert!(
+            said.iter().any(|l| l.starts_with(
+                "producer   sent back: records criterion 2: the per-job list on the line for \"landing time\" shows the same value (3) for every item"
+            )),
+            "{said:#?}"
+        );
+        // The first pass was not sent back; the second prompt carries the command, the line and the output.
+        assert!(!producer[0].contains("## Sent back"), "{}", producer[0]);
+        let second = &producer[1];
+        assert!(second.contains("## Sent back"), "{second}");
+        assert!(
+            second.contains(&format!("{CLI_COMMAND} {evidence}")),
+            "{second}"
+        );
+        assert!(
+            second.contains(&format!("line judged: `{CONSTANT_LINE}`")),
+            "{second}"
+        );
+        // Only the command's standard output is quoted, not cargo's messages on standard error.
+        assert!(!second.contains("--> src/x.rs"), "{second}");
+        // The seam was asked for the status command with the real evidence path.
+        let first = seam.calls.borrow()[0].clone();
+        assert_eq!(
+            first[..7],
+            [
+                "cargo",
+                "run",
+                "-p",
+                "athena-cli",
+                "--",
+                "status",
+                "--snapshot"
+            ]
+        );
+        assert_eq!(first[7], evidence);
+        // The verifier sees the second pass's output, as Athena's own run.
+        assert_eq!(verifier.len(), 1);
+        let brief = &verifier[0];
+        assert!(brief.contains("records-criterion-2"), "{brief}");
+        assert!(
+            brief.contains(&format!("`{CLI_COMMAND} {evidence}`")),
+            "{brief}"
+        );
+        assert!(brief.contains(VARIED_LINE), "{brief}");
+        assert!(!brief.contains(CONSTANT_LINE), "{brief}");
+        assert!(brief.contains("does not count as your command"), "{brief}");
+    }
+
+    #[test]
+    fn records_loop_measure_in_range_is_recorded_for_the_verifier() {
+        let repo = repo_with_cli_package();
+        let state = tempfile::tempdir().unwrap();
+        let seam = records_seam(VARIED_LINE, VARIED_LINE);
+        let (done, said, _athena, job, counts, producer, verifier) =
+            records_job(&repo, &state, |_, _| {});
+        let evidence = evidence_of(&state, &job);
+        let (_, producers, _, verifiers) = counts.all();
+        assert_eq!((producers, verifiers), (1, 1), "{}\n{said:#?}", done.reason);
+        assert_eq!(seam.count(), 1);
+        assert_eq!(producer.len(), 1);
+        assert!(
+            !said.iter().any(|l| l.starts_with("producer   sent back")),
+            "{said:#?}"
+        );
+        assert_eq!(verifier.len(), 1);
+        let brief = &verifier[0];
+        assert!(
+            brief.contains("records-criterion-2: not a check"),
+            "{brief}"
+        );
+        assert!(
+            brief.contains(&format!("`{CLI_COMMAND} {evidence}`")),
+            "{brief}"
+        );
+        assert!(brief.contains(&format!("`{VARIED_LINE}`")), "{brief}");
+        assert!(
+            brief.contains("the figure 4.6 minutes is inside the stated range 2 to 10 minutes"),
+            "{brief}"
+        );
+        assert!(
+            brief.contains("run the same command in your snapshot and cite it"),
+            "{brief}"
+        );
+        // The header line of the output names the snapshot, with the real path in the sent brief.
+        assert!(
+            brief.contains(&format!("snapshot    {evidence}")),
+            "{brief}"
+        );
+    }
+
+    #[test]
+    fn records_loop_job_lands_when_the_verifier_runs_and_cites_the_command() {
+        let repo = repo_with_cli_package();
+        let state = tempfile::tempdir().unwrap();
+        let _seam = records_seam(VARIED_LINE, VARIED_LINE);
+        let (done, said, ..) = records_job(&repo, &state, citing_verifier(true));
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{:#?}\n{said:#?}",
+            done.reason,
+            done.verification.as_ref().map(|v| &v.findings)
+        );
+    }
+
+    #[test]
+    fn records_loop_a_verifier_citing_athenas_run_without_running_it_is_unmet() {
+        let repo = repo_with_cli_package();
+        let state = tempfile::tempdir().unwrap();
+        let _seam = records_seam(VARIED_LINE, VARIED_LINE);
+        let (done, said, ..) = records_job(&repo, &state, citing_verifier(false));
+        assert_ne!(done.state, OutcomeState::Landed, "{said:#?}");
+        let verification = done.verification.expect("the verifier ran");
+        assert!(
+            verification
+                .findings
+                .iter()
+                .any(|f| f.evidence.contains("cited but not seen running")),
+            "{:#?}",
+            verification.findings
+        );
+    }
+
+    #[test]
+    fn records_loop_outside_the_range_is_sent_back() {
+        let repo = repo_with_cli_package();
+        let state = tempfile::tempdir().unwrap();
+        let seam = records_seam(FAR_LINE, VARIED_LINE);
+        let (done, said, _athena, _job, counts, producer, verifier) =
+            records_job(&repo, &state, |_, _| {});
+        let (_, producers, _, verifiers) = counts.all();
+        assert_eq!((producers, verifiers), (2, 1), "{}\n{said:#?}", done.reason);
+        assert_eq!(seam.count(), 2);
+        assert!(
+            said.iter().any(|l| l.starts_with(
+                "producer   sent back: records criterion 2: the figure 273.8 minutes on the line for \"landing time\" is outside the stated range 2 to 10 minutes"
+            )),
+            "{said:#?}"
+        );
+        assert!(producer[1].contains("273.8"), "{}", producer[1]);
+        assert!(producer[1].contains("2 to 10 minutes"), "{}", producer[1]);
+        assert!(
+            verifier[0].contains("4.6 minutes is inside"),
+            "{}",
+            verifier[0]
+        );
+    }
+
+    #[test]
+    fn records_loop_unreachable_snapshot_ends_the_job_before_the_verifier() {
+        let repo = repo_with_cli_package();
+        let state = tempfile::tempdir().unwrap();
+        let seam = records_seam(VARIED_LINE, VARIED_LINE);
+        let counts = Arc::new(Counts::default());
+        // The producer's pass removes the evidence snapshot, as a cleanup of the state directory would.
+        let inner = with_behavior_criteria(
+            editing(counts.clone(), Arc::default(), Vec::new()),
+            vec![RECORDS_CRITERION.to_string()],
+            |_, _| {},
+        );
+        let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
+            if spec.role == Role::Producer {
+                let path = evidence_path_in(&spec.user_prompt).unwrap();
+                crate::snapshot::unlock(&path).unwrap();
+                std::fs::remove_dir_all(&path).unwrap();
+            }
+            inner(spec)
+        });
+        let (done, said, _athena, job) = run_checked_job(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        let (_, producers, _, verifiers) = counts.all();
+        assert_eq!((producers, verifiers), (1, 0), "{said:#?}");
+        assert_eq!(seam.count(), 0, "nothing runs on a snapshot that is gone");
+        let placeholder = format!("<state>/jobs/{}/evidence", job.as_str());
+        assert!(done.reason.contains(&placeholder), "{}", done.reason);
+        assert!(
+            done.reason
+                .contains("cannot be reached from the producer's workspace"),
+            "{}",
+            done.reason
+        );
+        assert!(
+            !done.reason.contains(state.path().to_str().unwrap()),
+            "{}",
+            done.reason
+        );
+        assert!(
+            !said.iter().any(|l| l.starts_with("verifier   ")),
+            "{said:#?}"
+        );
+    }
+
+    #[test]
+    fn records_loop_stored_text_holds_no_machine_path_and_the_sent_text_does() {
+        let repo = repo_with_cli_package();
+        let state = tempfile::tempdir().unwrap();
+        let _seam = records_seam(CONSTANT_LINE, VARIED_LINE);
+        let (done, said, athena, job, _counts, producer, verifier) =
+            records_job(&repo, &state, |_, _| {});
+        let evidence = evidence_of(&state, &job);
+        let root = state.path().to_str().unwrap().to_string();
+        let placeholder = format!("<state>/jobs/{}/evidence", job.as_str());
+        // What was sent has the real path, in the send-back and in the verifier's brief.
+        assert!(producer[1].contains(&evidence), "{}", producer[1]);
+        assert!(verifier[0].contains(&evidence), "{}", verifier[0]);
+        // What was stored has the placeholder and no state path.
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let stored = &records.jobs[job.as_str()];
+        let brief = &stored.briefs["brief-verifier"];
+        assert!(brief.contains("records-criterion-2"), "{brief}");
+        assert!(brief.contains(&placeholder), "{brief}");
+        assert!(!brief.contains(&root), "{brief}");
+        let mut details: Vec<_> = stored
+            .invocations
+            .iter()
+            .filter(|i| i.role == Role::Producer)
+            .collect();
+        details.sort_by_key(|i| i.seq);
+        let detail = details[0].detail.clone().unwrap_or_default();
+        assert!(
+            detail.contains("self-check failed: records criterion 2:"),
+            "{detail}"
+        );
+        assert!(!detail.contains(&root), "{detail}");
+        assert!(!done.reason.contains(&root), "{}\n{said:#?}", done.reason);
+    }
+
+    #[test]
+    fn records_loop_fixture_only_criteria_run_nothing() {
+        let repo = repo_with_cli_package();
+        let state = tempfile::tempdir().unwrap();
+        let seam = records_seam(VARIED_LINE, VARIED_LINE);
+        let counts = Arc::new(Counts::default());
+        let verifier_prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let script = recording_verifier_prompts(
+            with_behavior_criteria(
+                editing(counts.clone(), Arc::default(), Vec::new()),
+                vec![
+                    "Run `cargo run -p athena-cli -- status --snapshot evidence`: on a fixture the landing time it prints is within the expected range 2 to 10 minutes".to_string(),
+                    "On the real records the landing time is within the expected range 2 to 10 minutes".to_string(),
+                ],
+                |_, _| {},
+            ),
+            verifier_prompts.clone(),
+        );
+        let (done, said, ..) = run_checked_job(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        assert_eq!(seam.count(), 0, "{}\n{said:#?}", done.reason);
+        let (_, producers, _, verifiers) = counts.all();
+        assert_eq!((producers, verifiers), (1, 1), "{said:#?}");
+        assert!(
+            !verifier_prompts.lock().unwrap()[0].contains("records-criterion"),
+            "no entry for a criterion that names no real records"
+        );
+        assert!(
+            !said.iter().any(|l| l.contains("records criterion")),
+            "{said:#?}"
+        );
+    }
+
+    #[test]
+    fn records_loop_without_an_athena_cli_package_records_not_run() {
+        // No `crates/athena-cli/Cargo.toml` in this repository.
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let seam = records_seam(CONSTANT_LINE, CONSTANT_LINE);
+        let (done, said, _athena, _job, counts, _producer, verifier) =
+            records_job(&repo, &state, |_, _| {});
+        assert_eq!(seam.count(), 0, "{}\n{said:#?}", done.reason);
+        let (_, producers, _, verifiers) = counts.all();
+        assert_eq!((producers, verifiers), (1, 1), "{said:#?}");
+        assert!(
+            !said.iter().any(|l| l.starts_with("producer   sent back")),
+            "{said:#?}"
+        );
+        assert!(
+            verifier[0].contains(
+                "not run: this repository has no athena-cli package, so the command cannot run here"
+            ),
+            "{}",
+            verifier[0]
+        );
+    }
+
+    #[test]
+    fn records_loop_busy_slot_is_skipped_with_a_line() {
+        let repo = repo_with_config_and_models("", "\n[drain.pipeline]\nbuild_wait_s = 1\n");
+        commit_file(&repo, "crates/athena-cli/Cargo.toml", ATHENA_CLI_MANIFEST);
+        let state = tempfile::tempdir().unwrap();
+        let seam = records_seam(CONSTANT_LINE, CONSTANT_LINE);
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            with_behavior_criteria(
+                counting(counts.clone(), None),
+                vec![RECORDS_CRITERION.to_string()],
+                |_, _| {},
+            ),
+        );
+        let job = athena.ask("describe the demo", &Quiet).unwrap().job;
+        // Another command holds the only build slot for the whole run.
+        let holder = slot_queue(&athena)
+            .try_acquire()
+            .unwrap()
+            .expect("the slot is free");
+        let ui = Lines::default();
+        let _ = athena.go(job.as_str(), AcceptedBy::User, &ui);
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter().any(|l| l
+                == "producer   records criterion 2 not run before the verifier: no build slot is free"),
+            "{said:#?}"
+        );
+        // The run produced nothing to judge: nothing was sent back for it.
+        assert!(
+            !said.iter().any(|l| l.starts_with("producer   sent back")),
+            "{said:#?}"
+        );
+        assert_eq!(counts.all().1, 1);
+        assert_eq!(
+            seam.count(),
+            1,
+            "the command was built, and the slot refused it"
+        );
+        drop(holder);
+    }
+
+    /// The real throughput section of a snapshot taken after a job landed.
+    fn real_throughput_text() -> String {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let (athena, done, said) = run_job(&repo, &state, base_script());
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        let head = athena.head().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let evidence = dir.path().join("evidence");
+        crate::snapshot::write(&athena.git, &head, &evidence).unwrap();
+        let view = crate::snapshot::status(&evidence);
+        crate::snapshot::unlock(&evidence).unwrap();
+        view.unwrap()
+            .throughput
+            .expect("a landed job gives a throughput section")
+            .text()
+    }
+
+    #[test]
+    fn records_loop_real_throughput_text_is_judged_on_the_named_line() {
+        use super::super::records_criteria::{Family, Range, RecordsVerdict, judge};
+        let text = real_throughput_text();
+        let header = "snapshot    <state>/jobs/x/evidence\nhistory     3 commits, newest abc1234 2026-11-12\njobs        1 landed\n";
+        let output = format!("{header}{text}");
+        let wide = Range {
+            lo: 0.0,
+            hi: 100_000.0,
+            family: Family::Minutes,
+        };
+        // A line the real text holds is judged, and only that line.
+        let (judged, verdict) = judge(1, Some("idle between jobs"), Some(&wide), &output);
+        assert_eq!(judged.len(), 1, "{output}");
+        assert!(judged[0].contains("idle between jobs"), "{judged:?}");
+        assert!(
+            matches!(verdict, RecordsVerdict::Passed(_)),
+            "{verdict:?}\n{output}"
+        );
+        // The same line against a range it cannot meet is a problem.
+        let far = Range {
+            lo: 100_000.0,
+            hi: 200_000.0,
+            family: Family::Minutes,
+        };
+        let (_, verdict) = judge(1, Some("idle between jobs"), Some(&far), &output);
+        assert!(
+            matches!(verdict, RecordsVerdict::Problem(_)),
+            "{verdict:?}\n{output}"
+        );
+        // A phrase no line holds is not judged, however many numbers the block holds.
+        let (judged, verdict) = judge(1, Some("landing time"), Some(&wide), &output);
+        assert!(judged.is_empty());
+        assert!(
+            matches!(verdict, RecordsVerdict::NotJudged(_)),
+            "{verdict:?}"
+        );
+        // The throughput line and the daily counts are never a constant list.
+        let (_, verdict) = judge(1, Some("throughput"), Some(&wide), &output);
+        assert!(
+            !matches!(verdict, RecordsVerdict::Problem(_)),
+            "{verdict:?}\n{output}"
+        );
+    }
+
     #[test]
     fn the_exposed_index_lists_new_files_and_is_restored_on_drop() {
         use athena_git::snapshot::{Snapshot, SnapshotRepo};

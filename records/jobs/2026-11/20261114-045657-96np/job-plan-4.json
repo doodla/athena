@@ -1,0 +1,545 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-045657-96np",
+  "round": 4,
+  "at": "2026-11-14T23:20:15.319725391Z",
+  "invocation_seq": 8,
+  "approach": "After each producer pass, once the replay and the in-loop checks are done and before the loop can `break Some(report)` (producer.rs:507-527), Athena runs the real-records criteria in its own process. The new `Athena::loop_records_criteria` in the new `run/records_criteria.rs` does this.\n\n1. Select. A behavior criterion is selected when its whitespace-collapsed, lowercase text holds `status --snapshot` and `real records` (`REAL_RECORDS_PHRASES`, surveys.rs:416). Its command is the first backticked span that holds `status --snapshot`, in any form (`cargo run -p athena-cli -- status --snapshot evidence`, `athena status --snapshot evidence`, or a bare `status --snapshot evidence`). The token after `--snapshot` (a word, or `<evidence directory>` through its closing `>`) is replaced by the job's evidence directory (`crate::snapshot::evidence_dir`, mod.rs:1153) and trailing arguments are kept. Every selected command runs as `cargo run -p athena-cli -- status --snapshot <evidence> [rest]`, so it measures the producer's tree.\n2. Package gate (finding 4). The mapped command needs the `athena-cli` package. `athena_cli_package(work_tree)` is true only when `<work tree>/crates/athena-cli/Cargo.toml` is a file holding a line `name = \"athena-cli\"` (the same file-test style as `is_athena_source`, mirrors.rs:941; the real file has `name = \"athena-cli\"` at line 2). The gate reads the producer's work tree (`snapshot.dir()`), so it is true for Athena's own source, the only place the gate's measure paths exist (surveys.rs:410-413). Elsewhere every selected criterion is recorded as `not run: this repository has no athena-cli package, so the command cannot run here`, with no reach check, no run and no send-back. The module docs state this.\n3. Reach, once per pass, after the package gate and before running. Athena's own read (`is_dir`, `crate::snapshot::read_history`), then the producer's permission: `reach(evidence, &Policy)` calls `athena_agent::policy::evaluate(&policy, \"Read\", {file_path: <evidence>/history.json}, None)` on the policy file the pass ran under (`spec.hook.policy_file`, written by `agent_spec`, reading.rs:415-425). Either failure ends the job through `self.failure` with `Flow::Stop` and no verifier. The reason is in the stored form of step 6.\n4. Run. Use `SnapExec { in_loop: true }`, `ExposedIndex` and `Exec::exec` in the producer's work tree (checks.rs:73-162, 283-317, 375-457). The `CheckSpec` has kind `CheckKind::Command` (success is exit 0), `skip_when_only: None`, name `records-criterion-<n>`. The command is wrapped as `sh -c '\"$@\" > \"$0\"' <job_dir>/records-criterion-<n>.out <argv>`, so Athena reads the command's whole stdout from a file it owns; cargo's stderr is kept only as an error tail. A non-zero exit, a timeout, low disk, a busy slot or any error becomes a `not run` entry with its reason and is never sent back. Only the kill switch and an unreachable snapshot stop the job.\n5. Judge, by rules written in the module docs (revised for findings 1 and 2).\n   - Judged lines: stdout lines that hold the measure phrase (the words after `real records` between `the` and `it prints` / `it shows` / `is within`). No phrase, or no judged line, is `not judged` with the reason.\n   - The head of a judged line is the text after the first occurrence of the phrase, cut at the first `;` or `(`. Figures after a `;`, inside parentheses, or on later occurrences are never judged.\n   - The figure is the FIRST number in the head directly followed by a unit of the range's family (alias table: minutes = min, mins, minute, minutes; seconds = s, sec, secs, second, seconds; hours = h, hr, hrs, hour, hours; usd = usd, or a `$` before the number; percent = %, percent; no conversion between families). A word such as `landing(s)` or `check(s)` is not a unit (whole-word match). No figure in the head is `not judged`.\n   - The range is `<lo> to|and|- <hi> <unit>` after `expected range`. A figure outside it is a problem. No parsable range means the figure is shown, not judged.\n   - Constant: only a per-item list counts. It is the first parenthesised group on a judged line after the phrase whose entries, split on ` · `, are ALL `<job id> <number>[ unit]`, with job id `\\d{8}-\\d{6}-\\w{4}`, and with at least three entries. It is a problem when every entry holds the same number. A list with any non-job-id label (stage names, dates) is never a per-item list, whatever the criterion says. There is no per-item-wording branch. A constant needs no stated range.\n6. Stored form (the machine-path rule). Everything stored carries no machine path: `brief-verifier.md`, the invocation `detail` and the job's failure reason. The run's command, output, judged lines and error tail pass through the redactor and then the state root is replaced by `<state>`. The real evidence path becomes `evidence_placeholder(id)`. Problem text names the criterion number, the figure and the range, never the command or a path. Text sent to an agent (the producer send-back and the sent verifier brief) has the placeholder replaced by the real evidence path, as the evidence section does (mod.rs:1155-1158; verification.rs:179-214 builds the brief once with the placeholder and once with the real path).\n7. Verdict (choice b, named in D183). Athena's run is not a CheckRun, so `verify::judge` does not count it as seen running (verify.rs:411-445, 573-603). The verifier entry says it is Athena's run, does not count as the verifier's command, and that the verifier must run the same command in its snapshot and cite it.\n8. Hand-off. Problems join the one shared send-back (`problems`, `report_problems`, `PRODUCER_SEND_BACKS`); at the limit they reach the verifier as `producer-report-gaps`. Every run, judged or not, reaches the verifier: `Reported` and `Built` carry `records_runs`, and `verification_stage` pushes one `CheckResultView` per run (`records-criterion-<n>`, command `not a check`) with a new `records_run: Option<RecordsRunView>`. No record kind is added, so `check_record_file`, `AnyRecord` and `ResumeMark` are unchanged.\n\nKnown limit, stated in the module docs, D183, the CHANGELOG and the open question (finding 3): today's `status --snapshot` prints only medians and totals (throughput.rs:836-844), with no per-job list labelled by job ids, so on current output the constant rule cannot fire. It fires when the producer's change makes the command print such a list, which a change to a per-job measure does. The range rule fires today for any criterion that states a numeric range and whose phrase names a line that prints a figure in that unit. A candidate taken through the resume shortcut (mod.rs:818-828, no producer pass) gets no records run; a retry that runs the producer again gets one after each pass.\n\nTests are pure unit tests in records_criteria.rs and fake-producer tests named `records_loop_*` in run/tests.rs. The seam is a thread-local `argv_seam` that mirrors `demo_seam` (checks.rs:585-615) and maps only the inner `cargo run` argv. The redirect, the reading of stdout, the package gate, the judging, the stored form and the send-back are production code. Fake-producer tests commit `crates/athena-cli/Cargo.toml` into the test repository with the existing `commit_file` (tests.rs:358), so the package gate runs for real.",
+  "decisions": [
+    {
+      "choice": "Finding 1: judge only the first figure in the range's unit family in the head of a judged line (text after the phrase, cut at the first `;` or `(`). Figures after a `;`, inside parentheses or after the head are ignored.",
+      "reason": "The real lines print comparison figures in the same unit. throughput.rs:794 appends `; the {n} landings before: {figure}` to the USD and percent lines (798-805): `spent on attempts that did not land: 1.23 USD over the last 5 landing(s); the 5 landings before: 0.40 USD` and `landed on the first attempt: 60% over the last 5 landing(s); the 5 landings before: 20%`. The build-wait line is `build wait {total} s over {n} check(s), longest {longest} s` (832-833). Taking every unit-matching figure would judge 0.40 USD, 20% or the longest wait against the range and spend the one shared send-back on correct work. The first figure after the phrase is the current value on all three; `median per landed job over the last 3 measured: 4.0 min (stages)` and `did not land: 2 job(s), 3.4 min` also give their figure first (`3 measured` and `2 job(s)` have no unit). Unit tests use literal lines copied from throughput.rs:794-805, 810, 832 and 837, assert that only the current figure is judged, and the real-text test runs `Throughput::text()` for the lines a job produces.",
+      "rejected": [
+        {
+          "option": "Judge every figure on the line that is in the range's unit family",
+          "why": "Judges the `landings before` comparison and `longest` figures, so correct work is sent back (the critic's false positive)."
+        },
+        {
+          "option": "Judge the first number on each line",
+          "why": "Hits history counts, hash digits, `3 measured` and `2 job(s)`."
+        },
+        {
+          "option": "Use run_check's `output_tail` as the judged output",
+          "why": "It is the last 4096 bytes of stdout and stderr merged, so item lines could be cut and cargo `--> file:line:col` lines parsed; Athena reads the whole stdout from a file it owns instead."
+        },
+        {
+          "option": "Import RECORDS_MEASURE_PHRASES from reading/surveys.rs",
+          "why": "It is `pub(super)` in the gate module, which is out of scope, and a list cannot name a measure the producer adds."
+        },
+        {
+          "option": "Run `status --snapshot --json` and read a named field",
+          "why": "No map from a phrase such as `landing time` to a JSON field exists, and the recorded command would differ from the criterion's."
+        }
+      ]
+    },
+    {
+      "choice": "Finding 2: a per-item list is only a parenthesised ` · ` list whose labels ALL are job ids (`\\d{8}-\\d{6}-\\w{4}`), with at least three entries. Constant means every entry holds the same number. The per-item-wording branch is dropped.",
+      "reason": "`StageMinutes::named()` returns six stages (reading, planning, producer, checks, verifier, landing and rebuild; throughput.rs:113-121) printed as `({name} {m:.1} · ...)` (806-812), and planning, checks and landing are often all 0.0. With a wording branch a criterion saying `per job` whose phrase matches the median line would flag equal stage medians as constant. With job-id labels only, stage names and `{day} {landed}` daily counts (813-818) are never per-item lists whatever the criterion says, so the unit test `equal stage medians with per-item wording give no problem` is satisfied by the rule and not by luck. `Constant` is every entry equal, at least three entries; two equal entries, or three with one different, are not constant. This is the request's `same answer for every item`. The gate's own failing example, a landing time of 0.1 minutes for every job (surveys.rs:591), is a per-job list.",
+      "rejected": [
+        {
+          "option": "Accept lists of non-date labels when the criterion says per job / each job / every item",
+          "why": "Matches the stage-median list, so equal stage medians would be called constant; the rule could not pass its own test."
+        },
+        {
+          "option": "Two or more equal items of any `label number` list",
+          "why": "Equal daily landed counts and equal stage medians are common and are not per-item values."
+        },
+        {
+          "option": "Never judge constants, only the range",
+          "why": "The request names the constant measure as a send-back reason, and the gate's usual criterion states no number."
+        }
+      ]
+    },
+    {
+      "choice": "Finding 3: state the limit in the module docs, D183, the CHANGELOG, the producer-brief sentence and the open question: a constant can be caught only when the command prints a per-job list labelled by job ids, which today's `status --snapshot` does not print; the range check needs a numeric range in the criterion and a judged line with a figure in its unit.",
+      "reason": "throughput.rs:836-844 prints `throughput N landed (days)`, a median with stage medians, idle, unlanded and waste lines, and build wait. `landed_jobs` (throughput.rs:472) holds per-job stage minutes, but `text()` prints none of them. Demonstrations 1-3 therefore use a printed per-job line the seam supplies, which stands for what a change to a per-job measure would print. Athena computing per-item values itself would be a new computation the code does not define, so it is asked as a question, not planned.",
+      "rejected": [
+        {
+          "option": "Compute per-job values from the snapshot inside Athena",
+          "why": "A new measure computation the code does not define, and it would run a different calculation from the command the verifier is told to run; asked as a question instead."
+        },
+        {
+          "option": "Change `status --snapshot` to print per-job values",
+          "why": "A user-facing output change made only for Athena's check; out of scope and the producer brief says not to do it."
+        }
+      ]
+    },
+    {
+      "choice": "Finding 4: gate the stage on the repository. `athena_cli_package(work_tree)` (a real file test in every build) must hold, else each selected criterion is a `not run` entry naming the missing package, with no reach check, no run and no send-back.",
+      "reason": "Selection matches only the text `status --snapshot` and `real records`, but the mapped command `cargo run -p athena-cli` exists only where that package does. The measure paths the reading gate watches are Athena's own files (surveys.rs:410-413), so in practice the package is there. The gate is a file test on the producer's work tree (`snapshot.dir()`), which has `crates/athena-cli/Cargo.toml` with `name = \"athena-cli\"` in Athena's source (line 2) and none elsewhere. Tests commit the file with `commit_file` (tests.rs:358) so the real check runs; a second test omits it and asserts the entry and a zero seam count; unit tests cover a tree with the package, without it, and with another package name.",
+      "rejected": [
+        {
+          "option": "Gate on the change touching RECORDS_MEASURE_PATHS",
+          "why": "Those paths are `pub(super)` in the gate module (out of scope), and a status measure may live in a file the list lacks; the package test asks the question that matters, whether the command can run."
+        },
+        {
+          "option": "Test-build shortcut where an installed seam counts as the package",
+          "why": "Puts the logic under test in the double and leaves the gate untested end to end."
+        },
+        {
+          "option": "Reuse `is_athena_source` (mirrors.rs:941)",
+          "why": "It also needs `setup.sh` and the timings file, which say nothing about whether `cargo run -p athena-cli` works."
+        }
+      ]
+    },
+    {
+      "choice": "Everything stored holds the placeholder form: command, output, judged lines, error tail, problem text, the unreachable failure reason. Only text sent to an agent has the placeholder replaced by the real evidence path.",
+      "reason": "mod.rs:1155-1156 keeps machine paths out of stored briefs, and verification.rs:179-191 stores `brief-verifier.md` built from the same `inputs`. The first stdout line of the command is `snapshot    {dir}` (display.rs:1198), the absolute path, so raw output would break the rule. The invocation `detail` (producer.rs:590-594) joins the problem text, so that text never holds a command or a path. `self.failure` stores its reason, so the unreachable reason names `<state>/jobs/<id>/evidence`. The briefs renderer replaces `evidence_placeholder(job)` by the `evidence` argument it is given, so the stored call and the sent call differ only there.",
+      "rejected": [
+        {
+          "option": "Store the real path in `RecordsRunView`",
+          "why": "Breaks the stored-brief rule."
+        },
+        {
+          "option": "Strip the output line that holds the path",
+          "why": "Hides data the verifier may need; the state-root replacement keeps every line."
+        }
+      ]
+    },
+    {
+      "choice": "Verdict choice (b): the verifier entry says it is Athena's own run, does not count as the verifier's command, and must be run again in the verifier's snapshot and cited. verify.rs, records.rs and CheckRun are unchanged.",
+      "reason": "`verify::judge` builds `ran` from the verifier's `commands_run` and passing CheckRuns (verify.rs:411-445) and marks a behavior criterion unmet when its cited command was not seen running (573-603). Counting Athena's run (choice a) needs a new CheckRun field or a verify.rs rule, and neither file is a deliverable. `revert_for` (records.rs:893-901) means a run with the fix reverted, so reusing it would misdescribe the run. With (b) the failure the request names (evidence that cites no command that ran) is fixed from the verifier side: the verifier sees the command and Athena's figures, runs the same command and cites it. Tests: a fake verifier that runs and cites the command reaches Landed; one that cites it without running it is unmet with the D43 finding.",
+      "rejected": [
+        {
+          "option": "(a) Make Athena's run count as seen running",
+          "why": "Needs a record or verify.rs change outside the deliverables and would let a verifier cite a run it never repeated."
+        },
+        {
+          "option": "Reuse `revert_for` on a stored CheckRun",
+          "why": "Its documented meaning is a run with the fix reverted; this run is on the unreverted tree."
+        }
+      ]
+    },
+    {
+      "choice": "Any selected `status --snapshot <token>` command, whatever its prefix, runs as `cargo run -p athena-cli -- status --snapshot <evidence>` plus trailing arguments; the shown command is that string in stored form.",
+      "reason": "reading.rs:8552-8584 tests accept `Run `status --snapshot evidence`: on the real records ...`, so the gate accepts bare and `athena` forms. An installed `athena status` would print the old measure; `cargo run` measures the producer's tree and matches the command the evidence section tells the verifier to run (briefs.rs:671). Unit tests cover the bare, `athena`, `cargo run` and wrapped-line forms, the `evidence` token and `<evidence directory>`.",
+      "rejected": [
+        {
+          "option": "Skip a command that is not `cargo run` with a `not run` entry",
+          "why": "Silently drops criteria the gate accepts, which is the failure the request is about."
+        },
+        {
+          "option": "Run `self.athena_bin status --snapshot <dir>`",
+          "why": "That is the installed Athena, not the producer's change."
+        }
+      ]
+    },
+    {
+      "choice": "The wrapper `CheckSpec` has kind `CheckKind::Command`, `skip_when_only: None`, name `records-criterion-<n>`, run `sh -c ...`, through the in-loop `SnapExec`.",
+      "reason": "run_check rewrites cargo test args for `CheckKind::Test` (checks.rs:526-530) and fails a test check that ran zero tests (594-598); `Command` is the default kind where success is exit 0 (config.rs:474-480). `isolate`, `kill_group` and the poll loop are private to checks.rs, so reusing `Exec::exec` avoids a copy that would need to be kept in step. The in-loop `SnapExec` reads no check seam (checks.rs:131-134), so the records seam is separate.",
+      "rejected": [
+        {
+          "option": "CheckKind::Test",
+          "why": "Fails the run for running zero tests."
+        },
+        {
+          "option": "A second process runner in records_criteria.rs",
+          "why": "Copies private code."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the producer-permission half of `reach` and state its limit in D183: it catches only a policy built while the folder was missing (`agent_spec` writes `evidence` only when `dir.is_dir()` at spawn, reading.rs:415-416; athena-agent has no OS sandbox). It calls `evaluate(..., None)` with an absolute file path. `reach` is tested directly with `Policy` values, not through a forged policy file.",
+      "reason": "The reading defines unreachable as missing or not readable by the producer's grant. policy.rs:35-47 documents `evidence` as a directory outside the snapshot that may be read, never written; `evaluate` has the signature `evaluate(policy, tool, input, cwd: Option<&Path>)` (policy.rs:90). The end-to-end early end is shown by the removed-directory test.",
+      "rejected": [
+        {
+          "option": "Drop the policy half",
+          "why": "The reading names the grant case."
+        },
+        {
+          "option": "Check only before the first pass",
+          "why": "The policy is built from the same `is_dir()` test dispatch just satisfied (mod.rs:1153-1154), so a first-pass check never fires in a real job."
+        }
+      ]
+    },
+    {
+      "choice": "The producer-brief sentence describes how Athena judges and asks for no output change: 'Athena also runs each behavior criterion that names real records and gives a `status --snapshot` command, on your work tree, and records the command and its output for the verifier. It sends you back only when a line that holds the criterion's phrase prints a figure outside the stated range, or a parenthesised list of three or more job ids that all show the same value; other output is only recorded. Do not change what a command prints to satisfy this check.' A briefs test asserts the sentence and that it holds no request to reformat output.",
+      "reason": "A sentence that asked producers to print a phrase would invite user-facing `status` changes made only for Athena's check.",
+      "rejected": [
+        {
+          "option": "Tell the producer to print the measure on a line that holds the criterion's phrase",
+          "why": "Invites output changes that exist only to satisfy the check."
+        }
+      ]
+    },
+    {
+      "choice": "Send back only a constant per-job list or a figure outside the stated range; record everything else (non-zero exit, timeout, skip, no package, unidentifiable measure, no figure) as `not run` or `not judged`, with its reason, for the verifier. Send-backs reuse `PRODUCER_SEND_BACKS`.",
+      "reason": "The request names two send-back reasons. A build failure in the producer's tree is already a failing in-loop check (checks.rs:447-455), so a second send-back would report it twice and spend the shared send-back on an environment error.",
+      "rejected": [
+        {
+          "option": "Send back a non-zero exit",
+          "why": "Duplicates the in-loop check and adds a reason the request did not ask for."
+        }
+      ]
+    },
+    {
+      "choice": "Hold the evidence in `Reported` and `Built` as `records_runs: Vec<RecordsRun>`, shown as `CheckResultView` entries with a new optional `records_run: Option<RecordsRunView>`, rendered by a dedicated briefs function. `ResumeMark` is unchanged. crates/athena-agent/src/fake.rs is not modified and is named under `unchanged_planned_files` with this reason.",
+      "reason": "This follows the `producer-report-gaps` and `ci-result` entries (verification.rs:88-127). The existing `demonstration` field renders `fails without the fix ... fix reverted` text (briefs.rs:989-1036), and `failed_check_detail` shows no output for a passed entry (briefs.rs:1062-1063), so a dedicated field and renderer are needed. The `Script` closure already receives the whole `AgentInvocation` and `FakeTurn` has `edits` and `commands_run` (fake.rs:16-21, 43, 97-111), so the fixtures (fix on send-back, remove the evidence directory, a verifier that cites a command it ran) are scripts in tests.rs.",
+      "rejected": [
+        {
+          "option": "A records field on `ResumeMark`",
+          "why": "state.rs is not a deliverable; the resume shortcut runs no producer pass."
+        },
+        {
+          "option": "A new record kind or file under records/",
+          "why": "The request keeps the output as check evidence in the existing form."
+        },
+        {
+          "option": "A records-aware fake turn in fake.rs",
+          "why": "Test-only structure for behavior a closure already expresses."
+        }
+      ]
+    },
+    {
+      "choice": "Test reading: keep the base test reading (capability `study`, class `docs`, tests.rs:227-231) and add or swap a `\"kind\": \"behavior\"` criterion, as tests.rs:1368 does. Add no refusal-corpus case.",
+      "reason": "`check_code_survey` and `check_records_measure` apply only to class `code` or `tests` (surveys.rs:237-241), so the docs reading is accepted and admission's demonstration rules apply only in planning, which `repo()` leaves off. The new selection, phrase, range, list and package parsers consume readings the gate accepted and refuse nothing; `refusal_corpus` runs reading checks, never the run stage. Input forms the parsers handle and the corpus cases that hold them (read at refusal_corpus.rs:427, 436, 452): backticked `cargo run -p athena-cli -- status --snapshot evidence` with `real records` and a range with no number is `records-measure-change-with-real-records-range-history-json` and `...-range-git-log`; the wrapped line is `refusal-rate-declaration-wrapped-line`; the bare and `athena` command forms are tested at reading.rs:8552-8584, not in the corpus. The `<evidence directory>` token, each numeric range form (`2 to 10 minutes`, `between 2 and 10`, `2-10`), no range, the unit aliases and the list forms have no corpus case and no corpus case is added, because they are unit-tested in records_criteria.rs and are not refusals. The corpus test is still run as a demonstration (criterion 7).",
+      "rejected": [
+        {
+          "option": "Class `code` with a Code survey assumption",
+          "why": "Brings the reading gates into a run-stage test for no benefit."
+        },
+        {
+          "option": "New corpus cases for the numeric-range forms",
+          "why": "The corpus tests refusal outcomes; refusal_corpus.rs is not a deliverable and the new code is not on that path."
+        }
+      ]
+    },
+    {
+      "choice": "Append D183 to docs/decisions.md after D182 with a Provenance bullet naming D182 (the in-loop checks), D115 and D156 as standing. It records the verdict choice (b), the stored-form rule, what is judged (first figure in the head; job-id lists only), what is only recorded, the no-per-job-list limit on current output, the package gate, the reach limit and the resume-shortcut limit.",
+      "reason": "A new stage and send-back rule before the verifier is a decision later jobs will cite. Nothing existing is edited. docs/decision-links.toml:220-224 governs only candidate.rs and athena-git snapshot.rs, which this plan does not touch.",
+      "rejected": [
+        {
+          "option": "No decision entry",
+          "why": "docs/decisions.md is a listed deliverable and the rule changes when a job can end."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/records_criteria.rs",
+      "action": "create",
+      "purpose": "The pre-verifier records run. `RecordsRun`, `RecordsVerdict`; `select` and command mapping (any `status --snapshot <token>` span mapped to `cargo run -p athena-cli -- status --snapshot <evidence>`); `athena_cli_package(work_tree)` (finding 4); `measure_phrase`, `stated_range`, the unit alias table, `judge` (judged lines; the first figure in the range's unit family in the head cut at `;` or `(` (finding 1); per-item lists only with job-id labels, at least three entries, constant means every entry equal (finding 2)) with the rules and the no-per-job-list limit in the module docs; `reach` (Athena's read and `evaluate` on a `Policy`); `Athena::loop_records_criteria` (package gate, reach, SnapExec in_loop, ExposedIndex, `CheckKind::Command` spec, the `sh` redirect wrapper, skip lines, kill switch); the stored-form helper (state root to `<state>`); `append_records_problems`; cfg-gated `argv_seam` and `records_runs_here`; unit tests for each rule and input form.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Call `loop_records_criteria` after `loop_check_failures` and before `break Some(report)`, passing the pass's policy file. On `unreachable`, call `self.failure` (stored-form reason) and return `Flow::Stop`. Add the records problems to the break condition, `problems` and `report_problems`. Wrap `attempt_brief` with `append_records_problems` (the real evidence path in the sent text). Add `records_runs` to `Reported`. Extend the `producer_loop` doc with the root cause and limits.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Declare `mod records_criteria;`; add `records_runs` to `Built` (resume path: empty) and take it from `Reported`; update the `PRODUCER_SEND_BACKS` doc to name the records run.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Push one `CheckResultView` per `RecordsRun` (name `records-criterion-<n>`, command `not a check`, passed true, `records_run: Some(..)`, stored-form text) after the `producer-report-gaps` entry.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `RecordsRunView` and `CheckResultView.records_run`; a renderer in the verifier brief's checks list (command, result sentence, judged lines, clipped output as data, and the sentence that this is Athena's run and must be run and cited by the verifier) that replaces `evidence_placeholder(job)` by the `evidence` argument; one sentence in the producer brief's `## Checks before the verifier` that describes judging (figure outside the range, or a job-id list that is all equal) and asks for no output change; `records_run: None` where tests list every field; new briefs tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "The fake-producer tests `records_loop_*` named in the demonstrations (constant, in range, lands with a citing verifier, citing-without-running unmet, out of range, unreachable, stored versus sent text, fixture-only runs nothing, no athena-cli package, busy slot, real throughput text); a helper that adds the behavior criterion to the reader, producer and verifier scripts (the `scoped` pattern); a helper that commits `crates/athena-cli/Cargo.toml` with `commit_file`; a verifier-script wrapper that sets `commands_run` and `commands`; a helper that builds the real-shaped status block; a seam installer.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One new bullet at the top of `### Added` under `## [Unreleased]`, written for an outside reader: the stage, the send-back conditions, the early end, what is only recorded, the athena-cli package condition, the no-per-job-list limit, the resume-shortcut limit and the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D183 after D182, with a Provenance bullet. No existing entry is edited.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the patterns the new code follows: run/checks.rs:73-162 and 283-457 (SnapExec, ExposedIndex, loop_check_failures, run_loop_checks), checks.rs:513-638 (run_check, CheckKind), checks.rs:557-615 (demo_runs_here, demo_seam), producer.rs:287-688, verification.rs:88-127 and 179-214, briefs.rs:651-675, 905-918, 948-1100, 1305-1370, verify.rs:411-445 and 573-603, reading.rs:391-461 (agent_spec and the policy file), policy.rs:35-47, 90-117, 992-1016 and 1380-1411, display.rs:1196-1249, status/throughput.rs:789-845, mirrors.rs:941, tests.rs:288-366 (repo, commit_file), 859-948 and 1137-1156.",
+    "Create run/records_criteria.rs with `RecordsRun`, `RecordsVerdict`, `select` and the command mapping (any `status --snapshot <token>` span, `<evidence directory>` token, trailing args kept), `athena_cli_package`, `measure_phrase`, `stated_range`, the unit alias table, `judge`, `reach`, the stored-form helper, `append_records_problems`, `Athena::loop_records_criteria`, and the cfg-gated `argv_seam` and `records_runs_here`. Write the rules in the module docs: head = text after the first phrase occurrence cut at the first `;` or `(`; the first figure in the range's unit family; a per-item list is a parenthesised ` · ` list whose labels are all job ids with at least three entries; constant = all entries equal, no range needed; the alias table; the package gate; the no-per-job-list limit on current output. Add `mod records_criteria;` in run/mod.rs.",
+    "In `loop_records_criteria`: return empty for a nested run, a pinned run, an empty change and no selected criterion (no line, no package or reach check). If `athena_cli_package(snapshot.dir())` is false, return one `not run` entry per selected criterion with the missing-package reason and stop there. Otherwise run `reach` and return `unreachable: Some(reason)` in stored form naming `<state>/jobs/<id>/evidence`. Build `SnapExec` and `ExposedIndex` as `run_loop_checks` does (env from `athena_agent::env::build`, `Side::Produce`, `in_loop: true`). Run each selected command once through `Exec::exec` with `CheckKind::Command`, `skip_when_only: None` and the `sh` redirect wrapper to `job_dir/records-criterion-<n>.out`. Read the whole stdout, redact it, convert it to the stored form, remove the file, then `judge`. A non-zero exit, timeout, busy slot, low disk or error becomes a `not run` run with its reason and a skip line; call `refuse_if_stopped` so the kill switch still ends the job.",
+    "In producer.rs call it after `loop_check_failures`, passing the pass's policy file (`spec.hook`). On `unreachable` call `self.failure(ctx, ...)` and return `Ok(Flow::Stop)`. Add the records problems to the break condition, `problems` and `report_problems`. Problem text names the criterion number, the figure and the range, or the constant list, and never a command or path. Wrap `attempt_brief` with `append_records_problems` (the command, judged lines and clipped output, the placeholder replaced by the real evidence path). Add `records_runs` to `Reported`; extend the doc comment.",
+    "In mod.rs add `records_runs` to `Built` (resume path `Vec::new()`) and take it from `Reported`. In verification.rs push the `CheckResultView` entries (stored-form text).",
+    "In briefs.rs add `RecordsRunView`, the `records_run` field, the renderer (replaces `evidence_placeholder(job)` by the `evidence` argument; the sentence that this is Athena's run, does not count as the verifier's command, and must be run in the verifier's snapshot and cited), the producer-brief sentence from the decisions, `records_run: None` in the tests that list every field, and new briefs tests (the rendered entry, the sentence, the stored-versus-sent replacement, the producer sentence and its absence of any output-change request).",
+    "Do not touch crates/athena-agent/src/fake.rs; list it under `unchanged_planned_files` in the producer report with the reason in the decisions (the `Script` closure and `FakeTurn.commands_run` already express every fixture).",
+    "In tests.rs add the helpers (behavior criterion added to the reader, producer and verifier scripts in the `scoped` pattern; `commit_file` of `crates/athena-cli/Cargo.toml` with `name = \"athena-cli\"`; a verifier-script wrapper that sets `commands_run` and `commands` from the sent brief; the real-shaped status block; the seam installer with a call counter) and the `records_loop_*` tests named in the demonstrations, including stored-versus-sent text, fixture-only, no athena-cli package, busy slot and real throughput text. Unit-test in records_criteria.rs: every command form (`evidence` token, `<evidence directory>`, wrapped lines, bare, `athena`, `cargo run`); `2 to 10 minutes`, `between 2 and 10`, `2-10`, no range, no unit, a figure in another family, each alias pair; the USD, percent and build-wait lines with `the N landings before` and `longest` (only the current figure judged); equal stage medians with and without per-item wording (no problem); daily counts with equal values (no problem); a job-id list with equal items, two equal items, varied items, one non-job-id label; a constant with no stated range; noise lines and stderr lines; a long output whose measure line is first; a clean exit with `CheckKind::Command`; `athena_cli_package` with, without and another name; and `reach` with `Policy` values.",
+    "Append D183 to docs/decisions.md after D182 in the same shape (heading, body, `- **Provenance:**` bullet), and add one CHANGELOG.md bullet at the top of `### Added`. Both name the root cause (failure class 20261111-105030-a2bc), the stage, the send-back conditions, the early end, what is only recorded, choice (b) for the verdict, the stored-form rule, the first-figure and job-id-list judging rules, the limit that current output prints no per-job list, the package condition, the policy half's limit, the resume-shortcut limit and the tests.",
+    "Run `cargo fmt --all`, then `cargo test -p athena-core`, `cargo test -p athena-context`, `cargo test -p athena-core --test refusal_corpus`, `cargo test mirrors`, `cargo test --locked` and `cargo clippy --all-targets --locked -- -D warnings`."
+  ],
+  "risks": [
+    {
+      "risk": "The judge compares the wrong numbers and sends back correct work, or misses a constant measure.",
+      "mitigation": "Only lines that hold the criterion's own phrase are judged. Only the first figure in the range's unit family in the head (cut at `;` or `(`) counts, so `the N landings before` comparisons and `longest` figures are never judged. A list counts only with at least three job-id labels, so stage medians and daily counts never do. Stdout only is read. Anything not identified is `not judged` with its reason and sends nothing back. The rules are in the module docs and unit-tested on literal copies of the real status lines (USD, percent, build wait, median with stages, throughput with days, header, dates, hashes, cargo lines) and on a real `Throughput::text()`."
+    },
+    {
+      "risk": "On current output the constant rule cannot fire, and for the gate's usual wording (no number, `the landing time it prints`) no line holds the phrase, so for many real jobs nothing is judged.",
+      "mitigation": "Stated in the module docs, D183, the CHANGELOG, the producer sentence and the open questions. The verifier entry shows `not judged: <reason>` with the whole output and tells the verifier to run and cite the command, so the stage still removes the cause named in the request: Athena runs the command and the verifier sees its output."
+    },
+    {
+      "risk": "The verifier does not repeat the command, so the behavior criterion is still unmet at the verdict (choice b).",
+      "mitigation": "The entry says so in plain words next to the command, and the command is the one the evidence section already tells the verifier to run (briefs.rs:671). The end-to-end tests show a verifier that runs and cites it lands and one that cites it without running it does not. D183 names the choice."
+    },
+    {
+      "risk": "A pre-verifier `cargo run` adds build time on each pass of these jobs.",
+      "mitigation": "It runs only for a behavior criterion that holds both `status --snapshot` and `real records`, only where the package exists, in the producer's own `target/produce`, with a slot only if one is free and within `check_timeout_s`. A busy slot, low disk or any error is a skip line and a `not run` entry, never a stop. Only the kill switch and an unreachable snapshot end the job."
+    },
+    {
+      "risk": "The `sh -c '\"$@\" > \"$0\"'` wrapper fails on a host without `sh` on the check environment's PATH.",
+      "mitigation": "The environment is `athena_agent::env::build` for `Side::Produce`, the one the in-loop checks use for `cargo`. A missing `sh` makes the run fail to start, recorded as `not run`, and nothing is sent back. The test seam uses `sh` too."
+    },
+    {
+      "risk": "The state-root replacement misses a machine path outside the state directory, or replaces too much.",
+      "mitigation": "The evidence, job and work-tree paths are all under the state root (the evidence path ends in `/jobs/<id>/evidence`, asserted in a unit test). The stored-versus-sent test checks the real state path appears nowhere in the stored verifier brief, invocation detail or failure reason, and that the sent prompts hold the real evidence path. A path outside the state root in a cargo error tail is clipped and quoted as data."
+    },
+    {
+      "risk": "The package file test differs from what `cargo run -p athena-cli` needs (for example a renamed package, or a workspace member listed elsewhere).",
+      "mitigation": "A false `not run` only records the command for the verifier and sends nothing back; a false pass leads to a `not run` entry from the failed cargo call. Neither sends back or ends a job. The test is the plain file-and-name check, unit-tested with the package, without it, and with another name."
+    },
+    {
+      "risk": "The Landed test needs everything else in the harness to pass.",
+      "mitigation": "It follows `a_failing_check_is_sent_back_before_the_verifier_and_the_fix_reaches_it` (tests.rs:4543), which lands on the same harness and the same checks; only the verifier script differs. The extra `crates/athena-cli/Cargo.toml` is committed to the base, not at the root, so the root-`Cargo.toml` tests of producer.rs:185 are not affected. If another verdict reason blocks it, the test reports `finished.reason` and the producer fixes the fixture, not the production rule."
+    },
+    {
+      "risk": "The real-text test needs `Throughput::compute` to return a value for a job the fake agents landed.",
+      "mitigation": "crates/athena-cli/tests/status_snapshot.rs:97-100 shows a landed job has throughput in the cli fixture. If it is `None` in the core harness, the producer moves that one test to athena-cli/tests with the judge reached through a documented `pub` re-export, and reports which."
+    },
+    {
+      "risk": "The thread-local `argv_seam` is not seen if a test runs the job on another thread.",
+      "mitigation": "The mapper is installed per test and cleared by its guard, as `demo_seam` is. `records_runs_here` mirrors `demo_runs_here`, so a build without an installed seam runs nothing. The loop tests run `Athena::go` on the test thread, as the existing demonstration tests do."
+    },
+    {
+      "risk": "A candidate taken through the resume shortcut shows the verifier no records run.",
+      "mitigation": "The shortcut runs no producer pass (mod.rs:818-828), so there is nothing to run; the criterion still tells the verifier to run the command itself. D183 and the CHANGELOG state the limit."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`Reported` and `Built` gain `records_runs`",
+      "dependent": "crates/athena-core/src/run/mod.rs:1810-1857 (destructure of `Reported`, the `Built` literal) and the resume path's `Built` at mod.rs:818-828",
+      "kind": "code",
+      "test": "cargo test -p athena-core run::tests (the whole module; `scope_send_back_a_resumed_candidate_outside_the_list_closes_at_the_checks_stage` covers the resume path, which sets `records_runs: Vec::new()`)",
+      "reason": null
+    },
+    {
+      "name": "the stored-brief placeholder rule for machine paths",
+      "dependent": "crates/athena-core/src/run/mod.rs:1155-1158 (stored brief uses `evidence_placeholder`), run/verification.rs:179-214 (`brief-verifier.md` stored with the placeholder, sent with the real path), run/producer.rs:590-594 (invocation `detail` stores the problems), `self.failure` (stores the reason), run/tests.rs:1137-1156 (stored versus sent contract)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core records_loop_stored_text_holds_no_machine_path_and_the_sent_text_does (asserts the stored brief-verifier.md entry, the producer invocation detail and the unreachable failure reason hold `<state>/jobs/<id>/evidence` and no real state path, while the sent verifier and send-back prompts hold the real path) and records_loop_unreachable_snapshot_ends_the_job_before_the_verifier",
+      "reason": null
+    },
+    {
+      "name": "the final verdict's rule that a behavior criterion cites a command that ran (D43, D115)",
+      "dependent": "crates/athena-core/src/verify.rs:411-445 (`ran`), 573-603 (the `cited but not seen running` finding)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core records_loop_job_lands_when_the_verifier_runs_and_cites_the_command and records_loop_a_verifier_citing_athenas_run_without_running_it_is_unmet",
+      "reason": null
+    },
+    {
+      "name": "stored resume mark",
+      "dependent": "crates/athena-core/src/state.rs:489 (`ResumeMark`) and `write_resume_mark` (mod.rs:835-856)",
+      "kind": "code",
+      "test": null,
+      "reason": "`ResumeMark` is not changed; `write_resume_mark` copies only report_gaps and left_criteria, so old marks read as before. A candidate taken through the resume shortcut (mod.rs:818-828) runs no producer pass and so gets no records run; a retry that runs the producer again gets one after each pass. D183 and the CHANGELOG state the limit; the criterion still tells the verifier to run the command itself."
+    },
+    {
+      "name": "the shared send-back budget",
+      "dependent": "crates/athena-core/src/run/mod.rs (`PRODUCER_SEND_BACKS` and its doc) and producer.rs:604-649",
+      "kind": "code",
+      "test": "cargo test -p athena-core a_check_still_failing_after_the_send_back_is_flagged_to_the_verifier and a_failing_check_is_sent_back_before_the_verifier_and_the_fix_reaches_it (counts stay (2,1) and 1 send-back), plus records_loop_constant_measure_is_sent_back_and_the_fix_reaches_the_verifier",
+      "reason": null
+    },
+    {
+      "name": "`CheckResultView` gains `records_run: Option<RecordsRunView>`",
+      "dependent": "crates/athena-context/src/briefs.rs:948-964 and its constructors: briefs.rs tests at 2582, 3092-3101 and 3256; crates/athena-core/src/verify.rs:1143-1158 and run/verification.rs:89-126 (`..Default::default()`)",
+      "kind": "code",
+      "test": "cargo test -p athena-context (the tests that list every field get `records_run: None`; new tests render a `records_run` with the placeholder replaced by the evidence argument, and the stored call leaves the placeholder) and cargo test -p athena-core verify::",
+      "reason": null
+    },
+    {
+      "name": "producer brief text gains one sentence in `## Checks before the verifier`",
+      "dependent": "crates/athena-context/src/briefs.rs:905-918 (`checks_before_verifier_section`), `evidence_section` (657-675), the briefs test at briefs.rs:2470 and run/tests.rs:859-948, 1032, 1142-1155",
+      "kind": "code",
+      "test": "cargo test -p athena-context (a new test asserts the sentence, that it describes judging only, and that it asks for no output change; the existing `producer_briefs_say_athena_runs...` test is kept) and cargo test -p athena-core run::tests (the stored-versus-sent brief test at tests.rs:1142 is unaffected: the sentence holds no evidence path)",
+      "reason": null
+    },
+    {
+      "name": "prompt-set budgets",
+      "dependent": "docs/system-facts.md 'Prompt sets and budgets' and the test `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The new sentence is in the producer brief built by `briefs.rs`, which the system facts place outside the always-loaded sets. No file under crates/athena-context/prompts/ changes and no budget line changes."
+    },
+    {
+      "name": "the producer's policy file and its `evidence` field, read by the reach check",
+      "dependent": "crates/athena-agent/src/policy.rs:35-47, 90-117, 1380-1411 (`Policy`, `evaluate(policy, tool, input, cwd)`); crates/athena-core/src/reading.rs:415-425 (`agent_spec` writes the file); crates/athena-cli/src/hooks.rs:5",
+      "kind": "code",
+      "test": "cargo test -p athena-core records_criteria::tests::reach_ and cargo test -p athena-agent policy",
+      "reason": null
+    },
+    {
+      "name": "`athena status --snapshot` and the evidence directory, run read-only",
+      "dependent": "crates/athena-core/src/snapshot.rs (`status`, `read_history`, `evidence_dir`, `unlock`); crates/athena-cli/src/display.rs:1196 (`snapshot_status`); crates/athena-cli/tests/status_snapshot.rs",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test status_snapshot",
+      "reason": null
+    },
+    {
+      "name": "the lines `status --snapshot` prints (the judged output)",
+      "dependent": "crates/athena-core/src/status/throughput.rs:789-845 (`Throughput::text`, the lines the judge reads: `landing(s)` and `; the N landings before:` comparisons at 794-805, stage medians at 806-812, daily counts at 813-818, build wait at 832, the median line at 837); crates/athena-cli/src/display.rs:1196-1249",
+      "kind": "code",
+      "test": "cargo test -p athena-core records_criteria::tests:: (literal-line tests for the USD, percent, build-wait, stage-median and daily lines) and records_loop_real_throughput_text_is_judged_on_the_named_line, which judges the real `Throughput::text()`; a later change to the text shape is caught by the real-text test",
+      "reason": null
+    },
+    {
+      "name": "the package gate for the mapped `cargo run -p athena-cli` command",
+      "dependent": "crates/athena-cli/Cargo.toml (`name = \"athena-cli\"`, line 2) and the package gate `athena_cli_package`; crates/athena-core/src/mirrors.rs:941 (`is_athena_source`, same file-test style, not reused); crates/athena-core/src/reading/surveys.rs:410-413 (RECORDS_MEASURE_PATHS, unchanged)",
+      "kind": "code",
+      "test": "cargo test -p athena-core records_criteria::tests::athena_cli_package_ (with, without, another name) and records_loop_without_an_athena_cli_package_records_not_run",
+      "reason": null
+    },
+    {
+      "name": "the reading gate's real-records criterion text",
+      "dependent": "crates/athena-core/src/reading/surveys.rs:416-431, 538-602 (`check_records_measure`); crates/athena-core/tests/refusal_corpus.rs:427, 436, 452; crates/athena-core/src/reading.rs:8552-8584",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus and cargo test -p athena-core reading::",
+      "reason": null
+    },
+    {
+      "name": "the in-loop executor reused for the records run",
+      "dependent": "crates/athena-core/src/run/checks.rs:73-162 (`SnapExec`, `in_loop`), 283-308 (`ExposedIndex`), 350-457 (`loop_check_failures`, `run_loop_checks`); crates/athena-core/src/checks.rs:513-638 (`run_check`, `CheckKind::Command` versus `Test`); crate::slots, crate::disk",
+      "kind": "code",
+      "test": "cargo test -p athena-core records_loop_busy_slot_is_skipped_with_a_line (modeled on `a_busy_build_slot_skips_the_in_loop_checks_without_waiting`, tests.rs:4848) and the existing in-loop check tests",
+      "reason": null
+    },
+    {
+      "name": "decisions that govern changed files",
+      "dependent": "docs/decision-links.toml:220-224 (`[[governs]]`) and the decision gate `unreconciled_in_snapshot` (producer.rs:485)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The governed paths are crates/athena-git/src/snapshot.rs and crates/athena-core/src/run/candidate.rs; this plan changes neither, so the gate fires nothing."
+    },
+    {
+      "name": "the appended decision and the changelog default",
+      "dependent": "crates/athena-core/src/mirrors.rs (decision-log structure check, D162) and `admission::changelog_required` (producer.rs:461)",
+      "kind": "rule",
+      "test": "cargo test mirrors",
+      "reason": null
+    },
+    {
+      "name": "callers and modes of the new stage",
+      "dependent": "Every mode that reaches `producer_loop` (producer.rs:287): nested runs, pinned runs, an empty change, a job with no selected criterion, a repository with no athena-cli package, a resumed candidate, a retry seeded from a tree; `run_loop_checks` (checks.rs:381-383) is the pattern",
+      "kind": "code",
+      "test": "cargo test -p athena-core records_loop_fixture_only_criteria_run_nothing, records_loop_without_an_athena_cli_package_records_not_run and the existing resume tests",
+      "reason": "A nested run is judged by the outer job, a pinned run has no records, and an empty change fails later as an idle producer; the stage returns empty for all three without a line. A job with no selected criterion returns before the package gate and the reach check, so no other job reads the policy file or the evidence directory. A repository without the package records `not run` and reads nothing else. A resumed or retry-seeded job runs the stage after each producer pass like any other; the resume shortcut (mod.rs:818) runs no pass and sets `records_runs: Vec::new()`."
+    },
+    {
+      "name": "jobs run by other test crates with fake agents",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs and crates/athena-cli/tests (jobs run with `test-support`)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli",
+      "reason": "With `test-support` the command runs only when a test installed `argv_seam` (the `demo_runs_here` rule, checks.rs:561-567), so no test starts a real `cargo run` by accident, and a reading with no selected criterion runs nothing. Those tests commit no athena-cli package, so a selected criterion would be a `not run` entry at most."
+    },
+    {
+      "name": "the evidence directory path and its lifetime",
+      "dependent": "crates/athena-core/src/run/mod.rs `Athena::go` dispatch (mod.rs:1153-1158, 1341) and `crate::snapshot::evidence_dir`",
+      "kind": "code",
+      "test": "cargo test -p athena-core records_loop_unreachable_snapshot_ends_the_job_before_the_verifier",
+      "reason": "Unchanged. The stage reads the same path the producer brief names and never writes to it. The command's out file is in the job's own directory, outside the work tree and the evidence directory, and is removed after it is read."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Fake-producer run through `Athena::go`, in the shape of `a_failing_check_is_sent_back_before_the_verifier_and_the_fix_reaches_it` (tests.rs:4543). The test commits `crates/athena-cli/Cargo.toml` (name `athena-cli`) with `commit_file`, so the package gate passes for real. The scripted reader adds a behavior criterion: \"Run `cargo run -p athena-cli -- status --snapshot evidence`: on the real records the landing time it prints is within the expected range 2 to 10 minutes taken from the commit times in history.json\". The producer and verifier report it. The producer script adds FIXED.txt only when its prompt holds `## Sent back` (as `fixing_file_on_send_back`, tests.rs:4493). The `argv_seam` maps the inner `cargo run` argv to an `sh -c` that prints a real-shaped status block: the header (the `snapshot    <evidence path>` line first, history and job counts, hashes, dates), the throughput lines, a `median per landed job over the last 3 measured: 4.0 min (reading 0.0 · planning 0.0 · producer 1.0 · checks 0.0 · verifier 1.0 · landing and rebuild 0.0)` line, and a per-job line `landing time 4.0 min (20261101-101010-aaaa 3.0 · 20261101-111111-bbbb 3.0 · 20261101-121212-cccc 3.0)` before FIXED.txt exists and `(... 3.0 · ... 6.5 · ... 4.2)` after it, plus a cargo-style `--> src/x.rs:120:9` line on stderr. The per-job line stands for what a change to a per-job measure prints; today's status prints none (stated limit).",
+      "command": "cargo test -p athena-core records_loop_constant_measure_is_sent_back_and_the_fix_reaches_the_verifier",
+      "observes": "Pass 1 prints the constant job-id list, so the producer is sent back and the UI shows `producer   sent back: records criterion 1 ... same value for every item`. The second producer prompt holds `## Sent back`, the command with the job's real evidence path, the judged line and the output. Pass 2 prints varied in-range figures and the verifier runs once, so the counts (producer, verifier) are (2, 1). The one verifier prompt holds `records-criterion-1`, the command and pass 2's output. The header numbers, the stage-median line (equal 0.0 stages, not job ids) and the stderr line do not change the outcome.",
+      "fails_without": "With no pre-verifier run the constant output is never seen: the producer count is 1, no `producer   sent back: records criterion 1` line exists, the second prompt holds no command or output, and the verifier prompt holds no `records-criterion-1`.",
+      "seam": "Production entry `Athena::go` -> `producer_loop` -> `loop_records_criteria`. Guards: not nested, not pinned, a non-empty change, a selected criterion, package gate passes, reach passes. Fixture: a `FakeAgentDriver` script (exists: `editing`, `scoped`, `fixing_file_on_send_back`, `recording_verifier_prompts`, tests.rs:3158, 3945, 4493, 4509) plus a new helper that adds the behavior criterion (plan step 8). `commit_file` exists (tests.rs:358). Injected by `athena_with` (exists, tests.rs:191) and by `records_criteria::argv_seam::install` (thread-local, added by plan step 2, mirrors `demo_seam` at checks.rs:585-615). The mapper replaces only the inner `cargo run` argv, so the redirect, reading, package gate, judging and send-back are production code."
+    },
+    {
+      "criterion": 2,
+      "method": "Same harness as criterion 1, with the seam printing a block whose per-job line is `landing time 4.6 min (20261101-101010-aaaa 3.0 · 20261101-111111-bbbb 6.5 · 20261101-121212-cccc 4.2)` against the range 2 to 10 minutes, and the verifier prompts kept with `recording_verifier_prompts`. Three tests: (a) the in-range test asserts counts, prompt and lines; (b) a verifier script takes the evidence path from its prompt (`evidence_path_in`, tests.rs:851), sets `commands_run` and the criterion's `commands` to the exact command (`cargo run -p athena-cli -- status --snapshot <real path>`), and the job reaches Landed; (c) a verifier script cites the same command with an empty `commands_run`, and the job does not land, with the D43 finding `cited but not seen running`. A briefs unit test asserts the rendered entry's sentence: Athena's own run, it does not count as the verifier's command, run it in your snapshot and cite it.",
+      "command": "cargo test -p athena-core records_loop_measure_in_range_is_recorded_for_the_verifier && cargo test -p athena-core records_loop_job_lands_when_the_verifier_runs_and_cites_the_command && cargo test -p athena-core records_loop_a_verifier_citing_athenas_run_without_running_it_is_unmet && cargo test -p athena-context records_run",
+      "observes": "(a) The counts are (1, 1), no UI line starts with `producer   sent back`, and the single verifier prompt holds `records-criterion-1`, the command with the real evidence path, the judged `landing time` line and a result sentence saying the figure 4.6 min is inside the range 2 to 10 minutes, with the sentence that this is Athena's run and must be run and cited again. The mapper received the evidence path in place of the `evidence` token. (b) `finished.state` is `Landed`: the verdict counts the command the verifier ran. (c) The state is not `Landed` and the finding evidence says `cited but not seen running`. The briefs test passes on the new sentence.",
+      "fails_without": "Without the run and its hand-off through `Reported`, `Built` and `verification_stage`, the verifier prompt holds no `records-criterion-1`, command or output, and the (a) assertions fail. A wrong in-range judgement would send the producer back and make the producer count 2. Without the sentence the briefs test fails. (b) and (c) pin the verdict behavior (choice b) so a later change to verify.rs that began counting Athena's run would be seen.",
+      "seam": "`Athena::go` with `athena_with` (exists, tests.rs:191), the `editing` and `recording_verifier_prompts` scripts (exist), `commit_file` (exists), a new verifier-script wrapper in tests.rs (plan step 8) that sets `commands_run` and `commands`, `FakeTurn.commands_run` (exists, fake.rs:21), and `argv_seam` (plan step 2). The briefs test calls `verifier_brief_with_evidence` on a `CheckResultView` with `records_run` (plan step 6)."
+    },
+    {
+      "criterion": 3,
+      "method": "Two end-to-end tests and the `reach` unit tests. (a) `records_loop_outside_the_range_is_sent_back`: the per-job line is `landing time 273.8 min (...varied job-id list...)` before FIXED.txt and `4.0 min` after; the send-back names the figure 273.8 and the range 2 to 10 minutes; counts (2, 1). (b) `records_loop_unreachable_snapshot_ends_the_job_before_the_verifier`: the producer script takes the evidence path from its prompt (`evidence_path_in`, tests.rs:851), calls `crate::snapshot::unlock` and removes the directory, as a snapshot cleaned away mid-job would be (the unlock-and-remove pattern is in tests.rs:859-948). The test repository holds the `athena-cli` package file, so the package gate passes and reach is what fails. (c) Unit tests `reach_*` in records_criteria.rs call `reach(evidence, &Policy)` with `Policy` values built as at policy.rs:992-1016 and 1380-1411: evidence `None`, evidence at another path, evidence correct.",
+      "command": "cargo test -p athena-core -- records_loop_outside_the_range_is_sent_back records_loop_unreachable_snapshot_ends_the_job_before_the_verifier records_criteria::tests::reach_",
+      "observes": "(a) The send-back text holds the out-of-range figure and the range, then the corrected pass goes on to the verifier. (b) `finished.state` is `Failed`; the reason names `<state>/jobs/<id>/evidence` in the placeholder form (no real state path) and says it cannot be reached from the producer's workspace; the verifier count is 0 and the producer count is 1. (c) With evidence `None` or at another path `reach` returns an error naming the placeholder path and that the producer's policy gave no read access; with the right evidence it passes.",
+      "fails_without": "Without the out-of-range judgement the 273.8 figure passes and no send-back line appears. Without the reach check the job reaches the verifier (verifier count 1) or the cargo run is attempted on a missing directory, so the verifier-count-0 and named-snapshot assertions fail. Without the policy half the `reach_` tests for evidence `None` fail.",
+      "seam": "`Athena::go` -> `producer_loop` -> the reach check inside `loop_records_criteria` (production code: `is_dir`, `read_history`, the policy-file parse, `evaluate`). The producer script of (b) edits the real evidence directory through std::fs (the `Script` closure receives its prompt: exists, fake.rs:43, 97). (a) uses `argv_seam` (plan step 2). (c) calls the production function `reach` directly with `Policy` values (no double)."
+    },
+    {
+      "criterion": 4,
+      "method": "Content check by reading the diff: the call site, the own-process run, and the evidence in both hand-offs.",
+      "command": "git diff -- crates/athena-core/src/run/producer.rs crates/athena-core/src/run/records_criteria.rs crates/athena-core/src/run/mod.rs crates/athena-core/src/run/verification.rs crates/athena-context/src/briefs.rs",
+      "observes": "In producer.rs the call `self.loop_records_criteria(...)` sits after `let check_failures = self.loop_check_failures(...)` and before the `if unmet.is_empty() ... { break Some(report); }` test, which also tests the records problems. The call runs in Athena's own process through `SnapExec` and not in the producer's sandbox. `append_records_problems` adds the command, judged lines and output to `attempt_brief`. verification.rs pushes one `records-criterion-<n>` `CheckResultView` per run. briefs.rs renders `records_run` with the command, the output and the sentence that it is Athena's run. Every stored text goes through the state-root replacement before it is kept.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Content check by reading the diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One added bullet at the top of `### Added` under `## [Unreleased]`, no existing line changed. It says Athena runs each behavior criterion that names real records and gives a `status --snapshot` command, after the producer's report and the in-loop checks and before the verifier, only where the repository has the `athena-cli` package. The command and output go to the producer's send-back and the verifier's brief. A figure outside the stated range, or a list of three or more job ids that all show the same value, is sent back through the shared send-back. It states that today's status output prints no per-job list, so the constant check can fire only when the change prints one. An unreachable snapshot (missing, or no read grant for the producer) ends the job early naming the snapshot. What is not judged is only recorded; a non-zero exit is recorded and not sent back. The verifier must run and cite the command itself. A candidate taken through the resume shortcut gets no records run. The tests are named and D183 is cited.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Content check by reading the diff; `git diff --stat` shows no path under records/.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "Added lines only, after D182: a `## D183` heading and a `- **Provenance:**` bullet; no existing entry edited. The decision-log structure check in the full `cargo test` (`mirrors`, crates/athena-core/src/mirrors.rs) passes on the appended entry.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the whole workspace, including the existing producer-loop tests (the in-loop check tests at tests.rs:4543-4940 and the scope, mirror and changelog send-backs) and the refusal corpus (`cargo test -p athena-core --test refusal_corpus`, which holds `records-measure-change-with-real-records-range-history-json`, `records-measure-change-with-real-records-range-git-log` and `refusal-rate-declaration-wrapped-line`; the plan changes no gate). New tests that show no unrelated change: `records_loop_fixture_only_criteria_run_nothing` (behavior criteria that are `cargo test` fixtures, one with `status --snapshot` and no `real records`, one with `real records` and no `status --snapshot`; the seam counts calls); `records_loop_without_an_athena_cli_package_records_not_run` (a selected criterion in a repository without the package: a `not run` entry, seam count 0, no send-back, no reach check); unit tests for `athena_cli_package` (with the package, without it, another package name); and the judge unit tests on literal lines copied from throughput.rs:794-805, 810, 818, 832, 837: (i) `spent on attempts that did not land: 1.23 USD over the last 5 landing(s); the 5 landings before: 0.40 USD` with range 1 to 2 USD judges only 1.23 and gives no problem, with range 0.1 to 0.5 USD the problem names 1.23; (ii) `landed on the first attempt: 60% over the last 5 landing(s); the 5 landings before: 20%` with range 50 to 70 percent judges only 60%; (iii) `build wait 3.0 s over 4 check(s), longest 1.0 s` with range 2 to 5 seconds judges only 3.0 s, and `check(s)` is not a unit; (iv) `median per landed job over the last 3 measured: 4.0 min (reading 0.0 · planning 0.0 · producer 0.0 · checks 0.0 · verifier 0.0 · landing and rebuild 0.0)`, with and without a criterion that says per job, gives no constant and judges only 4.0 min; (v) `throughput 6 landed (2026-11-10 3 · 2026-11-11 3 · 2026-11-12 3)` is never a constant list; (vi) a job-id list of three equal items is constant, two equal items are not, three with one different are not, a list with one non-job-id label is not a per-item list, and a constant is caught with no stated range; (vii) the unit alias table, one test per alias against a range of the family's long name, and a figure in another family is not judged; (viii) header counts, dates, hashes, job counts and cargo `--> file:line:col` lines are never judged. `records_loop_real_throughput_text_is_judged_on_the_named_line` runs a job to Landed, writes the evidence snapshot of the repository head (`crate::snapshot::write`, unlock at the end), reads the real `Throughput::text()` through `crate::snapshot::status`, prepends the header in the shape of display.rs:1196-1249 and judges it.",
+      "command": "cargo test",
+      "observes": "All tests pass. The seam's call count is 0 for the non-matching criteria and for the no-package repository. On the real text, a criterion naming `idle between jobs` with range 0 to 100000 minutes is Passed with exactly the `idle between jobs` line judged; the same criterion with range 1000 to 2000 minutes is a problem; a criterion naming `landing time` (no line holds it) is not judged and sends nothing back although the block holds many numbers; a criterion naming `throughput` judges the `throughput N landed (...)` line for figures with a unit only (none) and never calls the daily list constant. If `Throughput::compute` returns `None` for the core harness job, the producer moves the one real-text test to crates/athena-cli/tests with the judge reached through a documented `pub` re-export and reports which.",
+      "fails_without": "If selection were too broad the fixture-only criteria would call the seam and the counter assertion would fail. If the package gate were missing the no-package test would run the seam. If judging took every figure on a line, tests (i) to (iii) would send back or judge 0.40 USD, 20% or the longest wait. If judging took lists of non-job-id labels, tests (iv) and (v) would send back. The existing producer-loop tests would fail if send-back behavior had changed.",
+      "seam": "Production entry `Athena::go` for the loop tests and the pure functions `select`, `judge`, `athena_cli_package` and `reach` for the unit tests; `argv_seam` (plan step 2) and its call counter owned by the test; `athena_with`, `run_job`, `Counts` and `commit_file` exist (tests.rs:191, 4001, 3043, 358). The real-text test uses the production `crate::snapshot::write`, `status` and `Throughput::text()`; only the header lines are written by the test."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the formatter check on the result. Athena also formats the work tree at the end of each producer pass (producer.rs:448).",
+      "command": "cargo fmt --check",
+      "observes": "Exit 0 and no diff output.",
+      "fails_without": "Any unformatted line in records_criteria.rs, tests.rs, briefs.rs or producer.rs makes the check exit non-zero.",
+      "seam": "The command itself; no seam."
+    },
+    {
+      "criterion": 9,
+      "method": "Run clippy as the configured check does (`cargo clippy --all-targets --locked -- -D warnings`).",
+      "command": "cargo clippy --all-targets",
+      "observes": "Exit 0 and no warnings.",
+      "fails_without": "Any warning (unused import, needless borrow, too many arguments, a test-only seam unused in a non-test build) fails the `-D warnings` run.",
+      "seam": "The command itself; no seam."
+    }
+  ],
+  "open_questions": [
+    "User: Today's `status --snapshot` prints only medians, totals and daily counts, never a per-job list labelled by job ids (throughput.rs:836-844), so the constant check can fire only when the producer's change makes the command print such a list. Is that limit acceptable, or should Athena compute per-job values from the snapshot's records itself (a new computation the code does not define today, which `landed_jobs` at throughput.rs:472 could feed)?",
+    "User: The reading gate's own example range is \"taken from the commit times in history.json\" and holds no number (refusal_corpus.rs:354), and for the usual wording no output line holds the criterion's phrase. For such a criterion the stage records the command and output for the verifier and sends the job back only for a constant job-id list. Is that acceptable, or should Athena compute a range from history.json (the gate says the range must come from a source the change does not compute)?"
+  ],
+  "producer_section_sha256": "37d9303894eae553d41eb0980fc0cac47d3f41312aaae54c47db405906cce33b"
+}
