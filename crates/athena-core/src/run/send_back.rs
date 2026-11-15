@@ -294,7 +294,16 @@ impl CheckFailure {
                 (None, Some(note)) => note.to_string(),
                 (None, None) => "no exit code".to_string(),
             },
-            tail: crate::checks::tail(&run.output_tail, CHECK_FAILURE_TAIL_BYTES),
+            // A stored record written before the cleanup text was cut may still hold it, so the section is
+            // cut again here (it changes nothing on a tail that is already cut).
+            tail: crate::checks::tail(
+                &crate::checks::failure_section(
+                    &run.output_tail,
+                    crate::checks::FAILED_TAIL_LINES,
+                    crate::checks::FAILED_TAIL_BYTES,
+                ),
+                CHECK_FAILURE_TAIL_BYTES,
+            ),
         }
     }
 
@@ -409,6 +418,44 @@ mod check_failure_tests {
         f.tail = String::new();
         let out = append_check_failures(send_back_text("brief", &[], &[]), &[f]);
         assert!(out.ends_with("    (no output)\n"), "{out}");
+    }
+
+    fn run_with_tail(tail: &str) -> athena_data::records::CheckRun {
+        use athena_data::{Quantity, Unit};
+        athena_data::records::CheckRun {
+            name: "test".into(),
+            command: vec!["cargo".into(), "test".into()],
+            exit_code: Some(1),
+            passed: false,
+            tests_ran: None,
+            duration: Quantity::measured(1.0, Unit::Seconds, "test"),
+            output_tail: tail.into(),
+            note: None,
+            failed_tests: Vec::new(),
+            reused: true,
+            revert_for: Vec::new(),
+            queued_s: None,
+        }
+    }
+
+    #[test]
+    fn with_failure_detail_tail_is_clean_in_the_send_back() {
+        // Constructed: a stored tail with progress lines and a block with no header.
+        let block = "[command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader\nRemoving HTTP extra header\nCleaning up orphan processes\n##[warning]Node.js 20 actions are deprecated\n";
+        let f = CheckFailure::of(&run_with_tail(&format!(
+            "progress one\nprogress two\n{block}"
+        )));
+        assert_eq!(f.tail, "progress one\nprogress two\n");
+        let out = append_check_failures(send_back_text("brief", &[], &[]), &[f]);
+        for s in ["/usr/bin/git", "Removing", "Cleaning up orphan", "Node.js"] {
+            assert!(!out.contains(s), "{s} in {out}");
+        }
+        assert!(out.contains("    progress two\n"));
+        // A tail that ends in the note keeps it.
+        let note = crate::checks::no_test_section_note(&["test (shard 1)"]);
+        let f = CheckFailure::of(&run_with_tail(&format!("progress one\n{note}")));
+        let out = append_check_failures(send_back_text("brief", &[], &[]), &[f]);
+        assert!(out.contains("(no failing test section was found in test (shard 1)"));
     }
 
     #[test]

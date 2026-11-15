@@ -612,6 +612,123 @@ mod tests {
         assert!(local.ran.borrow().is_empty());
     }
 
+    // Constructed: the text `cargo xtask test-shard` prints for `units` passing units, then the end of the
+    // job's log with the cleanup header and block.
+    fn passing_units(units: usize) -> String {
+        let mut s = String::new();
+        for u in 0..units {
+            s.push_str(&format!("== shard 3/6: other{u} --lib\n"));
+            for t in 0..250 {
+                s.push_str(&format!("test t_{t} ... ok\n"));
+            }
+            s.push_str("test result: ok. 250 passed; 0 failed\n");
+            if u == 0 {
+                s.push_str("thread 'child' panicked at child.rs:1:1:\n");
+            }
+        }
+        s
+    }
+
+    const JOB_END: &str = "##[error]Process completed with exit code 1.\nPost job cleanup.\n[command]/usr/bin/git version\ngit version 2.52.0\n[command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader\nRemoving HTTP extra header\n";
+
+    /// The stored `test` run of a red CI run whose one failed shard has `log`, read through the real
+    /// `detail_from_job_logs`.
+    fn stored_test_run(conclusion: &str, log: String) -> CheckRun {
+        let detail = crate::gh::detail_from_job_logs(&[(
+            "test (shard 3)".to_string(),
+            conclusion.to_string(),
+            Some(log),
+        )])
+        .unwrap();
+        let ci = Detailed {
+            inner: Ci::new(Some(ci_run(SHA, "failure"))),
+            detail,
+            detail_reads: Cell::new(0),
+        };
+        let local = Local::new(None);
+        let changed = paths(&["src/a.rs"]);
+        let r = route(Some("code"), specs(), &changed);
+        let (runs, _) = run_routed_with_record(&r, SHA, &changed, &ci, &local, WAIT).unwrap();
+        runs.into_iter().find(|c| c.name == "test").unwrap()
+    }
+
+    fn assert_no_cleanup(text: &str) {
+        for s in [
+            "/usr/bin/git",
+            "Removing",
+            "Cleaning up orphan",
+            "Node.js",
+            "Post job cleanup",
+        ] {
+            assert!(!text.contains(s), "{s} kept in {text}");
+        }
+    }
+
+    #[test]
+    fn with_failure_detail_keeps_a_failing_units_output_to_the_send_back() {
+        let log = format!(
+            "== shard 3/6: athena-core --lib\n   Compiling athena-core v0.1.0\nerror[E0432]: unresolved import `crate::nope`\nerror: could not compile `athena-core` (lib test) due to 1 previous error\n{}error: shard 3 of 6: 1 of 5 units failed: athena-core --lib\n{JOB_END}",
+            passing_units(4)
+        );
+        let test = stored_test_run("failure", log);
+        assert!(test.output_tail.contains("error[E0432]: unresolved import"));
+        assert!(test.output_tail.contains("1 of 5 units failed"));
+        assert_no_cleanup(&test.output_tail);
+        let sent = crate::run::CheckFailure::of(&test).tail;
+        assert!(sent.contains("error[E0432]"));
+        assert_no_cleanup(&sent);
+        let view = crate::verify::check_result_view(&test);
+        assert!(view.output_tail.contains("error[E0432]"));
+    }
+
+    #[test]
+    fn with_failure_detail_keeps_a_marker_units_panic_among_passing_units() {
+        let mut log = String::from(
+            "== shard 3/6: athena-core --lib\n    Running unittests src/lib.rs (target/debug/deps/athena_core-0f3a9b)\nrunning 101 tests\n",
+        );
+        for t in 0..100 {
+            log.push_str(&format!("test t_{t} ... ok\n"));
+        }
+        log.push_str(
+            "test tests::a ... FAILED\n\nfailures:\n\n---- tests::a stdout ----\nthread 'tests::a' panicked at src/lib.rs:9:5:\nassertion `left == right` failed\n  left: 1\n right: 2\n\nfailures:\n    tests::a\n\ntest result: FAILED. 100 passed; 1 failed\n",
+        );
+        log.push_str(&passing_units(4));
+        log.push_str(&format!(
+            "error: shard 3 of 6: 1 of 5 units failed: athena-core --lib\n{JOB_END}"
+        ));
+        let test = stored_test_run("failure", log);
+        let n = athena_context::briefs::BRIEF_TAIL_LINES;
+        let view = crate::verify::check_result_view(&test).output_tail;
+        let lines: Vec<&str> = view.lines().collect();
+        let last = lines[lines.len().saturating_sub(n)..].join("\n");
+        assert!(last.contains("panicked at src/lib.rs:9:5"), "{last}");
+        assert!(last.contains("assertion `left == right` failed"), "{last}");
+        let sent = crate::run::CheckFailure::of(&test).tail;
+        assert!(sent.contains("panicked at src/lib.rs:9:5"), "{sent}");
+        assert!(sent.contains("assertion `left == right` failed"), "{sent}");
+    }
+
+    #[test]
+    fn with_failure_detail_end_to_end_cancelled_shard_ends_in_the_note() {
+        let block = "[command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader\nRemoving HTTP extra header\nCleaning up orphan processes\n##[warning]Node.js 20 actions are deprecated\n";
+        let progress: String = (0..300).map(|i| format!("step progress {i}\n")).collect();
+        let test = stored_test_run("cancelled", format!("{progress}{block}"));
+        assert!(test.output_tail.lines().count() <= crate::checks::FAILED_TAIL_LINES);
+        assert_no_cleanup(&test.output_tail);
+        let last = test.output_tail.lines().last().unwrap();
+        assert!(last.starts_with("(no failing test section was found in"));
+        assert!(
+            crate::run::CheckFailure::of(&test)
+                .tail
+                .contains("(no failing test section was found in")
+        );
+        assert!(
+            crate::verify::check_result_view(&test)
+                .output_tail
+                .contains("(no failing test section was found in")
+        );
+    }
+
     #[test]
     fn routing_a_green_run_never_reads_a_failure_detail() {
         let ci = detailed("success");

@@ -283,6 +283,86 @@ fn failing_units(log: &str) -> Vec<String> {
         .collect()
 }
 
+/// The units a `cargo xtask test-shard` summary line names: `shard k of n: X of Y units failed: a; b`, which
+/// the xtask prints (xtask/src/shard.rs) after an optional `error: ` prefix (xtask/src/main.rs). `None` for
+/// any other line, including the `N units failed, so their times may be too short` message.
+fn summary_units(line: &str) -> Option<Vec<&str>> {
+    let t = line.trim();
+    let t = t.strip_prefix("error: ").unwrap_or(t);
+    if !t.starts_with("shard ") {
+        return None;
+    }
+    let (_, units) = t.split_once(" units failed: ")?;
+    Some(units.split("; ").map(str::trim).collect())
+}
+
+/// The most passing unit names a collapse line lists.
+const COLLAPSE_NAMES: usize = 6;
+
+/// `log` cut to the output of the units its own `units failed:` summary names. Each named unit keeps its part
+/// whole (from its `== shard k/n: <unit>` line to the next such line or the summary); a run of other units
+/// becomes one `(output of N passing units not kept: ...)` line; the summary and every line after it stay.
+/// Lines before the first unit are dropped. `None` when the log has no summary or no named unit has a
+/// `== shard` line, so the caller keeps the log as it is.
+fn failed_units_only(log: &str) -> Option<String> {
+    let lines: Vec<&str> = log.lines().collect();
+    let summary = lines.iter().rposition(|l| summary_units(l).is_some())?;
+    let named = summary_units(lines[summary])?;
+    let mut parts: Vec<(&str, usize)> = Vec::new();
+    for (i, line) in lines[..summary].iter().enumerate() {
+        if let Some(rest) = line.strip_prefix("== shard ")
+            && let Some((_, unit)) = rest.split_once(": ")
+        {
+            parts.push((unit.trim(), i));
+        }
+    }
+    if !parts.iter().any(|(unit, _)| named.contains(unit)) {
+        return None;
+    }
+    let mut out = String::new();
+    let mut passing: Vec<&str> = Vec::new();
+    let flush = |passing: &mut Vec<&str>, out: &mut String| {
+        if passing.is_empty() {
+            return;
+        }
+        let shown = passing
+            .iter()
+            .take(COLLAPSE_NAMES)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("; ");
+        let more = if passing.len() > COLLAPSE_NAMES {
+            format!("; +{} more", passing.len() - COLLAPSE_NAMES)
+        } else {
+            String::new()
+        };
+        let noun = if passing.len() == 1 { "unit" } else { "units" };
+        out.push_str(&format!(
+            "(output of {} passing {noun} not kept: {shown}{more})\n",
+            passing.len()
+        ));
+        passing.clear();
+    };
+    for (k, (unit, start)) in parts.iter().enumerate() {
+        if named.contains(unit) {
+            flush(&mut passing, &mut out);
+            let stop = parts.get(k + 1).map_or(summary, |(_, s)| *s);
+            for line in &lines[*start..stop] {
+                out.push_str(line);
+                out.push('\n');
+            }
+        } else {
+            passing.push(unit);
+        }
+    }
+    flush(&mut passing, &mut out);
+    for line in &lines[summary..] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    Some(out)
+}
+
 /// What the logs of the failed test-shard jobs say, from `(job name, conclusion, log)` with `None` for a log
 /// that could not be read.
 ///
@@ -293,6 +373,12 @@ fn failing_units(log: &str) -> Vec<String> {
 /// than [`MAX_RECORDED_TESTS`] is cut with [`LIST_CUT`]. Those entries never match a base's names, so a
 /// partly read set of shards can never look like a complete list. With no names the list stays empty and the
 /// tail alone is kept; with no log read, or no job, the result is `None`.
+///
+/// The tail of each shard is its failing section with the runner's cleanup text dropped. When the log's own
+/// `units failed:` summary names a unit, that is the failing unit's output with the passing units collapsed
+/// to one line. A shard with no failing test section keeps the last lines of its log before the cleanup, and
+/// one note at the end of the whole tail names those shards. No note is added for a `failure` log that was
+/// kept whole, since nothing was cut from it.
 pub fn detail_from_job_logs(
     jobs: &[(String, String, Option<String>)],
 ) -> Option<crate::ci_result::FailureDetail> {
@@ -333,23 +419,51 @@ pub fn detail_from_job_logs(
     let mut text = String::new();
     let n = readable.len().max(1);
     let header = usize::from(n > 1);
-    let per_lines = (crate::checks::FAILED_TAIL_LINES / n)
+    let reduced: Vec<Option<String>> = readable
+        .iter()
+        .map(|(_, _, log)| log.as_deref().and_then(failed_units_only))
+        .collect();
+    // Room for the one trailing note, sized for every shard that has no reduced log (a superset of the
+    // shards the note can name), and for the `failing units:` line added below.
+    let unreduced: Vec<&str> = readable
+        .iter()
+        .zip(&reduced)
+        .filter(|(_, r)| r.is_none())
+        .map(|((name, _, _), _)| *name)
+        .collect();
+    let reserved_lines =
+        usize::from(!unreduced.is_empty()) + usize::from(!names.is_empty() && !units.is_empty());
+    let per_lines = ((crate::checks::FAILED_TAIL_LINES - reserved_lines) / n)
         .saturating_sub(header)
         .max(1);
-    let per_bytes = crate::checks::FAILED_TAIL_BYTES / n;
-    for (name, _, log) in &readable {
+    let note_len = if unreduced.is_empty() {
+        0
+    } else {
+        crate::checks::no_test_section_note(&unreduced).len()
+    };
+    let per_bytes = crate::checks::FAILED_TAIL_BYTES.saturating_sub(note_len) / n;
+    let mut missing: Vec<&str> = Vec::new();
+    for ((name, conclusion, log), reduced) in readable.iter().zip(&reduced) {
         if readable.len() > 1 {
             text.push_str(&format!("== {name}\n"));
         }
-        let mut section = crate::checks::failure_section(
-            log.as_deref().unwrap_or_default(),
-            per_lines,
-            per_bytes,
-        );
+        let log = log.as_deref().unwrap_or_default();
+        let mut section =
+            crate::checks::failure_section(reduced.as_deref().unwrap_or(log), per_lines, per_bytes);
+        // With a summary the reduced log is the evidence; without one, the stored section is. A `failure`
+        // log kept whole was not cut, so every line is visible and a note that lines were cut would be
+        // false; any other conclusion (the shard did not finish) always gets the note.
+        let found = reduced.is_some() || crate::checks::has_failing_section(&section);
+        if !found && (*conclusion != "failure" || section.trim_end() != log.trim_end()) {
+            missing.push(name);
+        }
         if !section.ends_with('\n') {
             section.push('\n');
         }
         text.push_str(&section);
+    }
+    if !missing.is_empty() {
+        text.push_str(&crate::checks::no_test_section_note(&missing));
     }
     let mut failed_tests: Vec<String> = Vec::new();
     let mut output_tail = text;
@@ -1264,5 +1378,161 @@ mod origin_tests {
         ] {
             assert_eq!(GhClient::origin_repository(url).as_deref(), want, "{url:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    use crate::checks::FAILED_TAIL_LINES;
+
+    // Constructed: the runner's credential removal and closing lines, with no `Post job cleanup.` header.
+    const BLOCK: &str = "[command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader\nRemoving HTTP extra header\nCleaning up orphan processes\n##[warning]Node.js 20 actions are deprecated\n";
+
+    // Constructed: what follows the summary in a job log, with the header present.
+    const END_OF_JOB: &str = "##[error]Process completed with exit code 1.\nPost job cleanup.\n[command]/usr/bin/git version\ngit version 2.52.0\n[command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader\nRemoving HTTP extra header\n";
+
+    fn job(name: &str, conclusion: &str, log: String) -> (String, String, Option<String>) {
+        (name.into(), conclusion.into(), Some(log))
+    }
+
+    fn assert_clean(tail: &str) {
+        for s in [
+            "/usr/bin/git",
+            "Removing",
+            "Cleaning up orphan",
+            "Node.js",
+            "Post job cleanup",
+        ] {
+            assert!(!tail.contains(s), "{s} kept in {tail}");
+        }
+    }
+
+    fn progress(n: usize) -> String {
+        (0..n).map(|i| format!("step progress {i}\n")).collect()
+    }
+
+    // `count` passing units in the text `cargo xtask test-shard` prints, the first with a stray panic line.
+    fn passing_units(count: usize, prefix: &str) -> String {
+        let mut s = String::new();
+        for u in 0..count {
+            s.push_str(&format!(
+                "== shard 3/6: {prefix}{u} --lib\n    Running unittests src/lib.rs (target/debug/deps/{prefix}{u}-0f3a9b)\n"
+            ));
+            for t in 0..250 {
+                s.push_str(&format!("test t_{t} ... ok\n"));
+            }
+            s.push_str("test result: ok. 250 passed; 0 failed\n");
+            if u == 0 {
+                s.push_str("thread 'child' panicked at child.rs:1:1:\n");
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn detail_from_job_logs_notes_a_cancelled_shard_without_a_test_section() {
+        let log = format!("{}{BLOCK}", progress(5));
+        let d = detail_from_job_logs(&[job("test (shard 3)", "cancelled", log)]).unwrap();
+        for i in 0..5 {
+            assert!(d.output_tail.contains(&format!("step progress {i}\n")));
+        }
+        let last = d.output_tail.lines().last().unwrap();
+        assert!(last.starts_with("(no failing test section was found in test (shard 3)"));
+        assert_clean(&d.output_tail);
+    }
+
+    #[test]
+    fn detail_from_job_logs_keeps_the_failing_section_of_a_failed_shard() {
+        let log = format!(
+            "== shard 1/6: athena-core --lib\n    Running unittests src/lib.rs (target/debug/deps/athena_core-0f3a9b)\nfailures:\n\n---- tests::a stdout ----\nthread 'tests::a' panicked at src/lib.rs:9:5:\nboom\n\nfailures:\n    tests::a\n\ntest result: FAILED. 0 passed; 1 failed\n{BLOCK}"
+        );
+        let d = detail_from_job_logs(&[job("test (shard 1)", "failure", log)]).unwrap();
+        assert_eq!(d.failed_tests, vec!["athena_core tests::a"]);
+        assert!(d.output_tail.contains("tests::a"));
+        assert!(d.output_tail.contains("panicked at src/lib.rs:9:5"));
+        assert!(!d.output_tail.contains("no failing test section"));
+        assert_clean(&d.output_tail);
+    }
+
+    #[test]
+    fn detail_from_job_logs_counts_the_note_inside_the_line_limit() {
+        let log = format!("{}{BLOCK}", progress(300));
+        let one = detail_from_job_logs(&[job("test (shard 1)", "cancelled", log.clone())]).unwrap();
+        assert!(one.output_tail.lines().count() <= FAILED_TAIL_LINES);
+        let last = one.output_tail.lines().last().unwrap();
+        assert!(last.starts_with("(no failing test section was found in test (shard 1)"));
+        assert!(one.output_tail.contains("step progress 299\n"));
+        let three: Vec<_> = (1..=3)
+            .map(|i| job(&format!("test (shard {i})"), "cancelled", log.clone()))
+            .collect();
+        let d = detail_from_job_logs(&three).unwrap();
+        assert!(d.output_tail.lines().count() <= FAILED_TAIL_LINES);
+        let last = d.output_tail.lines().last().unwrap();
+        assert!(last.contains("test (shard 1), test (shard 2), test (shard 3)"));
+        assert_eq!(d.output_tail.matches("no failing test section").count(), 1);
+        assert_clean(&d.output_tail);
+    }
+
+    #[test]
+    fn detail_from_job_logs_keeps_the_failing_units_own_output_in_a_multi_unit_shard() {
+        // Constructed in the step order of the test job; the unit and summary lines are the text the xtask prints.
+        let log = format!(
+            "##[group]Run actions/checkout@v4\n[command]/usr/bin/git init\n##[group]Run cargo run --locked -p xtask -- test-shard 3 6\n== shard 3/6: athena-core --lib\n   Compiling athena-core v0.1.0\nerror[E0432]: unresolved import `crate::nope`\n --> crates/athena-core/src/lib.rs:3:5\nerror: could not compile `athena-core` (lib test) due to 1 previous error\n{}error: shard 3 of 6: 1 of 5 units failed: athena-core --lib\n{END_OF_JOB}",
+            passing_units(4, "pkg")
+        );
+        let d = detail_from_job_logs(&[job("test (shard 3)", "failure", log)]).unwrap();
+        let t = &d.output_tail;
+        assert!(t.contains("error[E0432]: unresolved import"));
+        assert!(t.contains("could not compile"));
+        assert!(t.contains("1 of 5 units failed"));
+        assert!(t.contains("(output of 4 passing units not kept"));
+        assert!(!t.contains("t_100 ... ok") && !t.contains("child.rs:1:1"));
+        assert!(!t.contains("no failing test section"));
+        assert!(t.lines().count() <= FAILED_TAIL_LINES);
+        assert_clean(t);
+        assert!(d.failed_tests.is_empty());
+    }
+
+    #[test]
+    fn detail_from_job_logs_stores_a_failed_shard_with_no_section_and_no_cleanup_whole() {
+        let log = "one\nbuild broke\n".to_string();
+        let d = detail_from_job_logs(&[job("test (shard 1)", "failure", log)]).unwrap();
+        assert_eq!(d.output_tail, "one\nbuild broke\n");
+    }
+
+    #[test]
+    fn detail_from_job_logs_keeps_a_marker_units_panic_among_passing_units() {
+        let mut log = String::from(
+            "== shard 3/6: athena-core --lib\n    Running unittests src/lib.rs (target/debug/deps/athena_core-0f3a9b)\nrunning 101 tests\n",
+        );
+        for t in 0..100 {
+            log.push_str(&format!("test t_{t} ... ok\n"));
+        }
+        log.push_str(
+            "test tests::a ... FAILED\n\nfailures:\n\n---- tests::a stdout ----\nthread 'tests::a' panicked at src/lib.rs:9:5:\nassertion `left == right` failed\n  left: 1\n right: 2\n\nfailures:\n    tests::a\n\ntest result: FAILED. 100 passed; 1 failed\nerror: test failed, to rerun pass `-p athena-core --lib`\n",
+        );
+        log.push_str(&passing_units(4, "other"));
+        log.push_str(&format!(
+            "error: shard 3 of 6: 1 of 5 units failed: athena-core --lib\n{END_OF_JOB}"
+        ));
+        let d = detail_from_job_logs(&[job("test (shard 3)", "failure", log)]).unwrap();
+        let t = &d.output_tail;
+        assert_eq!(d.failed_tests, vec!["athena_core tests::a"]);
+        assert!(t.starts_with("failing units: athena-core --lib\n"));
+        assert!(t.contains("panicked at src/lib.rs:9:5"));
+        assert!(t.contains("assertion `left == right` failed"));
+        assert!(t.contains("(output of 4 passing units not kept"));
+        assert!(!t.contains("t_249") && !t.contains("child.rs:1:1"));
+        assert!(!t.contains("no failing test section"));
+        assert!(t.lines().count() <= FAILED_TAIL_LINES);
+        assert_clean(t);
+        let n = athena_context::briefs::BRIEF_TAIL_LINES;
+        let lines: Vec<&str> = t.lines().collect();
+        assert!(
+            lines[lines.len().saturating_sub(n)..]
+                .iter()
+                .any(|l| l.contains("panicked at"))
+        );
     }
 }
