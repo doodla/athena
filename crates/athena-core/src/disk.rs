@@ -24,6 +24,13 @@
 //!   with no verification verdict. A workspace that takes no write has no usable space, so a failed probe
 //!   is held with 0 bytes free, and the probe's error is printed first.
 //!
+//! The build-folder slot. With `[parallel] max_concurrency` above 1, two jobs read and plan side by side, but
+//! the disk fits one job's build folder (15 to 24 GB), so only one job at a time holds it (`BuildFolder`).
+//! `dispatch` takes the slot after planning and before the baseline checks, and keeps it until the job is
+//! closed; a job that waits for it is neither held for low disk nor failed. At dispatch the gate
+//! (`Athena::dispatch_disk_gate`) does not hold a job for a shortfall that the holder's own folder explains.
+//! Every other low-disk case holds as above.
+//!
 //! Hold and resume. A held job needs no `athena retry` from a person. The drain lists a dispatched job with
 //! no process as interrupted and retries it by itself on a later pass, once space is free; the retry resumes
 //! from the kept candidate ([`crate::state::ResumeMark`]) with no planner or producer run. That skips the
@@ -87,6 +94,7 @@
 //! `max_in_flight` 1, or with no other job in flight, nothing is held by the bound.
 
 use crate::commits::{NewFile, message};
+use crate::slots::{Class, Slot, SlotQueue};
 use crate::state::{StateDir, format_bytes};
 use crate::store::{JobState, Records};
 use crate::{Athena, Ui};
@@ -97,6 +105,7 @@ use athena_data::records::{
 use athena_data::{JobId, RecordId};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::Duration;
 
 /// The status text of a job held for lack of disk space.
 pub const LOW_DISK: &str = "environment: low disk";
@@ -629,6 +638,135 @@ impl Athena {
             .map(|j| j.id().clone())
             .collect();
         reclaim_interrupted_targets(&self.state, &dispatched, ui)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The build-folder slot (docs/design/agent-and-build-slots.md section 11)
+
+/// The longest a job waits for the build folder: seven days. The holder is bound by its own deadlines, so this
+/// only ends a wait that nothing else would; the kill switch ends it sooner. It is not `build_wait_s`, which
+/// is shorter than one job's producer, checks and verifier together, and a job that waits only for another
+/// job's folder must not be held for it.
+pub const BUILD_FOLDER_WAIT: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// The queue of the build-folder slot: one entry, over `<state>/build-folder/`. Its own directory keeps its
+/// count out of `max_check_slots`, whose slots are taken per cargo command.
+pub(crate) fn build_folder_queue(state: &StateDir) -> SlotQueue {
+    SlotQueue::new(
+        state.build_folder_dir(),
+        1,
+        BUILD_FOLDER_WAIT,
+        Duration::from_secs(600),
+    )
+}
+
+/// The hold on the build folder of one job, from just before its baseline checks until the job is closed.
+/// Only one job at a time holds it. Dropping it removes the job's build directory (`target/`) and the holder
+/// file, and only then lets the slot go, so a free slot means no job's build folder is held.
+#[derive(Debug)]
+pub(crate) struct BuildFolder {
+    state: StateDir,
+    job: JobId,
+    waited: Option<Duration>,
+    // Declared last, so it is dropped last: the folder is gone before the next job may take the slot.
+    _slot: Slot,
+}
+
+impl BuildFolder {
+    /// How long the job waited for the folder; `None` when it was free at once.
+    pub(crate) fn waited(&self) -> Option<Duration> {
+        self.waited
+    }
+}
+
+impl Drop for BuildFolder {
+    fn drop(&mut self) {
+        let _ = self.state.remove_target(&self.job);
+        let _ = std::fs::remove_file(self.state.build_folder_holder_file());
+    }
+}
+
+/// The job that the holder file names as the one holding the build folder.
+fn build_folder_holder(state: &StateDir) -> Option<JobId> {
+    let text = std::fs::read_to_string(state.build_folder_holder_file()).ok()?;
+    JobId::parse(text.trim()).ok()
+}
+
+/// The bytes the build folder of the slot holder uses, when the holder is not `except` and its job lock is
+/// held (a holder that crashed holds no lock). Any other job's folder adds nothing: a job lock is also held
+/// by a landing or a manage command, whose `target/` no slot holder will free.
+fn other_jobs_build_bytes(state: &StateDir, except: &JobId) -> u64 {
+    match build_folder_holder(state) {
+        Some(holder) if &holder != except && state.job_lock_held(&holder) => {
+            dir_bytes(&state.job_dir(&holder).join("target"))
+        }
+        _ => 0,
+    }
+}
+
+impl Athena {
+    /// Takes the build-folder slot for `id`, waiting for the job that holds it. The wait is bounded by
+    /// [`BUILD_FOLDER_WAIT`] (a [`SlotWait`] error) and by the kill switch. A holder file that names `id` is
+    /// the leftover of an earlier run of this job that died; it is removed before the job queues.
+    pub(crate) fn take_build_folder(&self, id: &JobId, ui: &dyn Ui) -> anyhow::Result<BuildFolder> {
+        if build_folder_holder(&self.state).as_ref() == Some(id) {
+            let _ = std::fs::remove_file(self.state.build_folder_holder_file());
+        }
+        let calls = std::cell::Cell::new(0u32);
+        let stop = || {
+            self.refuse_if_stopped()?;
+            calls.set(calls.get() + 1);
+            // The second call is the first look that did not serve the request.
+            if calls.get() == 2 {
+                ui.line(
+                    "disk       the build folder is held by another job; waiting for it before the producer builds",
+                );
+            }
+            Ok(())
+        };
+        let slot = build_folder_queue(&self.state).acquire(Class::Producer, &stop)?;
+        // A write error is ignored: the dispatch credit then does not apply, and a job short of disk is held.
+        let _ = std::fs::write(self.state.build_folder_holder_file(), id.as_str());
+        let waited = slot.waited().then(|| slot.queued());
+        if let Some(wait) = waited {
+            ui.line(&format!(
+                "disk       the build folder is free after {:.1}s; the producer builds now",
+                wait.as_secs_f64()
+            ));
+        }
+        Ok(BuildFolder {
+            state: self.state.clone(),
+            job: id.clone(),
+            waited,
+            _slot: slot,
+        })
+    }
+
+    /// The disk gate at dispatch ([`Athena::disk_gate`]), with one allowance: free space that falls short only
+    /// because the job holding the build folder is using it does not hold this job. The job then reads and
+    /// plans, and waits at [`Athena::take_build_folder`], as the holder's folder is freed when it ends. The
+    /// credit is the measured bytes under the holder's `target/`, and only for the job the holder file names
+    /// ([`other_jobs_build_bytes`]). A shortfall the folder does not explain holds the job as before.
+    pub(crate) fn dispatch_disk_gate(
+        &self,
+        required_gb: u64,
+        job: &JobId,
+        ui: &dyn Ui,
+    ) -> Option<LowDisk> {
+        let low = self.disk_gate(required_gb, job, ui)?;
+        let held = other_jobs_build_bytes(&self.state, job);
+        if held == 0 || low.free.saturating_add(held) < low.required {
+            return Some(low);
+        }
+        let holder = build_folder_holder(&self.state)?;
+        ui.line(&format!(
+            "disk       {} free, {} required; job {holder} holds the build folder, which uses {}; this job reads and plans, then waits for the folder",
+            format_bytes(low.free),
+            format_bytes(low.required),
+            format_bytes(held)
+        ));
+        None
     }
 }
 
@@ -1197,6 +1335,105 @@ mod tests {
         let said = ui.0.lock().unwrap().join("\n");
         assert!(said.contains(idle.as_str()), "{said}");
         assert!(!said.contains(locked.as_str()), "{said}");
+    }
+
+    /// A build-folder guard as `take_build_folder` makes it: the slot, the holder file and a build directory.
+    fn hold_the_folder(state: &StateDir, job: &JobId) -> BuildFolder {
+        let slot = build_folder_queue(state)
+            .acquire(Class::Producer, &|| Ok(()))
+            .unwrap();
+        std::fs::write(state.build_folder_holder_file(), job.as_str()).unwrap();
+        let produce = state.produce_dir(job);
+        std::fs::create_dir_all(&produce).unwrap();
+        std::fs::write(produce.join("big"), vec![1u8; 4096]).unwrap();
+        BuildFolder {
+            state: state.clone(),
+            job: job.clone(),
+            waited: None,
+            _slot: slot,
+        }
+    }
+
+    #[test]
+    fn a_second_job_waits_for_the_build_folder_until_the_first_guard_drops() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        let queue = build_folder_queue(&state).with_poll(std::time::Duration::from_millis(10));
+        let first = hold_the_folder(&state, &id(1));
+        assert!(
+            queue.try_acquire().unwrap().is_none(),
+            "the one slot is held"
+        );
+        let got = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                let slot = queue.acquire(Class::Producer, &|| Ok(())).unwrap();
+                got.store(true, std::sync::atomic::Ordering::SeqCst);
+                slot.waited()
+            });
+            let start = std::time::Instant::now();
+            while queue.waiting() < 1 {
+                assert!(start.elapsed() < Duration::from_secs(10), "never queued");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(
+                !got.load(std::sync::atomic::Ordering::SeqCst),
+                "the second job got the folder while the first held it"
+            );
+            drop(first);
+            assert!(waiter.join().unwrap(), "the second job waited its turn");
+        });
+    }
+
+    #[test]
+    fn dropping_the_build_folder_removes_the_jobs_target_and_the_holder_file_before_the_slot_is_free()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        let job = id(1);
+        let folder = hold_the_folder(&state, &job);
+        // The job's other build directory (the checks') and its source: the target goes whole, the source stays.
+        std::fs::create_dir_all(state.job_dir(&job).join("target/verify")).unwrap();
+        std::fs::create_dir_all(state.job_dir(&job).join("work")).unwrap();
+        std::fs::write(state.job_dir(&job).join("work/main.rs"), b"x").unwrap();
+        assert_eq!(build_folder_holder(&state), Some(job.clone()));
+        drop(folder);
+        assert!(!state.job_dir(&job).join("target").exists());
+        assert!(state.job_dir(&job).join("work/main.rs").exists());
+        assert!(!state.build_folder_holder_file().exists());
+        assert!(build_folder_queue(&state).try_acquire().unwrap().is_some());
+    }
+
+    #[test]
+    fn the_credit_counts_only_the_slot_holder() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        let (holder, other, asking) = (id(1), id(2), id(3));
+        let make = |job: &JobId, bytes: usize| {
+            let dir = state.job_dir(job).join("target/produce");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("big"), vec![1u8; bytes]).unwrap();
+        };
+        make(&holder, 5_000);
+        make(&other, 7_000);
+        make(&asking, 9_000);
+        // No holder file: nothing is credited, though every job has a folder.
+        let _other_lock = state.try_lock_job(&other).unwrap().expect("free");
+        assert_eq!(other_jobs_build_bytes(&state, &asking), 0);
+        // The holder file names a job whose lock is free (a holder that crashed): nothing.
+        std::fs::create_dir_all(state.build_folder_dir()).unwrap();
+        std::fs::write(state.build_folder_holder_file(), holder.as_str()).unwrap();
+        assert_eq!(other_jobs_build_bytes(&state, &asking), 0);
+        // The holder holds its job lock: its bytes count, and only its bytes: `other` is locked too (as a
+        // landing or a manage command would hold it) but is not named.
+        let _holder_lock = state.try_lock_job(&holder).unwrap().expect("free");
+        assert_eq!(other_jobs_build_bytes(&state, &asking), 5_000);
+        // The asking job is the holder: it credits nothing for its own folder.
+        assert_eq!(other_jobs_build_bytes(&state, &holder), 0);
+        // A holder file that names nothing real credits nothing.
+        std::fs::write(state.build_folder_holder_file(), "not a job").unwrap();
+        assert_eq!(other_jobs_build_bytes(&state, &asking), 0);
     }
 
     #[test]
