@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045744-tj6b",
+  "round": 3,
+  "at": "2026-11-15T09:26:39.878070351Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The plan names the missing output for locally run failing checks as half of the root cause, but fixes it only when the output cites a tracked path.",
+      "evidence": "The Approach says the verifier is shown no output for a locally run failing check, because check_result_view fills the output tail only when r.reused (verify.rs:75-86), and calls this one of the 'two inputs' to fix. The plan only adds a path summary to `detail`, and only when a tracked path is cited. A build error, a tail cut before the panic line, or Go-style bare file names in a subdirectory still give the verifier no output at all. Fix: Either always give the verifier the bounded output tail of a failing, non-pre-existing local check (the same field reused checks already fill), or narrow the root-cause wording to the missing path link and list the missing output as a separate, named limit in D186 and the CHANGELOG.",
+      "location": "Approach / root cause; crates/athena-core/src/verify.rs:75-86",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The finding says the check ran on 'the base commit plus the job's change', but the verifier snapshot puts the base's check-tool configuration in the working tree.",
+      "evidence": "mod.rs:1999-2003: 'The verifier's snapshot: its own two-commit repository, base then candidate, with the base's check-tool configuration in the working tree' (it returns tool_config_from_base). If the job changed a tool-config file, failure_paths would mark it 'changed' even though the checks ran with the base's version, and the evidence sentence would be inaccurate. Fix: Add the replaced files to the evidence sentence ('...plus the job's change, with the base's check-tool configuration'), or leave the paths in tool_config_from_base out of the 'changed' list. Add a test case for it.",
+      "location": "Decision 3 / step 2, the finding's evidence sentence; crates/athena-core/src/run/mod.rs:1999-2003",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The suffix match compares up to 400 tokens against every tracked file.",
+      "evidence": "For a token containing '/' with no exact match, the plan scans tree_paths for entries ending with '/<token>'. On a repository with a very large number of files that is a large number of string comparisons per verification stage (an estimate, not measured). Fix: Build an index from file name to full paths once, then check only the candidates sharing the token's file name.",
+      "location": "Decision 4 / step 2, suffix resolution in failure_paths",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the accepted reading. It adds a function in verify.rs that takes the file paths a failing check's output cites, keeps only tracked files, and sorts them into changed by the job, not changed, or ambiguous. It also adds a wrapper, judge_with_tree, that appends one Minor Athena finding after every finding judge makes, and passes the same text into the verifier brief through the check's existing `detail` text. No refusal rule is added. What I read in the code confirms the plan's claims: judge has one production caller (verification.rs:414; the send_back.rs:654 call is in a test); check_result_view shows the output tail only for reused CI results (verify.rs:75-86); the brief's check lines come from verification.rs:74-77; Git::ls_tree is recursive and full-tree (athena-git lib.rs:516); the baseline is taken on ctx.prediction and used only when base_commit equals p; display.rs:985 shows only the first five findings of a rejected job; D185 is the last decision. Each demonstration works through production code (judge_with_tree, verifier_check_views, and the whole job via run_checked_job), would fail without the change, and checks that the verdict reasons stay the same. The dependents list matches the readers I found by searching. Remaining issues are minor: the verifier still gets no output for a locally run failing check that cites no tracked path, although the plan names that missing output as part of the root cause; the 'base commit plus the job's change' wording ignores that the verifier snapshot uses the base's check-tool configuration; and the suffix match is slow on very large repositories."
+}

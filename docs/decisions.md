@@ -5430,3 +5430,43 @@ should replace those estimates with its figures.
   `crates/athena-context/src/briefs/reader.rs` (`headroom_section`) and the introspections of the seven jobs. Ran:
   `cargo test -p athena-context headroom`, `cargo test -p athena-context reader_brief` and `cargo test -p athena-core
   token_headroom`. Not measured: whether readers act on the table.
+
+## D186 · A failing check carries a finding that links the files its output cites to the files the job changed
+
+- **Case:** Six jobs in the class failing-check-blocks-all-criteria-unjudged-no-baseline (for example 20261017-044408-wcwy,
+  20261017-182453-a5sf and 20261026-232434-6wfq) were rejected on a red check that the job's paths could not obviously
+  have caused, and the verdict and the verifier's brief gave nothing to tell the two apart.
+- **Decision:** Root cause: the check stage has a baseline of base-commit failures but no mapping from a failing test's
+  reported file paths to the paths the job changed, so a failure from a concurrent change is indistinguishable from the
+  job's own; and the verifier is shown no output for a check Athena ran itself. `failure_paths`, `failure_path_finding`
+  and `judge_with_tree` in `crates/athena-core/src/verify.rs` make that link: one Minor Athena finding that lists the
+  tracked files the failing output cites, split into the files the job changed, the files it did not and names that
+  match several files, with how the failure got past the baseline. `verifier_check_views` in
+  `crates/athena-core/src/run/verification.rs` puts the same text in the detail of the failing check in the verifier's
+  brief. `judge` is unchanged, so reasons and verdicts are unchanged: no refusal rule is added, and the expected share
+  of past accepted readings newly refused is 0%. The finding is appended after every finding `judge` made, so a
+  verifier Blocker or Major keeps its place among the first five findings a rejected job shows. It is made only when a
+  tracked path is cited, as the accepted reading says; there is no route-only finding for a red check that cites no
+  path, because it would add a finding to every red check and repeat what the record already holds (the check's note,
+  the "newly failing" finding and the pre-existing note). The note that a concurrent change is "not covered" is
+  corrected: the tested tree is the base plus the job's diff, so a concurrent change reaches it only by being in the
+  base, and a usable baseline then already marks the failure pre-existing; without one the finding says "no usable
+  baseline".
+- **Alternatives:** Rerun the failing test on the base tree and mark it pre-existing, as the introspections propose: the
+  per-test baseline already does that, and a base rerun gives the same answer at the cost of a new stage and
+  snapshot. Rejected. Excuse or downgrade a failure whose cited paths the job did not change: a new verdict rule, and a
+  panic site is the asserting file, not the cause, so a job that breaks a test it did not edit would be excused.
+  Rejected. A new field on `CheckResultView`: its `detail` is already printed for every check. Stored paths in
+  `CheckRun`: a stored record with `deny_unknown_fields`; the paths are derived from the output when needed.
+- **Tradeoff:** A cited path is not proof of cause, so the finding says it names no cause and the check still fails the
+  verdict. Only the last 200 lines of a failed run's output are kept, so a cut panic line gives no finding. An
+  unreadable snapshot, an unknown change list or output with no tracked path gives no finding. The finding is
+  carried with the failed output into a retry; it is Minor, so it is never a must-address item. Two `ls-tree` reads
+  are added to each verification.
+- **Reversal cost:** Low; remove the three functions, `verifier_check_views` and `tracked_paths`, and call `judge`
+  again in `verification_stage`.
+- **Provenance:** Read: `crates/athena-core/src/verify.rs` (`judge`, `is_pre_existing`, `check_result_view`),
+  `crates/athena-core/src/run/verification.rs`, `crates/athena-core/src/run/checks.rs` (`take_baseline`,
+  `baseline_for`) and the introspections of the six jobs. Ran: `cargo test -p athena-core verify` and `cargo test -p
+  athena-core a_failing_check_citing`. Not measured: whether verifiers or owners act on the finding, or how many past
+  rejections cited a path the job did not change.

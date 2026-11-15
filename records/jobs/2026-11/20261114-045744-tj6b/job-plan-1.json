@@ -1,0 +1,286 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-045744-tj6b",
+  "round": 1,
+  "at": "2026-11-15T09:06:15.111988055Z",
+  "invocation_seq": 2,
+  "approach": "Root cause: the check stage keeps a baseline of failures present on the base commit (`Baseline`, `is_pre_existing`, `failure_split` at crates/athena-core/src/verify.rs:203-222), but nothing maps the file paths in a failing check's output to the paths the job changed. A failure that comes from a concurrent merge or an unrelated config or doc change is not in the baseline, so it reads as the job's own. The verifier's brief shows a locally run failing check as a name and a note only, because `check_result_view` (verify.rs:62-88) fills the tail and test names only for reused CI results. Fix at those two inputs, with no new rule. (1) verify.rs gets a pure function `failure_paths(check, changed_paths)` that pulls repository paths (`file:line:col` forms) out of a failed check's `output_tail` and splits them into those the job changed and those it did not. A second function turns that into one Minor Athena finding. (2) `judge` adds that finding for each blocking check, beside the existing newly-failing finding (verify.rs:447-472); reasons, severities and the verdict stay as they are. (3) `verification_stage` (run/verification.rs) computes the changed paths before the verifier's inputs are built, and puts the same finding text into the `detail` of each blocking failed check's `CheckResultView`. The brief already prints `detail` in parentheses (briefs.rs:1449-1460), so briefs.rs does not change. When the changed-path list is empty, no claim is made. The change adds unit tests, an end-to-end run test, a CHANGELOG entry and a new decision D186.",
+  "decisions": [
+    {
+      "choice": "Give the verdict inputs and the verifier brief a finding that links the failing output's paths to the job's changed paths. Add no refusal rule.",
+      "reason": "The failing stage lacked that link. The verifier is shown no output for a locally run failing check (check_result_view fills the tail only when `r.reused`, verify.rs:75-86), and `judge` has the changed paths (VerdictInputs.changed_paths, verify.rs:167) but never compared them with the output. Giving the information can prevent the failure, so no refusal is allowed. The finding is Minor, so `serious` (verify.rs:652-655) and the reasons are unchanged and the expected share of newly refused readings is 0%.",
+      "rejected": [
+        {
+          "option": "Run the failing test again on the base tree and mark it pre-existing, as the introspections propose",
+          "why": "The baseline per test already exists (verify.rs:203-211). A concurrent-change failure does not fail on the old base, so a base rerun cannot separate it. It also needs a new run stage and snapshot, which is much larger."
+        },
+        {
+          "option": "Excuse or downgrade a failure whose paths the job did not change",
+          "why": "This would be a new verdict rule that changes what passes. Output paths are not proof of cause: a test can fail on a file the job did not touch because of what the job did. The request asks for information, not a rule."
+        },
+        {
+          "option": "Add a field to CheckResultView and render it in crates/athena-context/src/briefs.rs",
+          "why": "The existing `detail` field is already rendered for every check (briefs.rs:1449-1460). A new field would touch a second crate and the brief-shape tests for no gain."
+        },
+        {
+          "option": "Change `check_result_view` or `CheckRun` to carry the paths",
+          "why": "CheckRun is a stored record type (athena-data records.rs:868). Changing it risks old-record parsing and `check_record_file`. The paths can be computed from `output_tail` when needed."
+        }
+      ]
+    },
+    {
+      "choice": "One function builds the finding, and both `judge` and the brief detail use it. The cited-path extractor accepts only relative paths with an allow-listed extension (rs, toml, md, json, yml, yaml, txt, sh, lock). It drops paths starting with `/`, `~` or `target/`, paths containing `..`, URLs and duplicates, and caps the list at 10. A path counts as changed when it equals a changed path or a changed path ends with `/<path>`.",
+      "reason": "A single source keeps the verdict's finding and the verifier's brief in step. The allow-list and the exclusions keep test names (`tests::a`), durations (`1.5s`), registry and rustc paths and build output from showing up as 'paths the job did not change'. The suffix match avoids saying 'did not change' for a crate-relative path such as `src/verify.rs`.",
+      "rejected": [
+        {
+          "option": "Reuse `location_tokens`, `path_of_token` and `looks_like_path` (verify.rs:717-749)",
+          "why": "`path_of_token` removes only one trailing `:digits` (verify.rs:728-731), so `file.rs:12:5:` from a panic message keeps its `:5:`. `looks_like_path` accepts any dotted token. Both were written for verifier findings, not test output."
+        },
+        {
+          "option": "Read the paths from `failed_tests` names",
+          "why": "Names are `<binary> <test>` with no path (athena-data records.rs:881-883)."
+        }
+      ]
+    },
+    {
+      "choice": "Make no claim when `changed_paths` is empty, and skip checks that passed or are pre-existing.",
+      "reason": "An empty list means unknown (verify.rs:165-167 treats it as not docs-only). Calling every cited path 'not changed' would then be wrong. A pre-existing check is already excused and marked, so the finding would add noise.",
+      "rejected": [
+        {
+          "option": "Treat an empty list as 'job changed nothing'",
+          "why": "A job with an empty diff fails earlier (system-facts: empty producer diff), so an empty list in `judge` means no data."
+        }
+      ]
+    },
+    {
+      "choice": "Leave crates/athena-core/src/run/checks.rs (`take_baseline`, `baseline_for`, the in-loop check at ~446-455) unchanged, though the brief lists it as a deliverable.",
+      "reason": "The baseline is correct for what it does and needs no new data. The gap is in the verdict and the brief. The producer's send-back already carries the failing output tail (send_back.rs:288-308), so the producer sees the paths. Touching checks.rs would add code with no demonstration.",
+      "rejected": [
+        {
+          "option": "Add paths to the producer send-back through run/checks.rs and send_back.rs",
+          "why": "send_back.rs is not a deliverable, and the producer already gets the output tail. It would be a second, untested path."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add `FailurePaths`, `failure_paths(check, changed_paths)` and `failure_path_finding(check, changed_paths) -> Option<Finding>`; call it from `judge` for each blocking check; update the doc comment of `is_pre_existing` (it says a concurrent change 'is not separated here'); add unit tests and the `judge_changed` helper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Compute `changed_paths` before the verifier inputs, add `verifier_check_views(check_runs, changed_paths, baseline)` that appends the finding text to the `detail` of each blocking failed check's view, and use it in place of the `check_result_view` map; reuse the same `changed_paths` for `judge`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the whole-job test (`a_failing_check_citing_an_untouched_path_reaches_the_verifier_brief`) and the direct view and brief test (`a_failing_check_citing_a_changed_path_is_marked_changed_in_its_view`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under [Unreleased] / Added: the root cause, the fix, the tests, the limits, and that no refusal rule is added (0% newly refused).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D186 after D185 (decisions.md:5410-5432), with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance bullets; no existing line changes.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read verify.rs:190-237, 408-472 and 717-749, run/verification.rs:56-130 and 395-430, briefs.rs:1440-1470, and the helpers in verify.rs tests (1806-2001).",
+    "In verify.rs add `const CITED_EXTENSIONS`, `const MAX_CITED_PATHS: usize = 10`, `pub struct FailurePaths { pub touched: Vec<String>, pub untouched: Vec<String> }` and `pub fn failure_paths(check: &CheckRun, changed_paths: &[String]) -> FailurePaths`. It returns an empty result when `check.passed` or `changed_paths` is empty. Otherwise it splits `output_tail` on whitespace and on `()[]{}<>,;'\"`=`, takes the part before the first `:` of each token, strips `./` and a trailing `.`, and keeps it only if it is relative (no leading `/` or `~`, no `..`, no `target/` prefix), has only [A-Za-z0-9_./-] characters, and ends in an allow-listed extension with a non-empty stem. It dedupes in order of first appearance and stops at 10. A path is touched if it equals a changed path or a changed path ends with `/<path>`.",
+    "In verify.rs add `pub fn failure_path_finding(check, changed_paths) -> Option<Finding>`: None when `failure_paths` has no paths. Otherwise a Minor, `FindingSource::Athena` finding via `athena_finding`. Summary: `Check <name>: its output cites <sentence>`, with the sentence built from 'path(s) the job changed: ...' and 'path(s) the job did not change: ...'. Evidence: with untouched paths, a sentence saying a failure that cites a path outside the job's change may come from the base or from a change merged after it, that the check still fails the verdict and that the criteria are judged from the diff. With only touched paths, a sentence saying the failure may come from the job's change. In `judge`, inside the `blocking_checks` loop after the failed-tests finding (verify.rs:471), push the finding when present. Do not change `reasons`. Update the doc comment of `is_pre_existing` (verify.rs:201-202) to point to this finding.",
+    "In run/verification.rs add `pub(super) fn verifier_check_views(check_runs: &[CheckRun], changed_paths: &[String], baseline: Option<&athena_data::records::Baseline>) -> Vec<CheckResultView>`. For each run it builds `crate::verify::check_result_view(run)`; for a run that failed and is not `is_pre_existing(run, baseline)` and has a finding, it sets `detail` to the old detail, `; `, the finding's summary, `. ` and its evidence (just the finding text when the old detail is empty). In `verification_stage`, move the `changed_paths` computation (lines 409-413) above `let mut inputs`, replace the `check_runs.iter().map(check_result_view).collect()` at 74-77 with `verifier_check_views(&check_runs, &changed_paths, usable_baseline)`, and pass `&changed_paths` to `judge` as before.",
+    "In verify.rs tests add `judge_changed(baseline, checks, changed)` (like `judge_against` at 1984 with `changed_paths` set) and the tests: `failure_paths_splits_cited_paths_into_changed_and_unchanged` (the input forms listed under criterion 2, the suffix match, the cap, an empty changed list and a passed check), `a_failure_citing_a_path_the_job_did_not_change_carries_that_finding`, `a_failure_citing_a_path_the_job_changed_says_so`, and `a_pre_existing_failure_gets_no_path_finding`. Each asserts the reasons are unchanged and the finding is Minor and Athena-sourced.",
+    "In run/tests.rs add the whole-job test with `leaked_sh_check`, `recording_verifier_prompts` and `run_checked_job`, asserting on the verifier prompt, the stored `brief-verifier.md`, the Rejected state and the recorded Minor finding. Add the direct test of `verifier_check_views` plus `athena_context::briefs::verifier_brief` rendering, with a pre-existing check and a passing check getting no added text.",
+    "Append D186 to docs/decisions.md and add the CHANGELOG entry under `## [Unreleased]` / `### Added`. Both name the root cause, the files, the test commands, the limits (path citation is not proof of cause; only the last 200 lines are kept) and that the expected share of newly refused readings is 0%.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked -p athena-core verify`, `cargo test --locked -p athena-core a_failing_check_citing`, `cargo test --locked -p athena-core --test refusal_corpus` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "A cited path outside the job's change is not proof the job did not cause the failure; for example a test reads a doc the job's code change broke. The finding could mislead the verifier.",
+      "mitigation": "The wording says only that the output cites paths, and that the failure may come from the base or a concurrent change. The check still fails the verdict, it is Minor, and the brief says to judge the criteria on the diff. D186 and the CHANGELOG state this limit."
+    },
+    {
+      "risk": "The path extractor matches a non-path token (a version string, a dotted identifier) or misses a form (a Windows path, a path without an allow-listed extension).",
+      "mitigation": "The allow-list, the exclusions and the 10-path cap are pinned by the table-driven unit test in step 6. A missed form only produces no finding, which is today's behavior."
+    },
+    {
+      "risk": "Only the last 200 lines of a failed run's output are kept (run/tests.rs:5690-5696, `FAILED_TAIL_LINES`), so the failing panic line may have been cut and no paths are found.",
+      "mitigation": "A missing path yields no finding and changes nothing. The limit is recorded in D186. It is not widened here, because stored output sizes are governed by `failure_section`, which is another change."
+    },
+    {
+      "risk": "Moving the `changed_paths` computation earlier in `verification_stage` changes the borrow of `closing.candidate`.",
+      "mitigation": "It is a plain clone into a `Vec<String>` before `inputs` is built, from the same expression as before (verification.rs:409-413). The compiler and the existing tests would catch an error."
+    },
+    {
+      "risk": "A test fixture names `docs/design/job-planning.md` or a similar path in a check's output elsewhere, and an existing test counts findings.",
+      "mitigation": "I searched for exact-findings assertions (run/tests.rs:1902, verify.rs:2774-2779). Their checks print no paths or `changed_paths` is empty. The final test run covers the rest."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`judge` findings list now may hold one more Minor Athena finding per blocking failed check",
+      "dependent": "crates/athena-core/src/run/verification.rs:414 (`judge` in `verification_stage`, the only production caller)",
+      "kind": "code",
+      "test": "a_failing_check_citing_an_untouched_path_reaches_the_verifier_brief (run/tests.rs, new) and the existing verify tests `the_finding_for_a_failed_check_separates_new_from_base_failures` (verify.rs:2738), which stays exact because its output is empty",
+      "reason": null
+    },
+    {
+      "name": "the stored verification record's findings",
+      "dependent": "crates/athena-core/src/run/verification.rs:439 and 451 (Verification.findings stored; `names_with_plan` inputs list)",
+      "kind": "code",
+      "test": null,
+      "reason": "A Finding with source Athena and severity Minor is an existing shape (verify.rs:291-299). No record field, schema or `check_record_file` rule changes, so old and new records parse alike."
+    },
+    {
+      "name": "finding severity filter",
+      "dependent": "crates/athena-core/src/reading/retry.rs:367-369, 432, 504 (retry reads blocking findings through `finding_blocks`, then `finding_is_content_only`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "`finding_blocks` keeps only Blocker and Major (verify.rs:688-690). The new finding is Minor, so retry decisions, 'content-only' routing and the hold rules never see it, even though its summary cites docs paths."
+    },
+    {
+      "name": "finding source filter",
+      "dependent": "crates/athena-core/src/evidence_labels.rs:322-335 (usable findings for introspection evidence)",
+      "kind": "code",
+      "test": null,
+      "reason": "`usable` drops every finding whose source is Athena (evidence_labels.rs:322), so the new finding never becomes evidence for a cause."
+    },
+    {
+      "name": "findings listed in an event's `what`",
+      "dependent": "crates/athena-core/src/introspect.rs:984-1004 (`failure_details`)",
+      "kind": "code",
+      "test": null,
+      "reason": "It lists only Blocker and Major findings and the failed checks that are not pre-existing, so the Minor finding is not added to introspection text."
+    },
+    {
+      "name": "count of minor findings in a landing body",
+      "dependent": "crates/athena-core/src/run/close.rs:672-686 (`landing_body` counts `verification.findings.len()` as minor findings)",
+      "kind": "code",
+      "test": null,
+      "reason": "It is built only for a pass. A blocking failed check always fails the verdict (verify.rs:659-663), and a pre-existing check gets no finding, so a landing body never counts the new finding."
+    },
+    {
+      "name": "`judge` with an empty changed-path list or empty output",
+      "dependent": "crates/athena-core/src/run/send_back.rs:654-674 (a test calling `crate::verify::judge`) and verify.rs:1984 `judge_against`, `judged_with_maps` (`changed_paths: &[]`)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core verify",
+      "reason": "An empty `changed_paths` or empty `output_tail` yields no finding, so these tests are unaffected."
+    },
+    {
+      "name": "producer send-back of a failing check",
+      "dependent": "crates/athena-core/src/run/send_back.rs:288-308 (`CheckFailure::of`) and run/checks.rs:446-455 (in-loop check, `is_pre_existing`)",
+      "kind": "code",
+      "test": null,
+      "reason": "Not changed. `is_pre_existing` and `CheckFailure::of` keep their signatures and behavior, and the producer already receives the output tail. run/checks.rs is read only."
+    },
+    {
+      "name": "`is_pre_existing` and `mark_pre_existing`",
+      "dependent": "crates/athena-core/src/checks.rs:591 (`held_for_timeout`) and run/mod.rs:2160 (`mark_pre_existing`)",
+      "kind": "code",
+      "test": null,
+      "reason": "Not changed. The new function is separate and only reads `CheckRun.passed` and `output_tail`. A timeout check (note, no output) has no paths and gets no finding."
+    },
+    {
+      "name": "verifier brief check lines",
+      "dependent": "crates/athena-context/src/briefs.rs:1440-1461 (`verifier_brief_with_evidence` renders each check's `detail` in parentheses) and 1131-1166 (`failed_check_detail`, only for reused checks)",
+      "kind": "code",
+      "test": "a_failing_check_citing_a_changed_path_is_marked_changed_in_its_view (run/tests.rs, new)",
+      "reason": "No briefs.rs change. The text goes into `detail`, which is already printed, so the brief shapes and the context crate's tests are unchanged. A reused failed check keeps its tail and names, with the path text added to its `detail`."
+    },
+    {
+      "name": "always-loaded prompt sets and their token budgets",
+      "dependent": "docs/system-facts.md prompt budgets (`system_facts_budgets_match_computed`, crates/athena-cli/tests/budgets.rs) and prompt files",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt file, brief constant or system-facts line changes. The finding text is added to the verifier's input at run time, outside the budgeted sets (system facts: briefs sit outside the sets)."
+    },
+    {
+      "name": "refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and the reading and admission rules",
+      "kind": "rule",
+      "test": "cargo test --locked -p athena-core --test refusal_corpus",
+      "reason": "No reading, admission or verdict rule is added or changed. The extractor feeds only a Minor informational finding and the brief text, and `reasons` is unchanged, so the expected share of newly refused readings is 0%. No corpus case maps to it."
+    },
+    {
+      "name": "other modes reaching `verification_stage`",
+      "dependent": "max_concurrency / parallel drain, `athena land`, nested runs (`self.nested`, run/verification.rs:422), resumed jobs (`recorded_checks`, run/mod.rs:2149-2186)",
+      "kind": "code",
+      "test": null,
+      "reason": "All reach the same `verification_stage` and `judge` and read only the check records and `closing.candidate`. A nested run records placeholder checks that pass, so no finding appears. A resumed job reuses recorded passing checks. If `closing.candidate` is `None`, `changed_paths` is empty and no claim is made. `[parallel] max_concurrency` only runs several jobs at once and shares no state with this code."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the CHANGELOG entry and D186 in the final diff.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md",
+      "observes": "Both texts name the root cause: the baseline holds only base-commit failures, there is no mapping from the paths in a failing check's output to the job's changed paths, so a concurrent-change failure looks like the job's own. Both name `failure_paths` in verify.rs as the fix and say no refusal rule is added.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Run the verify unit tests, which include `failure_paths_splits_cited_paths_into_changed_and_unchanged`. It calls `failure_paths` directly on a CheckRun whose `output_tail` holds these forms: `thread 'x' panicked at crates/athena-core/src/a.rs:12:5:`, `--> src/lib.rs:3:1`, `docs/design/job-planning.md:6`, a backticked path, `./README.md`, a bare `Cargo.toml`, and a path repeated. It also holds the excluded forms `/rustc/abc/library/core.rs:1:1`, `https://x.org/a.md`, `tests::a`, `took 1.5s`, `target/debug/x.rs:1` and `../x.rs:1`. Then run `cargo test --locked -p athena-core --test refusal_corpus` as a regression guard that no reading rule changed. The extractor is not a reading rule, so no corpus case maps to it and no case is added.",
+      "command": "cargo test --locked -p athena-core verify",
+      "observes": "The extractor returns the relative, allow-listed paths in order of first appearance, without line numbers or duplicates. A path equal to, or suffix-matched by, a changed path is in `touched`; the others are in `untouched`. Every excluded form is absent. An empty changed-path list or a passed check gives an empty result. The existing reason assertions (`check test failed` once, `reasons.len() == 1` at verify.rs:2741-2765) still pass, which shows the reasons are unchanged. I read no corpus case ids and cite none.",
+      "fails_without": null,
+      "seam": "Production entry point `verify::failure_paths` (step 1 adds it) and `judge` (exists, verify.rs:408). Fixture: the existing test helpers `check`, `failing` and `judge_against` (verify.rs:1806-2001), with `output_tail` set on a CheckRun. Nothing is faked."
+    },
+    {
+      "criterion": 3,
+      "method": "The new test `a_failure_citing_a_path_the_job_did_not_change_carries_that_finding` builds a failing `test` check whose `output_tail` is `thread 'x' panicked at docs/design/job-planning.md:6:1:` and whose `failed_tests` has one name. It builds a baseline with `baseline_with` that has the same check passing, so the failure is not pre-existing, and sets `changed_paths = [\"crates/athena-core/src/verify.rs\"]`. It then calls `judge` through a new helper `judge_changed(baseline, checks, changed)`.",
+      "command": "cargo test --locked -p athena-core verify",
+      "observes": "final_verdict is Fail; the reasons are exactly [\"check test failed\"]; one extra Minor Athena finding says the failure cites docs/design/job-planning.md, which the job did not change. A pre-existing failure with the same output gets no such finding.",
+      "fails_without": "On the base tree `judge` (verify.rs:447-472) adds no finding for the cited path, so the test's assertion that a Minor Athena finding names `docs/design/job-planning.md` as one the job did not change fails. It compiles on the base because it uses only `judge`, `VerdictInputs`, `CheckRun` and `Baseline`. The new test asserts final_verdict == Fail, the reason `check test failed` appears exactly once, the reasons list has no new entry, and the finding is Minor, Athena-sourced and names the path with 'did not change'.",
+      "seam": "Production entry point `verify::judge` with `VerdictInputs.changed_paths` and `.baseline`, both existing fields (verify.rs:153-188). Fixture: `check`, `failing`, `baseline_with` (exist, verify.rs:1806, 1835, 1973), plus a new helper `judge_changed` (step 6 adds it). The baseline is injected through `VerdictInputs.baseline`. No double; the logic under test is in `judge`."
+    },
+    {
+      "criterion": 4,
+      "method": "The new test `a_failure_citing_a_path_the_job_changed_says_so` uses the same fixture. The output cites `crates/athena-core/src/verify.rs:2700:5` and `docs/design/job-planning.md:6`, and `changed_paths` is `[\"crates/athena-core/src/verify.rs\"]`. It asserts the finding's summary contains 'the job changed crates/athena-core/src/verify.rs' and, for the second path, 'the job did not change docs/design/job-planning.md'. A second case cites only the changed path and asserts the evidence says the failure may come from the job's change. A third case, with `changed_paths` empty, asserts there is no finding.",
+      "command": "cargo test --locked -p athena-core verify",
+      "observes": "The finding reports the touched and untouched paths separately. A touched-only failure never says 'did not change'. An empty list gives no finding.",
+      "fails_without": "On the base tree no path finding exists, so the assertion that the finding says the job changed `crates/athena-core/src/verify.rs` fails. It also fails if the function treated every cited path as unchanged.",
+      "seam": "Same as criterion 3: `judge` plus `judge_changed`. Both fixtures are added in step 6."
+    },
+    {
+      "criterion": 5,
+      "method": "Two tests in crates/athena-core/src/run/tests.rs. (a) `a_failing_check_citing_an_untouched_path_reaches_the_verifier_brief` runs a whole fake job with `run_checked_job` and `recording_verifier_prompts`, using a check from `leaked_sh_check` (run/tests.rs:4493). On the candidate README (`grep -q 'A demo' README.md`) the script echoes `thread 'x' panicked at docs/design/job-planning.md:6:1:` and `see README.md:1` and exits 1. The base script (`base_script()`) edits README.md, as in the test at run/tests.rs:5640. (b) `a_failing_check_citing_a_changed_path_is_marked_changed_in_its_view` calls `verifier_check_views` directly and also feeds the result to `athena_context::briefs::verifier_brief`.",
+      "command": "cargo test --locked -p athena-core a_failing_check_citing",
+      "observes": "In (a) the verifier prompt holds the finding text, with docs/design/job-planning.md under 'did not change' and README.md under 'the job changed'. The stored `brief-verifier.md` holds it too, the final state is Rejected, and `verification.findings` holds the same Minor finding. In (b) a pre-existing failing check and a passing check get no added text, and `verifier_brief` prints the text inside the parentheses after `failed`.",
+      "fails_without": "On the base tree `verification_stage` builds the brief from `check_result_view` alone, so `brief-verifier.md` and the verifier prompt do not contain the untouched-path text. The test asserts they do, so it fails without the change. The unit test of `verifier_check_views` does not compile without it.",
+      "seam": "Production entry points are the whole run `Athena::go` (exists; used by `run_checked_job` at run/tests.rs:4561) and `verifier_check_views` (step 3 adds it, called from `verification_stage`). Fixtures: the existing `athena_with`, `repo()`, `leaked_sh_check` and `recording_verifier_prompts`, which capture the verifier's `user_prompt` through the fake driver script. Nothing under test is faked."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff. CHANGELOG.md gains one entry under `## [Unreleased]` / `### Added`. docs/decisions.md gains only an appended `## D186` section, with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance bullets in the form of D185 (decisions.md:5410-5432).",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md",
+      "observes": "No existing line of decisions.md is changed; the diff only appends. The entry names the root cause, files, tests and the 0% newly refused share. It lists the limits: path citation is not proof of cause, only the last 200 lines of output are kept, and a test failing in code the job did not touch can still be caused by the job.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Athena's recorded checks on the final tree: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. The verifier may also run each command itself.",
+      "command": "cargo fmt --all --check",
+      "observes": "All three exit 0. Existing tests that assert on `judge` findings stay green because their `output_tail` is empty or `changed_paths` is empty: verify.rs:2774-2779, run/tests.rs:1902, and send_back.rs:654-674.",
+      "fails_without": "A formatting error, a clippy warning (denied by -D warnings), or any failing test, including the new ones, would make the matching Athena check fail.",
+      "seam": "The commands themselves. The three checks exist as the configured checks (system checks list). No double."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "5dfe862290d4658a1475525d47092bdef7b43ceb9debcba41a63aa0a80c4cfac"
+}

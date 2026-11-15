@@ -61,6 +61,14 @@ impl Athena {
             stat: vsnap.git().run(["diff", "--stat", "HEAD~1", "HEAD"])?,
             diff: vsnap.git().run(["diff", "HEAD~1", "HEAD"])?,
         };
+        // The same list the skip decision used (run/mod.rs `changed_for_skip`), so the judgment and the skip
+        // see the same paths.
+        let changed_paths: Vec<String> = closing
+            .candidate
+            .as_ref()
+            .map(|cand| cand.changes.iter().map(|e| e.path.clone()).collect())
+            .unwrap_or_default();
+        let tree_paths = tracked_paths(&vsnap);
         let mut inputs = VerifierInputs {
             job: id.as_str().to_string(),
             request: ctx
@@ -71,10 +79,7 @@ impl Athena {
                 .unwrap_or_default(),
             reading: accepted.clone(),
             candidate: candidate_view,
-            checks: check_runs
-                .iter()
-                .map(crate::verify::check_result_view)
-                .collect(),
+            checks: verifier_check_views(&check_runs, &changed_paths, &tree_paths, usable_baseline),
             commands: athena_agent::policy::describe_commands(&verifier_grant.commands),
             tool_config_from_base: tool_config_from_base.clone(),
             pin: ctx.job.job.as_ref().and_then(|j| j.pin.clone()),
@@ -404,29 +409,25 @@ impl Athena {
         };
         let map_base = map_at("HEAD~1")?;
         let map_candidate = map_at("HEAD")?;
-        // The same list the skip decision used (run/mod.rs `changed_for_skip`), so the judgment and the skip
-        // see the same paths.
-        let changed_paths: Vec<String> = closing
-            .candidate
-            .as_ref()
-            .map(|cand| cand.changes.iter().map(|e| e.path.clone()).collect())
-            .unwrap_or_default();
-        let judgment = judge(&VerdictInputs {
-            criteria: &criteria,
-            checks: &check_runs,
-            output: verdict_output.as_ref(),
-            commands_run: &redacted_commands,
-            changed_paths: &changed_paths,
-            candidate_tree: Some(c.as_str()),
-            // A nested run records "not run" placeholders, not results.
-            checks_tree: self.nested.is_none().then_some(c.as_str()),
-            system_fault: system_fault.clone(),
-            verifier_failure: verifier_failure.clone(),
-            map_base: map_base.as_deref(),
-            map_candidate: map_candidate.as_deref(),
-            baseline: usable_baseline,
-            replay: Some(&replay_record),
-        });
+        let judgment = judge_with_tree(
+            &VerdictInputs {
+                criteria: &criteria,
+                checks: &check_runs,
+                output: verdict_output.as_ref(),
+                commands_run: &redacted_commands,
+                changed_paths: &changed_paths,
+                candidate_tree: Some(c.as_str()),
+                // A nested run records "not run" placeholders, not results.
+                checks_tree: self.nested.is_none().then_some(c.as_str()),
+                system_fault: system_fault.clone(),
+                verifier_failure: verifier_failure.clone(),
+                map_base: map_base.as_deref(),
+                map_candidate: map_candidate.as_deref(),
+                baseline: usable_baseline,
+                replay: Some(&replay_record),
+            },
+            &tree_paths,
+        );
         let verification = Verification {
             job: id.clone(),
             candidate_commit: c.clone(),
@@ -491,4 +492,46 @@ impl Athena {
         let prepared = snapshot.work_tree_tree()?;
         Ok((snapshot, tool_config, prepared))
     }
+}
+
+/// Every file tracked at the base or at the candidate in the verifier's snapshot (its two commits), sorted
+/// and without duplicates. A commit that cannot be read leaves its paths out; no paths means no path finding.
+fn tracked_paths(snapshot: &Snapshot) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    for rev in ["HEAD~1", "HEAD"] {
+        if let Ok(entries) = snapshot.git().ls_tree(rev) {
+            paths.extend(entries.into_iter().map(|e| e.path));
+        }
+    }
+    paths.into_iter().collect()
+}
+
+/// The check lines of the verifier's brief. Each is [`crate::verify::check_result_view`]; a failing check that
+/// is not pre-existing and cites tracked files also gets Athena's path finding in its detail, so the
+/// verifier sees which cited files the job changed and how the failure got past the baseline. It does not
+/// change what the check decides.
+pub(super) fn verifier_check_views(
+    check_runs: &[CheckRun],
+    changed_paths: &[String],
+    tree_paths: &[String],
+    baseline: Option<&Baseline>,
+) -> Vec<CheckResultView> {
+    check_runs
+        .iter()
+        .map(|run| {
+            let mut view = crate::verify::check_result_view(run);
+            if let Some(finding) =
+                crate::verify::failure_path_finding(run, baseline, changed_paths, tree_paths)
+            {
+                if !view.detail.is_empty() {
+                    view.detail.push_str("; ");
+                }
+                view.detail.push_str(&format!(
+                    "Athena's note on this failure: {}. {} The check still fails the verdict; judge each criterion from the diff and your own runs.",
+                    finding.summary, finding.evidence
+                ));
+            }
+            view
+        })
+        .collect()
 }
