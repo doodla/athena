@@ -1,0 +1,230 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-160745-8e6x",
+  "round": 1,
+  "at": "2026-11-15T18:59:12.923796829Z",
+  "invocation_seq": 2,
+  "approach": "Root cause: in `producer_loop` (crates/athena-core/src/run/producer.rs) the per-criterion self-check result is written to the attempt's invocation `detail` only inside the send-back path (producer.rs:616-625, after the early `break Some(report)` at 545-556). A check that finds every criterion met, or met-or-left-to-Athena, stores nothing, so a job later rejected on an unmet criterion shows no check before the verdict. The path that exhausts the send-back does store its problems, but not per-criterion status. Fix at that one place: add `criteria_check_lines` in send_back.rs. It derives each accepted criterion's status (met, unmet, not reported, or left to Athena's checks) from the existing `unmet_criteria` and `left_to_athena`, so status cannot drift from the send-back decision, and takes the evidence from the already-redacted report. In producer.rs, build that block once per attempt after redaction. Set it as the invocation detail on the passing break, as `self-check passed: criteria: ...`. On the failing path insert it into the existing `self-check failed: {problems}; ...; redacted report: {json}` string, after the problems and before `; redacted report: `, so the existing wording and the `split(\"redacted report: \")` parse in run_pin_tests.rs:1799 hold. No refusal rule, no new loop, no prompt edit, no schema change (`detail` exists). briefs.rs is not needed, because the producer already gets every criterion and a send-back (briefs.rs:871), so it is not modified.",
+  "decisions": [
+    {
+      "choice": "Store the criteria block on every attempt's invocation detail, in the same place and field the failing path already uses.",
+      "reason": "The failing path already puts its record in `detail` (producer.rs:621); the gap is that the passing path stores nothing. One field, no schema or record-shape change, and every reader of stored invocations sees it.",
+      "rejected": [
+        {
+          "option": "Add a new field to the invocation record or a new record type.",
+          "why": "Changes the schema, check_record_file, the round-trip tests and the gate; `detail` already exists and holds the failing check."
+        },
+        {
+          "option": "Add a harness gate that blocks the producer's final report without a per-criterion table (the introspections' proposal).",
+          "why": "A refusal rule that gives the producer no information it lacks: the brief already lists every criterion and sends the producer back for unmet ones. It would also need a replay share, and the brief asks to prefer information over refusal."
+        },
+        {
+          "option": "A second repair loop or changing PRODUCER_SEND_BACKS.",
+          "why": "Out of scope in the brief."
+        }
+      ]
+    },
+    {
+      "choice": "Derive each criterion's status in send_back.rs from `unmet_criteria` and `left_to_athena`, not from a second matching rule.",
+      "reason": "One definition of met, unmet and left-to-Athena (criterion_key matching, send_back.rs:361) means the stored status always equals the decision that sent the producer back.",
+      "rejected": [
+        {
+          "option": "Re-match criteria in producer.rs.",
+          "why": "Two copies of the matching rule could disagree."
+        }
+      ]
+    },
+    {
+      "choice": "Put the block before `; redacted report: ` on the failing path and keep the `self-check failed: ` prefix and problem text unchanged.",
+      "reason": "Tests assert `detail.contains(\"self-check failed: check probe failed before the verifier\")` (tests.rs:4894), `\"self-check failed: records criterion 2:\"` (tests.rs:5730), and parse the JSON after `redacted report: ` (run_pin_tests.rs:1799).",
+      "rejected": [
+        {
+          "option": "Append the block after the JSON.",
+          "why": "Breaks the `serde_json::from_str` of everything after `redacted report: ` in run_pin_tests.rs:1799-1800."
+        }
+      ]
+    },
+    {
+      "choice": "Take the evidence text from the redacted `ProducerReport`, not the raw output.",
+      "reason": "Evidence text can hold secrets; `redact_report` (run/mod.rs:2594) runs before anything is stored and the failing path already stores only the redacted report.",
+      "rejected": [
+        {
+          "option": "Use raw `ProducerOutput.criteria_check`.",
+          "why": "Unredacted text would reach stored records."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add `pub(crate) fn criteria_check_lines(report: &ProducerReport, accepted: &AcceptedReading, unmet: &[String], left: &[String]) -> String`. It returns one line per accepted criterion in `; `-joined form, with status `met`, `unmet (not reported)` or `unmet (<reported status>)`, or `left to Athena's checks`, plus the redacted evidence, found by `criterion_key` (send_back.rs:361). Add unit tests there for the three statuses.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "After `redact_report`, build the criteria block once. Set the attempt invocation's detail to `self-check passed: criteria: ...` before `break Some(report)` (the empty-problems branch). In the send-back block, insert the block between the problems and `; redacted report: `. Add a Root-cause paragraph to the producer_loop doc comment. Both branches write through `closing.new_invocations.last_mut()`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the two whole-job tests (met report; omitted criterion with the send-back used up).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One new bullet under `## [Unreleased]` / `### Changed`: root cause, fix location, no refusal rule (0% newly refused), tests.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In send_back.rs add `criteria_check_lines(report: &athena_data::records::ProducerReport, accepted: &AcceptedReading, unmet: &[String], left: &[String]) -> String`. For each `(text, _)` in `accepted.criteria`: find the report entry whose `criterion_key` equals the criterion's key. Status is `left to Athena's checks` if the text is in `left` and not in `unmet`; `unmet (not reported)` if it is in `unmet` and has no entry; `unmet (<entry status>)` if it is in `unmet` with an entry; else `met`. Format each as `\"<text>\" -> <status>[: <evidence>]` and join with `; `. Unit tests: all met, one omitted, one unmet with evidence, one left to Athena.",
+    "In producer.rs, after `let report = self.redact_report(raw, ctx.redactor)?;` (about line 512), compute `let criteria_block = criteria_check_lines(&report, accepted, &unmet, &left_criteria);` and add `changed.len()` as `checked against N changed files`.",
+    "In the empty-problems branch (`if unmet.is_empty() && ... { break Some(report); }`) set the last invocation's detail before the break: `format!(\"self-check passed: criteria: {criteria_block}\")`, through `closing.new_invocations.last_mut().expect(...)`, the same call used at the send-back block.",
+    "In the send-back block change the detail format to `self-check failed: {problems}; criteria: {criteria_block}; redacted report: {json}`. Keep the prefix and the problems text unchanged.",
+    "Add a Root-cause paragraph to the `producer_loop` doc comment (the nature of the gap: the outcome was stored only when it failed, so a pass left no stored event before the final verdict).",
+    "In tests.rs add `a_passing_self_check_is_stored_on_the_producers_invocation` (criterion 3) and `a_criterion_the_report_omits_is_stored_unmet_after_the_send_back_is_used` (criterion 4), following the Records::load pattern at tests.rs:4885-4892. Check the producer invocation count, the status text, and in the second test that the JSON after `redacted report: ` still parses.",
+    "Add the CHANGELOG.md bullet under `## [Unreleased]` / `### Changed`: root cause, the fix at producer_loop plus `criteria_check_lines`, 'no refusal rule is added (0% of past accepted readings newly refused)', tests, and the limit that the block shows the producer's reported evidence, not an Athena re-run.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix failures."
+  ],
+  "risks": [
+    {
+      "risk": "A longer stored detail on passing attempts enlarges invocation records and could be read by a place that assumed a passing producer has no detail.",
+      "mitigation": "The block holds one short line per criterion; I searched `.detail` readers (producer.rs:408/420, auditor, hestia, pin, audience, steward, lifecycle, retry tests) and found none that read a successful producer's detail. The full `cargo test --locked` gate runs the CLI lifecycle and drain tests."
+    },
+    {
+      "risk": "Evidence text in the block could carry unredacted secrets.",
+      "mitigation": "Evidence is taken from the redacted `ProducerReport` (redact_report, run/mod.rs:2594), the same text the failing path already stores."
+    },
+    {
+      "risk": "The fake agent in other tests (athena-agent fake.rs:329) builds criteria_check from the brief, so many jobs now store a detail that earlier asserts on `None` or exact text might reject.",
+      "mitigation": "I searched for `detail.is_none()` and `detail, None` asserts on a stored producer record and found only record constructions, not assertions on a stored producer detail; the full gate runs them all."
+    },
+    {
+      "risk": "Hand-kept-file mirror checks (crates/athena-core/src/mirrors.rs) apply to Athena's own source when producer.rs or the CHANGELOG change.",
+      "mitigation": "The CHANGELOG bullet follows the existing form; no decision log, prompt or CI file is touched, so the registry entries (decision log, shard timings, ontology) are not affected."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "invocation detail of a failing self-check attempt",
+      "dependent": "crates/athena-core/src/run/tests.rs:4894, 4952 and 5730 (assertions on `self-check failed: ...` and the problem text)",
+      "kind": "code",
+      "test": "cargo test -p athena-core self_check; the prefix `self-check failed: ` and the problem text are unchanged, the criteria block goes after the problems.",
+      "reason": null
+    },
+    {
+      "name": "layout of `detail`: `redacted report: <json>` last",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:1798-1804 (parses the JSON after `redacted report: `)",
+      "kind": "code",
+      "test": "a_report_that_fails_the_self_check_is_kept_for_both_attempts_and_the_work_still_goes_on, unchanged, and run in the full test gate. The block is inserted before `; redacted report: `, so the JSON is still the final field.",
+      "reason": null
+    },
+    {
+      "name": "producer invocation `detail` on non-success outcomes",
+      "dependent": "crates/athena-core/src/run/producer.rs:408, 420 (`record.detail` read for timed-out and failed outcomes) and producer_stop_reason",
+      "kind": "code",
+      "test": null,
+      "reason": "These reads happen at 407-439, before the self-check; the new assignment is only after a successful, parsed report, so a timeout, usage limit or login stop keeps its own detail."
+    },
+    {
+      "name": "invocation `detail` field content",
+      "dependent": "Readers of invocation detail across roles: crates/athena-core/src/auditor.rs:403, hestia.rs:2892, pin.rs:479, audience.rs:291, steward.rs:1309",
+      "kind": "code",
+      "test": null,
+      "reason": "They read the detail of their own role's invocation (auditor, steward, audience, pin runs), not the producer's, so a producer's detail on a success is not read by them; I read each at the cited line and each uses `unwrap_or(\"no detail\")` only for display."
+    },
+    {
+      "name": "detail of an interrupted producer invocation",
+      "dependent": "crates/athena-cli/tests/lifecycle.rs:1267, 3044 and crates/athena-cli/tests/retry.rs (assertions on a producer's detail after a kill switch or deadline)",
+      "kind": "code",
+      "test": null,
+      "reason": "Those stops return at producer.rs:407-439 before the new assignment, so their detail is untouched."
+    },
+    {
+      "name": "stored invocation record shape and the records gate",
+      "dependent": "crates/athena-data/src/records.rs (`Invocation.detail`, `check_record_file`, `AnyRecord` parse, round-trip tests) and crates/athena-gate (records and landing checks)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The `detail` field already exists as `Option<String>`; the change stores a longer string in it and adds no record file, key or schema, so the shape checks and the gate see the same record shape."
+    },
+    {
+      "name": "`producer_loop` (producer.rs:298)",
+      "dependent": "Run stage paths that reach `producer_loop`: `Athena::dispatch`, retry and resume (run/mod.rs), the nested run (`self.nested`), the pinned study run (`ctx.pin_dir`)",
+      "kind": "code",
+      "test": null,
+      "reason": "All pass the same per-attempt code; the new assignment reads only `report`, `accepted`, `unmet` and `left_criteria`, already computed on every pass, and none of the mode flags. The tests above run the real loop through `go`; the pin tests in run_pin_tests.rs use the pinned path and run in the gate."
+    },
+    {
+      "name": "prompt-set budgets",
+      "dependent": "docs/system-facts.md and the `system_facts_budgets_match_computed` test (crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt or brief text is changed (briefs.rs not edited), so no budget line moves."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the CHANGELOG.md entry and the new doc paragraph on `producer_loop` in producer.rs (the doc already holds one 'Root cause' paragraph per past fix, producer.rs:238-297).",
+      "command": "git diff -- CHANGELOG.md crates/athena-core/src/run/producer.rs",
+      "observes": "The CHANGELOG entry and the producer_loop doc name the root cause: the self-check outcome was stored on the invocation detail only when it failed and sent the producer back, so a pass or a met report left no stored event. The entry also names the fix location, the tests, and says no refusal rule is added (0% of past accepted readings newly refused).",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the producer.rs hunk. The detail is set before `break Some(report)` at the empty-problems branch (currently producer.rs:545-556) as well as in the send-back block (currently 616-625). Both use `criteria_check_lines` from send_back.rs.",
+      "command": "git diff -- crates/athena-core/src/run/producer.rs crates/athena-core/src/run/send_back.rs",
+      "observes": "The passing branch assigns `attempt.detail` from the criteria block, and each accepted criterion is listed with its met, unmet or left to Athena's checks status.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "New test `run::tests::a_passing_self_check_is_stored_on_the_producers_invocation` in crates/athena-core/src/run/tests.rs. It uses `athena(&repo,&state)` (tests.rs:180), which runs `base_script()` (tests.rs:225): the producer edits README.md and marks CRITERION `met`, and the verifier passes. It then calls `athena.ask` and `athena.go(.., AcceptedBy::User, &Quiet)` (the entry point other tests use, e.g. tests.rs:4849-4863), loads `Records::load(&athena.git, &athena.head().unwrap())` and reads the Producer invocation's `detail`, as at tests.rs:4885-4892.",
+      "command": "cargo test -p athena-core a_passing_self_check_is_stored_on_the_producers_invocation",
+      "observes": "There is exactly one producer invocation (no send-back); its detail starts with `self-check passed`, contains `README.md describes the demo` with status `met`, and the evidence `read it`. The test also asserts the job reached a verifier, i.e. the check ran before the verdict.",
+      "fails_without": "On the base tree a passing attempt's detail is None (producer.rs:555 breaks before any detail is set), so `detail.unwrap_or_default()` is empty and the assertion on `self-check passed` and the criterion text fails.",
+      "seam": "Production entry point: `Athena::go` over the repo fixture, reaching `producer_loop` (producer.rs:298). The fake agent is injected through `athena_with(.., base_script())` (tests.rs:192, FakeAgentDriver). The producer's report comes from base_script, and nothing under test (criteria_check_lines, the detail assignment) is in the fake. Seam exists today (read tests.rs:180-287)."
+    },
+    {
+      "criterion": 4,
+      "method": "New test `run::tests::a_criterion_the_report_omits_is_stored_unmet_after_the_send_back_is_used` in tests.rs. A script wraps `base_script()`: for Role::Producer it sets `turn.structured[\"criteria_check\"] = json!([])`, so both attempts omit CRITERION. PRODUCER_SEND_BACKS is 1 (run/mod.rs:1682), so attempt 2 runs the limit branch (producer.rs:635-674). Run through `athena_with(&repo,&state,PASSES,plenty_of_space,script)`, `ask`, `go`, `Records::load`.",
+      "command": "cargo test -p athena-core a_criterion_the_report_omits_is_stored_unmet_after_the_send_back_is_used",
+      "observes": "Two producer invocations (sorted by seq). Each stored detail still begins `self-check failed: acceptance criteria not met or not reported:` and lists `README.md describes the demo` with status `unmet (not reported)`. The detail still parses after `redacted report: ` into a ProducerReport.",
+      "fails_without": "On the base tree the detail names the criterion only inside the problem sentence and has no per-criterion status line, so the assertion on `unmet (not reported)` fails.",
+      "seam": "As for criterion 3: `Athena::go`, `producer_loop`, the fake script wrapping `base_script()` at tests.rs:225, the `Tweak`-style wrapper pattern of `script_with_verifier_misread` (tests.rs:1909). Seam exists today."
+    },
+    {
+      "criterion": 5,
+      "method": "The existing tests that pin the wording stay unchanged and must pass: tests.rs:4894 and 4952, tests.rs:5730, run_pin_tests.rs:1760-1805. The diff must not touch those files' existing assertions. No refusal rule, so no reading is newly refused.",
+      "command": "cargo test -p athena-core self_check",
+      "observes": "`a_failing_check_is_sent_back_before_the_verifier_and_the_fix_reaches_it`, `a_report_that_fails_the_self_check_is_kept_for_both_attempts_and_the_work_still_goes_on` and the records-criterion test all pass with their original assertions. `git diff` shows no edit to a `self-check failed` assertion. The CHANGELOG entry states 0% of past accepted readings newly refused.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff file list: CHANGELOG.md has a new bullet under `## [Unreleased]`; nothing under docs/decisions.md, records/, prompts or the files of the prior jobs.",
+      "command": "git diff --stat",
+      "observes": "Changed files: CHANGELOG.md, crates/athena-core/src/run/producer.rs, send_back.rs, tests.rs only. None of docs/decisions.md, records/, crates/athena-context/prompts/*, athena-context/src/lib.rs, verify.rs or budgets.rs.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three checks Athena runs on the result.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0, including the unchanged pin tests and the system-facts budget tests (no prompt file changes).",
+      "fails_without": "A clippy lint or a changed stored detail that breaks an old assertion would fail here.",
+      "seam": "The commands themselves; no double."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "0a17c1e6e12e7a6977f75d3c3881c7eb71da5d9ea99ae078ed0bcbd35ba58ce3"
+}
