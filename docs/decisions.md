@@ -5317,3 +5317,69 @@ should replace those estimates with its figures.
   `all_checks_passing_means_one_producer_call`, `a_file_the_producer_added_is_seen_by_the_in_loop_check`,
   `the_exposed_index_lists_new_files_and_is_restored_on_drop` and `an_error_in_the_in_loop_run`, which drive the real
   producer loop with a fake producer and real check processes. Not measured: the added wall time and the skip rate.
+
+## D183 · Athena runs each real-records `status --snapshot` criterion on the producer's tree before the verifier
+
+- **Case:** Five status- or usage-measure jobs failed between 2026-11-11 and 2026-11-12 (failure class
+  20261111-105030-a2bc). The reading gate already makes such a reading carry a behavior criterion that runs the measure
+  on the real records against an independent range, but nothing ran that criterion before the final verdict. Producers
+  shipped measures checked only on fixtures, or evidence that cited no command that ran, and the verifier rejected the
+  whole job. This entry records job 20261114-045657-96np.
+- **Decision:** After each producer report, the formatter, the replay and the in-loop checks, and before the loop can
+  end, `Athena::loop_records_criteria` (`crates/athena-core/src/run/records_criteria.rs`) runs each selected criterion
+  in Athena's own process. A criterion is selected when it is a behavior criterion whose text holds `status --snapshot`
+  and `real records`. Its command is the first backticked span with `status --snapshot`, in any form; the word after
+  `--snapshot` (or `<evidence directory>`) becomes the job's evidence directory, later arguments are kept, and the run
+  is always `cargo run -p athena-cli -- status --snapshot <evidence> [rest]`, so it measures the producer's change and
+  not an installed Athena. The run uses the in-loop executor of D182 (`SnapExec` with `in_loop`, `ExposedIndex`,
+  `CheckKind::Command`): a build slot only if one is free, no wait, the producer's own build directory. The command is
+  wrapped as `sh -c '"$@" > "$0"'` so Athena reads the whole standard output from a file it owns. It runs only where
+  `crates/athena-cli/Cargo.toml` names the package `athena-cli`; elsewhere each criterion is recorded as `not run`.
+  Judging: a judged line is an output line that holds the criterion's measure phrase (the words after `real records`
+  between `the` and `it prints`, `it shows` or `is within`). The figure is the first number after the phrase, cut at the
+  first `;` or `(`, that is directly followed by a whole-word unit of the stated range's family (minutes, seconds, hours,
+  USD, percent; no conversion). A figure outside the range stated after `expected range` is a problem. A per-item list
+  is the first parenthesised group after the phrase whose ` · ` entries are all `<job id> <number>` with at least three
+  entries; all values equal is a problem and needs no range. Everything else is only recorded: no phrase on any line, no
+  readable range, no figure, a non-zero exit (already a failing in-loop check), a timeout, low disk, a busy slot, an
+  error. A problem joins the one shared send-back (`PRODUCER_SEND_BACKS` stays 1) with the command, the judged lines and
+  the output; one left at the limit reaches the verifier among the report gaps. Every run reaches the verifier as an
+  entry `records-criterion-<n>` under the checks that says it is Athena's own run. Verdict (choice b): that run is not a
+  `CheckRun`, so `verify::judge` does not count it as the verifier's command; the entry says the verifier must run the
+  same command in its snapshot and cite it. To make that possible the criteria's cited commands are redacted like the
+  commands the verifier ran, since the redactor rewrites the evidence path in the latter and the two would never match.
+  An evidence snapshot that is missing, has no readable `history.json`, or is not readable under the policy the
+  producer's pass ran with ends the job with `self.failure`, before any verifier, naming the snapshot. Everything stored
+  (the verifier brief record, the invocation detail, the failure reason) carries `<state>/jobs/<id>/evidence` and `<state>`
+  and no machine path; text sent to an agent has the real evidence path.
+- **Alternatives:** Count Athena's run as the verifier's command: it needs a new `CheckRun` field or a `verify.rs` rule
+  and would let a verifier cite a run it never repeated. Judge every figure on a line: it would judge the
+  `the 5 landings before` comparison and `longest` figures and send back correct work. Take any labelled list as
+  per-item: the stage medians, often all 0.0, and the daily counts would be called constant. Send back a non-zero exit:
+  the in-loop checks already report a failing build, so it would be reported twice. Compute per-job values inside
+  Athena: a measure computation the code does not define, and a different calculation from the command the verifier
+  runs. Change `status --snapshot` to print per-job values: a user-facing change made for Athena's check. A new record
+  kind: the request keeps the output as check evidence in the existing form.
+- **Tradeoff:** One more `cargo run` per pass for jobs that have such a criterion; builds in the producer's own
+  directory, warm after the checks. Estimate, not measured: seconds when warm. Known limit: today's `status --snapshot`
+  prints medians, totals and daily counts and no per-job list labelled by job ids, so the constant rule can fire only when
+  the producer's change makes the command print one; for a criterion that states no number and names a phrase no line
+  holds (the gate's usual wording), the stage records the command and output for the verifier and sends nothing back.
+  The producer-policy half of the reach check catches only a policy built while the directory was missing, because the
+  policy file is written when the producer starts and no operating-system confinement backs it. A candidate taken through
+  the resume shortcut runs no producer pass and gets no records run.
+- **Reversal cost:** Low; delete the call in `producer_loop`, `records_criteria.rs`, the `records_runs` fields of
+  `Reported` and `Built`, the `records_run` field and renderer of the verifier brief, the producer-brief sentence and the
+  tests that pin them. The redaction of cited commands is independent and can stay.
+- **Provenance:** Read: `crates/athena-core/src/run/producer.rs` (the loop, its send-back and `Reported`), `run/checks.rs`
+  (`SnapExec`, `ExposedIndex`, `LoopWork`), `run/verification.rs`, `run/mod.rs` (`PRODUCER_SEND_BACKS`, `Built`,
+  the evidence snapshot at dispatch), `crates/athena-core/src/snapshot.rs`, `verify.rs` (`judge`, the cited-but-not-seen
+  rule), `crates/athena-agent/src/policy.rs` (`Policy`, `evaluate`), `crates/athena-core/src/status/throughput.rs`
+  (`Throughput::text`, the lines judged), `crates/athena-core/src/reading/surveys.rs` (the real-records criterion text),
+  D43, D115, D156 and D182, which stand; this entry applies D182's in-loop run to the real-records criterion and
+  reverses nothing. Root cause: nothing ran a status-measure criterion on the real records before the verifier did
+  (failure class 20261111-105030-a2bc). Measured: `cargo test -p athena-core records_loop`, `records_criteria` and
+  `cargo test -p athena-context records_run`, which drive the real producer loop with a fake producer, the real redirect,
+  reading, package gate, judging and send-back, and a fake `cargo run` argv; the literal lines of
+  `Throughput::text()` and the real text of a landed job are judged in the tests. Not measured: the added wall time,
+  whether producers act on the send-back, and how often a real criterion names a phrase that a line holds.
