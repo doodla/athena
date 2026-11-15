@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045733-smbn",
+  "round": 2,
+  "at": "2026-11-15T05:11:38.0302608Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The scan's cut at the first `#[cfg(test)]` followed by `mod` still hides production code, so its fail-without claim is false for real files, and the `+=` case is not caught as described.",
+      "evidence": "crates/athena-core/src/lib.rs:154-155 is `#[cfg(test)]` then `mod run_pin_tests;`, and production items follow (`pub struct Quiet` at 187, `pub struct Athena` at 229, `impl Athena` at 263, `pub fn truncate_at_word` at 324). crates/athena-core/src/run/mod.rs:1531-1532 is `#[cfg(test)]` then `pub(crate) mod check_seam {`, and production code runs on to the `mod tests;` at 2602. Depending on how 'followed by mod' is coded, that cut hides about 1,070 production lines. The structural half ('no other core non-test file calls those four') uses the same cut. Rule (a) looks at the previous non-space character, which is `=` in `x += cfg.budget.verifier_usd`, so that example from the demonstration is not flagged. This was critic finding 4 in round 1; the answer changes the cut but keeps its failure mode. Fix: Skip only the brace-matched body of an inline `#[cfg(test)] mod name { … }`. Ignore `#[cfg(test)] mod name;` declarations and other gated items rather than cutting there. Treat `+=` as a `+` sign. Add a self-test row that plants `a.producer_usd + a.verifier_usd` after a `#[cfg(test)] mod x;` line in a string fixture and asserts the scanner flags it.",
+      "location": "Decision 6 / Criterion 2 demonstration (`no_second_sum_of_stage_caps_in_core`)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list omits most readers of the files the plan edits: other CHANGELOG.md tests and tests that read reading.rs and drain.rs source.",
+      "evidence": "Besides refusal_corpus.rs, CHANGELOG.md is read by include_str! at crates/athena-core/src/reading.rs:4364, 5086, 5531, 5874, 6956, 7259, 7598, 7624, 7639, 8271 and 8997, crates/athena-cli/src/main.rs:1616 and crates/athena-cli/tests/lifecycle.rs:2888. Several slice `## [Unreleased]` and pick an item by its text (reading.rs:5874-5894, 7639-7660). The reading.rs source, where the plan adds the scan and CHANGELOG tests with cap-name strings and edits the ReserveStage doc, is read by `reading_source()` at reading.rs:1578-1593 and refusal_corpus.rs:2845-2860, which `function_body` searches by heading. drain.rs source, where the module doc is edited, is scanned at cli/src/main.rs:1585-1609. None of these is in the dependents list. Step 8's full `cargo test --locked` does run them, and I found no negated phrase the new entry would trip, so the risk is low, but the list is incomplete. Fix: Add dependents entries for these CHANGELOG readers and for the reading.rs and drain.rs source readers, each tied to the step 8 `cargo test --locked` run. State that the new reading.rs tests add no `fn check_` or other heading those source searches key on.",
+      "location": "Dependents: 'CHANGELOG.md content' and the reading.rs / drain.rs doc and test edits",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The not-gated tests assume the fake reading is neither marked hard nor asks for a fails-without run; otherwise the job is planned under hard mode and 'Landed with no planner call' fails.",
+      "evidence": "run/mod.rs:1103-1105: `planned` is true in hard mode when `reading.hard_reason.is_some() || asks_for_fails_without_run(&reading)`. Dispatch{planned:true} with planner and critic at 3.00 and max_rounds 5 needs 45.00, not 15.00. Row (j) also keeps the reader cost cell at 4.50, so the re-read itself spends 4.50 more. Fix: In (i) and (j), assert the base reading has `hard_reason == None` and no fails-without criterion, or say which script supplies such a reading. Set the reader cost cell to 0.01 before the re-read in (j).",
+      "location": "Criterion 3 rows (i) and (j)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`RecordingLander` in tests/drain.rs records `(job, ratings)` pairs, not bare ids.",
+      "evidence": "crates/athena-cli/tests/drain.rs:2556 `struct RecordingLander(std::sync::Mutex<Vec<(String, usize)>>);`. The plan says 'the lander holds only its id'. Fix: Compare the first element of each recorded pair, or use the job_plan.rs lander, which records ids only.",
+      "location": "Criterion 5 demonstration (A)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan keeps the accepted reading. The root cause is already fixed by `reading::budget_reserve` and `Athena::preflight`. The work is a test per entry point, a cap-varying table, a drain test, a source scan and a CHANGELOG entry, with no production logic change. Reading the code, I confirmed: the seven preflight call sites the plan cites (reading.rs:1203, 1303; run/mod.rs:1108, 1367; planning.rs:116, 336); the Config sum methods (config.rs:898-935); and that the fake driver enforces no cost cap (run/tests.rs:2097-2098), so readers costing 30.51 are fine. The arithmetic of rows (a)-(f) and of the criterion 4 coefficients matches `budget_reserve`, and the helpers it reuses exist (`real_steps`, `work_everything`, `queued_ids`, `RecordingLander`, the job_plan.rs failing-reader pattern). Dropping the Admission checks in `correct` and the re-read is sound: the re-read runs before the Dispatch preflight (run/mod.rs:1043-1108), and an admission check there would be a new refusal. Two problems remain. (1) The rebuilt source scan still cuts at one-line declarations such as `#[cfg(test)] mod run_pin_tests;` (lib.rs:154, before production code at 187-338) and possibly `pub(crate) mod check_seam {` (run/mod.rs:1531). So its claim to fail on a sum added to 'any core non-test file' is false, which repeats round-1 finding 4. (2) The dependents list names only refusal_corpus as a CHANGELOG reader. It omits the many other CHANGELOG `include_str!` tests and the tests that read the reading.rs and drain.rs source, all of which the plan edits. Both are easy to fix, so the verdict is revise."
+}

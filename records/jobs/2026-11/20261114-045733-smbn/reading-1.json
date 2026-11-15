@@ -1,0 +1,149 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-045733-smbn",
+  "n": 1,
+  "at": "2026-11-15T04:46:09.31792911Z",
+  "invocation_seq": 1,
+  "base_commit": "8504e8534bef15acf1aa3b6ff940c38884bcd684",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Prove the job budget reserve is checked before every spend, incl.",
+  "summary": "The root cause (per-invocation budget check made after planning spent, with a reserve that left out the critic and later rounds) is already fixed in the repo by `reading::budget_reserve` and `Athena::preflight`. This change closes the remaining gap: a test per entry point (admission, retry, dispatch, planner, critic, run, drain, and a resumed job with prior spend) that fails when its preflight is removed. It supersedes the stalled jobs 20261028-082151-67fa, 20261030-033434-3v30 and 20261030-151827-48rm; the audience is the operator and verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check that a short budget is held before spend, not that a function exists."
+    },
+    {
+      "id": "root-cause",
+      "how": "One reserve function and a cap-varying table test cover the whole class."
+    },
+    {
+      "id": "tested",
+      "how": "fmt, clippy and test pass is a criterion."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-data/src/config.rs (planning_usd, critic_usd, run_usd, budget_required, check_budget at 894-949), crates/athena-core/src/reading.rs (ReserveStage and budget_reserve 94-140, check_budget and preflight 467-503, first_reading 1187 with preflight at 1203, retry 1262 with preflight at 1303), crates/athena-core/src/run/mod.rs (dispatch preflight 1108, Run preflight 1367), crates/athena-core/src/run/planning.rs (preflight at 116 and 336), crates/athena-cli/src/drain.rs (budget short hold, doc at 266). The entry points are Athena::ask, retry, go and drain, and the order is admission, dispatch, each planner and critic, then run. No record or data file under crates/ is added, so no records allow-list or AnyRecord round-trip change. The property is measured by comparing the job's remaining budget (job_usd minus spent) with budget_reserve at each stage, and by the error type BudgetShort.",
+    "Current state: CHANGELOG.md 2184-2200 already records the root-cause fix and the per-stage preflight, and athena.toml has job_usd = 50.00 against a reserve of 2 + planning + 15, so the shipped config no longer reproduces the $8.00 failures. The three previous jobs (20261028-082151-67fa, 20261030-033434-3v30 and 20261030-151827-48rm) stopped in planning with no candidate and no changed files. Their critic findings concern different features (an interrupted-job takeover, drain ordering), not this cause, so they no longer apply to this request. Their file scopes (run/mod.rs, disk.rs, manage.rs, drain.rs, plan.rs and the athena.toml budget) are excluded here except where listed as deliverables, and their work is dropped.",
+    "Existing code: this extends reading::budget_reserve, Athena::preflight, ReserveStage and BudgetShort in crates/athena-core/src/reading.rs and Config::planning_usd and budget_required in crates/athena-data/src/config.rs. It builds no second reserve computation.",
+    "The gap to close, if the audit finds one, is a path where spend happens without a preflight. The likely places are a resumed or interrupted job whose earlier spend is not counted, a retry judged at spend 0 while its seeded stage already ran, and a drain dispatch. If the audit finds no gap, the change is tests, a short doc note and a CHANGELOG entry only.",
+    "Expected newly refused readings: 0%. The shipped job_usd of 50.00 exceeds the largest reserve, so no past accepted reading is refused. No new refusal rule is added. The preflight already exists, and the change only proves it and extends it to any uncovered entry point."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "CHANGELOG.md has a new entry naming the root cause (the budget checked per invocation, after planning had spent, with a reserve that omitted the critic and later rounds) and jobs 20261028-082151-67fa, 20261030-033434-3v30 and 20261030-151827-48rm, and stating that 0% of past accepted readings are newly refused.",
+      "kind": "content"
+    },
+    {
+      "text": "The reserve for every ReserveStage is still computed only in reading::budget_reserve, from Config methods. Grep for `planner_usd + ` or `producer_usd + ` under crates/athena-core/src shows no second sum of caps outside Config.",
+      "kind": "content"
+    },
+    {
+      "text": "A new test per entry point (ask, retry, dispatch, planner round, critic round, run stage, drain, and a resumed job with prior spend) gives a job a budget one cent below budget_reserve for that stage, asserts a BudgetShort error before any invocation is recorded, and asserts success at exactly the reserve. Run `cargo test` and check that these tests pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The cause is tested, not one job: a table test varies each cap in a Config (reader, planner, critic, producer, verifier, max_rounds) and asserts the reserve and the refusal threshold move by exactly that amount at every stage. Removing the preflight call in any one entry point (shown by the verifier running `cargo test` on a mutated tree, or by reading the test) makes its test fail. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Through the drain entry point, a queued item whose remaining budget is below the reserve is left queued with one `item <id> is left queued` line and outcome `budget short`, and the next affordable item still runs. Run `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass, as a recorded Athena check on the final tree.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.35
+    }
+  ],
+  "out_of_scope": [
+    "Changes to athena.toml, defaults.toml, .github/workflows or records/; the [budget] values stay as they are",
+    "The interrupted-job takeover and the retry head-staleness work from job 20261028-082151-67fa (run/mod.rs timeout_seed, disk.rs, manage.rs)",
+    "Drain ordering and plan.rs changes from jobs 20261030-033434-3v30 and 20261030-151827-48rm",
+    "Any new refusal rule beyond the existing preflight; changing the producer, verifier or planner prompts",
+    "A partial-plan resume for the planner"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.2,
+        "p90": 6.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6784511784511784,
+      "p_user_intervenes": 0.06172465960665657,
+      "cost_usd": {
+        "p10": 0.553467703439396,
+        "p50": 1.485969315591328,
+        "p90": 5.7262384735183955
+      },
+      "wall_time_s": {
+        "p10": 606.5972299874452,
+        "p50": 2164.56201495,
+        "p90": 4430.960626430005
+      }
+    }
+  },
+  "departures": "The fix is already in the repo, so the job is mostly audit and tests. That gives a lower cost than a fresh fix. The stalled-retry lineage and a hard-job review add risk of rejection.",
+  "hard_reason": "It touches the budget preflight, a rule that refuses or holds work before a job's stages run, and the run pipeline (admission, retry, dispatch, drain).",
+  "producer_effort": "high"
+}

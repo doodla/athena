@@ -894,7 +894,8 @@ impl Config {
     /// The cost of `rounds` planning rounds, a planner call and a critic call each, at their caps; zero when
     /// `[job_plan]` is absent. This and the three methods below are the one place the stage caps are summed:
     /// the runtime reserve (`athena_core::reading::budget_reserve`) and [`Config::check_budget`] both use
-    /// them, so a changed cap changes both with no other edit.
+    /// them, so a changed cap changes both with no other edit. Used by the dispatch reserve (every round of a
+    /// planned job) and by each planner round (this round and the ones after it).
     pub fn planning_usd(&self, rounds: u32) -> f64 {
         self.job_plan
             .map_or(0.0, |p| f64::from(rounds) * (p.planner_usd + p.critic_usd))
@@ -913,19 +914,22 @@ impl Config {
         roles
     }
 
-    /// The cap on one critic call, zero when `[job_plan]` is absent.
+    /// The cap on one critic call, zero when `[job_plan]` is absent. Added by the reserve before each critic
+    /// round, on top of the rounds after it.
     pub fn critic_usd(&self) -> f64 {
         self.job_plan.map_or(0.0, |p| p.critic_usd)
     }
 
     /// What the producer and the verifier may spend: the part of a job that always runs once planning is over.
+    /// It is the whole reserve of the run stage, and the last term of every other stage's reserve.
     pub fn run_usd(&self) -> f64 {
         self.budget.producer_usd + self.budget.verifier_usd
     }
 
     /// What a job needs from the start: the reader, every planning round when `[job_plan]` is enabled (the
     /// reading's `hard` flag is not known yet, so planning is counted; over-reserving is the safe side), the
-    /// producer and the verifier.
+    /// producer and the verifier. It is the reserve at admission: `ask`, a queued read, a read made again with
+    /// its earlier spend, and `retry`.
     pub fn budget_required(&self) -> f64 {
         let rounds = match self.job_plan {
             Some(p) if p.enabled => p.max_rounds,
@@ -1035,6 +1039,70 @@ pub(crate) mod tests {
         assert!((config.budget_required() - sum).abs() < 1e-9);
         assert!(b.job_usd >= config.budget_required());
         assert!(config.check_budget().is_ok());
+    }
+
+    #[test]
+    fn planning_and_run_caps_move_by_exactly_the_cap() {
+        // The shipped caps: reader 2.00, planner and critic 3.00, five rounds, producer 10.00, verifier 5.00.
+        // For each cap raised by 1.00 (and `max_rounds` by 1), how much `planning_usd(2)`, `critic_usd()`,
+        // `run_usd()` and `budget_required()` rise: written out by hand, not taken from the methods.
+        let base = Config::parse(REPO_CONFIG).unwrap();
+        let sums = |c: &Config| {
+            [
+                c.planning_usd(2),
+                c.critic_usd(),
+                c.run_usd(),
+                c.budget_required(),
+            ]
+        };
+        assert_eq!(sums(&base), [12.0, 3.0, 15.0, 47.0]);
+        /// A cap, how to raise it by one step, and how much each of the four sums rises.
+        type Row = (&'static str, fn(&mut Config), [f64; 4]);
+        let rows: [Row; 6] = [
+            (
+                "reader_usd",
+                |c| c.budget.reader_usd += 1.0,
+                [0.0, 0.0, 0.0, 1.0],
+            ),
+            (
+                "planner_usd",
+                |c| c.job_plan.as_mut().unwrap().planner_usd += 1.0,
+                [2.0, 0.0, 0.0, 5.0],
+            ),
+            (
+                "critic_usd",
+                |c| c.job_plan.as_mut().unwrap().critic_usd += 1.0,
+                [2.0, 1.0, 0.0, 5.0],
+            ),
+            (
+                "producer_usd",
+                |c| c.budget.producer_usd += 1.0,
+                [0.0, 0.0, 1.0, 1.0],
+            ),
+            (
+                "verifier_usd",
+                |c| c.budget.verifier_usd += 1.0,
+                [0.0, 0.0, 1.0, 1.0],
+            ),
+            (
+                "max_rounds",
+                |c| c.job_plan.as_mut().unwrap().max_rounds += 1,
+                [0.0, 0.0, 0.0, 6.0],
+            ),
+        ];
+        let before = sums(&base);
+        for (name, bump, rises) in rows {
+            let mut changed = base.clone();
+            bump(&mut changed);
+            for (i, after) in sums(&changed).into_iter().enumerate() {
+                assert!(
+                    (after - before[i] - rises[i]).abs() < 1e-9,
+                    "{name}: sum {i} moved from {} to {after}, not by {}",
+                    before[i],
+                    rises[i]
+                );
+            }
+        }
     }
 
     fn with_job_usd(text: &str, job_usd: &str) -> String {

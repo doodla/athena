@@ -92,6 +92,18 @@ pub fn same_scope(old: &Reading, new: &Reading) -> bool {
 }
 
 /// Where a job is when its budget is checked against everything still to run (see [`budget_reserve`]).
+///
+/// Each stage is judged by `Athena::preflight` at one place, before the money of that stage is spent:
+///
+/// | stage | judged in |
+/// |---|---|
+/// | `Admission` | `first_reading` (`ask`, a queued read, a read made again with its earlier spend) and `retry` |
+/// | `Dispatch` | `dispatch`, before anything is committed |
+/// | `Planner`, `Critic` | `planning_round` and `critic_round` in `run/planning.rs`, before each call; a stop there is a recorded planning stop |
+/// | `Run` | `run/mod.rs`, after planning and before the producer; a stop there is a recorded planning stop |
+///
+/// `correct` and the re-read after a configuration change spend the reader only, bounded by `check_budget`, and
+/// start no planning; the next `go` is judged at `Dispatch`, before any planner, producer or verifier spend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReserveStage {
     /// Before the reader: the whole path, the reader included, with every planning round when `[job_plan]`
