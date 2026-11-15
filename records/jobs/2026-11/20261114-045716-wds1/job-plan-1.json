@@ -1,0 +1,177 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-045716-wds1",
+  "round": 1,
+  "at": "2026-11-15T01:56:53.859461777Z",
+  "invocation_seq": 2,
+  "approach": "Add one prose const, CODE_CLAIMS_RULE, to crates/athena-context/src/briefs/planner.rs and append it to the Report section of planner_brief after FIELD_MEANING_RULE. The text requires each claim about existing behavior (what consumes a state, which sites produce each error or state class, which input forms an existing rule accepts, which records a gate reconciles, a role or config limit) to name the function and file:line the planner read. It requires a plan that classifies errors or states to list every producer site with its class. It tells a revising planner to settle each finding that names a file and function by reading that code and citing file:line, and to answer a finding about an unlisted adjacent path (max_concurrency path, role limits, records read from the branch) by listing that path in dependents. The Report section is shared by first-round and revision briefs, so one text serves both. A new test in briefs.rs checks the wording in both inputs. The existing Report size pin test (briefs.rs:3959) gets the new rule's length added to its bound. A CHANGELOG entry names the root cause. No refusal rule is added, frame.planner is untouched, and the data files and core crates are unchanged.",
+  "decisions": [
+    {
+      "choice": "Put the new text in the planner brief's Report as a separate const next to OPEN_QUESTION_RULE, REAL_RECORDS_RULE and FIELD_MEANING_RULE.",
+      "reason": "The failing stage lacked this information in its brief. The Report is the one section both first-round and revision briefs share (planner.rs:146-149), so one text covers both. The sibling rules are separate consts that each have their own test, so this follows the pattern and keeps its own doc comment naming the root cause.",
+      "rejected": [
+        {
+          "option": "Edit frame.planner (prompts)",
+          "why": "Out of scope. The brief says it has only 95 tokens of headroom, and the planner budget line in docs/system-facts.md would move."
+        },
+        {
+          "option": "A pre-critic admission check that refuses a plan with an unsupported claim or open question",
+          "why": "Out of scope. Whether a claim is backed by the code cannot be judged without the repository, which is why the existing OPEN_QUESTION_RULE doc comment (planner.rs:62-63) keeps caller listing as prose. A refusal also adds a share of refused readings to measure."
+        },
+        {
+          "option": "Extend OPEN_QUESTION_RULE in place",
+          "why": "The existing test planner_brief_tells_the_planner_to_settle_code_questions_by_reading (briefs.rs:1818-1832) pins its wording. A separate const keeps that test valid and lets the new test pin the new text alone."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs/planner.rs",
+      "action": "modify",
+      "purpose": "Add a pub(super) const CODE_CLAIMS_RULE with a doc comment naming the root cause and jobs 20261030-013555-f5qm, 20261031-030119-tw3v, 20261103-075205-wbtm. Append {CODE_CLAIMS_RULE} after {FIELD_MEANING_RULE} in the Report format string of planner_brief (line 148).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add a test for the new wording in a first-round and a revision brief. Update the Report size pin test (3938-3972) to include the new rule's length.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under [Unreleased] ### Added naming the root cause, the const, the test commands and that no refusal rule was added.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-context/src/briefs/planner.rs add `pub(super) const CODE_CLAIMS_RULE: &str = \"...\";` after FIELD_MEANING_RULE, with a doc comment naming the root cause (the brief asked to settle questions and list callers but never required each claim about existing behavior to cite the function and file:line read, nor revisions to settle code-named findings by reading) and the three jobs, and saying it is information, not a refusal. Text: each claim about existing behavior (what consumes a state, which sites produce each error or state class, which input forms an existing rule accepts, which records a gate reconciles, a role or config limit) names the function and file:line you read, and a plan that classifies errors or states lists every producer site (every bail!/Err site feeding the arm) with its class. On a revision, settle each finding that names a file and function by reading that code and citing file:line, not by assertion or by leaving it open; answer a finding about an unlisted adjacent path (for example the max_concurrency path, role limits, records read from the branch) by listing that path in dependents.",
+    "Append `\\n\\n{CODE_CLAIMS_RULE}` after `{FIELD_MEANING_RULE}` in the Report format string at planner.rs:148.",
+    "In crates/athena-context/src/briefs.rs add test planner_brief_requires_code_claims_to_cite_the_code_in_both_rounds near line 1832. It builds planner_inputs(None) and planner_inputs(Some(PlanRevision{previous: plan(1), findings: vec![finding(Severity::Major, FindingSource::Critic, \"F\")], resumed_from: None})). For each it takes the text after `## Report` and asserts the const appears exactly once, has no newline, and that the Report holds the needles `function and file:line`, `every producer`, `class`, `accepted`, `reconcile`, `settle each finding`, `dependents`, `max_concurrency`.",
+    "Update the_planner_brief_states_the_real_records_rule_once_within_its_bound (briefs.rs:3959) to add `+ super::planner::CODE_CLAIMS_RULE.len() + 2` to the bound, with a comment, and update the assert message format.",
+    "Add the CHANGELOG.md entry as the first bullet under ## [Unreleased] ### Added (line 22): root cause, failure class plan-leaves-code-answerable-questions-open-and-skips-adjacent-existing-path-fails-planning-rounds, the eight introspections' common cause, jobs 20261030-013555-f5qm, 20261031-030119-tw3v and 20261103-075205-wbtm (recorded no candidate; their work is not redone), the const and test names, the commands, that no refusal rule is added (0% refused) and the frame and token budgets are unchanged.",
+    "Run cargo fmt --all, then cargo test -p athena-context planner_brief and the full checks."
+  ],
+  "risks": [
+    {
+      "risk": "A longer Report may be skimmed by the planner, so the rule has little effect.",
+      "mitigation": "The text is short and generic, and it extends the existing OPEN_QUESTION_RULE without repeating its caller-listing sentence. The test checks that the const appears once and has no newline. Whether the planner follows it is not measured; the changelog says so."
+    },
+    {
+      "risk": "The existing size pin fails on the longer Report and breaks the test check.",
+      "mitigation": "Update the size pin's bound in the same step and run cargo test -p athena-context planner_brief, which selects the pin test."
+    },
+    {
+      "risk": "A revising planner reads the instruction to settle findings by reading as permission to skip the finding text.",
+      "mitigation": "The Report in the revision brief appears after the findings, so both appear in one brief. The wording tells the planner to settle each finding by reading, not to ignore it, and the existing line `Answer each in the new plan` stays."
+    },
+    {
+      "risk": "The new text accidentally contains the string used to split the Report section in tests.",
+      "mitigation": "Use the quoted marker `## Report` as in the existing tests: split on `## Report` and take nth(1). The new const text must not contain the string `## Report`."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "planner_brief Report section length",
+      "dependent": "crates/athena-context/src/briefs.rs: the_planner_brief_states_the_real_records_rule_once_within_its_bound (3938-3972), with PLANNER_REPORT_BASE_BYTES = 1749 at 3936",
+      "kind": "code",
+      "test": "cargo test -p athena-context the_planner_brief_states_the_real_records_rule_once_within_its_bound. The plan updates its upper bound to add CODE_CLAIMS_RULE.len() + 2, the paragraph break, and its comment. Without the update it fails on the longer Report.",
+      "reason": null
+    },
+    {
+      "name": "existing Report wording (OPEN_QUESTION_RULE, REFUSAL_CORPUS_RULE, REAL_RECORDS_RULE, FIELD_MEANING_RULE)",
+      "dependent": "crates/athena-context/src/briefs.rs: planner_brief_tells_the_planner_to_settle_code_questions_by_reading (1818), planner_prompt_and_brief_carry_the_refusal_corpus_rule (1801), planning_prompts_and_brief_require_a_named_test_seam (1766) and the_planner_brief_requires_a_reused_field_to_quote_its_meaning_and_check_the_live_config (3975)",
+      "kind": "code",
+      "test": "The same planner_brief filter. The existing consts are not edited and the new rule is appended after them, so each of these needle checks still holds. The field-meaning test checks the order only against the real-records rule.",
+      "reason": null
+    },
+    {
+      "name": "planner_brief output",
+      "dependent": "crates/athena-core/src/run/planning.rs:129-156 (planner_brief call, passed to the planner invocation and stored as the brief)",
+      "kind": "code",
+      "test": null,
+      "reason": "The function is called with the same PlannerInputs. Only the returned text grows. No code parses the Report section, and no test outside crates/athena-context reads the planner brief text (grep for brief-planner and planner_brief_text found only planning.rs). Both first-round and revision modes go through the same call."
+    },
+    {
+      "name": "role token budgets",
+      "dependent": "docs/system-facts.md budget lines and the test system_facts_budgets_match_computed (crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The facts file says the brief sits outside the prompt sets and budgets. Only the brief changes; the frame and the contract do not, so planner stays at 1105 of 1200."
+    },
+    {
+      "name": "plan admission rules",
+      "dependent": "crates/athena-core/src/admission.rs open_questions_findings and the plan checks run before the critic",
+      "kind": "rule",
+      "test": null,
+      "reason": "Unchanged. The change adds no refusal rule and no check. The new text only tells the planner what to cite. The refused-reading share is 0%."
+    },
+    {
+      "name": "refusal or matching rule",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No refusal or matching rule is added or changed, so there are no input forms to map to corpus cases."
+    },
+    {
+      "name": "planner timeout and cost caps",
+      "dependent": "crates/athena-core/src/run/planning.rs and the athena.toml planner settings (planner_timeout_s, planner_revision_model and effort)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The brief gains a few hundred bytes of text, which is small beside the existing Report and system facts (222 KB briefs.rs is source and does not enter the brief). The caps are not changed by this plan."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "The new test checks the Report text for each content element. A read of planner.rs shows the const's doc comment names the root cause and the three job ids, and shows the const is appended after FIELD_MEANING_RULE in the Report.",
+      "command": "grep -n \"CODE_CLAIMS_RULE\" crates/athena-context/src/briefs/planner.rs (Grep tool) and cargo test -p athena-context planner_brief",
+      "observes": "The test passes. The Report contains the needles for state consumers, error or state producers with class, accepted input forms, gate-reconciled records, role or config limits, and function plus file:line. The const doc comment names jobs 20261030-013555-f5qm, 20261031-030119-tw3v and 20261103-075205-wbtm.",
+      "fails_without": "Without the const and its use in the format string, the Report lacks the wording and the new test fails on missing needles. The new test's own assertions cover the content: function and file:line, producer sites with their class, and the claim kinds.",
+      "seam": "Production entry point: planner_brief(&PlannerInputs) in crates/athena-context/src/briefs/planner.rs:85. Fixture: planner_inputs(None) in briefs.rs:2747, which exists today. No double; the real function builds the real brief."
+    },
+    {
+      "criterion": 2,
+      "method": "The same new test builds the brief from planner_inputs(Some(PlanRevision{previous: plan(1), findings: vec![finding(Severity::Major, FindingSource::Critic, ..)], resumed_from: None})). It also builds a resumed variant. It asserts that the Report after `## Report` carries the finding-settling wording: settle each finding that names a file and function by reading that code and citing file:line, and list an unlisted adjacent path in dependents.",
+      "command": "cargo test -p athena-context planner_brief",
+      "observes": "The test passes. The revision and resumed briefs both contain the settle-by-reading wording and the adjacent-path-in-dependents wording in the Report section.",
+      "fails_without": "Without the revision sentences in the Report, the revision-input assertions fail on the missing wording.",
+      "seam": "Production entry point: planner_brief with a PlanRevision. Fixtures: plan(round) at briefs.rs:2675, finding(...) at briefs.rs:2737 and planner_inputs(Some(..)) at briefs.rs:2747. These exist today and are used by the revision test near briefs.rs:2824."
+    },
+    {
+      "criterion": 3,
+      "method": "A new test, planner_brief_requires_code_claims_to_cite_the_code_in_both_rounds, in briefs.rs next to briefs.rs:1818. It builds the first-round and revision briefs, takes the text after `## Report`, and asserts the const appears once with each needle in both. It also asserts the const names no job's field, matching the generic style of the field-meaning test at briefs.rs:3998-4006. The size pin test (briefs.rs:3938-3972) is updated so its bound adds the new rule length plus 2 for the paragraph break; it would otherwise fail on the longer Report. The name contains `planner_brief`, so the filter selects it, the existing planner-brief tests and the size pin.",
+      "command": "cargo test -p athena-context planner_brief",
+      "observes": "The command shows the new test and the existing planner_brief tests pass. Run on the base tree with only the test added, the new test fails.",
+      "fails_without": "The new test fails on the old tree because CODE_CLAIMS_RULE is absent. It asserts report.matches(CODE_CLAIMS_RULE).count()==1 for both inputs, plus the literal needles, so it cannot pass on the old tree.",
+      "seam": "Production entry point: planner_brief. Fixtures: planner_inputs and PlanRevision, which exist today. The const is imported via super::planner::CODE_CLAIMS_RULE, so the const is `pub(super)`. The test adds a step; the seam exists."
+    },
+    {
+      "criterion": 4,
+      "method": "Reading shows the diff touches only the Report format string, a new const, a test and the changelog. No change to crates/athena-core/src/admission.rs, to any check_* function, or to prompts/ or crates/athena-context/src/lib.rs frames. The test asserts the PLANNER_FRAME text is unchanged in its existing pinned wording (existing tests at briefs.rs:1774-1779 still pass). cargo test -p athena-context system_facts_budgets_match_computed keeps the planner budget line at 1105 of 1200. The CHANGELOG entry states 0% newly refused.",
+      "command": "cargo test -p athena-context planner_brief",
+      "observes": "The tests pass, the budgets test is unchanged and no file other than the three deliverables is modified.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read CHANGELOG.md under ## [Unreleased] ### Added (line 22), where the new entry is added as the first bullet after the heading, in the style of the entries at lines 29-30. It names the root cause: the planner brief did not tell the planner to cite the code behind claims about existing callers, producers and states. It names the failure class, the three jobs, the const and its test, and says no refusal rule is added (0% refused).",
+      "command": "grep -n \"code\" CHANGELOG.md (Grep tool, first lines of ## [Unreleased]) and read the first lines of the ### Added section",
+      "observes": "The entry is present under Unreleased, names the root cause and the test commands, and states that no refusal rule or prompt change was made.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Athena's recorded checks run on the final tree. The new strings and test use only existing imports. The long `const` string lines follow the style of FIELD_MEANING_RULE, which rustfmt leaves alone.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "c0fe768d7abb16b64ff176403706b6dc67c057c9602b2ed43342bd40293389ed"
+}
