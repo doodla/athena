@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045803-0hj9",
+  "round": 2,
+  "at": "2026-11-15T12:37:31.053804808Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The 'bounded' rule ties Major findings to unmet criteria by count. That miscounts the usual behavior-criterion gap and lets unrelated Athena Majors through, although the record holds the structured data to tell them apart.",
+      "evidence": "verify.rs:586 sets met=false and pushes an Athena Major ('Behavior criterion N is unmet…') for any behavior criterion whose cited commands were not seen running. It does this whatever the verifier's own `met` says. verifier.md:9 tells the verifier to rate an unmet criterion Major as well. A behavior criterion the verifier marks unmet without a command that ran therefore yields two Majors for one gap. `gaps_only` then returns false and the old pause comes back, for the criterion kind most readings in this repository use (this job's own criteria are mostly [behavior]). In the other direction, verify.rs:494 adds an Athena Major for a requirement row marked Covered, which has nothing to do with any criterion. With one unmet content criterion and no verifier Major, the count is 1 ≤ 1, so the attempt reads as bounded although a separate rule rejected it. The plan says findings carry no criterion index and so ties them by count. But `Finding.source` (Athena vs Verifier) and `CriterionResult.commands_verified` are structured fields that separate judge's per-criterion findings from the rest. The plan's 'one major per gap is the normal shape' rests on the drain fixture, which uses content criteria only. Demonstration 2 uses the rig, whose criteria are all content (scope_guard.rs:1274-1277), so neither shape is tested. Fix: Count Majors by source. Verifier-sourced Majors must number no more than the unmet criteria. Athena-sourced Majors must number no more than the criteria with `commands_verified == false`: judge's per-criterion findings (unseen behavior commands, unassessed criteria) are of this kind and repeat a gap already counted as unmet. Treat any other Athena-sourced Major or any Blocker as unbounded. In `attempt_of_records_how_far_a_near_complete_rejection_got`, add two cases: (a) one behavior criterion unmet with `commands_verified=false`, plus a verifier Major and judge's Athena Major, which must stay bounded; (b) all unmet criteria are content with commands verified, plus one Athena-sourced Major, which must be unbounded.",
+      "location": "Plan Decision 1 and step 2 (`gaps_only`: 'Major findings number no more than the unmet criteria'); crates/athena-core/src/verify.rs:586-604, 494-497, 550-554; crates/athena-data/src/records.rs:923-929",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'Once per line' really means 'not two near-complete counted attempts in a row'. A near-complete attempt that stayed under the spend limit uses up the allowance without any downgrade.",
+      "evidence": "`targeted_retry` holds when the last counted attempt is near_complete and the one before it is not. Take the line [8/9 at spend under 1.5× p90, 8/9 that crosses 1.5×]. It pauses at the first moment T3 trips, so the line never got the targeted retry the doc and changelog describe. Conversely, after a manual lift, [near, Failed, near] downgrades again. The behavior may be acceptable, but the docs and changelog describe it differently. Fix: Say the rule exactly in the t3_cost doc and the changelog: no pause is withheld after two near-complete rejections in a row. Alternatively, define the allowance as 'the previous counted attempt did not already have T3 at Pause by spend'. Add an A1 case for the under-limit-then-over-limit sequence that pins whichever choice is made.",
+      "location": "Plan step 2 (`targeted_retry`), Decision 2, Risks bullet 1",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The criterion 6 demonstration says an unused pub item would fail clippy with a dead-code warning. Pub items of a library crate do not raise dead_code.",
+      "evidence": "`near_complete`, `NEAR_COMPLETE_SHARE` and `Progress` are declared `pub` in athena-core, a library crate. rustc's dead_code lint does not fire on reachable pub items. Fix: Drop that sentence, or apply it only to the private helpers (`progress_of`, `gaps_only`, `targeted_retry`, `t3_by_spend`).",
+      "location": "Plan Demonstrations, criterion 6, 'Fails without the behavior'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read scope_guard.rs, verify.rs (judge), records.rs (Verification, Finding), reading/retry.rs, gate_counts.rs and the drain header. The plan matches the request and the accepted reading. It adds the missing fact (how far a rejected attempt got) where an attempt is built (attempt_of), and it adds no refusal rule. It changes only T3, by recompute through line_state, so line_pause, line_flag, the watcher and the drain follow without new logic. The once-per-line limit answers the round-1 runaway concern, and T4 and T5 still pause. The named files, functions, line numbers and test helpers exist: rig, rig_build, mark, pause, flag, att, PRE_EXISTING_NOTE, request_reading_mismatch and agent_verdict. AttemptRecord and t3_cost have no readers outside scope_guard.rs apart from docs/design/scope-guard.md, which the plan names as a follow-up. The tests drive production code through real seams (t3_cost, evaluate_before_attempt, Athena::go → watch_line → line_pause, attempt_of on a real rig verification), and they fail on the base. One soundness problem needs a revision. The rule that decides whether a rejection is \"bounded\" ties Major findings to unmet criteria by count. That tie ignores the structured `source` field and how judge works. Judge always adds an Athena Major for a behavior criterion whose cited commands were not seen running, even when the verifier already marked it unmet and filed its own Major. So the common behavior-criterion gap counts as two Majors for one gap and the rule does not fire. In the other direction, an unrelated Athena Major, such as the requirement-row finding, can pass as a gap. The demonstrations only use content criteria, so neither case is shown. Two smaller points: the \"once per line\" wording is imprecise, and one claim about clippy dead-code is wrong."
+}

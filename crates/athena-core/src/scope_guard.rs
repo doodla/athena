@@ -23,6 +23,12 @@
 //! pause is also not the decision: [`Athena::line_pause`] recomputes the signals from the line's attempts under
 //! the current rule and returns the stored pause only while they still reach a pause.
 //!
+//! How far a rejected attempt got also decides whether its spend pauses the line. The guard used to reduce an
+//! attempt to a verdict, a cost and minutes, so a rejection one named gap short of done looked the same as one
+//! that got nowhere. A rejected [`AttemptRecord`] now carries [`Progress`] (criteria met, criteria in all, and
+//! whether the named gaps are all that rejected it), and [`t3_cost`] flags instead of pausing once for a
+//! near-complete rejection ([`near_complete`]).
+//!
 //! Every threshold is an **estimate, to be tuned** (section 5); the basis for each is in that section's table.
 
 use crate::introspect::normalise;
@@ -33,7 +39,10 @@ use crate::store::{JobRecords, JobState, Records};
 use crate::{Athena, Ui};
 use anyhow::{Context, Result};
 use athena_data::JobId;
-use athena_data::records::{OutcomeState, Role};
+use athena_data::records::{
+    CriterionKind, FindingSource, InvocationOutcome, OutcomeState, PRE_EXISTING_NOTE, Role,
+    Severity, Verification,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -97,7 +106,34 @@ pub enum Verdict {
     Environment,
 }
 
+/// Share of the acceptance criteria that must be met for a rejected attempt to count as near-complete
+/// ([`near_complete`]). Estimate and a judgement call, not measured: it is a share of criteria met, not of
+/// effort, and criteria differ in weight. 8 of 9 and 4 of 5 reach it; 7 of 9 does not.
+pub const NEAR_COMPLETE_SHARE: f64 = 0.8;
+
+/// How far a rejected attempt got, read from its stored verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    /// Acceptance criteria the verification found met.
+    pub met: u32,
+    /// Acceptance criteria the verification judged.
+    pub total: u32,
+    /// True when the unmet criteria are all that rejected the attempt: the verifier finished with a verdict,
+    /// no misread, no Blocker, no finding that is not about a criterion, and no failing check of the
+    /// candidate's own. Read from the record's structured fields, never from reason text.
+    pub bounded: bool,
+}
+
 /// One finished attempt, as the watcher reads it from job records.
+///
+/// Root cause this record fixes: the scope guard treated every attempt's spend as one number and did not record
+/// how far a rejected attempt got, so a rejection one named gap short of done paused a line the same as one that
+/// got nowhere. `progress` is that missing fact. It is set only for a [`Verdict::Rejected`] attempt that has a
+/// verification record; a failed, environment or accepted attempt carries `None`.
+///
+/// Why an attempt stopped is not stored here a second time. An environment stop stays excluded through
+/// [`crate::disk::is_environment_reason`] (called by [`verdict_of`]), the one classifier; there is no second list
+/// of environment reasons on this type or in this module.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttemptRecord {
     /// How the attempt ended.
@@ -116,6 +152,8 @@ pub struct AttemptRecord {
     /// interrupted ([`crate::disk::resumable_stop`]) and this job ran no producer. Planning, build and checks were
     /// then already done, so only the verifier was left to pay for.
     pub resumed: bool,
+    /// How far a rejected attempt got; `None` for any other verdict, and for a rejection with no verification.
+    pub progress: Option<Progress>,
 }
 
 /// One request and its finished attempts.
@@ -243,10 +281,47 @@ fn done(attempts: &[AttemptRecord]) -> bool {
 /// The attempts that count toward the attempt, round and time signals: every attempt except one that ended on
 /// an environment cause. A failed verification (`Rejected`) and a failure of the work (`Failed`) count.
 fn counted(attempts: &[AttemptRecord]) -> Vec<&AttemptRecord> {
+    counted_at(attempts).map(|(_, a)| a).collect()
+}
+
+/// [`counted`] with each attempt's index in `attempts`: the one definition of the environment filter.
+fn counted_at(
+    attempts: &[AttemptRecord],
+) -> impl DoubleEndedIterator<Item = (usize, &AttemptRecord)> {
     attempts
         .iter()
-        .filter(|a| a.verdict != Verdict::Environment)
-        .collect()
+        .enumerate()
+        .filter(|(_, a)| a.verdict != Verdict::Environment)
+}
+
+/// Whether a rejected attempt got most of the way: it is [`Verdict::Rejected`], its [`Progress`] is bounded
+/// (the unmet criteria are all that rejected it), at least one criterion is unmet, and the share of criteria met
+/// is at least [`NEAR_COMPLETE_SHARE`].
+pub fn near_complete(a: &AttemptRecord) -> bool {
+    a.verdict == Verdict::Rejected
+        && a.progress.is_some_and(|p| {
+            p.bounded
+                && p.total > 0
+                && p.met < p.total
+                && f64::from(p.met) / f64::from(p.total) >= NEAR_COMPLETE_SHARE
+        })
+}
+
+/// Whether the line may have a targeted retry instead of a T3 pause: the last counted attempt is near-complete,
+/// and it is not the second near-complete one in a row with the line's spend already at the pause limit at the
+/// earlier one. An earlier near-complete attempt under the limit does not use the allowance, and an environment
+/// stop between two attempts neither resets nor uses it.
+fn targeted_retry(attempts: &[AttemptRecord], forecast_p90_dollars: f64) -> bool {
+    let mut counted = counted_at(attempts).rev();
+    if !counted.next().is_some_and(|(_, last)| near_complete(last)) {
+        return false;
+    }
+    match counted.next() {
+        Some((i, before)) if near_complete(before) => {
+            t3_by_spend(&attempts[..=i], forecast_p90_dollars) != Level::Pause
+        }
+        _ => true,
+    }
 }
 
 /// T1, repeated retries: flag when the next attempt would be the `T1_ATTEMPT`th on the line. An attempt that
@@ -318,7 +393,29 @@ pub fn t3_basis(attempts: &[AttemptRecord], forecast_p90_dollars: f64) -> (f64, 
 /// times it, and flag over `T3_LINE_DOLLARS` regardless of forecast. A forecast of 0 or less is not used.
 /// `forecast_p90_dollars` is the p90 for a whole job; spend and forecast are adjusted by [`t3_basis`] for
 /// environment stops and for a retry that resumed a kept candidate.
+///
+/// Root cause fixed here: the guard treated every attempt's spend as one number and did not record how far a
+/// rejected attempt got ([`AttemptRecord::progress`]). A near-complete last attempt ([`near_complete`]: bounded,
+/// at least [`NEAR_COMPLETE_SHARE`] of criteria met) is therefore flagged, not paused, so one targeted retry is
+/// allowed. The allowance is used once: the second near-complete rejection in a row pauses when the line's spend
+/// was already at the pause limit at the earlier one. An earlier near-complete attempt under the limit does not
+/// use it. A last attempt that is failed, less complete, unbounded or without progress pauses as before.
+///
+/// Environment stops stay excluded only through [`t3_basis`] and [`crate::disk::is_environment_reason`] (by
+/// [`verdict_of`]); there is no second list of environment reasons. A pause stored before this rule on a
+/// near-complete line is no longer returned by [`Athena::line_pause`], so it does not block; the line shows no
+/// flag until its next attempt finishes.
 pub fn t3_cost(attempts: &[AttemptRecord], forecast_p90_dollars: f64) -> Level {
+    let level = t3_by_spend(attempts, forecast_p90_dollars);
+    if level == Level::Pause && targeted_retry(attempts, forecast_p90_dollars) {
+        Level::Flag
+    } else {
+        level
+    }
+}
+
+/// The T3 level from spend alone, before any allowance for a near-complete attempt.
+fn t3_by_spend(attempts: &[AttemptRecord], forecast_p90_dollars: f64) -> Level {
     if done(attempts) {
         return Level::None;
     }
@@ -593,6 +690,11 @@ fn attempt_of(job: &JobRecords, resumed: bool, unlanded: bool) -> Option<Attempt
     } else {
         None
     };
+    let progress = if verdict == Verdict::Rejected {
+        progress_of(job)
+    } else {
+        None
+    };
     let totals = job.outcome.as_ref().and_then(|o| o.totals.as_ref());
     // `cost_execution` is what the reading's `cost_usd` forecast covers (producer and verifier).
     let cost_dollars = totals
@@ -611,7 +713,70 @@ fn attempt_of(job: &JobRecords, resumed: bool, unlanded: bool) -> Option<Attempt
         plan_size: plan.map(|p| (p.files.len() + p.steps.len()) as u32),
         planning_round: plan.map_or(1, |p| p.round),
         resumed,
+        progress,
     })
+}
+
+/// How far a rejected job got, from its stored verification; `None` when it has none or it judged no criterion.
+fn progress_of(job: &JobRecords) -> Option<Progress> {
+    let v = job
+        .verification
+        .as_ref()
+        .filter(|v| !v.criteria.is_empty())?;
+    Some(Progress {
+        met: v.criteria.iter().filter(|c| c.met).count() as u32,
+        total: v.criteria.len() as u32,
+        bounded: gaps_only(job, v),
+    })
+}
+
+/// Whether the unmet criteria are all that rejected the attempt, counting findings by their source:
+/// 1. the verifier gave a verdict and its own invocation finished (a verifier that did not finish still leaves
+///    parsed output in the record);
+/// 2. no misread of the request and no Blocker finding of any source;
+/// 3. verifier Majors number at most the unmet criteria (the verifier rates an unmet criterion Major);
+/// 4. Athena Majors number at most the criteria `judge` marks itself: those with no seen command that are
+///    behavior criteria, or have no command at all (verify.rs, the "not assessed" and "cited command not seen"
+///    findings). Any other Athena Major (a requirement row marked Covered, the replay Blocker) is not about a
+///    criterion;
+/// 5. every failed check is pre-existing or a revert run (the filter of `gate_counts::gates_of`).
+///
+/// Findings carry no criterion index, so verifier Majors are tied to unmet criteria by count only.
+fn gaps_only(job: &JobRecords, v: &Verification) -> bool {
+    let verifier_finished = v.verifier_invocation.is_some_and(|seq| {
+        job.invocations.iter().any(|i| {
+            i.seq == seq && i.role == Role::Verifier && i.outcome == InvocationOutcome::Success
+        })
+    });
+    if v.agent_verdict.is_none() || !verifier_finished || v.request_reading_mismatch.is_some() {
+        return false;
+    }
+    if v.findings.iter().any(|f| f.severity == Severity::Blocker) {
+        return false;
+    }
+    let majors = |source: FindingSource| {
+        v.findings
+            .iter()
+            .filter(|f| f.severity == Severity::Major && f.source == source)
+            .count()
+    };
+    let unmet = v.criteria.iter().filter(|c| !c.met).count();
+    let judged_gaps = v
+        .criteria
+        .iter()
+        .filter(|c| {
+            !c.commands_verified && (c.kind == CriterionKind::Behavior || c.commands.is_empty())
+        })
+        .count();
+    majors(FindingSource::Verifier) <= unmet
+        && majors(FindingSource::Athena) <= judged_gaps
+        && v.checks.iter().all(|c| {
+            c.passed
+                || !c.revert_for.is_empty()
+                || c.note
+                    .as_deref()
+                    .is_some_and(|n| n.starts_with(PRE_EXISTING_NOTE))
+        })
 }
 
 /// Whether `job`, a retry of `target`, resumed the target's kept candidate. Basis: the target stopped in a way
@@ -780,11 +945,23 @@ fn facts(signals: &Signals, attempts: &[AttemptRecord], numbers: &MarkNumbers) -
             attempts.iter().map(|a| a.planning_round).max().unwrap_or(1)
         ),
     );
+    // A T3 flag at or over the pause limit can only come from the allowance for a near-complete rejection
+    // ([`t3_cost`]), since spend alone would have paused.
+    let withheld = signals.t3 == Level::Flag
+        && numbers.forecast_p90_usd > 0.0
+        && numbers.spend_usd >= T3_PAUSE_RATIO * numbers.forecast_p90_usd;
+    let withheld_note = match attempts.last().and_then(|a| a.progress) {
+        Some(p) if withheld => format!(
+            "; the last attempt met {} of {} criteria and nothing else rejected it, so the pause is withheld for one targeted retry",
+            p.met, p.total
+        ),
+        _ => String::new(),
+    };
     add(
         "T3",
         signals.t3,
         format!(
-            "spend ${:.2} against forecast p90 ${:.2} (flag at {T3_FLAG_RATIO} times, pause at {T3_PAUSE_RATIO} times; flag over ${T3_LINE_DOLLARS:.2} whatever the forecast)",
+            "spend ${:.2} against forecast p90 ${:.2} (flag at {T3_FLAG_RATIO} times, pause at {T3_PAUSE_RATIO} times; flag over ${T3_LINE_DOLLARS:.2} whatever the forecast){withheld_note}",
             numbers.spend_usd, numbers.forecast_p90_usd
         ),
     );
@@ -1106,7 +1283,17 @@ mod watcher_tests {
     use std::sync::{Arc, Mutex};
 
     /// The criterion texts the fake reader gives; the verifier fails the one whose index the script names.
-    const CRITERIA: [&str; 2] = ["README.md describes the demo", "the file is plain text"];
+    const CRITERIA: [&str; 9] = [
+        "README.md describes the demo",
+        "the file is plain text",
+        "the README names the demo's title",
+        "the README has no broken links",
+        "the README ends with a newline",
+        "the README keeps its first heading",
+        "the README uses short sentences",
+        "the README has no trailing spaces",
+        "the README stays under fifty lines",
+    ];
 
     /// A capability that edits files and runs no checks.
     struct Docs;
@@ -1183,7 +1370,20 @@ mod watcher_tests {
         verdicts: &[Option<usize>],
         free_space: crate::state::FreeSpace,
     ) -> Rig {
-        rig_build(p90, cost, verdicts, free_space, false)
+        rig_build(p90, cost, verdicts, free_space, false, 2)
+    }
+
+    /// As [`rig`], where the reading, the producer's report and the verifier's verdict all have `criteria`
+    /// acceptance criteria (at most the nine of [`CRITERIA`]).
+    fn rig_with_criteria(p90: f64, cost: f64, verdicts: &[Option<usize>], criteria: usize) -> Rig {
+        rig_build(
+            p90,
+            cost,
+            verdicts,
+            crate::test_support::plenty_of_space,
+            false,
+            criteria,
+        )
     }
 
     /// As [`rig`], but the fake producer writes README text that differs on every call, so every job changes
@@ -1195,6 +1395,7 @@ mod watcher_tests {
             verdicts,
             crate::test_support::plenty_of_space,
             true,
+            2,
         )
     }
 
@@ -1204,6 +1405,7 @@ mod watcher_tests {
         verdicts: &[Option<usize>],
         free_space: crate::state::FreeSpace,
         counting: bool,
+        criteria: usize,
     ) -> Rig {
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let raw = include_str!("../../../athena.toml");
@@ -1271,10 +1473,10 @@ mod watcher_tests {
                     "defaults_applied": [{ "id": "strangers", "how": "plain words" }],
                     "assumptions": [],
                     "question": null,
-                    "acceptance_criteria": [
-                        { "text": CRITERIA[0], "kind": "content" },
-                        { "text": CRITERIA[1], "kind": "content" }
-                    ],
+                    "acceptance_criteria": CRITERIA[..criteria]
+                        .iter()
+                        .map(|text| json!({ "text": text, "kind": "content" }))
+                        .collect::<Vec<_>>(),
                     "deliverables": [{ "path": "README.md", "action": "modify", "p": 0.9 }],
                     "out_of_scope": ["Other files"],
                     "forecast": {
@@ -1291,10 +1493,10 @@ mod watcher_tests {
                         "summary": "Described the demo.",
                         "files": ["README.md"],
                         "checks_run": [],
-                        "criteria_check": [
-                            { "criterion": CRITERIA[0], "status": "met", "evidence": "read it" },
-                            { "criterion": CRITERIA[1], "status": "met", "evidence": "read it" }
-                        ],
+                        "criteria_check": CRITERIA[..criteria]
+                            .iter()
+                            .map(|text| json!({ "criterion": text, "status": "met", "evidence": "read it" }))
+                            .collect::<Vec<_>>(),
                         "open_issues": [], "mistakes": [], "learnings": [], "desires": []
                     }));
                     let text = if counting {
@@ -1310,10 +1512,11 @@ mod watcher_tests {
                     let fail = plan.verdicts.lock().unwrap().pop_front().flatten();
                     FakeTurn::output(json!({
                         "verdict": if fail.is_some() { "fail" } else { "pass" },
-                        "criteria": [
-                            { "criterion": CRITERIA[0], "met": fail != Some(0), "evidence": "checked", "commands": [] },
-                            { "criterion": CRITERIA[1], "met": fail != Some(1), "evidence": "checked", "commands": [] }
-                        ],
+                        "criteria": CRITERIA[..criteria]
+                            .iter()
+                            .enumerate()
+                            .map(|(i, text)| json!({ "criterion": text, "met": fail != Some(i), "evidence": "checked", "commands": [] }))
+                            .collect::<Vec<_>>(),
                         "findings": [],
                         "request_misread": false,
                         "request_misread_reason": null,
@@ -1940,6 +2143,351 @@ mod watcher_tests {
     }
 
     #[test]
+    fn a_near_complete_rejection_is_flagged_and_the_next_attempt_is_dispatched() {
+        // Five criteria, one unmet: 4 of 5. One attempt costs 1.6 against a p90 of 1.0, over the 1.5 limit.
+        let r = rig_with_criteria(1.0, 0.8, &[Some(0), None], 5);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Rejected);
+        assert!(
+            !r.pause(&a).exists(),
+            "a near-complete rejection is not paused"
+        );
+        let flag = read_mark(&r.flag(&a)).expect("it is flagged");
+        assert_eq!(flag.signal_names(), "T3");
+        assert!((flag.numbers.spend_usd - 1.6).abs() < 1e-9, "{flag:?}");
+        assert!(flag.reason.contains("met 4 of 5"), "{}", flag.reason);
+        assert_eq!(r.athena.line_pause(&r.records(), a.as_str()), None);
+        let b = r.ask(&format!("try again on {a}"));
+        assert_eq!(
+            r.go(&b).expect("a flagged line is dispatched"),
+            OutcomeState::Landed
+        );
+    }
+
+    #[test]
+    fn a_second_near_complete_rejection_over_the_spend_limit_pauses() {
+        // Each attempt misses a different criterion, so T4 does not pause; the first trips T3 and is flagged.
+        let r = rig_with_criteria(1.0, 0.8, &[Some(0), Some(1)], 5);
+        let (a, b) = r.two_rejections();
+        let paused = read_mark(&r.pause(&a)).expect("the second one pauses the line");
+        let t3 = paused.signals.iter().find(|s| s.signal == "T3").unwrap();
+        assert_eq!(t3.level, "pause", "{paused:?}");
+        let c = r.ask(&format!("try again on {b}"));
+        let err = r.go(&c).unwrap_err().to_string();
+        assert!(err.contains("T3"), "{err}");
+    }
+
+    #[test]
+    fn a_t3_pause_stored_before_the_change_for_a_near_complete_line_does_not_block() {
+        let r = rig_with_criteria(1.0, 0.8, &[Some(0), None], 5);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Rejected);
+        // The pause the old rule wrote in place of the flag.
+        std::fs::remove_file(r.flag(&a)).unwrap();
+        write_mark(r.pause(&a), &mark("pause", a.as_str(), "T3")).unwrap();
+        let records = r.records();
+        assert_eq!(r.athena.line_pause(&records, a.as_str()), None);
+        // The gap the docs name: no flag shows until the next attempt finishes.
+        assert_eq!(r.athena.line_flag(&records, a.as_str()), None);
+        assert!(r.athena.status().unwrap().lines.is_empty());
+        let b = r.ask(&format!("try again on {a}"));
+        assert_eq!(r.go(&b).unwrap(), OutcomeState::Landed);
+    }
+
+    /// A rejected job from the rig, as stored: one criterion unmet of two, nothing else against it.
+    fn rejected_job() -> JobRecords {
+        let r = rig(10.0, 0.1, &[Some(0)]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Rejected);
+        r.records().jobs.remove(a.as_str()).unwrap()
+    }
+
+    #[test]
+    fn attempt_of_records_how_far_a_near_complete_rejection_got() {
+        let job = rejected_job();
+        let rejected = attempt_of(&job, false, false).unwrap();
+        assert_eq!(rejected.verdict, Verdict::Rejected);
+        assert_eq!(
+            rejected.progress,
+            Some(Progress {
+                met: 1,
+                total: 2,
+                bounded: true
+            })
+        );
+        assert!(!near_complete(&rejected), "1 of 2 is under the share");
+
+        let mut no_verification = job.clone();
+        no_verification.verification = None;
+        assert_eq!(
+            attempt_of(&no_verification, false, false).unwrap().progress,
+            None
+        );
+
+        // A failed attempt carries none, though the verification is still in the records.
+        let mut failed = job.clone();
+        failed.outcome.as_mut().unwrap().state = OutcomeState::Failed;
+        failed.outcome.as_mut().unwrap().reason = "the producer returned no valid report".into();
+        let attempt = attempt_of(&failed, false, false).unwrap();
+        assert_eq!((attempt.verdict, attempt.progress), (Verdict::Failed, None));
+
+        // So does an environment stop, classified by the one classifier.
+        let mut environment = job.clone();
+        environment.outcome.as_mut().unwrap().state = OutcomeState::Failed;
+        environment.outcome.as_mut().unwrap().reason = crate::disk::LowDisk {
+            free: 3_000_000_000,
+            required: 10_000_000_000,
+        }
+        .text();
+        let attempt = attempt_of(&environment, false, false).unwrap();
+        assert_eq!(
+            (attempt.verdict, attempt.progress),
+            (Verdict::Environment, None)
+        );
+
+        let mut landed = job.clone();
+        landed.outcome.as_mut().unwrap().state = OutcomeState::Landed;
+        let attempt = attempt_of(&landed, false, false).unwrap();
+        assert_eq!(
+            (attempt.verdict, attempt.progress),
+            (Verdict::Accepted, None)
+        );
+    }
+
+    /// Nine criteria, the last of them a behavior criterion when `behavior_last` is set; `unmet` indexes those
+    /// the verifier found unmet; the verifier lists only the first `assessed`. The verification fields are made by the real
+    /// `judge`, so a change in what it records for a criterion shows here.
+    struct Gap {
+        behavior_last: bool,
+        unmet: Vec<usize>,
+        assessed: usize,
+        findings: Vec<(athena_context::outputs::SeverityOutput, &'static str)>,
+        misread: bool,
+        maps: Option<(&'static str, &'static str)>,
+    }
+
+    impl Gap {
+        fn eight_of_nine() -> Gap {
+            Gap {
+                behavior_last: false,
+                unmet: vec![8],
+                assessed: 9,
+                findings: Vec::new(),
+                misread: false,
+                maps: None,
+            }
+        }
+
+        /// The job with its verification replaced by the judgment of this case.
+        fn job(&self, base: &JobRecords) -> JobRecords {
+            use athena_context::outputs::{
+                CriterionVerdictOutput, FindingOutput, VerdictOutput, VerdictValue,
+            };
+            use athena_data::records::Criterion;
+            let criteria: Vec<Criterion> = CRITERIA
+                .iter()
+                .enumerate()
+                .map(|(i, text)| Criterion {
+                    text: (*text).to_string(),
+                    kind: if self.behavior_last && i == 8 {
+                        CriterionKind::Behavior
+                    } else {
+                        CriterionKind::Content
+                    },
+                })
+                .collect();
+            let output = VerdictOutput {
+                verdict: if self.unmet.is_empty() {
+                    VerdictValue::Pass
+                } else {
+                    VerdictValue::Fail
+                },
+                criteria: criteria
+                    .iter()
+                    .enumerate()
+                    .take(self.assessed)
+                    .map(|(i, c)| CriterionVerdictOutput {
+                        criterion: c.text.clone(),
+                        met: !self.unmet.contains(&i),
+                        evidence: "checked".into(),
+                        commands: if c.kind == CriterionKind::Behavior {
+                            vec!["cargo test never_ran".into()]
+                        } else {
+                            Vec::new()
+                        },
+                    })
+                    .collect(),
+                findings: self
+                    .findings
+                    .iter()
+                    .map(|(severity, summary)| FindingOutput {
+                        severity: *severity,
+                        summary: (*summary).into(),
+                        evidence: "read it".into(),
+                        location: None,
+                    })
+                    .collect(),
+                request_misread: self.misread,
+                request_misread_reason: self.misread.then(|| "it asked for more".to_string()),
+                summary: "Checked.".into(),
+            };
+            let judged = crate::verify::judge(&crate::verify::VerdictInputs {
+                criteria: &criteria,
+                checks: &[],
+                output: Some(&output),
+                commands_run: &[],
+                changed_paths: &[],
+                candidate_tree: None,
+                checks_tree: None,
+                system_fault: None,
+                verifier_failure: None,
+                map_base: self.maps.map(|m| m.0),
+                map_candidate: self.maps.map(|m| m.1),
+                baseline: None,
+                replay: None,
+            });
+            let mut job = base.clone();
+            let v = job.verification.as_mut().unwrap();
+            v.criteria = judged.criteria;
+            v.findings = judged.findings;
+            v.agent_verdict = judged.agent_verdict;
+            v.request_reading_mismatch = self.misread.then(|| "it asked for more".to_string());
+            job
+        }
+
+        fn progress(&self, base: &JobRecords) -> Option<Progress> {
+            attempt_of(&self.job(base), false, false).unwrap().progress
+        }
+    }
+
+    #[test]
+    fn near_complete_gap_is_bounded_only_by_findings_of_the_gap() {
+        use athena_context::outputs::SeverityOutput::{Blocker, Major};
+        let base = rejected_job();
+        let v = base.verification.as_ref().unwrap();
+        let seq = v.verifier_invocation.expect("the verifier ran");
+        assert!(
+            base.invocations
+                .iter()
+                .any(|i| i.seq == seq && i.role == Role::Verifier)
+        );
+        let eight = Progress {
+            met: 8,
+            total: 9,
+            bounded: true,
+        };
+        let unbounded = Progress {
+            bounded: false,
+            ..eight
+        };
+        let near = |job: &JobRecords| near_complete(&attempt_of(job, false, false).unwrap());
+
+        // One gap, no findings: bounded and near-complete.
+        let gap = Gap::eight_of_nine();
+        assert_eq!(gap.progress(&base), Some(eight));
+        assert!(near(&gap.job(&base)));
+        // The verifier's Major on the gap: still bounded. A second Major is about something else.
+        let mut one = Gap::eight_of_nine();
+        one.findings = vec![(Major, "the criterion is not met")];
+        assert_eq!(one.progress(&base), Some(eight));
+        let mut two = Gap::eight_of_nine();
+        two.findings = vec![(Major, "one"), (Major, "two")];
+        assert_eq!(two.progress(&base), Some(unbounded));
+        assert!(!near(&two.job(&base)));
+        // (a) A behavior criterion whose cited command was not seen: the verifier's Major and the one `judge`
+        // adds are two Majors for one gap, and the attempt is bounded.
+        let mut behavior = Gap::eight_of_nine();
+        behavior.behavior_last = true;
+        behavior.findings = vec![(Major, "the test was not run")];
+        let job = behavior.job(&base);
+        let majors = |source| {
+            job.verification
+                .as_ref()
+                .unwrap()
+                .findings
+                .iter()
+                .filter(|f| f.severity == Severity::Major && f.source == source)
+                .count()
+        };
+        assert_eq!(
+            (
+                majors(FindingSource::Verifier),
+                majors(FindingSource::Athena)
+            ),
+            (1, 1)
+        );
+        assert_eq!(behavior.progress(&base), Some(eight));
+        // (b) The change marking its own requirement row Covered is an Athena Major that is not about a gap.
+        let mut covered = Gap::eight_of_nine();
+        covered.maps = Some(("| A1-1 | x | Open |", "| A1-1 | x | Covered |"));
+        assert_eq!(covered.progress(&base), Some(unbounded));
+        // A criterion the verifier did not assess is a gap `judge` marks itself.
+        let mut unassessed = Gap::eight_of_nine();
+        unassessed.unmet = Vec::new();
+        unassessed.assessed = 8;
+        assert_eq!(unassessed.progress(&base), Some(eight));
+        // A Blocker, a misread and a missing verdict each make it unbounded.
+        let mut blocker = Gap::eight_of_nine();
+        blocker.findings = vec![(Blocker, "it breaks the build")];
+        assert_eq!(blocker.progress(&base), Some(unbounded));
+        let mut misread = Gap::eight_of_nine();
+        misread.misread = true;
+        assert_eq!(misread.progress(&base), Some(unbounded));
+        let mut no_verdict = gap.job(&base);
+        no_verdict.verification.as_mut().unwrap().agent_verdict = None;
+        assert_eq!(
+            attempt_of(&no_verdict, false, false).unwrap().progress,
+            Some(unbounded)
+        );
+        // A verifier that did not finish still leaves parsed output; its invocation says so.
+        let mut killed = gap.job(&base);
+        for i in killed.invocations.iter_mut().filter(|i| i.seq == seq) {
+            i.outcome = InvocationOutcome::Killed;
+        }
+        assert_eq!(
+            attempt_of(&killed, false, false).unwrap().progress,
+            Some(unbounded)
+        );
+        let mut missing = gap.job(&base);
+        missing.invocations.retain(|i| i.seq != seq);
+        assert_eq!(
+            attempt_of(&missing, false, false).unwrap().progress,
+            Some(unbounded)
+        );
+        // A failing check of the candidate's own, unless it is pre-existing or a revert run.
+        let check = |note: Option<&str>, revert_for: Vec<u32>| athena_data::records::CheckRun {
+            name: "test".into(),
+            command: vec!["cargo".into(), "test".into()],
+            exit_code: Some(1),
+            passed: false,
+            tests_ran: None,
+            duration: athena_data::Quantity::measured(1.0, athena_data::Unit::Seconds, "test"),
+            output_tail: String::new(),
+            note: note.map(String::from),
+            failed_tests: Vec::new(),
+            reused: false,
+            revert_for,
+            queued_s: None,
+        };
+        let with_check = |c: athena_data::records::CheckRun| {
+            let mut job = gap.job(&base);
+            job.verification.as_mut().unwrap().checks = vec![c];
+            attempt_of(&job, false, false).unwrap().progress
+        };
+        assert_eq!(with_check(check(None, Vec::new())), Some(unbounded));
+        assert_eq!(
+            with_check(check(Some("flaky"), Vec::new())),
+            Some(unbounded)
+        );
+        let pre_existing = format!("{PRE_EXISTING_NOTE}; red on the base");
+        assert_eq!(
+            with_check(check(Some(&pre_existing), Vec::new())),
+            Some(eight)
+        );
+        assert_eq!(with_check(check(None, vec![1])), Some(eight));
+    }
+
+    #[test]
     fn a_low_disk_job_is_read_as_an_environment_attempt() {
         let r = rig_with_space(0.8, 0.01, &[None], crate::test_support::low_once_verifying);
         let a = r.ask("describe the demo in the readme");
@@ -2097,7 +2645,23 @@ mod tests {
             plan_size: None,
             planning_round: 1,
             resumed: false,
+            progress: None,
         }
+    }
+
+    /// A rejected attempt that met `met` of `total` criteria with nothing else against it, named `criterion`.
+    fn near_on(criterion: &str, met: u32, total: u32, cost: f64) -> AttemptRecord {
+        let mut a = att(Verdict::Rejected, Some(criterion), cost, 5);
+        a.progress = Some(Progress {
+            met,
+            total,
+            bounded: true,
+        });
+        a
+    }
+
+    fn near(met: u32, total: u32, cost: f64) -> AttemptRecord {
+        near_on("the file is plain text", met, total, cost)
     }
 
     fn rej(criterion: &str, cost: f64, minutes: u32) -> AttemptRecord {
@@ -2257,6 +2821,99 @@ mod tests {
         let mut rounds = vec![rej("a", 1.0, 5)];
         rounds[0].planning_round = 3;
         assert_eq!(t2_plan_growth(&rounds), Level::Flag);
+    }
+
+    #[test]
+    fn a_near_complete_rejection_does_not_pause_t3() {
+        // A forecast p90 of 2.0 throughout: 3.0 is 1.5 times it, the pause limit.
+        let t3 = |a: &[AttemptRecord]| t3_cost(a, 2.0);
+        assert_eq!(t3(&[near(8, 9, 3.0)]), Level::Flag);
+        assert_eq!(t3(&[near(3, 9, 3.0)]), Level::Pause);
+        assert_eq!(t3(&[near(7, 9, 3.0)]), Level::Pause);
+        assert_eq!(t3(&[near(4, 5, 3.0)]), Level::Flag, "0.8 is the boundary");
+        assert_eq!(t3(&[near(9, 9, 3.0)]), Level::Pause, "nothing unmet");
+        let mut unbounded = near(8, 9, 3.0);
+        unbounded.progress.as_mut().unwrap().bounded = false;
+        assert_eq!(t3(&[unbounded]), Level::Pause);
+        let mut no_progress = near(8, 9, 3.0);
+        no_progress.progress = None;
+        assert_eq!(t3(&[no_progress]), Level::Pause);
+        let mut failed = near(8, 9, 3.0);
+        failed.verdict = Verdict::Failed;
+        assert!(!near_complete(&failed));
+        assert_eq!(t3(&[failed]), Level::Pause);
+        // The last attempt decides.
+        assert_eq!(t3(&[near(8, 9, 1.5), near(3, 9, 1.5)]), Level::Pause);
+        assert_eq!(t3(&[near(3, 9, 1.5), near(8, 9, 1.5)]), Level::Flag);
+        // An environment stop after it is skipped.
+        let env = att(Verdict::Environment, None, 0.0, 5);
+        assert_eq!(t3(&[near(8, 9, 3.0), env]), Level::Flag);
+        // Under the pause limit nothing changes.
+        assert_eq!(t3(&[near(8, 9, 2.0)]), Level::Flag);
+        assert_eq!(t3(&[near(8, 9, 0.5)]), Level::None);
+        let signals = evaluate_before_attempt(&[near(8, 9, 3.0)], 2.0);
+        assert_eq!(signals.t3, Level::Flag);
+        assert_eq!(signals.overall(), Level::Flag);
+    }
+
+    #[test]
+    fn near_complete_targeted_retry_is_used_once_when_over_the_limit() {
+        let t3 = |a: &[AttemptRecord]| t3_cost(a, 2.0);
+        let env = || att(Verdict::Environment, None, 0.0, 5);
+        // Under the limit at the earlier attempt: the allowance is unused.
+        assert_eq!(t3(&[near(8, 9, 0.5), near(8, 9, 3.0)]), Level::Flag);
+        // Over the limit at the earlier attempt: the second near-complete rejection pauses.
+        assert_eq!(t3(&[near(8, 9, 3.0), near(8, 9, 0.1)]), Level::Pause);
+        assert_eq!(
+            t3(&[near(8, 9, 3.0), near(8, 9, 3.0), near(8, 9, 0.1)]),
+            Level::Pause
+        );
+        // A failed attempt between them is a counted attempt that is not near-complete.
+        let failed = att(Verdict::Failed, None, 0.0, 5);
+        assert_eq!(t3(&[near(8, 9, 3.0), failed, near(8, 9, 0.1)]), Level::Flag);
+        // An environment stop between them is skipped, so it neither resets nor uses the allowance.
+        assert_eq!(t3(&[near(8, 9, 3.0), env(), near(8, 9, 0.1)]), Level::Pause);
+    }
+
+    #[test]
+    fn near_complete_rejections_still_pause_through_t4_and_t5() {
+        // T4: the same criterion rejected twice pauses, with a forecast too large for T3.
+        let a = [near(8, 9, 0.1), near(8, 9, 0.1)];
+        let signals = evaluate_before_attempt(&a, 100.0);
+        assert_eq!(signals.t3, Level::None);
+        assert_eq!(signals.t4, Level::Pause);
+        assert_eq!(signals.overall(), Level::Pause);
+        // T5: a near-complete attempt of 130 agent minutes pauses.
+        let mut long = near(8, 9, 0.1);
+        long.agent_minutes = 130;
+        let signals = evaluate_before_attempt(&[long], 100.0);
+        assert_eq!(signals.t5, Level::Pause);
+        assert_eq!(signals.overall(), Level::Pause);
+    }
+
+    #[test]
+    fn near_complete_t3_detail_says_why_no_pause() {
+        let attempts = [near(8, 9, 3.0)];
+        let signals = evaluate_before_attempt(&attempts, 2.0);
+        let numbers = |spend: f64| MarkNumbers {
+            attempts: 1,
+            rejections: 1,
+            spend_usd: spend,
+            forecast_p90_usd: 2.0,
+            agent_minutes: 5,
+            matched_criterion: None,
+        };
+        let withheld = facts(&signals, &attempts, &numbers(3.0));
+        let t3 = withheld.iter().find(|f| f.signal == "T3").unwrap();
+        assert_eq!(t3.level, "flag");
+        assert!(t3.detail.contains("met 8 of 9"), "{}", t3.detail);
+        assert!(t3.detail.contains("withheld"), "{}", t3.detail);
+        // A flag at 1.0 times the forecast has no such clause.
+        let attempts = [near(8, 9, 2.0)];
+        let signals = evaluate_before_attempt(&attempts, 2.0);
+        let plain = facts(&signals, &attempts, &numbers(2.0));
+        let t3 = plain.iter().find(|f| f.signal == "T3").unwrap();
+        assert!(!t3.detail.contains("withheld"), "{}", t3.detail);
     }
 
     #[test]

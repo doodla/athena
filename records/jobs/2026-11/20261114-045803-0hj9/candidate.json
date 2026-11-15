@@ -1,0 +1,132 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261114-045803-0hj9",
+  "base_commit": "fa5bd1dfbe938b709e0add0defe4d542611d3efb",
+  "base_fingerprint": "sha256:e0aec34b4c0a49b63b754a81ecfbf923bec918c69dbfef83f0c3a451a0aecd83",
+  "previous_job": "20261114-045749-qcg2",
+  "candidate_commit": "6a6e9c8a4bade88482fea99295c6a1112ddee701",
+  "candidate_tree": "c97d956da2e5c0367cb69fe8a8cc1620d16f7255",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 490547
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 325408
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 91351
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 133892
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 176324
+    }
+  ],
+  "fingerprint": "sha256:78678e65485df16d8be06e01ee70d465ca9d521f08d1f67bf9e55b42778e0c47",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: the scope guard reduced each finished attempt to a verdict, a cost and minutes, so it never recorded how far a rejected attempt got. A rejection one named gap short of done paused a line on spend exactly as one that got nowhere. Environment stops were already excluded through crate::disk::is_environment_reason (called by verdict_of); I left that alone and added no second list.\n\nFix, at the attempt record in crates/athena-core/src/scope_guard.rs:\n- AttemptRecord gains `progress: Option<Progress>` (met, total, bounded). `attempt_of` sets it only for a Rejected attempt that has a verification. Failed, Environment and Accepted attempts carry None.\n- `bounded` is read from structured fields only, never reason text, in `gaps_only`. It holds when:\n  - the verifier gave a verdict and its own invocation finished with outcome Success;\n  - no misread and no Blocker is recorded;\n  - verifier Majors number at most the unmet criteria;\n  - Athena Majors number at most the criteria `judge` marks itself (no seen command and Behavior kind, or no command at all);\n  - every failed check is pre-existing or a revert run.\n- `near_complete` is true for a bounded rejection with met/total at least NEAR_COMPLETE_SHARE (0.8, labelled an estimate and a judgement call) and at least one criterion unmet.\n- `t3_cost` now wraps the old arithmetic (`t3_by_spend`). It returns Flag instead of Pause when `targeted_retry` holds: the last counted attempt is near-complete, and it is not the second near-complete one in a row with spend already at the pause limit at the earlier one. So the first trip gets one targeted retry, and the second pauses through T3. An environment stop in between neither resets nor uses the allowance.\n- `facts` adds a clause to a withheld T3 flag (\"met M of N … pause is withheld for one targeted retry\").\n- T1, T2, T4 and T5 are unchanged. No stored shape changed. A T3 pause stored before the change on a near-complete line no longer blocks, because `line_pause` recomputes. The line shows no flag until its next attempt finishes; this is documented and pinned by a test.\n- The doc edits in status.rs, drain.rs and disk.rs only explain the new meaning of a T3 flag and where near-completeness is read.\n- CHANGELOG.md has the new entry. reading.rs is untouched, so no refusal rule is added (0% of readings refused).\n\nNot measured: the effect of the 0.8 share on past lines, because records/ is absent from the working copy. docs/design/scope-guard.md section 5 is not updated here and the changelog names it as a follow-up.",
+    "files": [
+      "crates/athena-core/src/scope_guard.rs",
+      "CHANGELOG.md",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-core/src/disk.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --lib scope_guard::",
+        "result": "pass",
+        "note": "48 passed, 0 failed, including the new near_complete, attempt_of and gap tests and the unchanged environment-stop tests"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after `cargo fmt --all`"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "no warnings"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "22 passed; the boundary-word scan is clean"
+      },
+      {
+        "command": "cargo test -p athena-cli --test mirrors",
+        "result": "pass",
+        "note": "4 passed"
+      },
+      {
+        "command": "cargo test --locked --quiet",
+        "result": "pass",
+        "note": "full workspace suite, run once; exit code 0 (it finished in the background and I did not read its output)"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new unit test in crates/athena-core/src/scope_guard.rs builds a line whose last attempt is Rejected with 8 of 9 criteria met and spend over T3_PAUSE_RATIO times the forecast, and asserts t3_cost returns a level below Pause (checked by running cargo test); the same test with 3 of 9 met asserts Pause, so it fails without the change.",
+        "status": "met",
+        "evidence": "`a_near_complete_rejection_does_not_pause_t3` in scope_guard::tests asserts t3_cost(&[near(8,9,3.0)], 2.0) == Flag and the same with near(3,9,3.0) == Pause, with 3.0 equal to T3_PAUSE_RATIO times the forecast 2.0. It also covers the 7 of 9, 4 of 5, 9 of 9, unbounded, no-progress and Failed cases, and the last attempt deciding. Run: `cargo test -p athena-core --lib scope_guard::` gave 48 passed, 0 failed. Without the change the `progress` field and `near_complete` do not exist, so the test does not compile; with the field added but t3_cost unchanged, the 8-of-9 line returns Pause and the assertion fails."
+      },
+      {
+        "criterion": "A unit test shows an attempt record built by attempt_of from a rejected job's verification carries the met and total criterion counts (checked by running cargo test), and a Failed or Environment attempt carries none.",
+        "status": "met",
+        "evidence": "`attempt_of_records_how_far_a_near_complete_rejection_got` in scope_guard::watcher_tests runs a real rejected job through the Rig. It asserts attempt_of gives Rejected with progress Some(Progress{met:1,total:2,bounded:true}). It asserts None for: no verification, a job closed failed (\"the producer returned no valid report\"), a job closed failed with the real crate::disk::LowDisk text (verdict Environment), and a landed job. `near_complete_gap_is_bounded_only_by_findings_of_the_gap` builds 8-of-9 records with the real verify::judge. Both passed in `cargo test -p athena-core --lib scope_guard::`."
+      },
+      {
+        "criterion": "The doc comments of AttemptRecord and t3_cost in crates/athena-core/src/scope_guard.rs name the root cause (the guard treated every attempt's spend as one number and did not record how far a rejected attempt got), and say that environment stops stay excluded through crate::disk::is_environment_reason, with no second list of environment reasons.",
+        "status": "met",
+        "evidence": "Read in scope_guard.rs: the AttemptRecord doc and the t3_cost doc each contain \"the guard treated every attempt's spend as one number and did not record how far a rejected attempt got\" and name `crate::disk::is_environment_reason` with \"no second list of environment reasons\". The module header has a matching paragraph. verdict_of and disk.rs logic are not edited and no list of reason strings is added."
+      },
+      {
+        "criterion": "Existing scope_guard tests for environment stops (environment_stop_is_not_counted_but_a_rejection_is, every_kind_of_environment_stop_is_an_environment_attempt) still pass under cargo test.",
+        "status": "met",
+        "evidence": "Both bodies are unchanged; only the `att` helper gained `progress: None`. `cargo test -p athena-core --lib scope_guard::` lists both as ok. `only_a_job_closed_failed_is_an_environment_attempt`, `a_line_of_expired_login_stops_raises_no_signal` and `a_low_disk_job_is_read_as_an_environment_attempt` also pass."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry for this change, and no refusal rule is added to crates/athena-core/src/reading.rs.",
+        "status": "met",
+        "evidence": "CHANGELOG.md has a new first bullet under `## [Unreleased]` / `### Changed`. It names the root cause, the fix, the 0.8 estimate, the one-time allowance, the stored-pause gap, the limits and the test commands. crates/athena-core/src/reading.rs is not among the changed files. `cargo test -p xtask --test policy` passed (22 tests), so no banned word is in the changelog or code."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy and cargo test pass on the candidate tree.",
+        "status": "met",
+        "evidence": "I ran all three myself on the final tree: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked --quiet`. All exited 0. Athena runs them again on the result."
+      }
+    ],
+    "open_issues": [
+      "docs/design/scope-guard.md section 5 (the T3 rule) is not updated, because it is outside this request's files; the changelog names it as a follow-up.",
+      "The effect of the 0.8 share on past lines was not measured because records/ is absent from the working copy.",
+      "Findings carry no criterion index, so verifier Majors are tied to unmet criteria by count only. This is stated in the code docs and the changelog."
+    ],
+    "mistakes": [],
+    "learnings": [
+      "Verification keeps `agent_verdict`/`verdict_output` even when the verifier did not finish, so a finished-verifier check must read the invocation's `outcome` (InvocationOutcome::Success) as well.",
+      "`judge` pushes exactly one Athena Major per unassessed criterion and one per Behavior criterion whose cited commands were not seen. A verifier Major on the same gap makes two Majors for one gap, so Majors must be counted by source.",
+      "`line_flag` reads only the flag file, and the existing test pins that a pause mark is not a flag, so a stale pause that recomputes to a flag shows nothing until the next attempt writes one.",
+      "The producer's Bash is limited to cargo/git/ls/mv/rm/chmod: no grep, tail, python3, or `$?` substitution, and background-task output files under /tmp cannot be read."
+    ],
+    "desires": [
+      "A way to read a background command's output file from inside the working directory, so a long full-suite run can be inspected."
+    ]
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045803-0hj9",
+  "round": 1,
+  "at": "2026-11-15T12:27:41.345162857Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "near_complete counts only the criteria met. It ignores blocker or major findings, a request misread, blocking check failures and verifier failure, and each of these can reject an attempt on its own.",
+      "evidence": "crates/athena-core/src/verify.rs:620-664 rejects for agent verdict fail, unmet criteria, any Blocker or Major finding (`serious > 0`), blocking checks and verifier_failure. A request misread is pushed as a Severity::Major finding (verify.rs:630-633). Verification (records.rs:934-950) holds findings, request_reading_mismatch and checks next to criteria. The introspection 20261103-101210-m2aa that the plan addresses asked that 'every gap is a named, bounded finding'. Under the plan, an attempt with 8 of 9 met plus a request misread or a blocker finding counts as near_complete, and its T3 pause becomes a flag. Fix: Have attempt_of set the tally, or a separate `bounded` bool, only when the rejection's only blocking cause is the unmet criteria: request_reading_mismatch is None, there is no Blocker finding, and there is no Major finding other than ones tied to the unmet criteria (or simply none). Optionally also require no blocking failed check. Add demonstration cases where 8 of 9 met plus request_reading_mismatch, and 8 of 9 met plus a blocker finding, both still Pause, and an attempt_of case that sets no tally for them.",
+      "location": "Plan Decision 1 and Step 2 (near_complete); Step 3 (attempt_of)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A line that already has a stored T3 pause gets no flag after the change. The plan says the drain will treat it as flagged, which is wrong for these lines.",
+      "evidence": "try_watch_line removes the flag file when it writes a pause (scope_guard.rs:1074-1076). line_flag returns a mark only from flag_path (scope_guard.rs:842). live_marks drops the stale pause and has no flag to show. So for a line paused before this change, line_pause returns None and line_flag also returns None: the line is dispatched with no flag, and status shows no spend mark until the next attempt's watcher writes a flag. That defeats the plan's reason that 'the flag keeps the spend visible'. Fix: Correct the dependents claim. Either accept that such a line is unmarked until its next attempt and say so in the changelog, or make line_flag and live_marks also accept a stored pause mark whose recomputed level is Flag, with a test.",
+      "location": "Plan Dependents, entry 'line_pause and line_flag results'; Decision 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No demonstration shows the full path: go or retry no longer refusing a near-complete line.",
+      "evidence": "Demonstration 1 calls t3_cost on hand-built AttemptRecords. Demonstration 2 checks only attempt_of's tally. Nothing runs records → request_records → line_state → line_pause → Athena::go, the path the user sees. The existing test t3_pause_from_reading_forecast (scope_guard.rs:1912) shows the harness can do this. Fix: Add a watcher test like t3_pause_from_reading_forecast where the rejection meets at least 80% of its criteria (for example, the rig's verifier judges 5 criteria and fails one) with spend 1.6 against p90 1.0. Assert that no pause file is written, a flag is, and `go` on the retry is not refused.",
+      "location": "Demonstrations for criteria 1 and 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A line of near-complete rejections that each miss a different criterion never hits a spend pause. Only T5 (120 minutes) stops it.",
+      "evidence": "T4 pauses only when the same criterion is rejected twice (t4_match, scope_guard.rs:338-360). T1 only flags (scope_guard.rs:43). With different missed criteria each time, T3 stays at Flag however high the spend goes. Only T5 at 120 counted minutes pauses, and the drain's hold applies only in the drain. Fix: Limit the downgrade. For example, apply it only while spend stays under a second ceiling (such as 2 × T3_PAUSE_RATIO × forecast), or only once per line (the previous counted attempt was not near-complete). Or state in the changelog and the t3_cost doc that T5 is the only stop for this case.",
+      "location": "Plan Risks 1; Decision 2 (rejected alternative about regression)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the accepted reading. It puts the fix where the fault starts: an attempt is reduced to verdict, cost and minutes in AttemptRecord and attempt_of, and t3_cost reads only that. The plan adds a met/total tally there and turns a T3 spend pause into a flag when the last attempt nearly finished. Environment stops stay with the one existing classifier (verdict_of calls disk::is_environment_reason). Everything the plan names exists. AttemptRecord is built only in scope_guard.rs. The readers of the guard's result (go and retry through line_pause; the drain through line_pause and line_flag; status through live_marks) all recompute through line_state. The drain and watcher tests make pauses through T4, or with a verifier that meets 1 of 2 criteria, so the new rule does not change them. The demonstrations would fail without the change and call real code (t3_cost, evaluate_before_attempt, attempt_of through the Rig). The major problem is soundness. near_complete looks only at the share of criteria met. In verify.rs (lines 620-664), a rejection can also come from a blocker or major finding, a request misread (recorded as a Major finding), a blocking check failure or a verifier failure. So an attempt that misread the request, which is runaway work, would count as nearly done whenever 8 of 9 criteria were met. The introspection being addressed asked for every gap to be a named, bounded finding, and that data is already in the Verification record. Smaller issues: a line that already has a stored T3 pause gets no flag after the change, so the plan's claim about the drain is wrong for those lines; no test shows go or retry no longer refusing a near-complete line; and a line of near-complete rejections that each miss a different criterion is stopped only by T5."
+}

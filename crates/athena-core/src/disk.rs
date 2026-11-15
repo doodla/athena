@@ -425,6 +425,9 @@ const PRODUCER_STOPPED: &str = "the producer did not complete: ";
 /// login was closed as `the producer did not complete: ...`, which matched neither. It counted as a failure of
 /// the work, raised the retry, cost and time signals and paused the line, and the pause was never checked
 /// again. A new kind of environment stop is now added here once.
+///
+/// A rejection that got most of the way is not a stop cause: the job closed `rejected`, and how far it got is
+/// read from its verification by `scope_guard::near_complete`. Environment stops are classified here only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopCause {
     /// Free disk space was below the minimum, or the workspace could not be written ([`LOW_DISK`]).
