@@ -1832,6 +1832,35 @@ mod tests {
     }
 
     #[test]
+    fn planner_brief_requires_code_claims_to_cite_the_code_in_both_rounds() {
+        use super::planner::CODE_CLAIMS_RULE;
+        assert!(!CODE_CLAIMS_RULE.contains('\n'));
+        assert!(!CODE_CLAIMS_RULE.contains("## Report"));
+        let revision = PlanRevision {
+            previous: plan(1),
+            findings: vec![finding(Severity::Major, FindingSource::Critic, "F")],
+            resumed_from: None,
+        };
+        for inputs in [planner_inputs(None), planner_inputs(Some(revision))] {
+            let brief = planner_brief(&inputs);
+            let report = brief.split("## Report").nth(1).expect("report section");
+            assert_eq!(report.matches(CODE_CLAIMS_RULE).count(), 1, "{report}");
+            for needle in [
+                "function and file:line",
+                "every producer",
+                "class",
+                "input forms an existing rule accepts",
+                "reconcile",
+                "settle each finding",
+                "dependents",
+                "max_concurrency",
+            ] {
+                assert!(report.contains(needle), "missing wording: {needle}");
+            }
+        }
+    }
+
+    #[test]
     fn planner_briefs_have_no_criteria_check_section() {
         // Only the producer reports criteria_check.
         let accepted = AcceptedReading::new(&reading(), &defaults(), |_| false);
@@ -3962,12 +3991,15 @@ mod tests {
                     + REAL_RECORDS_RULE.len()
                     + 4
                     + super::planner::FIELD_MEANING_RULE.len()
+                    + 2
+                    + super::planner::CODE_CLAIMS_RULE.len()
                     + 2,
-            "{} > {} + {} + 4 + {} + 2",
+            "{} > {} + {} + 4 + {} + 2 + {} + 2",
             report.len(),
             PLANNER_REPORT_BASE_BYTES,
             REAL_RECORDS_RULE.len(),
-            super::planner::FIELD_MEANING_RULE.len()
+            super::planner::FIELD_MEANING_RULE.len(),
+            super::planner::CODE_CLAIMS_RULE.len()
         );
     }
 
