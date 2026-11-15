@@ -4143,9 +4143,12 @@ fn a_blocked_job_keeps_its_directory_until_it_is_closed_and_closing_reports_the_
     let (job, f, ui) = go_with_cache(&fx, blocking_scenario(fx.root().to_path_buf()));
     assert_eq!(f.state, OutcomeState::Blocked, "{}", f.reason);
     let dir = job_dir_of(&fx, &job);
+    assert!(dir.exists(), "a blocked job keeps its directory");
+    // The build folder goes when the run ends, with the build-folder slot (only one job at a time holds a
+    // build folder, and a blocked job does not keep one while it waits to be closed).
     assert!(
-        dir.join("target/debug/big").exists(),
-        "a blocked job keeps its build cache"
+        !dir.join("target").exists(),
+        "a blocked job's build folder is freed with its slot"
     );
     assert!(
         !said(&ui).iter().any(|l| l.contains("reclaimed")),
@@ -4153,7 +4156,9 @@ fn a_blocked_job_keeps_its_directory_until_it_is_closed_and_closing_reports_the_
         said(&ui)
     );
 
-    // Closing it abandons it and deletes the directory; the figure is what the directory occupied.
+    // Closing it abandons it and deletes the directory; the figure is what the directory occupied. A build
+    // cache is planted again, as a later command on the job would leave.
+    plant_cache(&dir);
     let athena = fx.athena(Scenario::default().script());
     let expected = occupied(&dir);
     assert!(expected >= PLANTED as u64);

@@ -57,7 +57,8 @@ use athena_git::index::{IndexEdit, TempIndex};
 use athena_git::snapshot::{Snapshot, SnapshotRepo};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 mod candidate;
 mod checks;
@@ -1085,7 +1086,9 @@ impl Athena {
         // Free disk space, before anything is committed or any agent runs. When it stays low after the idle
         // build directories are removed, the job is held: it stays queued, not rejected, and a later drain
         // picks up the same job. A hold is an error from `go`; no state changed.
-        if let Some(low) = self.disk_gate(jc.config.min_free_gb(), &id, ui) {
+        // A shortfall that the folder of the job holding the build-folder slot explains is no hold: this job
+        // reads and plans, then waits for the slot (`take_build_folder_or_hold`).
+        if let Some(low) = self.dispatch_disk_gate(jc.config.min_free_gb(), &id, ui) {
             crate::disk::write_hold(&self.state, &id, &low);
             ui.line(&format!("held       {}", low.text()));
             return Err(low.into());
@@ -1243,7 +1246,7 @@ impl Athena {
             Some(&evidence_stored),
         );
         let dispatched_at = crate::now();
-        let clock = Instant::now();
+        let clock = RunClock::start();
         let budget = &jc.config.budget;
         let job_record = Job {
             id: id.clone(),
@@ -1350,8 +1353,12 @@ impl Athena {
         // seeds the closing with its invocations, plan and critique, so the producer's invocation is
         // numbered after them and the budget check below counts what planning cost (review F1).
         if let Some(seed) = resume_from {
-            let run = self.resume_candidate(&ctx, &accepted, seed, Closing::new());
-            return self.finish_dispatched(&ctx, run);
+            // The resumed job's checks and verifier build in its folder, so it holds the slot too.
+            let (folder, closing) = self.take_build_folder_or_hold(&ctx, Closing::new())?;
+            let run = self.resume_candidate(&ctx, &accepted, seed, closing);
+            let result = self.finish_dispatched(&ctx, run);
+            drop(folder);
+            return result;
         }
         let mut closing = Closing::new();
         // What the producer is sent is the stored brief with the placeholder replaced by the real path.
@@ -1384,8 +1391,39 @@ impl Athena {
                 &planned_paths(closing.plans.last(), &accepted),
             ),
         );
+        // Only one job at a time builds in a job folder (the disk fits one). The job has read and planned; it
+        // waits here, with no hold, no attempt used and no discard, until the folder is free.
+        let (folder, closing) = self.take_build_folder_or_hold(&ctx, closing)?;
         let run = self.produce_and_verify(&ctx, &producer_prompt, &accepted, closing);
-        self.finish_dispatched(&ctx, run)
+        let result = self.finish_dispatched(&ctx, run);
+        // The folder goes with the job, on every way out: a verdict, a stop, a hold or an error.
+        drop(folder);
+        result
+    }
+
+    /// Takes the build-folder slot ([`Athena::take_build_folder`]) and leaves the wait out of the job's
+    /// execution time. A wait that ends at the limit holds the job as a build-slot wait: records committed, no
+    /// outcome, no attempt used, and a later drain runs it again. Any other error (the kill switch) passes on.
+    fn take_build_folder_or_hold(
+        &self,
+        ctx: &RunContext<'_>,
+        closing: Closing,
+    ) -> Result<(crate::disk::BuildFolder, Closing)> {
+        match self.take_build_folder(ctx.id(), ctx.ui) {
+            Ok(folder) => {
+                if let Some(wait) = folder.waited() {
+                    ctx.clock.exclude(wait);
+                }
+                Ok((folder, closing))
+            }
+            Err(e) => match e.downcast_ref::<crate::disk::SlotWait>() {
+                Some(wait) => {
+                    let wait = *wait;
+                    Err(self.hold_for_slot_wait(ctx, closing, wait))
+                }
+                None => Err(e),
+            },
+        }
     }
 
     /// Closes a job whose run can have pushed its CI branch (the resume path and the produce-and-verify
@@ -1405,6 +1443,37 @@ struct Outputs<'a> {
     stages: &'a dyn StageSink,
 }
 
+/// The clock of one dispatched run: the monotonic time since dispatch, less the time spent waiting for the
+/// build folder. `wall_time_execution` reads it, so a job that queued behind another job's whole build is
+/// not recorded as slow to execute. The excluded time is kept as atomic nanoseconds, so the context stays
+/// shareable across threads.
+struct RunClock {
+    start: Instant,
+    excluded: AtomicU64,
+}
+
+impl RunClock {
+    fn start() -> RunClock {
+        RunClock {
+            start: Instant::now(),
+            excluded: AtomicU64::new(0),
+        }
+    }
+
+    /// Leaves `wait` out of [`RunClock::elapsed`].
+    fn exclude(&self, wait: Duration) {
+        let nanos = u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX);
+        self.excluded.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    /// The time since the clock started, less the excluded time; never below zero.
+    fn elapsed(&self) -> Duration {
+        self.start
+            .elapsed()
+            .saturating_sub(Duration::from_nanos(self.excluded.load(Ordering::Relaxed)))
+    }
+}
+
 /// What every phase of a dispatched job needs.
 struct RunContext<'a> {
     jc: &'a JobConfig,
@@ -1413,7 +1482,7 @@ struct RunContext<'a> {
     capability: &'a dyn Capability,
     redactor: &'a Redactor,
     prediction: String,
-    clock: Instant,
+    clock: RunClock,
     ui: &'a dyn Ui,
     /// Told when the run enters the producer, the checks and the verifier.
     stages: &'a dyn StageSink,

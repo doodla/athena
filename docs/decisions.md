@@ -5514,3 +5514,65 @@ should replace those estimates with its figures.
   `docs/decision-links.toml`. Ran: `cargo test -p athena-data decision_links`, `cargo test -p athena-core governed`
   and `cargo test -p athena-cli --test backtest`. Not measured: how many past jobs the check would have held, or
   whether producers act on the list of docs lines.
+
+## D188 · One build-folder slot: two jobs run at once, only one at a time holds a build folder
+
+- **Case:** With `[parallel] max_concurrency = 2`, two jobs each kept a build folder of 15 to 24 GB under
+  `<job dir>/target` on a disk that fits one. Both passed the dispatch disk check while the disk was still empty,
+  then built side by side, so free space fell below `[disk] min_free_gb` and jobs were held or discarded for low
+  disk. A first stopgap set `max_concurrency` to 1, which also serialised reading and planning, the parts that
+  need no disk. The owner asked for the lasting fix: queue for disk and not only for running builds, let a second
+  job read and plan, and make it wait for the folder instead of being held.
+- **Decision:** One exclusive build-folder slot, `crate::disk::BuildFolder`, over its own queue directory
+  `<state>/build-folder/` (`slots::SlotQueue` with one entry: first in first out, freed on drop or on the death of
+  the process, with the kill switch read on every poll). `dispatch` in `crates/athena-core/src/run/mod.rs` takes
+  it after planning and before the baseline checks (before the checks of a resumed job), and drops it after the
+  job is closed. The guard's drop removes the job's `target/` and the holder file and only then frees the slot, so
+  a free slot means no job's build folder is held, whether the job landed, was rejected, failed, was held, was
+  killed or ended blocked by a local edit (a blocked job keeps its directory until it is closed, but no longer its
+  build folder, and `a_blocked_job_keeps_its_directory_until_it_is_closed_and_closing_reports_the_exact_space` in
+  `crates/athena-cli/tests/lifecycle.rs` now says so). The slot covers the whole build life of the job and not only the producer, because the baseline checks,
+  the demonstrations and the verifier's `cargo` all leave a real `target/verify`. A job that waits for the slot is
+  not held, uses no attempt and is not discarded; the wait ends by the holder's end, the kill switch or a limit of
+  seven days, which is held as a build-slot wait as the producer's is. At dispatch only, `dispatch_disk_gate` does
+  not hold a job when free space plus the measured bytes under `target/` of the job the holder file names, whose
+  job lock is held, meets the minimum; every other shortfall holds as before and the threshold is unchanged. The
+  wait is left out of `wall_time_execution` through a `RunClock` in the run context, so a job that queued behind
+  another job's build is not scored as slow to execute; no record shape changes. `max_concurrency` stays 2: it
+  bounds jobs, the slot bounds builds. The slot count is 1 and has no setting.
+- **Alternatives:** A global `max_concurrency` of 1 (the stopgap): it serialises reading and planning too, which
+  need no disk, and wastes the second job's model time. A free-disk check only (the existing gate, or the
+  in-flight bound `start_hold`): it is a reading taken before the builds begin, so two jobs that start together
+  both pass it, and it holds a job after planning spend instead of queueing it. Release the slot after the
+  producer, before the checks: the baseline folder, the demonstrations and the verifier's `cargo test` still build
+  in `target/verify` afterwards, so the next producer would build beside them. Take the slot a second time before
+  the verifier: the other job could take it in between, so the first job's verifier would wait behind a whole
+  producer run. Take `Class::Producer` from the check slots' queue for the whole job: that queue's count is
+  `max_check_slots` and the holder's own cargo shim and checks need the same slot, so the job would wait on
+  itself. A bare lock file loop: it rebuilds the ticket order, and a waiter could starve. Use `build_wait_s` (1800
+  s) as the limit: it is shorter than one job's producer, checks and verifier, so the second job would be held,
+  which the request rules out. Credit every other job whose job lock is held: a landing or a manage command also
+  locks a job, so a `target/` that no holder will free would be counted. Credit the expected folder size T (6 GB):
+  it is below the 15 to 24 GB folders, and the holder's actual bytes are what free space regains. Probe the slot
+  and skip the gate whenever it is held: it blames any shortfall on the other job. Keep the wait in
+  `wall_time_execution`: about half the jobs would record another job's whole build as execution time and skew the
+  forecast and its scoring.
+- **Tradeoff:** Builds are ordered, so only reading and planning overlap; a waiting job occupies a drain worker. A
+  job that is short of disk for its own reasons while the holder's folder exists plans before it is held, which
+  spends planner money. The credit reads the holder file: a holder that crashed while its job is locked by a
+  manage command can credit a folder no one frees, and the pre-producer gate then holds the job, again after
+  planning. Two builds stay outside the slot: the drain's own rebuild after a landing that touches Athena's code
+  (`rebuild_if_due`, which runs `setup.sh` in the checkout) and the check slots' warm target directories
+  (`slot_target`, up to `slot_max_gb` = 8 GB each), so free space can still fall below the gate with two jobs.
+  This was shown by tests that simulate free space, not on a real disk.
+- **Reversal cost:** Low; remove the `take_build_folder_or_hold` calls in `dispatch`, `BuildFolder`,
+  `dispatch_disk_gate` and the holder file in `crates/athena-core/src/disk.rs`, the two `StateDir` paths and
+  `RunClock`, and set `max_concurrency` to 1 again.
+- **Provenance:** Read: `crates/athena-core/src/slots.rs` (`SlotQueue`), `crates/athena-core/src/run/mod.rs`
+  (`dispatch`, `produce_and_verify`, `RunContext`), `crates/athena-core/src/run/checks.rs` (the baseline and the
+  check executor), `crates/athena-core/src/disk.rs` (`gate`, `sweep_idle_targets`, `start_hold`),
+  `crates/athena-core/src/state.rs`, `crates/athena-core/src/land.rs` (why a second job from the same base ends
+  stale) and `docs/design/agent-and-build-slots.md`. Ran: `cargo test -p athena-core build_folder`, `cargo test -p
+  athena-core disk::tests`, `cargo test -p athena-cli --test drain the_live_config_allows_two_jobs_at_once`,
+  `cargo test -p athena-core governed` and `cargo test -p athena-cli --test backtest`. Not measured: free space
+  or the size of a build folder on the owner's disk, and how often a second job waits.

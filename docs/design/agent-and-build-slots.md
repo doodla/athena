@@ -526,7 +526,70 @@ Each change is one focused job with its own tests, lands on its own, and reads i
 - Measuring the machine: no tool in this job could read memory, CPU use or the filesystem type, so every such
   figure is labeled **estimate** or **stated** above.
 
+## 11. The build-folder slot
+
+Decision D188. Sections 3 to 5 queue cargo commands; this slot queues a job's whole build folder.
+
+**What it guards.** A job's folder is `<state>/jobs/<id>/target`. It is not only the producer's `target/produce`:
+the baseline checks, the demonstrations and the verifier's `cargo` all leave a real `target/verify`, and none of it
+goes until the job closes. On a disk that fits one such folder (15 to 24 GB), two jobs that build side by side
+push free space under `[disk] min_free_gb`. The check slots do not prevent this: they bound the cargo commands
+that run at one moment, not the folders that exist.
+
+**Where it is taken and freed.** `Athena::dispatch` (`crates/athena-core/src/run/mod.rs`) takes the slot after
+planning and before the baseline checks, through `take_build_folder_or_hold`; a resumed job takes it before its
+checks. It drops the guard after `finish_dispatched` has closed the job. The guard (`BuildFolder`,
+`crates/athena-core/src/disk.rs`) removes the job's `target/` and the holder file first and frees the slot last, on
+every way a job ends: landed, rejected, failed, held for low disk or killed. A job that has not reached the
+slot, because it is still reading or planning, holds nothing. So a free slot means no job holds a build folder.
+
+**The queue.** One entry in a `slots::SlotQueue` of its own, over `<state>/build-folder/`, with the same
+first-in-first-out tickets and the kill switch read on every poll as section 4 describes. The directory differs
+from `<state>/slots/`, so the count is not `max_check_slots`: the holder's own cargo shim and checks take check
+slots while it holds the folder, and a shared queue would make the job wait on itself. The count is 1 and has no
+setting. The limit of the wait is seven days (`BUILD_FOLDER_WAIT`), not `build_wait_s`, which is shorter than one
+job's producer, checks and verifier together; at the limit the job is held as a build-slot wait, with no attempt
+used, as for a producer's `cargo` that waits too long.
+
+**Dispatch and the holder file.** While it holds the slot the guard writes the holder's job id to
+`<state>/build-folder/holder`. At dispatch only, `Athena::dispatch_disk_gate` runs the usual gate (the idle-target
+sweep included). On a shortfall it adds the measured bytes under `target/` of the job the holder file names, when
+that job is not the asking job and its job lock is held. When free space plus those bytes meets the minimum, the
+job is not held: it prints one `disk` line with the figures, reads and plans, and then waits at the slot. Any other
+shortfall holds as before. Only the named holder counts, because a landing or a manage command also locks a job
+whose `target/` no holder will free. A holder file that names the waiting job itself is left by a run that died, and
+`take_build_folder` removes it before the job queues. The gates inside the run are unchanged; they run in the
+guard's window, when no other job owns a folder.
+
+**How a waiting job appears.** The drain sees one blocking `go` call, so a waiting job occupies a worker and
+shows no row on the stage board (a row is written when a stage is entered, and the wait is not a stage). The job
+log says `disk       the build folder is held by another job; waiting for it before the producer builds`, and
+when the slot comes, how long it waited. Nothing is committed for the wait.
+
+**Execution time.** The wait is left out of `wall_time_execution`, which reads a `RunClock` in the run context
+(time since dispatch, less the time spent waiting for the folder). Otherwise about half the jobs would record
+another job's build as their own execution time, and the forecast and its scoring read that figure. No record
+shape changes and no earlier record is recomputed; no job waited before, so the earlier figures hold no such wait.
+
+**What stays outside the slot.** Two builds are not ordered by it. The drain's own rebuild after a landing that
+touches Athena's code (`rebuild_if_due`, which runs `setup.sh` in the checkout) builds the checkout's folder. The
+check slots' warm target directories (`<state>/build-slots/<n>/target`, up to `slot_max_gb` each) outlive jobs. Free
+space can still fall under the gate with two jobs because of them. Section 7.3 and the first question below ask for
+their disk use.
+
+**Alternatives.** A global `max_concurrency` of 1 serialises reading and planning, which need no disk; a free-disk
+check only is read before the builds start, so two jobs that start together both pass it. Releasing the slot
+before the checks leaves the baseline folder and the verifier's build unprotected. D188 lists the rest.
+
+**Tests.** `cargo test -p athena-core build_folder`: two jobs plan together and build one after the other, with a
+count of the jobs that hold a real build directory (peak 1); a job that waits is not held for low disk, while a
+job short of disk for its own reasons still is; the folder is free after each way a job ends; a resumed job takes
+the folder before its checks.
+
 ## Questions for the maintainer
+
+- How much disk do the drain's rebuild folder and the check slots' warm directories take beside one job build
+  folder (section 11)? The tests simulate free space; a live drain with two jobs has not been run.
 
 - Which filesystem holds the state directory? If it supports reflink (for example XFS or btrfs), alternative C
   becomes cheap and may beat D on disk.

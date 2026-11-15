@@ -274,7 +274,10 @@ pub const MAX_CONCURRENCY_CEILING: u32 = 16;
 pub struct Parallel {
     /// The most jobs a drain runs at the same time, from 1 to [`MAX_CONCURRENCY_CEILING`]. The default, 1, is
     /// the serial drain: one job at a time, in plan order. Only items of one plan group (no dependency, disjoint
-    /// touched paths) ever run side by side.
+    /// touched paths) ever run side by side. Jobs run side by side, but only one at a time holds a build folder
+    /// (the build-folder slot, `docs/design/agent-and-build-slots.md` section 11): a second job reads and plans,
+    /// then waits for the folder before its producer builds. This count bounds jobs, not builds, and the slot
+    /// count of 1 has no setting.
     #[serde(default = "Parallel::default_max_concurrency")]
     pub max_concurrency: u32,
 }

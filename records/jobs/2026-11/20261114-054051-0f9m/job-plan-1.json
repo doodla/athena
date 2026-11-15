@@ -1,0 +1,258 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-054051-0f9m",
+  "round": 1,
+  "at": "2026-11-15T16:26:26.507536838Z",
+  "invocation_seq": 3,
+  "approach": "Add one prose paragraph to the change capability's producer prompt (crates/athena-cap-change/prompts/producer.md) that gives the producer what the four failed jobs lacked. For an intermittent or racy failure it must reproduce the failure on the base tree under parallel load and report the command and counts, state the cause in terms of the code, fix it where it starts in one shared helper and not at each call site, add a repo test that scans for every site of the pattern and show that test fails with the cause put back, and report a soak run after the fix. A unit test in crates/athena-cap-change/src/lib.rs pins each element in `Change.producer_section().text`, so the guidance cannot be dropped silently. The larger prompt changes the computed producer set size, so the one number on the `- budget producer:` line of docs/system-facts.md is updated to the computed value; the budget drift test requires it. CHANGELOG.md gets one entry and docs/decisions.md gets D189. No refusal rule, gate or job step is added: expected share of past accepted readings refused is 0%. The prior jobs' testkit helper and scan and the drain.rs fix are already in the tree and are not touched.",
+  "decisions": [
+    {
+      "choice": "Give the producer the missing guidance in the change capability's own producer section, as prose pinned by a unit test.",
+      "reason": "The failing stage lacked information: nothing in its brief said to reproduce a flake under load, name the cause in code terms, fix through one helper, scan for every site, or soak. The request prefers giving information over a refusal rule. The section is compiled in by `include_str!` at crates/athena-cap-change/src/lib.rs:21 and returned by `Change.producer_section()` (lib.rs:51); the existing test module at lib.rs:118 already tests the capability's text-adjacent behavior. The change section is the largest producer section (1096 bytes against about 900 for the study section, crates/athena-cap-study/prompts/producer.md), so it is the one with the room the budget reports (157 tokens).",
+      "rejected": [
+        {
+          "option": "A job-flow step Athena runs itself (reproduce and soak before the verdict), as one introspection proposed",
+          "why": "It is a gate that holds or rejects work and needs core changes; the brief puts it out of scope, and the information gap is closed by the brief."
+        },
+        {
+          "option": "Another repo scan for executable writes",
+          "why": "Already in the tree (crates/athena-testkit/tests/no_in_process_exec_writes.rs) and out of scope; it covers one pattern, not the class of flaky-test fixes."
+        },
+        {
+          "option": "Put the text in the shared contract or the producer frame (crates/athena-context/prompts/producer.md)",
+          "why": "The frame is also read by study producers, and the contract has 40 tokens left; only the change producer fixes flakes."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the one-number edit to the `- budget producer:` line of docs/system-facts.md in the plan, as a forced edit, and name it in the change description, the changelog entry and D189.",
+      "reason": "It cannot be avoided. The producer row is the maximum over capabilities (crates/athena-cli/tests/budgets.rs:42-61) and the change section is the largest, so any added byte moves the computed size; `system_facts_budgets_match_computed` (budgets.rs:125-129, message at :109-114 says 'update docs/system-facts.md') fails the recorded `cargo test --locked` check otherwise. Precedent: commit d94ebc2 changed crates/athena-cap-change/prompts/producer.md and docs/system-facts.md together (HISTORY.txt:582-588). Mechanical effect read in code: the file-scope send-back `outside_allowed_paths` (crates/athena-core/src/run/mod.rs:1745) runs only when `allowed_paths()` is Some (crates/athena-context/src/briefs.rs:137-148, which needs a criterion that `change_limit` matches, briefs.rs:186-229); none of the six accepted criteria uses 'no file outside', 'no other file changed', 'only X may change' or 'test-only change', so no send-back happens. The plan admission finding for a non-deliverable file is Minor (crates/athena-core/src/admission.rs:306-312). The remaining exposure is the verifier's prose scope rule (crates/athena-context/prompts/verifier.md:8, briefs.rs:1390), which this plan answers by naming the forced edit.",
+      "rejected": [
+        {
+          "option": "Leave docs/system-facts.md alone",
+          "why": "`cargo test --locked` then fails on system_facts_budgets_match_computed and system_facts_drift_is_rejected (budgets.rs:125, :132)."
+        },
+        {
+          "option": "Trim existing text in producer.md so the computed size stays 1043",
+          "why": "It would delete the study-claim guidance the paragraph carries, to land inside one 3-byte bucket of ⌈bytes/3⌉; that hides the size change instead of recording it, and exact-size editing is fragile."
+        },
+        {
+          "option": "Move the guidance out of the always-loaded set (into the per-job producer brief in crates/athena-context/src/briefs.rs)",
+          "why": "It is not a deliverable file and the brief is built from code for every job; it would widen the scope more than a one-number facts edit."
+        }
+      ]
+    },
+    {
+      "choice": "Add decision D189 after D188 (docs/decisions.md:5518) in the D188 shape, worded without 'Amends', 'Supersedes' or 'Superseded by', stating that D160 and D163 stand.",
+      "reason": "docs/decisions.md is a listed deliverable. The link phrases that need a docs/decision-links.toml entry are 'supersedes' and 'amends' (crates/athena-data/src/decision_links.rs:254-257); avoiding them keeps decision-links.toml untouched. D188 shows the entry shape (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance bullets).",
+      "rejected": [
+        {
+          "option": "Write 'Amends D160' to link the decisions",
+          "why": "It would need a decision-links.toml entry and adds a gate path for no gain."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cap-change/prompts/producer.md",
+      "action": "modify",
+      "purpose": "Append one prose paragraph (under 470 bytes, blank line before it, no list markers) with the flaky-test guidance: reproduce under parallel load on the base tree and report command and counts; state the cause in terms of the code; fix it in one shared helper, not per call site; add a repo test that scans for every site and show it fails with the cause put back; report a soak run. Leave the existing paragraph as is.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-change/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add the unit test `the_producer_brief_carries_the_flaky_test_guidance` in the existing tests module, asserting each key phrase and the blank-line boundary in `Change.producer_section().text`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Not a listed deliverable, forced: update only the number on the `- budget producer:` line (line 26) to the computed value, which `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs:125) demands once the prompt grows.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet at the top of Unreleased / Changed: root cause, jobs, what the diff does, what it leaves alone, set size before and after, test names, 0% refused; names the forced facts-file edit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D189 after D188 in the D188 shape (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance); no link phrases.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read docs/system-facts.md line 26 and crates/athena-cap-change/prompts/producer.md. Append to producer.md a blank line and one prose paragraph, under 470 bytes, with no list markers and none of the banned boundary words. Suggested text: 'For an intermittent or racy failure, reproduce it on the base tree under parallel load and report the command and the counts. State the cause in terms of the code. Fix it where it starts, in one shared helper and not at each call site, and add a repo test that scans for every site of the pattern; show that test fails with the cause put back. Report a soak run after the fix.' Leave the existing paragraph as it is.",
+    "In crates/athena-cap-change/src/lib.rs add to `mod tests` the test `the_producer_brief_carries_the_flaky_test_guidance`: take `Change.producer_section().text` and assert, each with its own message, that it contains 'intermittent or racy', 'parallel load', 'command and the counts', 'terms of the code', 'one shared helper', 'scans for every site', 'put back' and 'soak run', and that '\\n\\nFor an intermittent or racy failure' is present (the paragraph is its own). Run `cargo test -p athena-cap-change`. Mutation check: delete the paragraph, see the test fail, restore it.",
+    "Run `cargo test -p athena-cli --test budgets`. Read the computed producer size from the failure of system_facts_budgets_match_computed and set `  - budget producer: <size> of 1200` in docs/system-facts.md, changing only the number. Re-run until the budget tests and `cargo test -p athena-context` pass.",
+    "Append D189 to docs/decisions.md after D188: heading `## D189 · The producer brief carries flaky-test guidance: reproduce under load, name the code cause, fix through one helper, scan for every site`; bullets Case (the four jobs and their introspections, and the missing information), Decision (what the brief says, the test that pins it, the facts-file line it forces, D160 and D163 stand), Alternatives (a job-flow step, refusal rules, another scan, putting the text in the frame or contract), Tradeoff (prose compliance is not measured), Reversal cost, Provenance. No 'Amends', 'Supersedes' or 'Superseded by' phrase.",
+    "Add one bullet at the top of `### Changed` under `## [Unreleased]` in CHANGELOG.md: root cause (the producer brief never said how to fix a flaky or racy test; failure class flaky-test-fix-patches-call-sites-not-root-cause; jobs 20261106-065752-jexx, 20261106-095820-edjm, 20261106-080857-9daz, 20261112-005306-pa2j); what the diff does (the paragraph, the test, the forced facts-file number, D189); what it leaves alone (testkit, drain.rs, no refusal rule, no job step; 0% of past accepted readings refused); the producer set size before and after; the test name. State only what the diff does.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix anything reported. Run `git diff --stat` and confirm only the five listed paths changed, with nothing under crates/athena-testkit or crates/athena-cli/src/drain.rs."
+  ],
+  "risks": [
+    {
+      "risk": "The added text pushes the producer set over its 1200-token budget (1043 of 1200 today).",
+      "mitigation": "The paragraph stays under 470 bytes, about 157 tokens at ⌈bytes/3⌉ at most. The producer runs `cargo test -p athena-cli --test budgets` after the edit and reads the exact computed size from the failure of system_facts_budgets_match_computed (budgets.rs:109-114)."
+    },
+    {
+      "risk": "The verifier raises a scope finding because docs/system-facts.md is not an expected deliverable (verifier.md:8, briefs.rs:1390; admission.rs:306-312 is Minor).",
+      "mitigation": "The edit is one number and cannot be avoided: the recorded `cargo test --locked` check fails without it (budgets.rs:125-129). The producer names it in its change description, in the CHANGELOG entry and in D189; commit d94ebc2 (HISTORY.txt:582-588) did the same pair of edits. The send-back for files outside the allowed paths does not run for this reading, because no criterion limits files (briefs.rs:137-148, :186-229)."
+    },
+    {
+      "risk": "Prose guidance does not guarantee a producer follows it.",
+      "mitigation": "The unit test pins only that the guidance is in the brief; D189 and the CHANGELOG entry say compliance is not measured. No gate is added, as the request asks. The class-wide mechanism for executable stand-ins already exists in the testkit scan and is kept."
+    },
+    {
+      "risk": "The PromptStructure rule (D162) or the decision-log guard sends the edit back.",
+      "mitigation": "The producer paragraph is plain prose after a blank line with no list markers (mirrors.rs:1033, :1053 read only added item heads). D189 is appended at the end with the standard heading and a Provenance bullet and no link phrase (decision_links.rs:254-257)."
+    },
+    {
+      "risk": "The new unit test is formatted or written in a way fmt or clippy rejects.",
+      "mitigation": "Plain assert! calls with messages, no new imports; the producer runs `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` before reporting."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "size of the change producer prompt set (producer budget 1043 of 1200)",
+      "dependent": "crates/athena-cli/tests/budgets.rs: system_facts_budgets_match_computed (:125), system_facts_drift_is_rejected (:132), every_role_set_is_within_its_budget (:340), the_reader_headroom_rows_equal_the_budget_figures_and_name_shared_files (:396), an_over_budget_role_set_fails (:449)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test budgets; the plan sets the `- budget producer:` line of docs/system-facts.md to the computed value, and the paragraph stays under 470 bytes, so the set stays under 1200",
+      "reason": null
+    },
+    {
+      "name": "the `budget producer` line of the facts file",
+      "dependent": "docs/system-facts.md line 26, compiled into the planner and critic briefs by crates/athena-context/src/briefs.rs:1524 with a size cap `SYSTEM_FACTS.len() < 6_000` at briefs.rs:3087",
+      "kind": "code",
+      "test": null,
+      "reason": "Only the digits of one number change, so the file stays far under the 6,000-byte cap; the briefs tests read the file whole and do not depend on the producer size. The planner line (1105 of 1200, frame + contract only) and the reader line (the reader set holds the catalog, not producer sections) do not move."
+    },
+    {
+      "name": "text of crates/athena-cap-change/prompts/producer.md",
+      "dependent": "crates/athena-context/src/lib.rs:445 headroom_file_paths_name_the_file_each_component_is_built_from (compares the disk file with the compiled text) and :820 (no capability section mentions agent-reference)",
+      "kind": "code",
+      "test": null,
+      "reason": "The disk file and the include_str! text are the same file after any edit, and the new paragraph does not mention agent-reference."
+    },
+    {
+      "name": "structure of prompt files (D162)",
+      "dependent": "crates/athena-core/src/mirrors.rs Rule::PromptStructure (:70, :149; judged at :1033) over crates/*/prompts/*.md, and crates/athena-cli/tests/mirrors.rs",
+      "kind": "rule",
+      "test": "cargo test --locked (mirrors tests) and the new unit test's blank-line assertion",
+      "reason": "The new paragraph is plain prose after a blank line with no list items, so no added line holds an item head and no base item is joined; the unit test also asserts the blank-line boundary."
+    },
+    {
+      "name": "prompt id and version of capability.change.producer",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:1652 (its own PromptAsset with id capability.change.producer), crates/athena-context/src/lib.rs:455 and crates/athena-cap-change/src/lib.rs:19",
+      "kind": "code",
+      "test": null,
+      "reason": "The id and version (1) are unchanged. run_pin_tests builds its own test asset and does not read the file."
+    },
+    {
+      "name": "other producer prompts",
+      "dependent": "crates/athena-cap-study/prompts/producer.md and crates/athena-context/prompts/producer.md (the frame)",
+      "kind": "code",
+      "test": null,
+      "reason": "Not edited. The producer budget row is the maximum over capabilities (budgets.rs:59), and the change section is the larger one, so the new size is read from it; the test reads the computed value either way."
+    },
+    {
+      "name": "file-scope send-back for a changed file outside the deliverables (affects docs/system-facts.md)",
+      "dependent": "crates/athena-core/src/run/mod.rs:1745 outside_allowed_paths, called at run/mod.rs:1992 and run/producer.rs:494; allowed paths come from `AcceptedReading::allowed_paths` (crates/athena-context/src/briefs.rs:137-148) via mod.rs:1291",
+      "kind": "code",
+      "test": null,
+      "reason": "It runs only when a criterion limits which files may change (`limits_changed_files`, briefs.rs:168 and `change_limit`, :186-229). None of the six criteria uses 'no file outside X changed', 'no other file changed', 'only X may change' or 'test-only change', so `allowed_paths` is None and no send-back or scope failure happens for docs/system-facts.md."
+    },
+    {
+      "name": "scope rule for a changed file outside the expected deliverables",
+      "dependent": "crates/athena-core/src/admission.rs:306-312 (plan file not among the deliverables) and crates/athena-context/prompts/verifier.md:8 with the Scope section at briefs.rs:1390 (D89, docs/decisions.md:1961)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan finding is Minor. The verifier's rule is prose; the edit is the one number the budget test forces, it is named in the plan, the change description, the CHANGELOG entry and D189, and commit d94ebc2 (HISTORY.txt:582-588) made the same pair of edits. The verifier can run `cargo test -p athena-cli --test budgets` to see that the edit is required."
+    },
+    {
+      "name": "docs/decisions.md log shape and links",
+      "dependent": "crates/athena-cli/src/decisions.rs (decision log guard), the DecisionEntries mirror rule in crates/athena-core/src/mirrors.rs, and decision_gate with link_problems (crates/athena-core/src/run/checks.rs; PHRASES at crates/athena-data/src/decision_links.rs:254-257)",
+      "kind": "rule",
+      "test": "cargo test --locked (decision log and mirrors tests)",
+      "reason": "D189 is appended after D188 (docs/decisions.md:5518), with heading `## D189 · ...`, a Provenance bullet in the entry and none of the phrases 'amends', 'supersedes' or 'superseded by', so no docs/decision-links.toml entry is needed and the base is an exact prefix of the new file."
+    },
+    {
+      "name": "changelog entry and banned words",
+      "dependent": "CHANGELOG.md [Unreleased] / Changed, and the boundary scan `boundary_words()` in xtask/tests/policy.rs",
+      "kind": "rule",
+      "test": "cargo test --locked (xtask policy tests)",
+      "reason": "One bullet is added in the form of the existing entries; no test parses its wording. The scan passes if the entry names no banned word, which the producer checks before writing."
+    },
+    {
+      "name": "prior jobs' fixes (executable stand-in helper and scan, drain test fix)",
+      "dependent": "crates/athena-testkit/tests/no_in_process_exec_writes.rs, crates/athena-testkit/tests/stand_in_stress.rs, crates/athena-cli/src/drain.rs",
+      "kind": "code",
+      "test": null,
+      "reason": "Not edited; the diff touches only a prompt, one test module, docs and the changelog. The scan and its planted-violation tests run in `cargo test --locked` and fail if a stand-in write were left behind."
+    },
+    {
+      "name": "recorded check names and commands",
+      "dependent": "athena.toml `[[capabilities.change.checks]]` fmt, clippy and test (:93-109) read through `Change.checks` (crates/athena-cap-change/src/lib.rs:83)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No check name, command or skip_when_only value changes; athena.toml is not edited."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of the prompt file and check each required element of the new paragraph.",
+      "command": "git diff -- crates/athena-cap-change/prompts/producer.md",
+      "observes": "The diff only adds text after a blank line; the existing paragraph is untouched. The new paragraph holds: for an intermittent or racy failure, reproduce on the base tree under parallel load and report the command and the counts; state the cause in terms of the code; fix it where it starts, in one shared helper and not at each call site; add a repo test that scans for every site of the pattern and show it fails with the cause put back; report a soak run after the fix. It has no list markers, so the PromptStructure rule (crates/athena-core/src/mirrors.rs:70, rule over crates/*/prompts/*.md) sees no item head. The root cause (the producer brief lacked flaky-test guidance, an information gap) is named in CHANGELOG.md and D189, read with `git diff -- CHANGELOG.md docs/decisions.md`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Run the new unit test `the_producer_brief_carries_the_flaky_test_guidance` in the existing `mod tests` of crates/athena-cap-change/src/lib.rs. It calls the production entry point `Change.producer_section()` (lib.rs:51), takes `.text` (the compiled include_str! of prompts/producer.md, lib.rs:21) and asserts, one assert! with its own message each, that it contains 'intermittent or racy', 'parallel load', 'command and the counts', 'terms of the code', 'one shared helper', 'scans for every site', 'put back' and 'soak run', and that the paragraph starts after a blank line ('\\n\\nFor an intermittent or racy failure'). Precondition: none; the real compiled asset is read.",
+      "command": "cargo test -p athena-cap-change",
+      "observes": "On the base tree the new test fails on its first assertion, because producer.md has one paragraph about studies and a criteria_check line and none of the phrases. With the change every test in the crate passes, including build_output_is_refused and grants_come_from_the_configuration. The producer also runs a mutation check: delete the paragraph, see the test fail, restore it.",
+      "fails_without": "Removing or rewording the new paragraph in crates/athena-cap-change/prompts/producer.md makes the phrase assertions fail; on the base tree 'intermittent or racy' is absent.",
+      "seam": "Production entry point: `Change.producer_section()` at crates/athena-cap-change/src/lib.rs:51, returning the PromptAsset built by `include_str!(\"../prompts/producer.md\")` (lib.rs:21). No fake or fixture: the real asset is read and the phrases are the pinned contract. Exists: the function and the tests module (lib.rs:118) are in the tree; plan step 2 adds only the test function."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the budget tests. They recompute each role set as ⌈bytes/3⌉ over contract + producer frame + the capability producer section for every capability through `athena_cli::wiring::capabilities()` and `check_budget` (crates/athena-cli/tests/budgets.rs:21-61), compare it with the `- budget producer:` line of docs/system-facts.md (:125, :132) and with the reader headroom rows (:396). The athena-context test `headroom_file_paths_name_the_file_each_component_is_built_from` (crates/athena-context/src/lib.rs:445) compares the disk file with the compiled text, and lib.rs:820 checks that no capability section mentions agent-reference. The recorded Athena `test` check (`cargo test --locked`, athena.toml:106-109) runs the same tests on the final tree and is read as well.",
+      "command": "cargo test -p athena-cli --test budgets",
+      "observes": "system_facts_budgets_match_computed, system_facts_drift_is_rejected, every_role_set_is_within_its_budget, an_over_budget_role_set_fails and the_reader_headroom_rows_equal_the_budget_figures_and_name_shared_files pass. The producer line in docs/system-facts.md reads the new computed size, below 1200 (base 1043 of 1200, paragraph under 470 bytes, so at most about 156 tokens more; the exact value is read from the failure message of system_facts_budgets_match_computed after the prompt edit, not guessed).",
+      "fails_without": "Without the docs/system-facts.md edit, system_facts_budgets_match_computed fails with 'producer: the facts file says 1043 of 1200, the computed value is <new> of 1200; update docs/system-facts.md'. If the paragraph were large enough to push the set over 1200, check_budget returns Err and every_role_set_is_within_its_budget fails at its unwrap (budgets.rs:371).",
+      "seam": "Production entry points: `athena_cli::wiring::capabilities()` and `athena_context::check_budget`, used by crates/athena-cli/tests/budgets.rs:21-61. The input is the real docs/system-facts.md compiled through `athena_context::briefs::SYSTEM_FACTS` (briefs.rs:1524). No double. Exists; this plan changes none of the test code."
+    },
+    {
+      "criterion": 4,
+      "method": "Athena records three checks for the change capability, configured in athena.toml: fmt (`cargo fmt --all --check`, :93-97), clippy (`cargo clippy --all-targets --locked -- -D warnings`, :99-102) and test (`cargo test --locked`, :106-109). The verifier runs `cargo test --locked` on the final tree and reads the recorded fmt and clippy results; it may also run `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` itself. skip_when_only (docs/, *.md) does not skip fmt and clippy here, because the diff touches crates/athena-cap-change/src/lib.rs.",
+      "command": "cargo test --locked",
+      "observes": "cargo test --locked ends with no failed test, including the new unit test, the budget tests, the context headroom tests, the mirrors tests over the prompt file and decision log, the testkit scan (crates/athena-testkit/tests/no_in_process_exec_writes.rs) and the xtask policy tests. fmt --check prints no diff and clippy -D warnings prints no warning.",
+      "fails_without": "Without the docs/system-facts.md producer-line update, `cargo test --locked` fails at system_facts_budgets_match_computed. With an unformatted new test, `cargo fmt --all --check` fails; with an unused import or needless borrow in it, `cargo clippy ... -D warnings` fails. Without the paragraph, the new unit test fails.",
+      "seam": "Production entry point: the configured checks of the change capability, `Change.checks(&jc)` (crates/athena-cap-change/src/lib.rs:83-97) reading `[[capabilities.change.checks]]` of athena.toml, which Athena runs on the final tree. Fixture: the final working tree itself, injected by being the tree under check; no double. Exists."
+    },
+    {
+      "criterion": 5,
+      "method": "List the changed paths and read the CHANGELOG.md diff; then Grep `set_executable(` over test code.",
+      "command": "git diff --stat",
+      "observes": "Only crates/athena-cap-change/prompts/producer.md, crates/athena-cap-change/src/lib.rs, CHANGELOG.md, docs/decisions.md and docs/system-facts.md (the forced one-number line) change. Nothing under crates/athena-testkit, crates/athena-cli/src/drain.rs or the six converted test sites. The Grep finds `set_executable(` only in the testkit helper and its scan, so no in-process stand-in write is left; the scan test in `cargo test --locked` keeps that true. The CHANGELOG.md diff adds one bullet under Unreleased that names the root cause (producer brief lacked flaky-test guidance), cites jobs 20261106-065752-jexx, 20261106-095820-edjm, 20261106-080857-9daz and 20261112-005306-pa2j, says what the diff does (paragraph, test, facts line, D189) and what it leaves alone (testkit, drain.rs, no refusal rule, no job step), and states the docs/system-facts.md edit as forced by the budget drift test.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the changed-path list and the diffs for any refusal, admission, gate or reading-check code.",
+      "command": "git diff --stat",
+      "observes": "No path under crates/athena-core, crates/athena-gate, crates/athena-data or crates/athena-context/src changes, no athena.toml, defaults.toml or workflow changes, and the checks list is unchanged: no refusal rule, gate, admission check or job-flow step exists in the diff, so the expected share of past accepted readings refused is 0% and no refusal_corpus case is added or changed.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "133a65ab685483fb469d5b4adb7d33acada73e880eaef272c47e1fed8027a47d"
+}

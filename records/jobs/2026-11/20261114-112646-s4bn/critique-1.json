@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-112646-s4bn",
+  "round": 1,
+  "at": "2026-11-15T17:49:35.721674109Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The planner cannot follow \"stop exploring by {stop_s} seconds\" because it has no clock, and the plan leaves out the producer precedent's answer to that.",
+      "evidence": "`planning_grant()` (planning.rs:656-663) gives the planner only Read, Grep and Glob, with an empty `commands` map, so it has no way to read the time. The plan says it follows the producer's `time_budget_section` (briefs.rs:758-776). That section deals with this directly: \"You have no clock of your own. If the commands Bash may run (below) include `date`, note the time ...; without it, count steps against the order above.\" The planned DEADLINE_RULE copies the seconds figure but drops this part. The rule therefore asks the planner to act on a time it cannot measure. This is the information gap the request asks to close (\"what information the failing stage lacked\"). The planner still lacks it, so the rule may not change its behaviour. Fix: Add to DEADLINE_RULE that the planner has no clock. Give it a measure it can check, as the producer brief does: for example, read the deliverables and the callers the criteria name first, count tool calls against that order, and start writing the plan as soon as every criterion has a demonstration and a seam. Keep the half-deadline figure as the target the step order is sized to. Extend the criterion-4 test to assert the no-clock sentence in all four briefs.",
+      "location": "Plan step 2 (DEADLINE_RULE text) and Decision 3; crates/athena-core/src/run/planning.rs:656-663",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The live 600 s trigger was already removed by an earlier commit. The changelog and the root-cause comment should say so.",
+      "evidence": "HISTORY.txt:90 shows `740a9e4 2026-11-14 Raise stage time limits to 24 hours in athena.toml`, and athena.toml:224 now reads `planner_timeout_s = 86400`. The accepted reading says the value in athena.toml is 600. The plan saw the 86400 value but does not say which change removed the 600 s setting. A reader of the changelog might take this change as the fix for the two failures, when the raised limit already ended them in this repository. Fix: In the CHANGELOG entry and the DEADLINE_RULE doc comment, say that the two failures ran under 600 s, that 740a9e4 raised the live value to 86400, and that this change covers any configured deadline (the run tests and other repositories use 600).",
+      "location": "Risks item 1; Plan step 7 (CHANGELOG entry)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test needle's capitalisation does not match the planned rule text.",
+      "evidence": "Step 2 writes the rule as \"...; stop exploring by {stop_s} seconds (half the deadline)...\", lowercase after a semicolon. Demonstration 4 asserts `Stop exploring by 300 seconds`, capitalised. One of them must change or the new test fails. Fix: Fix one exact phrase and use it in both the constant and the test needles, for example lowercase `stop exploring by {stop_s} seconds` in both.",
+      "location": "Demonstration 4 vs Plan step 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Criterion 5 sets the timeout outcome in the fake script, so its \"still stops\" half checks only existing stop handling.",
+      "evidence": "The wrapper sets `InvocationOutcome::TimedOut` and the detail \"deadline of 600s reached\" itself, so the reason text comes from the double. The path that matters here (planning.rs:190-198 through `stop_planning`) is production code, and run_pin_tests.rs:799-841 already pins it. This half is therefore a regression guard, not new evidence. Fix: Keep the half as written, but describe it as a regression guard. The brief figure and the `spec.timeout` equality are the parts that show the new behaviour.",
+      "location": "Demonstration 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the code I read. `PlannerInputs` (planner.rs:33), `planner_brief` (planner.rs:95) with the Report writeln at line 156, and the `PlannerInputs` literal in `planning_round` (planning.rs:129) all exist where the plan says. The same `cfg.planner_timeout_s` is passed to `agent_spec` at planning.rs:162. The only other `PlannerInputs {` literal is the test helper at briefs.rs:2788, and the fake-script seam the run test needs (`fake::Script` as `Fn(&AgentInvocation)`, `timing_out`, `repo_with_planning`, `prompts_of`, `finished_job`) exists. The dependents list is complete for the changed struct and function. The `## Deadline` section placed before `## Report` leaves the Report split tests and the size pin unchanged. The design has one major soundness gap. The planner is granted only Read, Grep and Glob (planning.rs:656-663), so it has no clock and cannot act on \"stop exploring by N seconds\". The producer precedent the plan says it follows handles this explicitly (\"You have no clock of your own ... count steps\"), and the plan leaves that out. Minor points: the changelog should name commit 740a9e4, which already raised the live value from 600 s to 86400 s; and the test needle `Stop exploring` is capitalised differently from the planned rule text. Verdict: revise."
+}
