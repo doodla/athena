@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045738-knwg",
+  "round": 2,
+  "at": "2026-11-15T07:14:44.248620411Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/ci_result.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/ci_result.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The fix targets a guessed log shape (cleanup with no header) and leaves alone the shape seen after the existing fix landed: the shard summary displacing the failing unit's output.",
+      "evidence": "HISTORY.txt:733 shows fe42b01 (2026-11-07) already added the header-based cleanup cut (CHANGELOG.md:1164-1166). The reading's three prior jobs (20261027-054225-ycks, 20261106-022423-vdtn, 20261106-045349-f6x6) have job ids from before that commit, so the pre-fix code explains their cleanup noise. The plan never mentions fe42b01 or compares dates, and says the shape of the logs 'is not shown'. The one sighting dated after the fix (introspection 20261114-022748-gmm5) asks to 'keep the failing unit's own output ... and not just the shard summary'. xtask/src/shard.rs:316-337 runs every unit in the shard even after one fails, prints `== shard k/n: <unit>` before each unit (crate::step), and ends with `shard k of n: X of Y units failed: <units>`. When the failing unit prints no runner marker (a compile error, a signal crash, a hang), the plan's branch for logs with no marker keeps the last pre-cleanup lines. Those are the later units' `ok` output and that summary, now with a note added. The record still cannot be used to diagnose the failure, so the failure class ('cause-of-test-failure-invisible') is not prevented. Raw GitHub logs normally do contain the 'Post job cleanup.' line, so the headerless case the demonstrations target may never occur. Fix: Base the root cause on the evidence that is available: name fe42b01, and say that the prior jobs predate it while the post-fix sighting reports a different symptom. When a shard log has no runner marker, use the information the log already holds. Anchor the kept section at the `== shard k/n: <unit>` line of a unit named in the final `units failed:` summary (or at the first `error[`/`error:` line inside it), so the failing unit's own output is kept. failing_units in client.rs:264 already splits logs at these lines. Keep content-based cleanup recognition as a secondary guard. Add a demonstration with a realistic multi-unit shard: a failing unit with a compile error, then 250 lines of passing units, the summary, `##[error]`, then 'Post job cleanup.' and the cleanup block. It should assert that the failing unit's error lines are in output_tail and in the send-back tail.",
+      "location": "Approach; Decision 4; Risks bullet 3; crates/athena-core/src/checks.rs:373-419; HISTORY.txt:733",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The demonstrations for criteria 1-3 use only synthetic headerless logs, so their 'fails without' result rests on a shape that has not been observed.",
+      "evidence": "The reading's criterion 1 says 'the log shape seen in the failed jobs', but the plan says records/ is absent and no log was read. The existing tests (checks.rs:857-930, gh/tests.rs:726-772) always include the header, and the base code already passes that shape. Fix: Label the inputs as constructed. Add at least one fixture with a header present that follows the real ci.yml test job (checkout with persist-credentials false, restore-only cache steps, `cargo run --locked -p xtask -- test-shard`). The regression the change protects should then be shown on that realistic log, not only on the hypothetical one.",
+      "location": "Demonstrations, Criterion 1 (a)-(d), Criterion 2 (a)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The bare `/usr/bin/git ` content prefix widens the matcher with no evidence that such lines appear.",
+      "evidence": "The actions toolkit prints commands as `[command]/usr/bin/git ...`, and the plan cites no log where a line starts with plain `/usr/bin/git `. The function also runs on local check output (checks.rs:618), where the anchor is 0 when there is no marker. Fix: Drop the bare `/usr/bin/git ` form, or cite where it occurs, and keep only `[command]/usr/bin/git `.",
+      "location": "Decision 2 / Step 1 (is_cleanup_line content forms)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The multi-shard note says 'the lines above are the last of that log', which is wrong for every named shard except the last.",
+      "evidence": "The note is appended once after all shard sections (Decision 1). A shard named earlier in the note has its lines higher up, under its own `== <job>` header, not directly above the note. Fix: Word it as 'each named shard's section above (under its == header) ends at its last line before runner cleanup'.",
+      "location": "Step 1, no_test_section_note text",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The dependents list omits a run/tests.rs fixture that goes through detail_from_job_logs.",
+      "evidence": "crates/athena-core/src/run/tests.rs:7724 SHARD_LOG reaches GhClient::failure_detail through CiReplies (7866). Its log has `failures:`, so it gets no note and is unaffected. Fix: List it with the reason it is unaffected.",
+      "location": "Dependents, detail_from_job_logs output_tail",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read checks.rs (failure_section, is_cleanup_line, with_failure_detail, run_check), gh/client.rs (detail_from_job_logs, failing_units), gh/tests.rs, briefs.rs (clip_log_tail, failed_check_detail), xtask/src/shard.rs, the test job in .github/workflows/ci.yml, HISTORY.txt and CHANGELOG.md. The plan holds together mechanically. The functions and line numbers it cites exist. The trailing note does survive every reader that keeps the end of the tail (with_failure_detail's re-cut, the 3000-byte send-back, the verifier brief's last 60 lines). The backward walk cannot take checkout lines at the start of a log as the cut. The one existing assertion the note breaks (gh/tests.rs:589) is found, and the demonstrations call real entry points and fail on the base tree. The weakness is evidence. The plan fixes a log shape it admits it has never seen: a cleanup block with no 'Post job cleanup.' header. It does not account for the fix that already landed. Commit fe42b01 (2026-11-07, 'Keep the failing test section, not the CI cleanup tail') added the current header cut. The three prior jobs the reading cites as hitting the noise all have job ids from before that commit. The one sighting dated after it (introspection gmm5 on job 20261114-013056-pkhp) does not complain about cleanup text: it says the record held the shard summary instead of the failing unit's own output. When a shard's log has no runner marker, the plan keeps 'the last pre-cleanup lines' plus a note. With `xtask test-shard` that is the later units' passing output and the 'N of M units failed' summary, which is exactly what gmm5 reported. So the class can recur. The log already carries the information needed to keep the failing unit's own output (the `== shard k/n: <unit>` lines and the units named in the final summary), and the plan does not use it. Verdict: revise."
+}

@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045738-knwg",
+  "round": 1,
+  "at": "2026-11-15T07:01:50.449784881Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The note is put above a section that already fills the line limit, so storage and every reader cut it off. No test checks the note after storage.",
+      "evidence": "detail_from_job_logs gives one shard per_lines = 200 (client.rs:336), so failure_section can return 200 lines. The note makes it 201. with_failure_detail then runs failure_section(rest, 200) (checks.rs:445). With no marker it keeps the plain tail of the last 200 lines (checks.rs:402-403), so the note, the first line, is dropped. With several shards, each shard's note pushes the total past 200 and the earliest lines are lost. The existing test two_shards_each_keep_their_failing_section asserts <= 200 lines. Later readers lose it too: CheckFailure::of keeps the last 3000 bytes, and the verifier brief's clip_log_tail keeps the last 60 lines (briefs.rs:1116). A log from a shard that did not finish is normally long, so the 'explicit statement that none was found' (reading, goal) reaches no reader. Demonstration 2 asserts the note only on detail_from_job_logs output. Demonstration 3(a) asserts only that cleanup is absent. Fix: Count the note inside the limit (call failure_section with max_lines - 1, and max_bytes minus the note's length) and put it at the END of the shard section, where every tail-based reader keeps it. Or have with_failure_detail keep a leading note line, as it keeps the units line. Add a test with a 300-line shard log that has no marker, run through detail_from_job_logs -> with_failure_detail (or routing) and then append_check_failures / the verifier brief, asserting the note is in each.",
+      "location": "Plan decision 2 / step 3 (ci_failure_section puts NO_TEST_SECTION_NOTE first); checks.rs:440-446; gh/client.rs:336-352; send_back.rs:297; crates/athena-context/src/briefs.rs:1114-1163",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Lines the plan counts as cleanup also open every real job log, and the cut is taken at the earliest qualifying point. A log with no marker can lose its progress lines, and the test logs never include a realistic job log start.",
+      "evidence": "The new forms include `##[group]`, `##[endgroup]`, `/usr/bin/git `, `[command]/usr/bin/git`, `Temporarily overriding HOME` and `Adding repository directory to the temporary git global config`. GitHub job logs (detail_from_job_logs receives whole job logs) emit these in 'Set up job' and in the actions/checkout step at the START of the log, and ##[group]/##[endgroup] around every step. With no marker or ##[error], anchor = 0 (checks.rs:379), and cleanup_start picks the FIRST i whose suffix is at least half cleanup. On a short log that is the checkout block, and the body becomes only the setup lines. The demonstration 1 and 2 test logs are '40 progress lines + cleanup', so this case is never exercised. Matching ##[group] lines as cleanup is a broad pattern of the kind the soundness question asks about. Fix: Find the trailing block from the end: walk backwards and choose the LATEST cut that removes the trailing cleanup, allowing a small gap of unrecognised lines. Do not count ##[group]/##[endgroup] or checkout-only lines as cleanup on their own (strip the ##[group] prefix as today). Add a test with a realistic log (setup lines, checkout git lines, a few progress lines, then the cleanup block with no header) and assert the progress lines survive.",
+      "location": "Plan decision 1 / step 1 (content forms + cleanup_start 'first index i >= anchor' density rule)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Any failed check with empty output would be stored with a false statement that its log held only runner cleanup text.",
+      "evidence": "failure_section is also the local run path (checks.rs:618). A local check that prints nothing (for example `exit 3`, used in baseline_records_each_check_whatever_the_others_did at checks.rs:759) gives text \"\", so body \"\", and the plan returns '(no output was kept: the log held only runner cleanup text)'. briefs.rs:1098 shows any non-empty output_tail to the producer, so the false note reaches briefs and introspection. Fix: Return NO_OUTPUT_NOTE only when the input had at least one non-blank line and the cleanup cut removed all of them. Add a test that an empty or whitespace-only input stays empty.",
+      "location": "Plan step 2 ('When the body is empty or only whitespace, return NO_OUTPUT_NOTE')",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list omits crates/athena-context/src/briefs.rs, which reads the stored output for the producer and verifier briefs.",
+      "evidence": "briefs.rs:1098-1104 (producer brief, clip_log_tail of run.output_tail) and briefs.rs:1131-1166 (verifier brief failed_check_detail: shows the tail when non-empty, last 60 lines / 6 KiB). Problem 1 drops the note here, and problem 3's false note would surface here. The dependents list names only athena-core readers (records_criteria.rs, retry.rs, introspect.rs). Fix: Add briefs.rs as a dependent, with a test in athena-context or athena-core that a stored record with the note still shows the note in the verifier brief's quoted tail.",
+      "location": "Plan Dependents list",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not check real logs for how a shard that did not finish ends; such shards usually carry a ##[error] line, so the stated root cause rests on an assumption.",
+      "evidence": "In GitHub, a cancelled or timed-out step prints '##[error]The operation was canceled.' (or similar), which failure_section already uses as its anchor (checks.rs:378). The plan names no record or log from the six jobs showing a log with neither a marker nor ##[error], or with the 'Post job cleanup.' header missing. records/ is absent from the snapshot. The CHANGELOG entry (criterion 5) states the root cause as fact. Fix: Phrase the CHANGELOG root cause as what the code did, a fall-through to a plain tail when no header was matched after the anchor. Also add a test case with a ##[error] cancel line followed by cleanup with no header, so both log shapes are covered.",
+      "location": "Plan Approach / root cause; reading criterion 1 log shape",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "After the change, is_cleanup_line recognises any cleanup line, not only the line that starts the block.",
+      "evidence": "Its doc reads 'Whether `line` starts the CI runner's post-job cleanup'. The new content forms match lines in the middle of the block. Fix: Update the doc comment, or rename it to is_cleanup_text, in the same step.",
+      "location": "checks.rs:344 is_cleanup_line doc comment",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan changes the right place: `failure_section` in checks.rs is where every failed check's stored output is chosen, and it adds no refusal rule. The files, functions and test seams it names exist: is_cleanup_line at checks.rs:345, failure_section at 373, with_failure_detail at 424, run_check at 618, detail_from_job_logs at client.rs:296/344, CheckFailure::of at send_back.rs:288, and the Detailed/Local stubs at routing.rs:526/565. Four major problems remain. (1) The \"no failing test section\" note goes at the top of a section that can already fill the line limit. with_failure_detail (checks.rs:445) trims the stored text back to 200 lines and drops the note, the send-back keeps the last 3000 bytes, and the verifier brief keeps the last 60 lines (briefs.rs:1114). So the note the reading promises usually reaches no reader, and no planned test checks the note after storage. (2) The cleanup finder is fragile. It counts ##[group]/##[endgroup], /usr/bin/git and checkout lines as cleanup, but these also appear at the start of every real GitHub job log. It then cuts at the earliest point where the rest is mostly cleanup. Without a marker, a short log can lose its progress lines, and the test logs never include a realistic job log start. (3) An empty failed output would be stored as \"(the log held only runner cleanup text)\", which is false for a local check that printed nothing. (4) The list of affected code omits crates/athena-context/src/briefs.rs, which reads the stored output for the producer and verifier briefs. The planner can fix all four."
+}

@@ -1,0 +1,323 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-045738-knwg",
+  "round": 2,
+  "at": "2026-11-15T07:10:36.768561162Z",
+  "invocation_seq": 4,
+  "approach": "Root cause, read in crates/athena-core/src/checks.rs:373-419. `failure_section` is the one place a failed check's output is chosen for storage. It cuts cleanup only at a header line (`is_cleanup_line`, 345: \"Post job cleanup\", \"Post Run \", \"Cleaning up orphan processes\"), and only at or after the last runner marker or `##[error]` line. When no header is matched, it keeps a plain tail. When the header is the last line of the block, the git credential-removal lines above it stay. Nothing tells a reader that no failing test section was found. Fix: change only `checks.rs` for recognition, and give the storing stage the missing knowledge. (1) `is_cleanup_line` recognises the content of the cleanup block as well as its header. (2) After the existing header cut, a new `cleanup_start` walks BACK from the end and strips the trailing cleanup block. It stops at a `##[group]Run ` step start, at the anchor, or after more than 1 consecutive unrecognised line. Setup and checkout git lines at the start of a log therefore cannot be mistaken for the block. (3) `failure_section` returns `NO_OUTPUT_NOTE` only when the input had a non-blank line and cleanup removed all of it. Empty output stays empty. (4) `detail_from_job_logs` (gh/client.rs:296) appends ONE note as the LAST line of the whole tail when any readable shard log has no runner marker. The note names those shards. Its line and byte cost is reserved inside the 200-line and 64 KiB limits. The last line is the one every later reader keeps: `with_failure_detail` (every branch of `failure_section` keeps the end, checks.rs:394-418), `CheckFailure::of` (last 3000 bytes) and the verifier brief (last 60 lines, briefs.rs:1114-1127). `with_failure_detail`, the local run (checks.rs:618) and `CheckFailure::of` (send_back.rs:297) all go through `failure_section`, so every producer of a failed record is covered. No record shape, admission or gate code changes.\n\nHow the previous round's findings are answered:\n- Finding 1: the note moves from first to last, is counted inside the limit, and an end-to-end test checks it after storage, in the send-back and in the verifier brief.\n- Finding 2: the forward density rule is replaced by a backward walk with a step-start boundary. `##[group]` and `##[endgroup]` are no longer treated as cleanup.\n- Finding 3: the empty-output note is gated on a non-blank input.\n- Finding 4: briefs.rs is added to the dependents with a test.\n- Finding 5: the CHANGELOG states what the code did. Both log shapes (with and without `##[error]`) are tested.\n- Finding 6: the doc comment is rewritten and the header predicate is split out.",
+  "decisions": [
+    {
+      "choice": "Put the 'no failing test section' note at the END of the whole stored tail, once, naming the shards without a runner marker, and count it inside the limits. In `detail_from_job_logs`, find the shards with no marker first, build the note, then reserve its 1 line and its byte length (plus 1 line when a `failing units:` line will be added) before computing `per_lines` and `per_bytes` (client.rs:334-339). `checks.rs` supplies `has_failing_section(text)`, `no_test_section_note(&[&str])` and the constants `NO_TEST_SECTION_PREFIX` and `NO_OUTPUT_NOTE`.",
+      "reason": "Answers finding 1. Every tail-based reader keeps the last line: `failure_section`'s branches keep the end (checks.rs:394-395 whole; 402-403 and 405-406 `tail_lines`; 417 the last 20 lines of the jump case). `CheckFailure::of` keeps the last 3000 bytes (send_back.rs:297). The verifier brief keeps the last 60 lines / 6 KiB (briefs.rs:1114-1127), after `check_result_view` strips only a LEADING units line (verify.rs:77-85). With the reserve, one shard totals at most 199 lines plus the note, so `with_failure_detail`'s 199/200-line re-cut (checks.rs:440-446) drops nothing. A multi-shard note is built once, so earlier shards' notes cannot be pushed out by a later shard's long section. An existing assertion breaks and is updated: gh/tests.rs:589 pins `ends_with(\"build broke\\n\")`.",
+      "rejected": [
+        {
+          "option": "Leading note, as in the previous plan",
+          "why": "At 200 lines `with_failure_detail` re-cut drops it (checks.rs:402-403). `CheckFailure::of`, `clip_log_tail` and every other tail reader lose it too."
+        },
+        {
+          "option": "Make `with_failure_detail` keep a leading note line the way it keeps the units line",
+          "why": "It survives storage but not the 3000-byte send-back tail (send_back.rs:297) nor the 60-line verifier clip (briefs.rs:1116). It would also need a second parse of the tail."
+        },
+        {
+          "option": "One note per shard section",
+          "why": "With several shards the earlier shards' notes sit above the last shard's section and are cut by tail readers. Each note also adds a line and pushes the total past 200."
+        },
+        {
+          "option": "Put a '(no failing test section)' marker in `failed_tests`",
+          "why": "client.rs:294-295 documents the list as empty when no log named a test. A non-empty list switches the verifier brief to 'Run only the failing tests' (briefs.rs:1463-1469) and feeds `is_pre_existing`."
+        }
+      ]
+    },
+    {
+      "choice": "Cleanup recognition, all in checks.rs. `is_cleanup_header` keeps the three existing header forms. `is_cleanup_line` = header or content: `[command]/usr/bin/git `, `/usr/bin/git `, `Temporarily overriding HOME`, `Adding repository directory to the temporary git global config`, `Removing HTTP extra header`, `Removing includeIf`, `Complete job`, `Evaluate and set job outputs`, `##[warning]Node.js` (an optional `##[group]` prefix is ignored). `##[group]` and `##[endgroup]` alone are NOT cleanup. `failure_section` first cuts at the first header at or after the anchor, as before. Then `cleanup_start(lines, anchor)` walks back from that point (or the end) over blank lines, recognised lines, and at most `CLEANUP_GAP = 1` consecutive unrecognised lines. It stops at the anchor, at a line starting `##[group]Run ` (a step start), or at the second unrecognised line. It returns the earliest recognised line reached, and the block is cut from there. The doc comment of `is_cleanup_line` is rewritten to 'any line of CI runner cleanup text, not only the one that starts the block'.",
+      "reason": "Answers findings 2 and 6. A walk from the END can only strip a trailing block, so checkout git lines at the START of a job log cannot be chosen as the cut. The `##[group]Run ` boundary (every step, including the failing `cargo xtask test-shard` step, starts with it in the raw log) separates the checkout block from the failing step even when the failing step printed 0 or 1 lines. The gap of 1 covers the real block's interleaved plain lines (`git version 2.x` between `[command]/usr/bin/git version` and the next command; `http.https://github.com/.extraheader` between two git commands). The header-first cut keeps old behaviour for logs with a header followed by unrecognised post-step text such as cache messages, so existing tests at checks.rs:857-930 and gh/tests.rs:726-772 are unchanged. Idempotence holds: after a pass, the last non-blank kept line has no recognised line within 1 unrecognised line, and the trailing note adds one more unrecognised line, so a second pass (with_failure_detail on the stored tail, CheckFailure::of) cuts nothing. A generic form such as `git version ` is not matched on its own, so a local check printing it is not touched. Input forms handled (log-line forms; no reading or admission form, so `refusal_corpus` has no case for them): header present and block after it; header absent with git/Removing/Node lines at the end; header last with the git lines above it; `##[error]` cancel line then block with no header; checkout lines at the start of the log; a single stray cleanup-looking line before the failing section (test at checks.rs:879); an all-cleanup log.",
+      "rejected": [
+        {
+          "option": "The previous plan's forward rule: first recognised line at or after the anchor whose suffix is at least half cleanup",
+          "why": "With no marker the anchor is 0 (checks.rs:379). Checkout git lines at the start of a job log would qualify and the body would shrink to the setup lines (finding 2)."
+        },
+        {
+          "option": "Count `##[group]` and `##[endgroup]` as cleanup",
+          "why": "They wrap every step of a job log, so they are not specific to cleanup and would widen the cut."
+        },
+        {
+          "option": "Strip only the maximal run of recognised lines from the end, with no gap",
+          "why": "A single unrecognised line inside the real block stops the strip and leaves earlier cleanup. The gap of 1 and the step-start boundary keep the tolerance small."
+        },
+        {
+          "option": "A second recogniser in gh/client.rs or send_back.rs",
+          "why": "Criterion 4 forbids it, and the local run (checks.rs:618) would not get it."
+        }
+      ]
+    },
+    {
+      "choice": "`failure_section` returns `NO_OUTPUT_NOTE` plus a newline only when `text.trim()` is non-empty and the body left after the cut has no non-blank line. A blank or empty input is returned as before. Local checks that print nothing keep `output_tail == \"\"`.",
+      "reason": "Answers finding 3. A silent local check (for example `exit 3`, used at checks.rs:759) reaches `failure_section` through checks.rs:618 with text \"\". A note saying the log held only runner cleanup text would be false there and would reach every reader that shows a non-empty tail. The old test at checks.rs:933 (all-cleanup text returns the whole text) is rewritten to expect the note, because the old `c > 0` filter existed only to avoid an empty body.",
+      "rejected": [
+        {
+          "option": "Return the note whenever the body is empty",
+          "why": "False for an empty local output (finding 3)."
+        },
+        {
+          "option": "Keep returning the whole all-cleanup text",
+          "why": "That is the noise the request removes: a record holding only runner cleanup."
+        }
+      ]
+    },
+    {
+      "choice": "Name the root cause in the CHANGELOG as what the code did: `failure_section` cut only at a cleanup header after the anchor, so a log with no header matched, or with git credential-removal lines above the last header line, fell through to a plain tail of cleanup text, and nothing told the reader that no failing section was found. Cover both shapes of a cancelled or did-not-finish shard in tests: with a `##[error]` cancel line (anchor at that line) and with neither a marker nor `##[error]` (anchor 0). Do not claim which shape the six jobs had.",
+      "reason": "Answers finding 5. `records/` is absent from the snapshot (system facts, Producer snapshot), so the logs of the six jobs cannot be read here. A cancelled step prints a `##[error]` line, which `failure_section` already uses as the anchor (checks.rs:378). The fix therefore does not depend on which shape occurred: header-first plus the backward walk handle both.",
+      "rejected": [
+        {
+          "option": "State as fact that the failed shards had no `##[error]` or header",
+          "why": "Not shown by any record available to the plan."
+        }
+      ]
+    },
+    {
+      "choice": "`CheckFailure::of` (send_back.rs:288-299) takes `failure_section(&run.output_tail, FAILED_TAIL_LINES, FAILED_TAIL_BYTES)` before the 3000-byte `tail`. routing.rs gets tests only, no production edit.",
+      "reason": "Production reaches `CheckFailure::of` only with local runs (run/checks.rs:448 `Exec::exec`, then 453). Their tails are already section-cut, and `failure_section` is idempotent on them (shown above), so behaviour there is unchanged. The change keeps the send-back clean for a stored record written by older code or by another source, and one shared recogniser serves the send-back too. routing.rs:276-293 already sends reused red `test` runs through `with_failure_detail`; only a test is needed to show the stored run and the later readers.",
+      "rejected": [
+        {
+          "option": "Change how the send-back cuts a section longer than 3000 bytes so the section's start is kept",
+          "why": "A separate length question, not caused by cleanup text. Listed as a risk."
+        },
+        {
+          "option": "Leave send_back.rs unchanged",
+          "why": "Criterion 3 asks for the send-back tail never to contain the cleanup lines, and send_back.rs is a listed deliverable."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "The one place for recognition. Add `is_cleanup_header`, extend `is_cleanup_line` (content forms; doc comment rewritten), add `is_step_start`, `cleanup_start`, `CLEANUP_GAP`, `has_failing_section`, `no_test_section_note`, `NO_OUTPUT_NOTE`, `NO_TEST_SECTION_PREFIX`. Change the cut and the empty-body rule in `failure_section` (373-419) and its doc comment. Add the new tests and rewrite the test at checks.rs:933.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "purpose": "`detail_from_job_logs` finds shards with no runner marker, builds one trailing note, reserves its line and byte cost (and the units line's) inside the limits, and appends it as the last line. Correct the doc comment at 286-295. Add `mod detail_tests`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "One assertion only: line 589 in `reused_red_degrades_when_the_log_lists_no_failures` changes from `ends_with(\"build broke\\n\")` to `contains(\"build broke\\n\")` plus a check that the last line is the no-section note. A test outside the listed deliverables that the trailing note breaks.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "`CheckFailure::of` cuts the stored output with `failure_section` before taking the 3000-byte tail; add `with_failure_detail_tail_is_clean_in_the_send_back` to `check_failure_tests`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "purpose": "Tests only: the end-to-end `with_failure_detail_end_to_end_keeps_the_note_to_the_send_back_and_the_verifier_brief` (real `detail_from_job_logs`, `run_routed_with_record`, `CheckFailure::of`, `check_result_view`, `verifier_brief`). No production edit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "action": "modify",
+      "purpose": "Doc comment of `FailureDetail.output_tail` only (line 99): add that it may end in one note line when no log had a failing test section.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One `### Fixed` entry under `## [Unreleased]`, inserted after the entry ending at line 23: root cause as what the code did, what is stored now, the limits, no refusal rule, the tests.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "checks.rs, recognisers: add `NO_OUTPUT_NOTE` ('(no output was kept: the log held only runner cleanup text)') and `NO_TEST_SECTION_PREFIX` ('(no failing test section was found in '). Split `is_cleanup_header` (the three existing header forms, `##[group]` prefix ignored) out of `is_cleanup_line`. Extend `is_cleanup_line` to header or content (`[command]/usr/bin/git `, `/usr/bin/git `, `Temporarily overriding HOME`, `Adding repository directory to the temporary git global config`, `Removing HTTP extra header`, `Removing includeIf`, `Complete job`, `Evaluate and set job outputs`, `##[warning]Node.js`), and rewrite its doc comment to 'any line of CI runner cleanup text'. Add `is_step_start` (a trimmed line starting `##[group]Run `), `CLEANUP_GAP = 1`, and `cleanup_start(lines, anchor) -> Option<usize>`: walk `(anchor..len).rev()`, skip blank lines, break at a step start, set `start` and reset the gap on a recognised line, otherwise count a gap and break when it exceeds `CLEANUP_GAP`. Add `pub fn has_failing_section(text) -> bool` (any `is_runner_marker` line) and `pub fn no_test_section_note(jobs: &[&str]) -> String`, which names at most 6 jobs then '+N more', ends with '; the lines above are the last of that log before runner cleanup)' and a newline.",
+    "checks.rs, `failure_section`: set `end` to the first `is_cleanup_header` line at or after the anchor, else `lines.len()`. Set `cut = cleanup_start(&lines[..end], anchor).unwrap_or(end)`. Body is `text` when `cut == lines.len()`, else `lines[..cut].join(\"\\n\")` plus a newline (empty when `cut == 0`). If `body.trim()` is empty and `text.trim()` is not, return `NO_OUTPUT_NOTE` plus a newline. Leave the window and jump logic (393-418) unchanged. Update the doc comment of `failure_section`.",
+    "checks.rs, tests: add the criterion 1 tests (a)-(f), `with_failure_detail_drops_headerless_cleanup_from_the_stored_tail` and `with_failure_detail_and_local_run_never_store_cleanup`. Rewrite the test at checks.rs:933 to `failure_section_of_only_cleanup_says_so`. Use string literals in the assertions that must fail on the base tree.",
+    "gh/client.rs: in `detail_from_job_logs`, after `readable` is built, collect `missing` (names of readable jobs whose log has no `has_failing_section`) and `note = (!missing.is_empty()).then(|| no_test_section_note(&missing))`. Set `reserved_lines = usize::from(note.is_some()) + usize::from(!names.is_empty() && !units.is_empty())`. Compute `per_lines = ((FAILED_TAIL_LINES - reserved_lines) / n).saturating_sub(header).max(1)` and `per_bytes = FAILED_TAIL_BYTES.saturating_sub(note_len) / n`. Push the note after the loop. Update the doc comment at 286-295 (the tail is the failing section or the last pre-cleanup lines, ending in a note naming shards with no test section). Add `mod detail_tests` with the three tests of criterion 2. Add one clause to the `FailureDetail.output_tail` doc comment in ci_result.rs:99.",
+    "gh/tests.rs:589: change the assertion in `reused_red_degrades_when_the_log_lists_no_failures` to `contains(\"build broke\\n\")` and assert the last line starts with '(no failing test section was found in test (shard 1)'. Change nothing else in that file.",
+    "send_back.rs: change `CheckFailure::of` to `tail: crate::checks::tail(&crate::checks::failure_section(&run.output_tail, crate::checks::FAILED_TAIL_LINES, crate::checks::FAILED_TAIL_BYTES), CHECK_FAILURE_TAIL_BYTES)`. Add `with_failure_detail_tail_is_clean_in_the_send_back` to `check_failure_tests`.",
+    "routing.rs, tests module: add `with_failure_detail_end_to_end_keeps_the_note_to_the_send_back_and_the_verifier_brief` using `crate::gh::detail_from_job_logs`, the `Detailed` and `Local` stubs, `run_routed_with_record`, `crate::run::CheckFailure::of`, `crate::run::append_check_failures`, `crate::verify::check_result_view` and `athena_context::briefs::verifier_brief`. Use no production edit.",
+    "CHANGELOG.md: insert one `### Fixed` entry after the entry ending at line 23 and before `### Added` (line 25). Give the failure class and the three job ids. State the root cause as what the code did, what is stored now, the known-text limit, that no refusal rule is added (0% newly refused) and that the drain test and a base-tree rerun are out of scope, and list the tests with their commands.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any failure in the touched tests, and confirm with `git diff --stat` that only the listed files changed."
+  ],
+  "risks": [
+    {
+      "risk": "The recognisers are a list of known strings. A new runner cleanup form, or 2 or more consecutive unrecognised lines inside a headerless block, leaves some cleanup text in the record. The trailing note still says when no failing test section was found.",
+      "mitigation": "The header-first cut keeps old behaviour for any log with a matched header. The content list covers the git, Node and Complete-job forms in the brief's log shape, and the gap of 1 covers the real block's interleaved plain lines. The CHANGELOG says recognition is by known text and does not claim zero residual noise."
+    },
+    {
+      "risk": "A cut removes real output: a local check whose output ends in cleanup-looking lines, or a log whose real section is followed by a single recognised line.",
+      "mitigation": "The cut never goes before the last runner marker or `##[error]` line (the anchor). It stops at a `##[group]Run ` step start and after 2 consecutive unrecognised lines. Generic forms such as `git version ` and `##[group]` are not matched alone. `NO_OUTPUT_NOTE` is returned only when a non-blank input was fully removed. The existing tests at checks.rs:857-930 and a new realistic-log test (checkout lines at the start, progress, block) must pass."
+    },
+    {
+      "risk": "Logs of the six failed jobs were not available (`records/` is absent from the snapshot), so which log shape each had is not shown.",
+      "mitigation": "The fix and the tests cover both shapes of a cancelled or did-not-finish shard (with `##[error]` and with neither marker nor `##[error]`). The CHANGELOG states what the code did and makes no claim about the six logs."
+    },
+    {
+      "risk": "The send-back keeps only the last 3000 bytes of a section that may be up to 64 KiB, so a long section can lose its `failures:` header there.",
+      "mitigation": "Not caused by cleanup text and left unchanged; it is a separate length question. The trailing note is the last line, so it is kept."
+    },
+    {
+      "risk": "Stored records written before the change still hold cleanup text.",
+      "mitigation": "They are not rewritten. The send-back view re-cleans them through `failure_section`. The other readers show the old text."
+    },
+    {
+      "risk": "The end-to-end test builds a `VerifierInputs` outside the context crate and `verifier_brief` may need more fields filled than expected.",
+      "mitigation": "Every field of `VerifierInputs`, `AcceptedReading` and `CandidateView` is pub (briefs.rs:74-83, 942-949, 1182-1198). The producer copies `plain_verifier_inputs` (briefs.rs:3346-3371) field by field, and if a field is missing falls back to the already-existing context-crate test shape without changing what is asserted."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "failure_section cleanup recognition and the empty-output rule",
+      "dependent": "crates/athena-core/src/checks.rs `run_check` (line 618), which stores `failure_section` output for every locally run failed check; crates/athena-core/src/run/format.rs:91-105 (`Formatted::Unfixed { output: check.output_tail }`) and run/tests.rs:516-540 (fmt error output)",
+      "kind": "code",
+      "test": "cargo test -p athena-core failure_section; a_failed_local_run_keeps_the_failing_section_not_trailing_cleanup (checks.rs:867); with_failure_detail_and_local_run_never_store_cleanup; run::tests an_unfixable_fmt_error_is_reported_and_the_fmt_check_fails_with_the_same_text (rustfmt output has none of the cleanup forms); run/tests.rs:5691 (306 lines with no marker or cleanup form: no cut, the old 200-line tail)",
+      "reason": null
+    },
+    {
+      "name": "with_failure_detail stored output_tail (checks.rs:424-452)",
+      "dependent": "crates/athena-core/src/routing.rs:276-293 (`run_routed_with_record` applies `with_failure_detail` to a reused red `test` run); the CiSource wrapper `Paced::failure_detail` at routing.rs:167",
+      "kind": "code",
+      "test": "routing.rs routing_a_red_run_puts_the_redacted_detail_on_the_failed_test_check_only (593, unchanged: its tail has no cleanup); the new with_failure_detail_end_to_end test; checks.rs a_reused_failed_check_takes_the_redacted_names_and_tail_and_logs_the_names (705) and with_failure_detail_keeps_the_units_line_first (939)",
+      "reason": null
+    },
+    {
+      "name": "detail_from_job_logs output_tail (trailing note; line and byte reserve) and its doc comment (client.rs:286-295)",
+      "dependent": "crates/athena-core/src/gh/client.rs:1089-1116 `GhClient::failure_detail` (the only production caller of `detail_from_job_logs`); gh/mod.rs:45 re-export",
+      "kind": "code",
+      "test": "New detail_tests; gh/tests.rs 494 red_reused_run_records_failing_tests_and_log_tail, 578 reused_red_degrades_when_the_log_lists_no_failures (its assertion `ends_with(\"build broke\\n\")` at line 589 is UPDATED to `contains(\"build broke\\n\")` plus a last-line note check, because the note is now the last line), 607 (asserts `failed_tests` only), 674, 726, 746 (both shards have markers, so no note, and `lines().count() <= 200` still holds)",
+      "reason": null
+    },
+    {
+      "name": "a test outside the deliverables that pins the old tail",
+      "dependent": "crates/athena-core/src/gh/tests.rs:589",
+      "kind": "code",
+      "test": "reused_red_degrades_when_the_log_lists_no_failures, updated as above in plan step 5. This is the only existing assertion found that the trailing note breaks. Searched: `ends_with(` on `output_tail` in gh/tests.rs, run/tests.rs, verify.rs, routing.rs and checks.rs.",
+      "reason": null
+    },
+    {
+      "name": "CheckFailure tail (send_back.rs:288-299)",
+      "dependent": "crates/athena-core/src/run/checks.rs:448-455 (the in-loop check run, which feeds `CheckFailure::of` with local runs only); crates/athena-core/src/run/producer.rs:702 (`append_check_failures`)",
+      "kind": "code",
+      "test": "with_failure_detail_tail_is_clean_in_the_send_back; existing check_failure_tests (send_back.rs:373-421) keep their short tails (`failure_section` returns them unchanged)",
+      "reason": null
+    },
+    {
+      "name": "the stored tail as the verifier brief quotes it",
+      "dependent": "crates/athena-core/src/verify.rs:62-88 `check_result_view` (strips only a leading `failing units:` line for a reused failed check); crates/athena-core/src/run/verification.rs:74-77 (builds the brief's check views); crates/athena-context/src/briefs.rs:1131-1166 `failed_check_detail` and 1114-1127 `clip_log_tail` (last 60 lines, 6 KiB). briefs.rs:1098-1102 quotes a demonstration run's tail, not a check's, and is unaffected.",
+      "kind": "code",
+      "test": "The end-to-end test with_failure_detail_end_to_end_keeps_the_note_to_the_send_back_and_the_verifier_brief renders `verifier_brief` from a stored run and asserts the note is quoted. The existing briefs.rs:3335 test already pins that the last 60 lines are kept. briefs.rs is not edited, since the note is the last line the clip keeps.",
+      "reason": null
+    },
+    {
+      "name": "CheckRun.output_tail readers",
+      "dependent": "crates/athena-core/src/run/records_criteria.rs:898 (`tail(&run.output_tail, 3000)` of a failed records-criterion command); crates/athena-core/src/reading/retry.rs:730 (carries a prior check's `output_tail`); crates/athena-core/src/introspect.rs:1053 (`clip_tail` of `c.output_tail`)",
+      "kind": "code",
+      "test": null,
+      "reason": "They read the stored text and take its end, so a trailing note is kept by them and clean text stays clean. They are not edited. Records written before the change keep their old text and are not rewritten."
+    },
+    {
+      "name": "failed_tests and `test <name> ... FAILED` lines in the kept output",
+      "dependent": "crates/athena-core/src/checks.rs:211 `failing_names`, `log_entry`; crates/athena-core/src/verify.rs `is_pre_existing`; the `failed_tests` field",
+      "kind": "code",
+      "test": "the_log_entry_names_the_failing_tests (checks.rs:988); reused_red_flags_a_shard_whose_log_was_not_read_or_did_not_finish (gh/tests.rs:607)",
+      "reason": "`failed_tests` comes from `failed_test_names` (checks.rs:119) on the raw log, computed before `failure_section` runs (client.rs:316 and checks.rs:603), and is not changed. The `FAILED` lines are in the kept section. The note starts with '(' and cannot match `test <name> ... FAILED`."
+    },
+    {
+      "name": "FailureDetail.output_tail meaning",
+      "dependent": "crates/athena-core/src/ci_result.rs:94-101 `FailureDetail.output_tail`, documented as 'The failing section of the job's log (post-job cleanup text dropped), led by a `failing units:` line. Not yet redacted.'",
+      "kind": "code",
+      "test": null,
+      "reason": "The documented meaning still holds: the field is the failing section with cleanup text dropped. It may now end in one note line when no log had a failing test section. The struct and its fields are unchanged; the doc comment gets one added clause (plan step 4)."
+    },
+    {
+      "name": "record shape and system facts",
+      "dependent": "crates/athena-data records (`CheckRun` serialisation and the records round-trip test); docs/system-facts.md and its budget lines; the prompt files",
+      "kind": "rule",
+      "test": null,
+      "reason": "No field is added, retyped or removed, so no record changes shape and the round-trip test is unaffected. No prompt file or brief changes, so no token budget moves and `system_facts_budgets_match_computed` is unaffected."
+    },
+    {
+      "name": "refusal and admission rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (header lines 1-15: request and reading shapes through the reading gate); admission.rs and gate checks",
+      "kind": "rule",
+      "test": null,
+      "reason": "No refusal, admission or gate rule is added or changed. The corpus has no case for CI log lines, and `cargo test -p athena-core --test refusal_corpus` is run as a guard in criterion 7."
+    },
+    {
+      "name": "admission, gates, config and CI settings",
+      "dependent": "`[parallel] max_concurrency` and parallel jobs; CI workflows; athena.toml; defaults.toml",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "None is read or edited. The changed functions are pure over strings. Parallel jobs reach them only through each job's own `run_check` or `with_failure_detail` call on its own output, so no concurrency mode or shared state changes."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Add tests to the `tests` module of checks.rs. Each calls `failure_section` on an inline string and asserts with string literals only, not with the new constants, so the file compiles on the base tree and the assertions fail there. (a) `failure_section_drops_a_headerless_cleanup_block`: 40 lines `shard progress N`, then `[command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader`, `Removing HTTP extra header`, `Removing includeIf entries pointing to credentials`, `Cleaning up orphan processes`, `##[warning]Node.js 20 actions are deprecated`. There is no 'Post job cleanup.' header, no runner marker and no `##[error]`. Assert the result contains 'shard progress 39' and none of '/usr/bin/git', 'Removing', 'Cleaning up orphan', 'Node.js'. (b) The same block with NO `Cleaning up orphan processes` line, ending in the Node warning, and a variant with the block's `git version 2.52.0` and extraheader key lines interleaved (the 1 unrecognised line allowed). (c) `failure_section_after_an_error_line_drops_a_headerless_cleanup_block`: progress, `##[error]The operation was canceled.`, then the block with no header. The `##[error]` line and the progress lines stay and the block goes. (d) `failure_section_keeps_progress_after_checkout_lines_in_a_realistic_log`: `Current runner version`, `##[group]Run actions/checkout@v4`, `[command]/usr/bin/git init`, `Temporarily overriding HOME='/x' before making global git config changes`, `Adding repository directory to the temporary git global config as a safe directory`, `[command]/usr/bin/git config --global --add safe.directory /x`, `##[group]Run cargo xtask test-shard 3`, `== shard 3/6: athena-core --lib`, `running 12 tests`, `test a ... ok`, then a headerless cleanup block that repeats `Temporarily overriding HOME` and the git lines. Assert 'running 12 tests' and 'test a ... ok' survive, the checkout lines survive (`Temporarily overriding HOME` appears exactly once), and the block's `--unset-all` and `Removing HTTP extra header` lines are gone. (e) `failure_section_of_only_cleanup_says_so` (replaces the test at checks.rs:933): `cleanup_text(5)` and a git-only block return `NO_OUTPUT_NOTE` plus a newline. (f) `failure_section_of_empty_output_stays_empty`: '' and '  \\n\\n' come back exactly as before, and a local script `exit 3` stored via the `run_script` helper gives `output_tail == \"\"`.",
+      "command": "cargo test -p athena-core failure_section",
+      "observes": "All `failure_section` tests pass: the new ones and the unchanged ones at checks.rs:857-930 (marker then 250 cleanup lines; a cleanup-looking line before the section is kept; no marker and no cleanup is the old tail; the jump case; wide lines). The logs without a header show no cleanup line, a realistic log keeps its progress and checkout lines, a cleanup-only log says so, and an empty log stays empty.",
+      "fails_without": "On the base tree (checks.rs:380-392) the cut is at `Cleaning up orphan processes` only, so (a) keeps the git credential-removal lines, (b) has no cut at all and keeps the whole text with the Node line, (c) keeps the block, and (d) keeps its cleanup copy. The all-cleanup test and the empty-output test also fail or do not compile without the note.",
+      "seam": "Production entry point: `checks::failure_section` (pub, checks.rs:373), called with an inline `&str`, `FAILED_TAIL_LINES` and `FAILED_TAIL_BYTES`. No fake. The in-file helpers `cleanup_text`, `failing_section_text` (checks.rs:838-854) and `run_script` / `sh_spec` (checks.rs:672, 821) exist. The new tests are added by plan step 3."
+    },
+    {
+      "criterion": 2,
+      "method": "Add `#[cfg(test)] mod detail_tests` in gh/client.rs next to `origin_tests` (client.rs:1246). Each test calls the production `detail_from_job_logs` (client.rs:296) with a `Vec<(String, String, Option<String>)>` built inline from unstamped lines (`plain_log_line`, client.rs:203, accepts them). Asserts use literals such as 'no failing test section was found' and not the new constants. (a) `detail_from_job_logs_notes_a_cancelled_shard_without_a_test_section`: job 'test (shard 3)', conclusion 'cancelled', 5 progress lines (no `Running` line, so `failed_tests` stays empty), then `/usr/bin/git config --local --unset-all ...`, `Removing HTTP extra header`, `Cleaning up orphan processes`, `##[warning]Node.js 20 actions are deprecated`. Assert `output_tail` contains every progress line, its LAST line starts '(no failing test section was found in test (shard 3)', and it holds none of the cleanup strings. (b) `detail_from_job_logs_keeps_the_failing_section_of_a_failed_shard`: a 'failure' shard whose log has `== shard 1/6: athena-core --lib`, `    Running unittests src/lib.rs (target/debug/deps/athena_core-0f3a9b)`, `failures:`, `---- tests::a stdout ----`, `thread 'tests::a' panicked at src/lib.rs:9:5:`, `boom`, `failures:`, `    tests::a`, `test result: FAILED. 0 passed; 1 failed`, then the headerless block. Assert `failed_tests == [\"athena_core tests::a\"]`, the tail contains 'tests::a' and 'panicked at', has no 'no failing test section' note, and has no cleanup. (c) `detail_from_job_logs_counts_the_note_inside_the_line_limit`: one 300-line marker-less shard, and a second case with 3 marker-less shards, each followed by the block. Assert `output_tail.lines().count() <= 200`, the last line is the note (naming all 3 shards in the second case), and exactly one note appears.",
+      "command": "cargo test -p athena-core detail_from_job_logs",
+      "observes": "The new tests pass. The existing tests of the same function in gh/tests.rs also pass: the two-shard test (746), the xtask-panic test (726), the parser test (674), the units test (494), and the updated 578. The verifier also runs `cargo test -p athena-core gh::`, because those names lack the substring.",
+      "fails_without": "On the base tree (client.rs:344-348) the cancelled shard's tail ends with the git, `Removing` and Node lines and has no note, so (a) fails on its assertions. (c) fails because there is no note. (b) passes on base, which shows the failing-section case is not changed.",
+      "seam": "Production entry point: `gh::client::detail_from_job_logs` (pub, re-exported at gh/mod.rs:45), with inline job tuples and no host or fake. The module is added by plan step 4; the function exists."
+    },
+    {
+      "criterion": 3,
+      "method": "Every test name contains `with_failure_detail`. Literal assertions are used where the test should fail on base. (a) checks.rs `with_failure_detail_drops_headerless_cleanup_from_the_stored_tail`: `with_failure_detail` on `reused_failed(\"test\")` (checks.rs:681) with `detail(&[\"athena_core x\"], tail)`, where the tail is `failing units: athena-core --lib`, 5 progress lines, then the block. A passthrough closure is the redactor. Assert the units line stays first, the progress lines stay, no cleanup string is present, and a second application of `with_failure_detail` to the result changes nothing (idempotence). (b) checks.rs `with_failure_detail_and_local_run_never_store_cleanup`: `run_script` on a `sh_spec` script that prints 3 progress lines, `test demo ... FAILED`, the git removal lines, `Cleaning up orphan processes` and a Node warning, then `exit 1`. Assert the stored `output_tail` has the FAILED line and no cleanup. (c) send_back.rs, in `check_failure_tests`: `with_failure_detail_tail_is_clean_in_the_send_back`. A `CheckRun` whose `output_tail` still holds progress lines and the block goes through `CheckFailure::of` and `append_check_failures`. Assert neither the `tail` nor the brief text holds the cleanup strings. A second run whose tail ends in a note keeps the note in the brief. (d) routing.rs, in the `tests` module: `with_failure_detail_end_to_end_keeps_the_note_to_the_send_back_and_the_verifier_brief`. Build `jobs` with one cancelled shard whose log is 300 progress lines then the headerless block. Call the production `crate::gh::detail_from_job_logs(&jobs)`, put the result in a `Detailed` stub (routing.rs:565) with `Ci::new(Some(ci_run(SHA, \"failure\")))`, and call `run_routed_with_record(&r, SHA, &changed, &ci, &local, WAIT)` as the test at routing.rs:593 does. On the stored `test` run assert: no cleanup line; `output_tail.lines().count() <= FAILED_TAIL_LINES`; the last line starts '(no failing test section was found in'; the tail equals the detail's tail (idempotent storage). Then `crate::run::append_check_failures(\"brief\".into(), &[crate::run::CheckFailure::of(test)])` must contain 'no failing test section was found'. Finally `crate::verify::check_result_view(test)` goes into a `VerifierInputs` built field by field like `plain_verifier_inputs` (briefs.rs:3346; all its types are pub) and `athena_context::briefs::verifier_brief(&inputs, true)` must contain the note text and no cleanup line.",
+      "command": "cargo test -p athena-core with_failure_detail",
+      "observes": "All the listed tests pass. They cover the reused-CI path (`detail_from_job_logs`, then `with_failure_detail` through `run_routed_with_record`), the local-run path (`run_check` via `run_script`), the send-back view, and the verifier brief's last-60-lines quote of a 300-line tail. On every route the cleanup lines are absent and the note is present as the last line.",
+      "fails_without": "On base, (a), (b) and (c) fail because the headerless block survives `failure_section`, which `with_failure_detail`, `run_check` and `CheckFailure::of` use. (d) fails because the stored tail holds the git and Node lines and has no note.",
+      "seam": "Production entry points: `checks::with_failure_detail` (checks.rs:424), `checks::run_check` (via the existing `run_script` helper, checks.rs:821), `CheckFailure::of` and `append_check_failures` (send_back.rs:288, 317, reachable as `crate::run::…` through `pub(crate) use` at run/mod.rs:89), `routing::run_routed_with_record` (routing.rs:256), `gh::detail_from_job_logs`, `verify::check_result_view` (verify.rs:62) and `athena_context::briefs::verifier_brief` (briefs.rs:1358). Fakes: the existing `Detailed` and `Local` stubs (routing.rs:526-590), injected as `&dyn CiSource` and `&dyn Exec`, and an inline redaction closure. The `Detailed` stub only returns the `FailureDetail` it is given; the logic under test is the real `detail_from_job_logs` and `with_failure_detail`. All exist today; the tests are added by plan steps 3, 6 and 7."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff. All cleanup recognition (`is_cleanup_header`, `is_cleanup_line`, `is_step_start`, `cleanup_start`) and the marker check `has_failing_section` are new or changed only in checks.rs, and are used by `failure_section`, which the local run, `with_failure_detail` and the per-shard path all call. Search the three other diffs for cleanup string literals.",
+      "command": "git diff -- crates/athena-core/src/checks.rs crates/athena-core/src/gh/client.rs crates/athena-core/src/run/send_back.rs crates/athena-core/src/routing.rs",
+      "observes": "gh/client.rs adds only calls to `crate::checks::has_failing_section` and `crate::checks::no_test_section_note` plus the line and byte reserve. send_back.rs adds one call to `crate::checks::failure_section`. routing.rs adds tests. No cleanup string or predicate appears in those files outside test input.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the new entry under `## [Unreleased]` / `### Fixed`, inserted after the entry that ends at CHANGELOG.md:23 and before `### Added` (CHANGELOG.md:25).",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One added entry. It names the failure class `failed-check-output-is-ci-noise-cause-of-test-failure-invisible` and the jobs 20261106-022423-vdtn, 20261106-045349-f6x6 and 20261027-054225-ycks. It states the root cause as what the code did: `failure_section` cut only at a cleanup header found after the anchor, so a log with no header matched, or with git credential-removal lines above the last header line, fell through to a plain tail of cleanup text, and nothing said no failing test section was found. It does not claim which log shape each job had, because the logs were not available to the plan. It states what the record stores now: the failing section, or the last lines before cleanup with one trailing note naming the shards that had no failing test section; `NO_OUTPUT_NOTE` only when a non-empty log held only cleanup; empty output unchanged. It says recognition is by known text, so unknown cleanup forms can still appear. It states that no refusal rule is added, that 0% of readings are newly refused, and that the drain test and a base-tree rerun are not part of the change. It names the tests and the command for each, and states only what the diff does.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks on the final tree: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Recorded Athena checks on the same tree count under D115.",
+      "command": "cargo fmt --all --check",
+      "observes": "fmt is clean, clippy has no warning, and every test passes, including the unchanged tests that assert on a tail: gh/tests.rs 494 (`starts_with` the units line, `ends_with` the last log line, which holds because that log has a runner marker so it gets no note), 607, 674, 726, 746; checks.rs 705, 939; routing.rs 593; run/tests.rs 516 and 5691; and verify.rs 1851.",
+      "fails_without": "A clippy failure would come from an unused helper or a needless borrow in the new functions. A test failure would come from the pinned assertion at gh/tests.rs:589 left as `ends_with(\"build broke\\n\")`, or from the checks.rs:933 test left as 'returns the whole text'.",
+      "seam": "The checks are the repository's own cargo commands (see 'Checks Athena will run on the result'). No fixture."
+    },
+    {
+      "criterion": 7,
+      "method": "Run `git diff --stat` and confirm the touched files. Then run `cargo test -p athena-core --test refusal_corpus` as a guard. The corpus runs request and reading shapes through the reading gate (refusal_corpus.rs:1-15); the cleanup matcher is a CI-log text matcher and has no corpus case. The producer and the verifier run the command, and no result is claimed here.",
+      "command": "git diff --stat",
+      "observes": "Only crates/athena-core/src/checks.rs, gh/client.rs, gh/tests.rs (one assertion), run/send_back.rs, routing.rs, ci_result.rs (a doc comment) and CHANGELOG.md appear. admission.rs, every gate, athena.toml, defaults.toml and the CI workflows are untouched. The corpus test still passes. Expected share of newly refused readings: 0%, because stored output changes and nothing is refused.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "68211ccc04c18680a70d08f94d7748c249e5071d1830833dc02bf8e921cca5f5"
+}
