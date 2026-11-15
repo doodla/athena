@@ -1,0 +1,265 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-045727-c8gn",
+  "round": 1,
+  "at": "2026-11-15T03:41:27.281078826Z",
+  "invocation_seq": 3,
+  "approach": "Root cause: the reader's \"Prompt token headroom\" section (reader.rs:641-661) lists each set by component id (frame.verifier, capability.change.verifier), so a reading that edits one prompt file must work out which sets compose it and take the tightest room itself. Seven jobs planned growth past a set's room. Fix it where the figure is given. Add to athena-context/src/lib.rs a pure `prompt_file_path(component_id) -> Option<String>` and `file_headroom(&[HeadroomRow]) -> Vec<FileHeadroom>` that derive file -> composing sets -> smallest `left()` from the same HeadroomRow list the budgets test checks. headroom_section renders one line per file after the existing per-set rows, which stay byte for byte. HeadroomRow, headroom_rows, ReaderInputs and reading.rs are untouched. No prompt file, budget or refusal rule changes. Unlike the previous plan, a new lib.rs test also reads each mapped file from disk and compares it with the compiled-in text, so the path convention is pinned to the real files. Criterion 7's demonstration now names its seam and what fails without the change.",
+  "decisions": [
+    {
+      "choice": "Derive the per-file table in the brief from the existing HeadroomRow list with a pure function in athena-context; add no field to ReaderInputs and do not touch reading.rs.",
+      "reason": "HeadroomRow.components names every component of every set in order (lib.rs:243-244), and `left()` is the room (lib.rs:253). File -> sets -> minimum is therefore a pure function of the rows, so the table cannot drift from the per-set rows or from the budgets test figures (budgets.rs:396-446 builds the same rows with headroom_rows). The only caller of reader_brief is read_once (reading.rs:607) and the rows reach it at reading.rs:629, both unchanged.",
+      "rejected": [
+        {
+          "option": "Compute the per-file table in athena-core reading.rs and pass it as a new ReaderInputs field",
+          "why": "It needs a second field built at reading.rs:629 plus the fixture at briefs.rs:3926, and two views of the same rows could disagree."
+        },
+        {
+          "option": "A refusal or admission rule that rejects a reading planning growth past a file's room",
+          "why": "The reader never saw the per-file figure, so giving it that figure can prevent the failure; the request prefers information over refusal. Expected share of past accepted readings refused: 0%, because none is added."
+        },
+        {
+          "option": "Put the guidance in prompts/reader.md",
+          "why": "Budget reader is 1998 of 2000 (docs/system-facts.md), and editing prompt files is out of scope. The brief sits outside the budgeted sets."
+        }
+      ]
+    },
+    {
+      "choice": "Map a component id to a path by convention: contract and frame.<reader|producer|verifier|planner|critic> to crates/athena-context/prompts/<name>.md, and capability.<id>.<producer|verifier> to crates/athena-cap-<id>/prompts/<role>.md. Any other id (defaults, catalog, an unknown frame or role) returns None and is left out of the table.",
+      "reason": "The ids are fixed at lib.rs:34-66 (contract, frame.reader, frame.producer, frame.verifier, frame.planner, frame.critic), and the capability crates use capability.change.* (cap-change lib.rs:19,24) and capability.study.* (cap-study lib.rs:24,29) with include_str!(\"../prompts/producer.md\" / \"verifier.md\"). defaults and catalog are generated at run time (reading.rs:276-277), so no file can be edited to change them. Returning None for anything unknown means a path is never invented.",
+      "rejected": [
+        {
+          "option": "Add a path field to PromptAsset",
+          "why": "PromptAsset literals appear in many places, including test capabilities (run_pin_tests.rs:43-48 uses the frame consts, and other test capabilities), so the change would spread across crates for no gain."
+        }
+      ]
+    },
+    {
+      "choice": "Pin the convention with a lib.rs test that, for the contract, each frame and the four real capability sections, reads the mapped path from disk (CARGO_MANIFEST_DIR/../../<path>) and asserts the file text equals the compiled-in text.",
+      "reason": "The earlier plan's risk was that the convention could be wrong. The existing test at lib.rs:654-666 already reads sibling crates' prompt files and docs/agent-reference.md by relative path, so the pattern exists. A wrong frame name or crate directory fails the test instead of printing a path that does not exist. athena-context already reaches these files by include_str! (lib.rs:655-658).",
+      "rejected": [
+        {
+          "option": "Test only the string mapping with literal expected paths",
+          "why": "It would pass even if a prompt file were renamed or moved, leaving the brief naming a path that does not exist."
+        }
+      ]
+    },
+    {
+      "choice": "Render the per-file table inside the existing '# Prompt token headroom' section, after the per-set rows, under a plain lead line (no new '#' heading), only when the rows are non-empty.",
+      "reason": "The existing per-set lines and the phrase 'costs every set that includes it' are asserted by briefs.rs:4263-4277 and run_pin_tests.rs:1603-1624, so they stay byte for byte. Criterion 2 puts the table under that heading. The no-rows test (briefs.rs:4588-4591) keeps passing.",
+      "rejected": [
+        {
+          "option": "A separate top-level section in the brief",
+          "why": "Criterion 2 asks for the table under '# Prompt token headroom'. A separate section would also need its own empty-rows guard."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `FileHeadroom { path, sets, left }`, `prompt_file_path` and `file_headroom` after `headroom_rows`, with unit tests for the shared verifier frame (59 and 36 left), the id -> path mapping, and a disk check that each mapped file exists and equals the compiled-in text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs/reader.rs",
+      "action": "modify",
+      "purpose": "headroom_section also renders the per-file table (path, composing sets, tightest room) after the unchanged per-set rows, only when the rows are non-empty.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add the two reader-brief tests: the contract.md line lists every composing set with the minimum room, and no per-file text appears when headroom is empty.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add a stand-in `change` capability and the test `the_reading_brief_names_the_token_headroom_per_prompt_file`, asserting the per-file lines in the real reading brief.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add one [Unreleased] / Changed entry naming the root cause, the failure class, the jobs, the fix and the tests; existing entries are not edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D185 (Case, Decision with root cause, Alternatives, Tradeoff, Reversal cost, Provenance); existing entries are not edited.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-context/src/lib.rs, after `headroom_rows`, add `pub struct FileHeadroom { pub path: String, pub sets: Vec<String>, pub left: u64 }` (derive Debug, Clone, PartialEq, Eq) with a doc comment: the tightest room among the sets that compose one prompt file; a file listed in several sets costs each of them when it grows. Add `pub fn prompt_file_path(component_id: &str) -> Option<String>`. `contract` returns crates/athena-context/prompts/contract.md. `frame.<role>` with role in reader, producer, verifier, planner or critic returns crates/athena-context/prompts/<role>.md. `capability.<id>.<role>` (split with `strip_prefix(\"capability.\")` and `rsplit_once('.')`) with role producer or verifier returns crates/athena-cap-<id>/prompts/<role>.md. Anything else returns None. Add `pub fn file_headroom(rows: &[HeadroomRow]) -> Vec<FileHeadroom>`: for each row in order and each component id with a path, find the entry by path in a Vec (first-seen order), push the row's set only if not yet listed, and keep the minimum `row.left()`; otherwise push a new entry.",
+    "In the lib.rs tests module add three tests, all with `headroom` in the name. `headroom_per_file_takes_the_tightest_of_the_sets_that_compose_it` builds the rows of criterion 3 (verifier (change) 59 left, verifier (study) 36 left), asserts the verifier.md entry lists both sets in row order with left 36, the cap-change verifier.md entry lists only change with 59, and a row listing frame.verifier twice names its set once. `headroom_file_paths_map_every_prompt_component` asserts the mapping cases and None for defaults, catalog, `frame.unknown`, `capability.x.other` and `capability`. `headroom_file_paths_name_the_file_each_component_is_built_from` joins `Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\")` with the mapped path for CONTRACT, the five frames and the four real capability sections, and asserts that `std::fs::read_to_string` equals the compiled-in text (use the include_str! paths already at lib.rs:655-658 for the capability texts).",
+    "In crates/athena-context/src/briefs/reader.rs `headroom_section`, keep the heading, intro, per-set loop and trailing blank line byte for byte, and insert the per-file block after the loop and before `out.push('\\n')`. Call `crate::file_headroom(&inputs.headroom)`. If the result is non-empty, write a lead line `By prompt file (the tightest room across the sets that compose it; plan growth to fit the tightest):` and one line per file: `- {path}: composed by {sets joined by \", \"}; tightest room {left} tokens left`. Do not add a new '#' heading.",
+    "In crates/athena-context/src/briefs.rs tests add `the_reader_brief_lists_the_tightest_room_per_prompt_file` (three rows composing `contract` with 80, 20 and 41 left; assert the exact contract.md line with all three sets and `tightest room 20 tokens left`) beside briefs.rs:4263, and `the_reader_brief_has_no_per_file_headroom_without_rows` (empty headroom; assert neither the lead line nor `prompts/contract.md: composed by` appears) beside briefs.rs:4588.",
+    "In crates/athena-core/src/run_pin_tests.rs add `struct StandInChange` (id \"change\"; card, grants, checks, env, admit and pins_repo as PinningStudy, lines 31-77; producer and verifier sections `PromptAsset { id: \"capability.change.producer\"/\"capability.change.verifier\", version: 1, text: \"stand-in ...\" }`) and the test `the_reading_brief_names_the_token_headroom_per_prompt_file`. It captures the reader brief with the Tweak hook as at :1587-1591, does `let mut athena = athena_with(...)`, `athena.capabilities.push(Box::new(StandInChange))`, then `athena.ask(\"study the demo\", &Quiet)`. It asserts the cap-change verifier.md line with the room computed through `athena_context::compose` and `BudgetSet::Verifier.budget()`, and that the context verifier.md line names `verifier (study), verifier (change)` with 0 tokens left (study's frame is composed twice, :1608-1619).",
+    "Add one bullet to CHANGELOG.md under `## [Unreleased]` / `### Changed` after the existing bullets (before line 16): the root cause (the reader's headroom section gave per-set rows by component id, not per-file room, so a reading had to find the sets composing a file and take the smallest room itself), the failure class reading-edits-prompt-without-checking-token-budget (20261024-002642-bm4c), job 20261024-002644-1as8 and the other introspected jobs, the fix (`prompt_file_path` and `file_headroom` in crates/athena-context/src/lib.rs and the per-file lines in headroom_section), 'no refusal rule (0% of past accepted readings refused)', and the tests (`cargo test -p athena-context headroom`, `cargo test -p athena-context reader_brief`, `cargo test -p athena-core token_headroom`). Append D185 to the end of docs/decisions.md in the D184 format (Case, Decision with the root cause, Alternatives, Tradeoff, Reversal cost, Provenance listing what was read, which tests were run and what was not measured, namely whether readers act on the table). Edit no existing entry.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` (fix lints in the new code only). Then run `cargo test -p athena-cli --test budgets` to confirm the headroom rows and the docs/system-facts.md budget lines are unchanged. Touch no Cargo.toml or Cargo.lock, so `--locked` holds."
+  ],
+  "risks": [
+    {
+      "risk": "The path convention is wrong for a future capability crate, or a component id has no file, so the brief shows a wrong path or omits the component.",
+      "mitigation": "`prompt_file_path` returns None for ids it does not know (defaults, catalog, an unknown frame or role), so a path is never invented. The disk test reads each mapped path for the contract, every frame and the four real capability sections and compares the file with the compiled-in text, so a rename or move fails a test. The per-set rows stay as a fallback."
+    },
+    {
+      "risk": "The stand-in capability in the athena-core test adds a second capability to `athena.capabilities` and could disturb the reader fake or the capability choice.",
+      "mitigation": "The scripted reader reply fixes `capability: study` (run_pin_tests.rs:170). `Athena::capability` looks up by id (lib.rs:264-270). The stand-in is pushed only in the new test and mirrors PinningStudy's trait methods (run_pin_tests.rs:31-77). The existing test is unchanged."
+    },
+    {
+      "risk": "The brief grows by about one line per prompt file, and a reader could still ignore it.",
+      "mitigation": "This is not enforced, by design: no refusal rule is added (0% of past accepted readings refused). The table states the tightest room per file in the form the reader needs, and the budgets test remains the backstop after a producer edit. The reader brief has no token budget, and the per-file table only restates figures the section already carries. Whether readers use it is not measured."
+    },
+    {
+      "risk": "The contract file is listed by every set, so its line is long (eight sets in the repository's own rows).",
+      "mitigation": "Sets are listed once each in row order and the table has at most one line per prompt file, about 15 lines. No other text in the brief changes."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "the '# Prompt token headroom' section of the reader brief",
+      "dependent": "crates/athena-context/src/briefs/reader.rs `headroom_section`, called only from `reader_brief` at reader.rs:387",
+      "kind": "code",
+      "test": "cargo test -p athena-context reader_brief. `the_reader_brief_shows_the_headroom_of_each_set` (briefs.rs:4263-4277) asserts the heading, the phrase 'costs every set that includes it' and the exact per-set line; all are kept. `the_reader_brief_has_no_headroom_section_without_rows` (briefs.rs:4588) still passes, and the new tests cover the per-file lines.",
+      "reason": null
+    },
+    {
+      "name": "reader brief text built per reading mode",
+      "dependent": "crates/athena-core/src/reading.rs `read_once` (reading.rs:571-632), the only caller of `reader_brief`. It is reached through `read_for` (reading.rs:512) from `ask` (:935), `read_queued` (:1158), `read_unread` (:1173), `first_reading` (:1187), `retry` (:1262) and `correct` (:1324), with or without an earlier attempt or a refusal.",
+      "kind": "code",
+      "test": "cargo test -p athena-core token_headroom covers the `ask` path end to end. The other modes differ only in `earlier_attempt` and `refusal`, which the new code does not read.",
+      "reason": "Every mode builds the brief from the same `reader_headroom(self, jc)` rows (reading.rs:258-280). They read only `athena.capabilities` and `jc.config` and no records or job state. The new lines are derived from those rows and add no input, so every mode gets the table and none changes behavior."
+    },
+    {
+      "name": "per-set headroom lines in the real reading brief",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:1582-1646 `the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets`",
+      "kind": "code",
+      "test": "cargo test -p athena-core token_headroom. The test asserts with `contains` the exact `verifier (study)` line and the `reader` line; those lines are not changed and the new text follows them. Its brief has study's verifier frame listed twice (frame.verifier, frame.verifier), and `file_headroom` adds a row's set once per path.",
+      "reason": null
+    },
+    {
+      "name": "HeadroomRow, headroom_rows and ReaderInputs.headroom (documented at lib.rs:238-249 as the components a set composes, in order, and the tokens left)",
+      "dependent": "crates/athena-core/src/reading.rs:258-280 `reader_headroom` and the ReaderInputs construction at reading.rs:629; crates/athena-context/src/briefs.rs:3926 (fixture `headroom: vec![]`)",
+      "kind": "code",
+      "test": null,
+      "reason": "No struct, field or signature changes. `file_headroom` only reads `&[HeadroomRow]`, using `components` for exactly its documented meaning, so these callers compile and behave as before."
+    },
+    {
+      "name": "headroom row figures and the prompt-set sizes and budgets",
+      "dependent": "crates/athena-cli/tests/budgets.rs:396-446 `the_reader_headroom_rows_equal_the_budget_figures_and_name_shared_files`, and `system_facts_budgets_match_computed` with the budget lines in docs/system-facts.md",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets",
+      "reason": "`headroom_rows`, the budgets and every prompt file are unchanged, so the computed sizes (reader 1998 of 2000 and the rest) are the same. The new per-file figures are derived from the same rows, and the new text lives in the reader brief, which sits outside the budgeted sets."
+    },
+    {
+      "name": "reader brief text",
+      "dependent": "crates/athena-core/src/run/planning.rs and the planner and critic briefs",
+      "kind": "code",
+      "test": null,
+      "reason": "They read the accepted reading, not the reader brief, and `rg reader_brief(` finds callers only in reading.rs, reader.rs and tests. Only the reader stage sees the new section."
+    },
+    {
+      "name": "reading refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and the reading checks in reading.rs (check_criteria_evidence and others)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No refusal or matching rule is added or changed. The change formats brief text only, so no input form is added and no corpus case is mapped. Those tests read old CHANGELOG.md and decisions.md entries by `include_str!` (refusal_corpus.rs:1138-1250, :1749-1774), which this change does not edit; it only appends."
+    },
+    {
+      "name": "docs/decisions.md (D185 appended)",
+      "dependent": "crates/athena-core/tests/buy_first.rs:105-149, which reads docs/decisions.md for the 'Buy before build' entry D36",
+      "kind": "rule",
+      "test": "cargo test --locked (the athena-core buy_first test)",
+      "reason": "The test reads only the D36 section and the Cargo.toml crate list. Appending D185 after D184 leaves D36 untouched."
+    },
+    {
+      "name": "capability id -> prompt path convention (crates/athena-cap-<id>/prompts/<role>.md)",
+      "dependent": "athena.toml `[capabilities.change]` (line 81) and `[capabilities.study]` (line 111), defaults.toml, and the capability crates' layout (athena-cap-change/src/lib.rs:19-26, athena-cap-study/src/lib.rs:24-31)",
+      "kind": "host_setting",
+      "test": "cargo test -p athena-context headroom (`headroom_file_paths_name_the_file_each_component_is_built_from`)",
+      "reason": "No config key is read or changed. The convention is read from the two capability crates' include_str! lines. A future capability crate laid out differently would get no line or a wrong path; the lib.rs disk test pins the two present crates and the frames, so renaming a file breaks that test."
+    },
+    {
+      "name": "capability list used by reader_headroom, `Athena::capability(id)` (lib.rs:264) and reading_schema's capability enum (reading.rs:633-643)",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs `athena_with` (:154-261) and the stand-in capability pushed onto `athena.capabilities` in the new test only",
+      "kind": "code",
+      "test": "cargo test -p athena-core token_headroom",
+      "reason": "The stand-in is added to a local `Athena` in one test. Other tests build their own `athena_with` and are unchanged. The scripted reader reply fixes `capability: study`, and the lookup is by id, so `study` still resolves to PinningStudy."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check of the diff in crates/athena-context/src/lib.rs, then run the unit tests that exercise the function.",
+      "command": "cargo test -p athena-context headroom",
+      "observes": "`prompt_file_path` and `file_headroom` exist in lib.rs. `file_headroom` walks the rows in order and each row's components, adds a row's set once per path, and keeps the minimum `row.left()`. The tests `headroom_file_paths_map_every_prompt_component` and `headroom_file_paths_name_the_file_each_component_is_built_from` pass. The first asserts contract, frame.reader/producer/verifier/planner/critic, capability.change.verifier and capability.study.producer map to the right paths and defaults, catalog and unknown ids map to None. The second reads each mapped file from disk and compares it with the compiled-in text.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Content check of the diff in crates/athena-context/src/briefs/reader.rs, then render it through the tests of criterion 4.",
+      "command": "cargo test -p athena-context reader_brief",
+      "observes": "headroom_section keeps the heading, intro and per-set loop unchanged. After the loop it calls `crate::file_headroom(&inputs.headroom)` and, when the result is non-empty, writes a lead line and one line per file in the form `- <path>: composed by <set>, <set>; tightest room <n> tokens left`. The existing test `the_reader_brief_shows_the_headroom_of_each_set` still passes, which proves the per-set rows are kept.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "New unit test `headroom_per_file_takes_the_tightest_of_the_sets_that_compose_it` in the lib.rs tests module. It builds HeadroomRow literals (all fields are pub, lib.rs:240-249) and calls `file_headroom`. The rows are `verifier (change)` with components [contract, frame.verifier, capability.change.verifier], used 1241 and budget 1300 (59 left), and `verifier (study)` with components [contract, frame.verifier, capability.study.verifier], used 1264 and budget 1300 (36 left). It finds the entry for crates/athena-context/prompts/verifier.md and asserts `sets == [\"verifier (change)\", \"verifier (study)\"]` and `left == 36`. It also asserts crates/athena-cap-change/prompts/verifier.md lists only `verifier (change)` with 59 left, and that a row that lists frame.verifier twice names its set once.",
+      "command": "cargo test -p athena-context headroom",
+      "observes": "The test passes. The shared frame file lists both sets with 36 left; the capability file lists only its own set with 59 left.",
+      "fails_without": "`file_headroom` does not exist, so the test does not compile. An implementation that took the first row's room (59), summed the rooms (95) or listed one set fails the `36` and both-sets assertions, so the test checks the minimum across composing sets and not one instance.",
+      "seam": "Production entry point: `athena_context::file_headroom` (added by plan step 1). The fixture is plain HeadroomRow literals, since every field is pub (lib.rs:240-249). Nothing is faked or injected, and the logic under test is not in the fixture. The seam is added by step 1; the HeadroomRow type exists."
+    },
+    {
+      "criterion": 4,
+      "method": "Two new tests in crates/athena-context/src/briefs.rs, beside the_reader_brief_shows_the_headroom_of_each_set (briefs.rs:4263). `the_reader_brief_lists_the_tightest_room_per_prompt_file` starts from the existing fixture `reader_inputs(&reading())` (briefs.rs:3913, `headroom: vec![]` at :3926) and sets `inputs.headroom` to three HeadroomRow literals that all list `contract` and differ in room: `reader` (80 left), `planner` (20 left) and `verifier (change)` (41 left). It renders `reader_brief(&inputs)` and asserts the brief contains the exact line `- crates/athena-context/prompts/contract.md: composed by reader, planner, verifier (change); tightest room 20 tokens left`. `the_reader_brief_has_no_per_file_headroom_without_rows` leaves `inputs.headroom` empty and asserts the brief contains neither the lead line nor `prompts/contract.md: composed by`. No existing text in the brief contains `prompts/` or the lead line (grep of crates/athena-context/src/briefs found none), so the negative assertion is meaningful.",
+      "command": "cargo test -p athena-context reader_brief",
+      "observes": "The rendered brief holds the contract.md line naming every composing set and the minimum room (20). With empty headroom no per-file text appears. The existing tests at briefs.rs:4263 and 4588 pass unchanged.",
+      "fails_without": "headroom_section prints only per-set rows, so the contract.md path line is absent and the `contains` assertion fails. A version that printed the first set's room (80) or omitted a set fails the exact-line assertion.",
+      "seam": "Production entry point: `reader_brief(&ReaderInputs)` in briefs/reader.rs, which calls headroom_section at reader.rs:387. The fixture `reader_inputs(&reading())` exists (briefs.rs:3913); the test sets the pub field `inputs.headroom` (reader.rs:266) directly, so nothing is faked. The seam exists today; no plan step adds it."
+    },
+    {
+      "criterion": 5,
+      "method": "New test `the_reading_brief_names_the_token_headroom_per_prompt_file` in crates/athena-core/src/run_pin_tests.rs, modelled on the test at :1582-1646. athena-core cannot depend on athena-cap-change (cap-change depends on core, per the crate-reach facts), so the test defines `StandInChange`, a capability with id \"change\" that copies PinningStudy's card, grants, checks, env and admit (run_pin_tests.rs:31-77). Its producer and verifier sections are `PromptAsset { id: \"capability.change.producer\"/\"capability.change.verifier\", version: 1, text: \"stand-in ...\" }`. The test builds `let mut athena = athena_with(...)`, pushes `Box::new(StandInChange)` onto `athena.capabilities` (the field is built at :250), captures the reader brief with the existing `Tweak` hook (as at :1587-1591), and calls `athena.ask(\"study the demo\", &Quiet)`. It asserts the brief contains `- crates/athena-cap-change/prompts/verifier.md: composed by verifier (change); tightest room {left} tokens left`, with `left` computed in the test from `athena_context::compose` of CONTRACT, VERIFIER_FRAME and the stand-in text and `BudgetSet::Verifier.budget()`. It also asserts the line for crates/athena-context/prompts/verifier.md names both `verifier (study)` and `verifier (change)`. The study set composes the frame twice (:1608-1619), so its room is 0 and that file's tightest room is 0.",
+      "command": "cargo test -p athena-core token_headroom",
+      "observes": "The real reading brief built by read_once (reading.rs:607, headroom from reader_headroom at :629) carries the per-file lines. The existing `the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets` also matches the filter and still passes, because its per-set lines are unchanged. `reader_headroom` includes the stand-in because `[capabilities.change]` is in athena.toml (line 81), which config(true) embeds (:80-107), and the filter at reading.rs:259-263 passes it. `Athena::capability(id)` looks up by id (lib.rs:264-270), so adding `change` does not disturb the scripted `capability: study` reply.",
+      "fails_without": "The brief has no per-file lines, so the contains assertion for crates/athena-cap-change/prompts/verifier.md fails. If the mapping ignored capability ids, the cap-change path would be missing.",
+      "seam": "Production entry point: `Athena::ask` (reading.rs:935) -> read_for -> read_once -> reader_brief. Fixtures: the fake agent driver, the `Tweak` hook and `athena_with` (run_pin_tests.rs:142-261), all of which exist. The stand-in capability and its push onto `athena.capabilities` are added by plan step 5; they double only the capability's prompt ids and text, not the headroom logic, and the expected room is computed independently with compose and BudgetSet."
+    },
+    {
+      "criterion": 6,
+      "method": "Content check of the diff of CHANGELOG.md and docs/decisions.md.",
+      "command": "git diff CHANGELOG.md docs/decisions.md",
+      "observes": "The diff holds only added lines. CHANGELOG.md gains one bullet under `## [Unreleased]` / `### Changed` (line 10) naming the root cause (the brief gave per-set rows by component id, not per-file room), the failure class reading-edits-prompt-without-checking-token-budget (20261024-002642-bm4c), the introspected jobs, the fix, 'no refusal rule (0% of past accepted readings refused)' and the tests. docs/decisions.md gets D185 appended after D184 (decisions.md:5387-5408) in the same format (Case, Decision with root cause, Alternatives, Tradeoff, Reversal cost, Provenance). Existing entries are untouched, so tests that read old entries (refusal_corpus.rs:1138-1250 include_str the changelog and decisions) are unaffected.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three recorded checks on the final tree, as listed under 'Checks Athena will run on the result', after step 7 has formatted and linted the new code. This is a regression gate over the new code and the tests of criteria 3-5.",
+      "command": "cargo fmt --all --check",
+      "observes": "fmt exits 0. Run the same way, `cargo clippy --all-targets --locked -- -D warnings` exits 0 with no warning in the new code, and `cargo test --locked` passes in full: the new tests of criteria 3, 4 and 5, the existing headroom and reader-brief tests, `the_reader_headroom_rows_equal_the_budget_figures_and_name_shared_files` (budgets.rs:396) and `system_facts_budgets_match_computed` (the budget lines in docs/system-facts.md are unchanged because no prompt file changes).",
+      "fails_without": "Without the change, the new tests of criteria 3, 4 and 5 are absent. With only part of it, `cargo test --locked` fails: no `file_headroom` means athena-context's test target does not compile, and a headroom_section that prints no per-file line fails the contract.md assertion of criterion 4 and the athena-core assertion of criterion 5. Unformatted new code fails `cargo fmt --all --check`. An unused or unlinted item fails clippy under `-D warnings`. A prompt-file edit or a budget change would fail `system_facts_budgets_match_computed` and the budgets test.",
+      "seam": "Production entry points: the three recorded commands, run at the repository root: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fixture: the final working tree and the committed Cargo.lock. `--locked` refuses a lockfile change, and the plan adds no dependency or crate. Nothing is faked or injected. The seam exists today (all three are in the verifier's allowed commands); plan step 7 runs them."
+    },
+    {
+      "criterion": 8,
+      "method": "Content check that the diff adds no refusal, admission or check function.",
+      "command": "git diff --stat",
+      "observes": "Changed files are only the six deliverables. crates/athena-core/src/reading.rs, run/, gate and every refusal_corpus input are untouched. The new code is `prompt_file_path`, `file_headroom` and formatting lines in headroom_section, none of which returns a refusal or error. The expected share of newly refused readings is 0%, because the change only adds brief text. No input form of a matching or refusal rule changes, so no refusal_corpus case is mapped.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "11cfe61ebc35bb40fd8af2cd5679e5ab4241dacd3b7b46d1017e431fb0f5fa6c"
+}

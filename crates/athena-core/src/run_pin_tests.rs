@@ -1645,6 +1645,98 @@ fn the_reading_brief_carries_the_token_headroom_of_the_reader_and_verifier_sets(
     assert!(brief.contains(&reader), "{brief}");
 }
 
+/// A capability with the change capability's id and prompt section ids, for the per-file headroom lines.
+struct StandInChange;
+
+const CHANGE_PRODUCER: PromptAsset = PromptAsset {
+    id: "capability.change.producer",
+    version: 1,
+    text: "stand-in change producer section",
+};
+const CHANGE_VERIFIER: PromptAsset = PromptAsset {
+    id: "capability.change.verifier",
+    version: 1,
+    text: "stand-in change verifier section",
+};
+
+impl Capability for StandInChange {
+    fn id(&self) -> &'static str {
+        "change"
+    }
+    fn card(&self) -> CapabilityCard {
+        CapabilityCard {
+            id: "change",
+            purpose: "change a repository.",
+            when: "for a request to change code.",
+            produces: "a diff.",
+        }
+    }
+    fn producer_section(&self) -> PromptAsset {
+        CHANGE_PRODUCER
+    }
+    fn verifier_section(&self) -> PromptAsset {
+        CHANGE_VERIFIER
+    }
+    fn producer_grant(&self, jc: &JobConfig) -> ToolGrant {
+        PinningStudy.producer_grant(jc)
+    }
+    fn verifier_grant(&self, jc: &JobConfig) -> ToolGrant {
+        PinningStudy.verifier_grant(jc)
+    }
+    fn checks(&self, _: &JobConfig) -> Vec<CheckSpec> {
+        Vec::new()
+    }
+    fn env(&self, _: &JobConfig) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
+    fn admit(&self, _: &ChangeList, _: &JobConfig) -> Vec<PolicyViolation> {
+        Vec::new()
+    }
+    fn pins_repo(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn the_reading_brief_names_the_token_headroom_per_prompt_file() {
+    let (dir, _git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let briefs = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_briefs = briefs.clone();
+    let tweak: Tweak = Arc::new(move |spec, _| {
+        if spec.role == Role::Reader {
+            seen_briefs.lock().unwrap().push(spec.user_prompt.clone());
+        }
+    });
+    let mut athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        tweak,
+    );
+    athena.capabilities.push(Box::new(StandInChange));
+    athena.ask("study the demo", &Quiet).unwrap();
+    let briefs = briefs.lock().unwrap();
+    assert_eq!(briefs.len(), 1);
+    let brief = &briefs[0];
+    let budget = athena_context::BudgetSet::Verifier.budget();
+    let used = athena_context::compose(&[
+        athena_context::CONTRACT.into(),
+        VERIFIER_FRAME.into(),
+        CHANGE_VERIFIER.into(),
+    ])
+    .estimated_tokens();
+    let line = format!(
+        "- crates/athena-cap-change/prompts/verifier.md: composed by verifier (change); tightest room {} tokens left",
+        budget.saturating_sub(used)
+    );
+    assert!(brief.contains(&line), "{brief}");
+    // The study set composes the verifier frame twice and has nothing left, so the shared file's room is 0.
+    let shared = "- crates/athena-context/prompts/verifier.md: composed by verifier (study), verifier (change); tightest room 0 tokens left";
+    assert!(brief.contains(shared), "{brief}");
+}
+
 #[test]
 fn a_first_report_with_a_met_entry_for_every_criterion_is_not_sent_back() {
     let prompts = producer_prompts_when_first_report_keeps(&[0, 1]);

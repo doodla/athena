@@ -311,9 +311,169 @@ pub fn headroom_rows(
     rows
 }
 
+/// The tightest room among the sets that compose one prompt file. A file listed in several sets costs each
+/// of them when it grows, so the smallest room is the most the file can grow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileHeadroom {
+    /// The file's repository path, such as `crates/athena-context/prompts/verifier.md`.
+    pub path: String,
+    /// The names of the sets that compose the file, in row order, each once.
+    pub sets: Vec<String>,
+    /// The smallest tokens-left among those sets.
+    pub left: u64,
+}
+
+/// The repository path of the prompt file a component id is built from, or `None` for a generated
+/// component (defaults, catalog) or an id this convention does not know.
+pub fn prompt_file_path(component_id: &str) -> Option<String> {
+    const FRAMES: [&str; 5] = ["reader", "producer", "verifier", "planner", "critic"];
+    if component_id == "contract" {
+        return Some("crates/athena-context/prompts/contract.md".into());
+    }
+    if let Some(role) = component_id.strip_prefix("frame.") {
+        return FRAMES
+            .contains(&role)
+            .then(|| format!("crates/athena-context/prompts/{role}.md"));
+    }
+    let (id, role) = component_id.strip_prefix("capability.")?.rsplit_once('.')?;
+    (!id.is_empty() && !id.contains('.') && (role == "producer" || role == "verifier"))
+        .then(|| format!("crates/athena-cap-{id}/prompts/{role}.md"))
+}
+
+/// Groups the headroom rows by prompt file: for each file, the sets that compose it and the smallest room
+/// among them. Derived from the same rows as the per-set figures, so the two cannot disagree.
+pub fn file_headroom(rows: &[HeadroomRow]) -> Vec<FileHeadroom> {
+    let mut files: Vec<FileHeadroom> = Vec::new();
+    for row in rows {
+        for id in &row.components {
+            let Some(path) = prompt_file_path(id) else {
+                continue;
+            };
+            match files.iter_mut().find(|f| f.path == path) {
+                Some(file) => {
+                    if !file.sets.contains(&row.set) {
+                        file.sets.push(row.set.clone());
+                    }
+                    file.left = file.left.min(row.left());
+                }
+                None => files.push(FileHeadroom {
+                    path,
+                    sets: vec![row.set.clone()],
+                    left: row.left(),
+                }),
+            }
+        }
+    }
+    files
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(set: &str, components: &[&str], used: u64) -> HeadroomRow {
+        HeadroomRow {
+            set: set.into(),
+            components: components.iter().map(|c| c.to_string()).collect(),
+            used,
+            budget: 1300,
+        }
+    }
+
+    #[test]
+    fn headroom_per_file_takes_the_tightest_of_the_sets_that_compose_it() {
+        let rows = [
+            row(
+                "verifier (change)",
+                &[
+                    "contract",
+                    "frame.verifier",
+                    "frame.verifier",
+                    "capability.change.verifier",
+                ],
+                1241,
+            ),
+            row(
+                "verifier (study)",
+                &["contract", "frame.verifier", "capability.study.verifier"],
+                1264,
+            ),
+        ];
+        let files = file_headroom(&rows);
+        let find = |p: &str| files.iter().find(|f| f.path == p).expect(p);
+        let shared = find("crates/athena-context/prompts/verifier.md");
+        assert_eq!(shared.sets, ["verifier (change)", "verifier (study)"]);
+        assert_eq!(shared.left, 36);
+        let own = find("crates/athena-cap-change/prompts/verifier.md");
+        assert_eq!(own.sets, ["verifier (change)"]);
+        assert_eq!(own.left, 59);
+    }
+
+    #[test]
+    fn headroom_file_paths_map_every_prompt_component() {
+        let p = prompt_file_path;
+        assert_eq!(
+            p("contract").as_deref(),
+            Some("crates/athena-context/prompts/contract.md")
+        );
+        for role in ["reader", "producer", "verifier", "planner", "critic"] {
+            assert_eq!(
+                p(&format!("frame.{role}")),
+                Some(format!("crates/athena-context/prompts/{role}.md"))
+            );
+        }
+        assert_eq!(
+            p("capability.change.verifier").as_deref(),
+            Some("crates/athena-cap-change/prompts/verifier.md")
+        );
+        assert_eq!(
+            p("capability.study.producer").as_deref(),
+            Some("crates/athena-cap-study/prompts/producer.md")
+        );
+        for none in [
+            "defaults",
+            "catalog",
+            "frame.unknown",
+            "capability.x.other",
+            "capability",
+        ] {
+            assert_eq!(p(none), None, "{none}");
+        }
+    }
+
+    #[test]
+    fn headroom_file_paths_name_the_file_each_component_is_built_from() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let pairs = [
+            (CONTRACT.id, CONTRACT.text),
+            (READER_FRAME.id, READER_FRAME.text),
+            (PRODUCER_FRAME.id, PRODUCER_FRAME.text),
+            (VERIFIER_FRAME.id, VERIFIER_FRAME.text),
+            (PLANNER_FRAME.id, PLANNER_FRAME.text),
+            (CRITIC_FRAME.id, CRITIC_FRAME.text),
+            (
+                "capability.change.producer",
+                include_str!("../../athena-cap-change/prompts/producer.md"),
+            ),
+            (
+                "capability.change.verifier",
+                include_str!("../../athena-cap-change/prompts/verifier.md"),
+            ),
+            (
+                "capability.study.producer",
+                include_str!("../../athena-cap-study/prompts/producer.md"),
+            ),
+            (
+                "capability.study.verifier",
+                include_str!("../../athena-cap-study/prompts/verifier.md"),
+            ),
+        ];
+        for (id, text) in pairs {
+            let path = prompt_file_path(id).expect(id);
+            let disk = std::fs::read_to_string(root.join(&path)).expect(&path);
+            assert_eq!(disk, text, "{path} is not the text of {id}");
+        }
+    }
 
     #[test]
     fn headroom_rows_name_shared_components_in_every_set_that_composes_them() {
