@@ -14,18 +14,67 @@ struct DecisionTexts {
     cand_log: String,
 }
 
-/// The gate's closing reason for a change, from the base list and the changed paths; `Ok(None)` when the change
-/// reconciles every decision it touches or the base has no list. `texts` is read only when the base has a
-/// list. `Err` is why the base list cannot be read. This is the one place the reason is worded, so the retry
-/// reader's [`athena_data::decision_links::GATE_REASON_PREFIX`] always matches it.
+/// What the decision gate found: the closing reason, and the advisory notes.
+#[derive(Debug, Default)]
+struct Gate {
+    /// The closing reason; `None` when the change is fine. It never holds the notes.
+    reason: Option<String>,
+    /// Docs lines that cite a decision the change adds a phrase for ([`athena_data::decision_links::citation_notes`]).
+    /// Advisory: a note is never a finding and never fails a job.
+    notes: Vec<String>,
+}
+
+/// The sentence of the closing reason for one unresolved link.
+fn link_problem_sentence(problem: &athena_data::decision_links::LinkProblem) -> String {
+    use athena_data::decision_links::{HitKind, LinkProblem};
+    match problem {
+        LinkProblem::NotNamed { older, newer } => format!(
+            "{DECISION_LINKS} has a [[link]] from {older} to {newer} that no phrase in {DECISION_LOG} names. \
+             Write `Amends {older}` or `Supersedes {older}` in the entry {newer} (a link is keyed on its \
+             older and newer ids, not on a line), or remove the link."
+        ),
+        LinkProblem::NoLink { older, newer, kind } => {
+            let phrase = match kind {
+                HitKind::Amends => format!("`Amends {older}` in {newer}"),
+                HitKind::Supersedes => format!("`Supersedes {older}` in {newer}"),
+                HitKind::SupersededBy => format!("`Superseded by {newer}` in {older}"),
+            };
+            format!(
+                "{DECISION_LOG} says {phrase}, but {DECISION_LINKS} has no [[link]] with older = \"{older}\" \
+                 and newer = \"{newer}\". Add one, with the status amended or superseded."
+            )
+        }
+        LinkProblem::NoTarget { line, text } => format!(
+            "{DECISION_LOG} line {line} has a supersession phrase with no decision id: `{text}`. Write the id, \
+             as in `Amends <id>`, or reword the line if it states no amendment."
+        ),
+        LinkProblem::ListUnreadable(why) => format!(
+            "{DECISION_LINKS} in the change cannot be read, so its links cannot be checked: {why}"
+        ),
+    }
+}
+
+/// The gate's finding for a change, from the base list and the changed paths; an empty [`Gate`] when the change
+/// reconciles every decision it touches, leaves every link resolved, or the base has no list. `texts` is read
+/// only when the base has a list. `Err` is why the base list cannot be read. This is the one place the reason is
+/// worded, so the retry reader's [`athena_data::decision_links::GATE_REASON_PREFIX`] always matches it.
+///
+/// Two checks share the reason. A change that touches a path a decision governs must reconcile it
+/// ([`athena_data::decision_links::unreconciled`]). A change that edits `docs/decisions.md` must also leave
+/// each `[[link]]` resolved: no link a phrase no longer names, no phrase it adds without a link, and no new
+/// statement with no id ([`athena_data::decision_links::link_problems`], which blames only what the change
+/// introduces). `docs` is read only when the change adds a phrase, for the advisory notes.
 fn decision_gate(
     base_links: &str,
     changed: &[String],
     texts: impl FnOnce() -> DecisionTexts,
-) -> Result<Option<String>, String> {
-    use athena_data::decision_links::{GATE_REASON_PREFIX, unreconciled};
+    docs: impl FnOnce() -> Vec<(String, String)>,
+) -> Result<Gate, String> {
+    use athena_data::decision_links::{
+        GATE_REASON_PREFIX, citation_notes, link_problems, new_hits, unreconciled,
+    };
     if base_links.is_empty() {
-        return Ok(None);
+        return Ok(Gate::default());
     }
     let texts = texts();
     let found = unreconciled(
@@ -35,20 +84,40 @@ fn decision_gate(
         &texts.cand_log,
         changed,
     )?;
-    if found.is_empty() {
-        return Ok(None);
+    let mut sentences: Vec<String> = Vec::new();
+    if !found.is_empty() {
+        let each: Vec<String> = found
+            .iter()
+            .map(|u| format!("{} ({})", u.decision, u.touched.join(", ")))
+            .collect();
+        sentences.push(format!(
+            "the change touches code that {DECISION_LOG} records decisions for: {}. Add an entry to \
+             {DECISION_LOG} that says `Amends <id>` or `Supersedes <id>` for each decision (write `Amends <id> \
+             in prose only` for one you checked and left standing), and a matching [[link]] in \
+             {DECISION_LINKS} whose older is the decision and whose newer is the new entry.",
+            each.join("; ")
+        ));
     }
-    let each: Vec<String> = found
-        .iter()
-        .map(|u| format!("{} ({})", u.decision, u.touched.join(", ")))
-        .collect();
-    Ok(Some(format!(
-        "{GATE_REASON_PREFIX} the change touches code that {DECISION_LOG} records decisions for: {}. \
-         Add an entry to {DECISION_LOG} that amends or supersedes each decision (or says it was checked \
-         and stands), and a matching [[link]] in {DECISION_LINKS} whose older is the decision and whose \
-         newer is the new entry.",
-        each.join("; ")
-    )))
+    let mut notes = Vec::new();
+    if changed.iter().any(|p| p == DECISION_LOG) {
+        sentences.extend(
+            link_problems(
+                base_links,
+                &texts.cand_links,
+                &texts.base_log,
+                &texts.cand_log,
+            )
+            .iter()
+            .map(link_problem_sentence),
+        );
+        let hits = new_hits(&texts.base_log, &texts.cand_log);
+        if !hits.is_empty() {
+            notes = citation_notes(&hits, &docs());
+        }
+    }
+    let reason =
+        (!sentences.is_empty()).then(|| format!("{GATE_REASON_PREFIX} {}", sentences.join(" ")));
+    Ok(Gate { reason, notes })
 }
 
 /// Runs one routed check in the verifier's snapshot, then puts the snapshot back as it was prepared.
@@ -619,7 +688,9 @@ impl Athena {
     /// the closing reason when there are any, `None` when the change is fine. The base's `[[governs]]` list in
     /// `docs/decision-links.toml` names each decision and the paths it governs; a change that touches one of
     /// them must add a log entry that amends or supersedes the decision (or says it was checked and stands)
-    /// with a matching `[[link]]` ([`athena_data::decision_links::unreconciled`]). It runs before the pull
+    /// with a matching `[[link]]` ([`athena_data::decision_links::unreconciled`]); a change that edits the log
+    /// must leave every `[[link]]` resolved ([`athena_data::decision_links::link_problems`]). The advisory
+    /// notes of docs lines that cite an amended decision are printed here and never close the job. It runs before the pull
     /// request, the checks and the verifier, so a reversal is found at the producer's step and not at the
     /// final verdict. A base with no list governs nothing; a base list that cannot be read is a warning line
     /// and the check is skipped, so a change that repairs the list can pass.
@@ -630,14 +701,23 @@ impl Athena {
         candidate: &str,
         changed: &[String],
     ) -> Option<String> {
-        match decision_gate(&self.committed_text(base, DECISION_LINKS), changed, || {
-            DecisionTexts {
+        match decision_gate(
+            &self.committed_text(base, DECISION_LINKS),
+            changed,
+            || DecisionTexts {
                 base_log: self.committed_text(base, DECISION_LOG),
                 cand_links: self.committed_text(candidate, DECISION_LINKS),
                 cand_log: self.committed_text(candidate, DECISION_LOG),
+            },
+            || self.docs_at(candidate),
+        ) {
+            Ok(gate) => {
+                // The notes are advisory: they are printed and never close the job.
+                for note in &gate.notes {
+                    ctx.ui.line(&format!("decisions  note: {note}"));
+                }
+                gate.reason
             }
-        }) {
-            Ok(reason) => reason,
             Err(why) => {
                 ctx.ui.line(&format!(
                     "warning: {DECISION_LINKS} could not be read, so decisions are not checked: {why}"
@@ -668,14 +748,66 @@ impl Athena {
                 None => self.committed_text(base, path),
             }
         };
-        decision_gate(&self.committed_text(base, DECISION_LINKS), &changed, || {
-            DecisionTexts {
+        // The docs as the candidate will hold them: the base's files, with the change applied.
+        let docs = || {
+            let mut docs: Vec<(String, String)> = self
+                .docs_at(base)
+                .into_iter()
+                .filter(|(path, _)| !changes.iter().any(|c| &c.path == path))
+                .collect();
+            for change in changes.iter().filter(|c| {
+                c.status != 'D'
+                    && c.path.starts_with("docs/")
+                    && c.path.ends_with(".md")
+                    && c.path != DECISION_LOG
+            }) {
+                if let Ok(bytes) = snapshot.blob(&change.new_oid) {
+                    docs.push((
+                        change.path.clone(),
+                        String::from_utf8_lossy(&bytes).into_owned(),
+                    ));
+                }
+            }
+            docs.sort();
+            docs
+        };
+        let gate = decision_gate(
+            &self.committed_text(base, DECISION_LINKS),
+            &changed,
+            || DecisionTexts {
                 base_log: self.committed_text(base, DECISION_LOG),
                 cand_links: candidate_text(DECISION_LINKS),
                 cand_log: candidate_text(DECISION_LOG),
-            }
-        })
-        .unwrap_or_default()
+            },
+            docs,
+        )
+        .unwrap_or_default();
+        // The send-back carries the notes after a finding, so the producer sees what else may need an edit.
+        // A change with no finding gets none: the loop shows the producer nothing for a passing gate.
+        let reason = gate.reason?;
+        if gate.notes.is_empty() {
+            return Some(reason);
+        }
+        Some(format!(
+            "{reason}\n\nAdvisory, not a finding: these docs lines cite a decision your change adds a phrase \
+             for. Check whether each still says what is true; the list reads ids, not meaning.\n- {}",
+            gate.notes.join("\n- ")
+        ))
+    }
+
+    /// The `.md` files under `docs/` at `commit`, as (path, text), without `docs/decisions.md`. Empty when the
+    /// tree cannot be read.
+    fn docs_at(&self, commit: &str) -> Vec<(String, String)> {
+        self.git
+            .ls_tree_under(commit, "docs/")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.kind == "blob" && e.path.ends_with(".md") && e.path != DECISION_LOG)
+            .filter_map(|e| {
+                let bytes = self.git.cat_blob(&e.oid).ok()?;
+                Some((e.path, String::from_utf8_lossy(&bytes).into_owned()))
+            })
+            .collect()
     }
 
     /// The decisions of the base's list that govern the `planned` paths, for the producer's brief. A base with

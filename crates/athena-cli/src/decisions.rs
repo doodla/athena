@@ -5,14 +5,15 @@
 //! still `active` or `superseded`, the entry that supersedes it and the entries that amend it. The links come
 //! from two sources that must agree:
 //!
-//! * the parse of the log's phrases ([`crate::backtest::parse_supersessions`]), which lists every hit with its
-//!   line; and
-//! * `docs/decision-links.toml`, the list the user confirmed hit by hit. A phrase such as "superseded by" does
-//!   not say whether the old decision stands in part, so the list, not the wording, decides the status. A
-//!   partial revision is `amended`, and the older decision stays `active` (D11 by D39 at line 322; D87 by D88).
+//! * the parse of the log's phrases ([`crate::backtest::parse_supersessions`]), which lists every hit; and
+//! * `docs/decision-links.toml`, the list the user confirmed hit by hit, one `[[link]]` for each pair of an
+//!   older and a newer entry id. A phrase such as "superseded by" does not say whether the old decision stands
+//!   in part, so the list, not the wording, decides the status. A partial revision is `amended`, and the
+//!   older decision stays `active` (D11 by D39; D87 by D88).
 //!
-//! A parsed hit that is not in the list, or a listed hit the parse does not find, is a finding of the backtest's
-//! condition (a); see [`crate::backtest::run_on`]. The view only applies hits that are in both.
+//! A parsed hit whose pair is not in the list, or a listed pair the parse does not find, is a finding of the
+//! backtest's condition (a); see [`crate::backtest::run_on`]. The view only applies hits that are in both. The
+//! pair is the whole key, so a change that moves a phrase down the log breaks no link.
 //!
 //! The same file holds a `[[governs]]` table: each decision and the code paths it governs. The log is prose, so
 //! nothing else tied a decision to the code it describes, and a change that reversed one was found only at the
@@ -41,19 +42,21 @@ pub enum LinkStatus {
     Amended,
 }
 
-/// One confirmed hit: the line of the phrase in `docs/decisions.md`, the older and newer entry ids, and the
-/// confirmed meaning.
+/// One confirmed hit: the older and newer entry ids, which are its key, and the confirmed meaning. It carries no
+/// line of the log: a phrase moves whenever an entry is inserted above it, and the ids do not. A list written
+/// before this key was dropped may still hold a `line`; it is ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Link {
-    pub line: usize,
     pub older: String,
     pub newer: String,
     pub status: LinkStatus,
 }
 
 impl Link {
+    /// Whether the phrase `hit` names this link's pair. Several phrases may name one pair (D46 and D79 say it
+    /// twice), and one link covers them all.
     fn matches(&self, hit: &Hit) -> bool {
-        self.line == hit.line && self.older == hit.older && self.newer == hit.newer
+        self.older == hit.older && self.newer == hit.newer
     }
 }
 
@@ -406,9 +409,8 @@ mod tests {
     fn the_confirmed_status_decides_not_the_phrase() {
         let parsed = parse_supersessions(LOG);
         let links = list(
-            "[[link]]\nline = 2\nolder = \"D01\"\nnewer = \"D02\"\nstatus = \"amended\"\n\
-             [[link]]\nline = 5\nolder = \"D01\"\nnewer = \"D02\"\nstatus = \"amended\"\n\
-             [[link]]\nline = 8\nolder = \"D01\"\nnewer = \"D03\"\nstatus = \"superseded\"\n",
+            "[[link]]\nolder = \"D01\"\nnewer = \"D02\"\nstatus = \"amended\"\n\
+             [[link]]\nolder = \"D01\"\nnewer = \"D03\"\nstatus = \"superseded\"\n",
         );
         assert!(links.unlisted(&parsed.hits).is_empty());
         assert!(links.not_found(&parsed.hits).is_empty());
@@ -424,11 +426,11 @@ mod tests {
     #[test]
     fn unlisted_and_unfound_hits_are_reported_and_not_applied() {
         let parsed = parse_supersessions(LOG);
-        let links = list(
-            "[[link]]\nline = 99\nolder = \"D01\"\nnewer = \"D03\"\nstatus = \"superseded\"\n",
-        );
+        // D01 to D09 is listed and no phrase of the log names it, wherever the phrases stand.
+        let links = list("[[link]]\nolder = \"D01\"\nnewer = \"D09\"\nstatus = \"superseded\"\n");
         assert_eq!(links.unlisted(&parsed.hits).len(), 3);
         assert_eq!(links.not_found(&parsed.hits).len(), 1);
+        assert_eq!(links.not_found(&parsed.hits)[0].newer, "D09");
         assert!(
             view(&parsed, &links)
                 .iter()
@@ -439,7 +441,7 @@ mod tests {
     #[test]
     fn governs_entries_are_read_and_a_list_without_any_still_parses() {
         let links = list(
-            "[[link]]\nline = 2\nolder = \"D01\"\nnewer = \"D02\"\nstatus = \"amended\"\n\n\
+            "[[link]]\nolder = \"D01\"\nnewer = \"D02\"\nstatus = \"amended\"\n\n\
              [[governs]]\ndecision = \"D01\"\npaths = [\"src/a.rs\", \"docs/\"]\n",
         );
         assert_eq!(links.links.len(), 1);
@@ -533,8 +535,102 @@ mod tests {
 
     #[test]
     fn two_superseders_of_one_entry_are_an_error() {
-        let text = "[[link]]\nline = 1\nolder = \"D01\"\nnewer = \"D02\"\nstatus = \"superseded\"\n\
-                    [[link]]\nline = 2\nolder = \"D01\"\nnewer = \"D03\"\nstatus = \"superseded\"\n";
+        let text = "[[link]]\nolder = \"D01\"\nnewer = \"D02\"\nstatus = \"superseded\"\n\
+                    [[link]]\nolder = \"D01\"\nnewer = \"D03\"\nstatus = \"superseded\"\n";
         assert!(ConfirmedLinks::parse(text).is_err());
+    }
+
+    #[test]
+    fn the_real_list_is_keyed_on_ids_and_gives_no_line_number_advice() {
+        let text = repo_file(LINKS_PATH);
+        let table: toml::Table = text.parse().unwrap();
+        let links = table["link"].as_array().expect("[[link]] tables");
+        let mut pairs = BTreeSet::new();
+        for link in links {
+            let keys: Vec<&str> = link
+                .as_table()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(keys, ["newer", "older", "status"], "{link}");
+            let pair = (
+                link["older"].as_str().unwrap().to_string(),
+                link["newer"].as_str().unwrap().to_string(),
+            );
+            assert!(pairs.insert(pair.clone()), "{pair:?} is listed twice");
+        }
+        assert!(links.len() > 20);
+        for line in text.lines().filter(|l| l.trim_start().starts_with('#')) {
+            for advice in ["`line`", "line number", "the lines here", "(line "] {
+                assert!(!line.contains(advice), "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_written_with_lines_still_parses_and_matches_on_the_pair() {
+        let old = "[[link]]\nline = 322\nolder = \"D11\"\nnewer = \"D39\"\nstatus = \"amended\"\n";
+        let links = list(old);
+        assert_eq!(links.links.len(), 1);
+        let hit = |line| Hit {
+            line,
+            entry: "D39".into(),
+            kind: crate::backtest::HitKind::Amends,
+            older: "D11".into(),
+            newer: "D39".into(),
+        };
+        // The phrase moved from line 322 to line 900: the link still names it.
+        assert!(links.unlisted(&[hit(322)]).is_empty());
+        assert!(links.unlisted(&[hit(900)]).is_empty());
+    }
+
+    #[test]
+    fn the_real_list_and_log_leave_no_link_unresolved() {
+        use athena_data::decision_links::link_problems;
+        let (list, log) = (repo_file(LINKS_PATH), repo_file("docs/decisions.md"));
+        // With nothing at the base, the whole of condition (a) is the delta: it is empty.
+        let found = link_problems("", &list, "", &log);
+        assert!(found.is_empty(), "{found:?}");
+        // The change that appended D187: the base log ends before it and the base list lacks its link.
+        let base_log = &log[..log.find("\n## D187 · ").expect("D187 is in the log")];
+        let link = "# D156 stands: a change to governed code";
+        let base_list = &list[..list.find(link).expect("the D156 to D187 link")];
+        let found = link_problems(base_list, &list, base_log, &log);
+        assert!(found.is_empty(), "{found:?}");
+        // Without its link, the phrase of D187 is held.
+        let found = link_problems(base_list, base_list, base_log, &log);
+        assert_eq!(
+            found,
+            [athena_data::decision_links::LinkProblem::NoLink {
+                older: "D156".into(),
+                newer: "D187".into(),
+                kind: crate::backtest::HitKind::Amends
+            }]
+        );
+    }
+
+    #[test]
+    fn d187_has_a_provenance_and_one_phrase_and_the_changelog_names_it() {
+        let log = repo_file("docs/decisions.md");
+        let entry = log
+            .split("\n## ")
+            .find(|e| e.starts_with("D187 · "))
+            .expect("D187 records the link check");
+        assert!(entry.contains("- **Provenance:**"));
+        let parsed = parse_supersessions(&log);
+        let mine: Vec<&Hit> = parsed.hits.iter().filter(|h| h.entry == "D187").collect();
+        assert_eq!(mine.len(), 1, "{mine:?}");
+        assert_eq!(
+            (mine[0].older.as_str(), mine[0].newer.as_str()),
+            ("D156", "D187")
+        );
+        assert!(parsed.lacking_target.is_empty());
+        let changelog = repo_file("CHANGELOG.md");
+        let unreleased = changelog
+            .split("\n## [")
+            .find(|s| s.starts_with("Unreleased]"))
+            .expect("an Unreleased section");
+        assert!(unreleased.contains("D187"));
     }
 }

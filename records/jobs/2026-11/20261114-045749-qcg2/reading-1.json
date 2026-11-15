@@ -1,0 +1,182 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-045749-qcg2",
+  "n": 1,
+  "at": "2026-11-15T10:41:43.282270637Z",
+  "invocation_seq": 1,
+  "base_commit": "e82e055e27970c50984c47ad32fa026ea6857f57",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Check decision links in the producer loop; key them on ids",
+  "summary": "Add a pre-handover check, run for any job that edits docs/decisions.md, that fails when a docs/decision-links.toml [[link]] no longer resolves, re-keys links on decision ids instead of line numbers, and lists docs/ lines that still cite an amended or superseded decision. It follows up jobs 20261104-153450-y72x and 20261010-225741-yvk0, whose line-shift and stale-doc failures it prevents; the D08 re-queue and failure-class recording are queue and records actions outside the diff.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Unit tests for the check, id keying and listing; cargo test, clippy and fmt required."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced by a check in the producer loop, not prose."
+    },
+    {
+      "id": "root-cause",
+      "how": "Links keyed on ids removes the line-number cause rather than updating lines."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria name tests that run the check on a broken and a shifted log."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: producers and verifiers of any job that amends or supersedes a decision should be stopped by a mechanism before handover, not by the final verdict; the user judges the result.",
+    "Code survey: read crates/athena-data/src/decision_links.rs (the one parser of [[governs]] and [[link]], pure rule `unreconciled`), crates/athena-core/src/run/checks.rs (DECISION_LINKS const, the pre-verifier governs check, line 620-689), and grep hits in crates/athena-cli/src/backtest.rs and crates/athena-cli/src/decisions.rs, crates/athena-core/src/run/tests.rs. The producer will extend the checks.rs gate and keep decision_links.rs as the shared parser. docs/decision-links.toml is data, not a record file under crates/, so no AnyRecord or check_record_file change is expected.",
+    "Existing code: crates/athena-data/src/decision_links.rs, crates/athena-core/src/run/checks.rs, crates/athena-cli/src/backtest.rs, docs/decision-links.toml and docs/design/decision-sets.md are extended, not created.",
+    "Environment: none; everything runs locally over the working tree with no CI, push or history reads.",
+    "Field meaning: [[link]] `line` is documented in docs/decision-links.toml lines 3-4 as the line in docs/decisions.md of the phrase. The change makes the pair (older, newer) the key; `line` becomes optional or is dropped. Config: athena.toml unchanged.",
+    "The sentence listing is advisory output (does not fail): lines in docs/ outside decisions.md that cite the id of a decision the change marks amended or superseded. A heuristic on ids; it cannot read meaning.",
+    "D08 re-queue and recording job 20261104-153450-y72x under failure class 20261104-153440-xf17 with 20261010-225741-yvk0 are Athena queue and records actions; records/ never changes in this diff.",
+    "Job 20261104-153450-y72x is addressed this way: its backtest findings (every link off by +3) cannot recur because links no longer depend on line numbers; its docs/design/athena-v0.md finding belongs to the dropped candidate. Its changed code and docs (snapshot.rs, lib.rs, producer.rs, verification.rs, run/mod.rs, run_pin_tests.rs, briefs.rs, enforcement.md) are dropped, not kept. Job 20261010-225741-yvk0's missing D08 amendment is handled by the re-queue.",
+    "Existing decisions.md entries are not edited; the change is recorded in a new appended decision with a Provenance bullet, and a new [[link]] only if it amends an earlier decision (it may amend D156)."
+  ],
+  "question": "The earlier D08 amendment (job 20261010-225741-yvk0) was a code feature (ATHENA-COMMITS.txt) that never landed. I assume Athena re-queues that job as a separate job and this change does not rebuild it. Is that right?",
+  "acceptance_criteria": [
+    {
+      "text": "A unit test in crates/athena-data/src/decision_links.rs (or athena-core checks tests) shows the new check fails when a [[link]] names an older/newer pair not found in docs/decisions.md and passes when decisions.md shifts by added lines; run `cargo test --locked` and it passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The check runs in the producer loop only for jobs whose changed paths include docs/decisions.md, and a test in crates/athena-core/src/run/tests.rs shows a job not touching it is not checked and one touching it with a broken link is held before the verifier; run `cargo test --locked -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "docs/decision-links.toml [[link]] entries are keyed by older/newer decision ids; no entry needs a line number to resolve, and the header comment no longer tells editors to update line numbers.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo test --locked -p athena-cli --test backtest` passes, including the confirmed-list tests, and a test shows inserting lines into a copy of decisions.md before a phrase does not produce a condition-a finding.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows the sentence listing returns the docs/ lines (outside decisions.md) that cite an amended or superseded decision id and does not fail the job; run `cargo test --locked`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "docs/decisions.md gains a new appended decision (next free id, Provenance bullet) recording the check; no existing entry is edited; docs/design/decision-sets.md and CHANGELOG.md describe the check and the id keying.",
+      "kind": "content"
+    },
+    {
+      "text": "The check refuses nothing in the current repository: the real docs/decision-links.toml and docs/decisions.md pass it, shown by `cargo test --locked` (existing backtest tests on the real log).",
+      "kind": "behavior"
+    },
+    {
+      "text": "No unrelated behavior changes and fmt, clippy and test pass: Athena's recorded `cargo fmt --check`, `cargo clippy --locked --all-targets` and `cargo test --locked` on the final tree pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-data/src/decision_links.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-cli/src/backtest.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/src/decisions.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/tests/backtest.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/design/decision-sets.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Rebuilding the ATHENA-COMMITS.txt history feature or any change to crates/athena-git/src/snapshot.rs, crates/athena-git/src/lib.rs, crates/athena-core/src/run/producer.rs, crates/athena-core/src/run/verification.rs, crates/athena-core/src/run/mod.rs, crates/athena-core/src/run_pin_tests.rs, crates/athena-context/src/briefs.rs (dropped from the earlier candidates)",
+    "docs/enforcement.md and docs/design/athena-v0.md edits belonging to the dropped history feature",
+    "Rewriting existing docs sentences automatically; the listing is advisory",
+    "Edits or annotation of existing docs/decisions.md entries, and anything under records/",
+    "Edits to athena.toml, defaults.toml or workflows",
+    "Re-queuing job D08 and recording failure class 20261104-153440-xf17 (queue and records actions by Athena)"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 1.0,
+        "p50": 2.8,
+        "p90": 7.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2700.0,
+        "p90": 6000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6800670016750419,
+      "p_user_intervenes": 0.061445783132530116,
+      "cost_usd": {
+        "p10": 0.5535529225041582,
+        "p50": 1.4970418,
+        "p90": 5.937977226640895
+      },
+      "wall_time_s": {
+        "p10": 607.5678303220644,
+        "p50": 2168.633644720307,
+        "p90": 4473.538231811352
+      }
+    }
+  },
+  "departures": "Hard job touching a gate, parser, backtest and docs across several crates; costlier and riskier than the reference, and two earlier related attempts failed.",
+  "urgent_reason": "Cuts repeated rejected attempts: a decision amendment shifts line numbers and fails only at the final verdict (jobs 20261104-153450-y72x, 20261010-225741-yvk0).",
+  "hard_reason": "Adds a rule that can refuse a producer's handover and changes the backtest check that judges decision links.",
+  "producer_effort": "high"
+}

@@ -4,8 +4,9 @@
 //! It does four things, all by code and from stored fields only:
 //!
 //! 1. Defines the typed header for D87 and D88 (and no other decision) and parses the supersession phrases of
-//!    `docs/decisions.md`, then checks the hits against the user-confirmed list `docs/decision-links.toml`
-//!    (see [`crate::decisions`]).
+//!    `docs/decisions.md` (the parse is `athena_data::decision_links::parse_supersessions`, re-exported here),
+//!    then checks the hits against the user-confirmed list `docs/decision-links.toml`, whose links are keyed on
+//!    the older and newer entry ids (see [`crate::decisions`]).
 //! 2. Reads `records/` (job outcomes and interventions) without an agent.
 //! 3. Runs the exact-match signals of those headers over the records. The intervention signal with an exact
 //!    match is D87's: a hand change (`did-work-themselves`) on a landed job, class of work `code`, threshold
@@ -46,135 +47,9 @@ use std::path::Path;
 // Supersession phrases of docs/decisions.md (decision-sets.md section 6, step 3).
 // ---------------------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum HitKind {
-    /// "Superseded by Dnn", written inside the older entry.
-    SupersededBy,
-    /// "Supersedes Dnn", written inside the newer entry.
-    Supersedes,
-    /// "Amends Dnn", written inside the newer entry.
-    Amends,
-}
-
-/// One phrase with a target id. `older` is the entry that is superseded or amended; `newer` is the one doing it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Hit {
-    pub line: usize,
-    pub entry: String,
-    pub kind: HitKind,
-    pub older: String,
-    pub newer: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Parsed {
-    pub entries: Vec<String>,
-    pub hits: Vec<Hit>,
-    /// Lines where a supersession phrase stands as a statement but names no entry.
-    pub lacking_target: Vec<usize>,
-}
-
-const PHRASES: [(&str, HitKind); 3] = [
-    ("superseded by", HitKind::SupersededBy),
-    ("supersedes", HitKind::Supersedes),
-    ("amends", HitKind::Amends),
-];
-
-/// An entry id (`D` and at least two digits) at the start of `text`, and the rest after it.
-fn take_id(text: &str) -> Option<(String, &str)> {
-    let rest = text.strip_prefix('D')?;
-    let digits = rest.chars().take_while(char::is_ascii_digit).count();
-    if digits < 2 {
-        return None;
-    }
-    Some((format!("D{}", &rest[..digits]), &rest[digits..]))
-}
-
-/// The ids named after a phrase. A phrase names one id, except "Amends", which may list several joined by
-/// commas or "and" ("Amends D06 and D14"). The list stops at the first id that is followed by anything else.
-fn target_ids(after: &str, list: bool) -> Vec<String> {
-    let mut ids = Vec::new();
-    let mut rest = after.trim_start();
-    while let Some((id, tail)) = take_id(rest) {
-        ids.push(id);
-        if !list {
-            break;
-        }
-        let next = [", and ", " and ", ", "]
-            .iter()
-            .find_map(|sep| tail.strip_prefix(sep));
-        match next {
-            Some(next) => rest = next,
-            None => break,
-        }
-    }
-    ids
-}
-
-/// A phrase that opens a statement: after `**`, `(`, "this", or at the start of the text. Descriptive prose
-/// ("each supersedes or amends an accepted entry") is not a statement and is not counted as lacking a target.
-fn opens_statement(before: &str) -> bool {
-    let before = before.trim_end();
-    before.is_empty() || before.ends_with("**") || before.ends_with('(') || before.ends_with("this")
-}
-
-fn entry_heading(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("## ")?;
-    take_id(rest).map(|(id, _)| id)
-}
-
-/// Parse the phrases of the log. The text before the first entry heading is the log's own header and is not
-/// read: it describes the rule and names no entry. Matching is case-insensitive (D79 writes "This supersedes").
-pub fn parse_supersessions(text: &str) -> Parsed {
-    let mut parsed = Parsed {
-        entries: Vec::new(),
-        hits: Vec::new(),
-        lacking_target: Vec::new(),
-    };
-    let mut current: Option<String> = None;
-    for (index, line) in text.lines().enumerate() {
-        if let Some(id) = entry_heading(line) {
-            parsed.entries.push(id.clone());
-            current = Some(id);
-            continue;
-        }
-        let Some(entry) = &current else { continue };
-        let lower = line.to_ascii_lowercase();
-        for (phrase, kind) in PHRASES {
-            for (at, _) in lower.match_indices(phrase) {
-                if lower[..at]
-                    .chars()
-                    .next_back()
-                    .is_some_and(char::is_alphabetic)
-                {
-                    continue;
-                }
-                let ids = target_ids(&line[at + phrase.len()..], kind == HitKind::Amends);
-                if ids.is_empty() {
-                    if opens_statement(&lower[..at]) {
-                        parsed.lacking_target.push(index + 1);
-                    }
-                    continue;
-                }
-                for id in ids {
-                    let (older, newer) = match kind {
-                        HitKind::SupersededBy => (entry.clone(), id),
-                        HitKind::Supersedes | HitKind::Amends => (id, entry.clone()),
-                    };
-                    parsed.hits.push(Hit {
-                        line: index + 1,
-                        entry: entry.clone(),
-                        kind,
-                        older,
-                        newer,
-                    });
-                }
-            }
-        }
-    }
-    parsed
-}
+// The parse itself (`HitKind`, `Hit`, `Parsed`, `parse_supersessions`) lives in `athena_data::decision_links`,
+// so that the producer-side link check and this backtest read the log through one parser.
+pub use athena_data::decision_links::{Hit, HitKind, Parsed, parse_supersessions};
 
 /// What the parse says about each older entry: the entry that supersedes it, and the entries that amend it.
 /// This is the literal reading of the phrases; a partial supersession (D87) is for the user to confirm, and the
@@ -325,8 +200,8 @@ fn check_parse(parsed: &Parsed, confirmed: &ConfirmedLinks, findings: &mut Vec<F
         findings.push(Finding {
             condition: "a",
             reason: format!(
-                "listed but not found in the log: {} and {} at line {}",
-                link.older, link.newer, link.line
+                "listed but not found in the log: {} and {}",
+                link.older, link.newer
             ),
         });
     }
@@ -596,34 +471,6 @@ pub fn render(report: &Report) -> String {
 mod tests {
     use super::*;
     use athena_core::introspect::{after_start, row_at};
-
-    #[test]
-    fn take_id_needs_two_digits() {
-        assert_eq!(take_id("D88**"), Some(("D88".to_string(), "**")));
-        assert_eq!(take_id("D8 x"), None);
-        assert_eq!(take_id("Dx"), None);
-    }
-
-    #[test]
-    fn amends_lists_split_on_and_and_commas() {
-        assert_eq!(target_ids(" D06 and D14. The gate", true), ["D06", "D14"]);
-        assert_eq!(target_ids(" D39's exemption list and D06.", true), ["D39"]);
-        assert_eq!(target_ids(" D87's", false), ["D87"]);
-    }
-
-    #[test]
-    fn descriptive_prose_is_not_a_missing_target() {
-        let text = "## D01 · x\n\nEach supersedes or amends an accepted entry\n(active, superseded by a named decision)\n";
-        let parsed = parse_supersessions(text);
-        assert!(parsed.hits.is_empty());
-        assert!(parsed.lacking_target.is_empty());
-    }
-
-    #[test]
-    fn a_statement_without_an_id_is_reported_with_its_line() {
-        let text = "## D01 · x\n- **Superseded by** nothing\n";
-        assert_eq!(parse_supersessions(text).lacking_target, [2]);
-    }
 
     #[test]
     fn a_governed_decision_that_is_not_an_entry_of_the_log_is_a_condition_a_finding() {

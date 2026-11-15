@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045749-qcg2",
+  "round": 1,
+  "at": "2026-11-15T10:48:40.748837643Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The loop check runs only one direction of condition (a); a new phrase with no link, and a phrase with no target id, are still caught only at the final verdict",
+      "evidence": "`check_parse` reports three things: hits the list lacks (`confirmed.unlisted`), links the log does not name (`confirmed.not_found`), and `parsed.lacking_target`. The plan's `unresolved_links` reports only the second (\"every [[link]] whose (older, newer) pair no phrase in the log names, or whose ids are not log entries\"). Decision 1 rejects the heading-only option because \"a link with no phrase would pass the loop and still fail the backtest at the final verdict, which is the failure being removed\". The same reasoning applies to a producer that appends `Amends D156` with no [[link]]: the loop passes it and the backtest test fails it at the final verdict. That is the request's acceptance case (\"Amending a decision in docs/decisions.md ... only the final verdict catches it\"). The log is append-only and pinned, so after id keying an existing link can no longer break. In-loop catches are therefore limited to new entries, and the plan leaves the more likely mistake for new entries (phrase written, link forgotten) late. Fix: In athena-data, have the check also report (a) every parsed hit whose `newer`, or `older` for `SupersededBy`, is an entry the candidate adds, and whose pair is not in the candidate's `link_pairs`; and (b) `lacking_target` lines past the end of the base log. Word both under `GATE_REASON_PREFIX`. Add a unit test and a core test: an appended entry that says `Amends D02` with no link is held before the verifier (producer=2, verifier=0), and fails without the new rule.",
+      "location": "Plan Decision 1 and Step 2 (`unresolved_links`); crates/athena-cli/src/backtest.rs:306-342 (`check_parse`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The gate's unreconciled message, which the plan keeps word for word, and the producer brief invite an entry with no phrase, which the new check then refuses after the one send-back is spent",
+      "evidence": "The kept message says to add an entry that \"amends or supersedes each decision (or says it was checked and stands), and a matching [[link]]\", and does not say the entry must contain `Amends <id>`. briefs.rs says the same. producer.rs:245-248 allows a single send-back. So a producer sent back for an unreconciled decision can write \"Checked D08; stands\" plus a link. The new link check then fails it with no send-back left. The plan's own fixture (tests.rs:3181) shows this exact entry shape. Fix: Add to the unreconciled message that the entry must state `Amends <id>` (or `Supersedes <id>`), and update the exact-text test at tests.rs:3371. Also say it in the rewritten toml header. briefs.rs is out of scope, so name its sentence as a follow-up in the change description, following the root-cause default.",
+      "location": "Plan Decision 5 / Step 6; crates/athena-core/src/run/checks.rs:45-50; crates/athena-context/src/briefs.rs:1491-1497",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The listing of docs lines citing an amended decision never reaches the producer, so it cannot prevent the contradicting docs",
+      "evidence": "The request asks the in-loop check to list stale sentences, to catch \"contradicting docs\" before handover. The plan prints them only to the job's UI at the candidate gate (mod.rs:1944), after the producer has finished. The plan's own Risks section admits the loop prints nothing. The in-loop gate's send-back string (producer.rs:498-502) is in scope through `decision_gate`. Fix: When the in-loop gate already sends back, append the citing lines to its message as advisory text. Or record in the change description that a producer-visible listing needs a producer.rs follow-up, and propose it.",
+      "location": "Plan Decision 4 / Step 6 (`unreconciled_decisions` prints UI lines)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Matching on ids lists every docs line citing a decision that a \"checked and stands\" amendment touched, where the claim is still true",
+      "evidence": "Most new links are `amended` links of the \"D08 was checked ... and stands\" kind (docs/decision-links.toml:180-199). For these, every line in docs/ citing D08 would be listed, even though nothing it says changed. The plan caps the output at 20 lines per decision but does not reduce the false positives. Fix: List every citation for `superseded` links. For `amended` links, list only lines that also quote text the newer entry changes, or print one summary count per decision for amendments. State the rule in decision-sets.md.",
+      "location": "Plan Decision 4 / Step 3 (`citing_lines`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion-3 demonstration checks for one phrase that the current header does not contain, so the header check would pass without the change",
+      "evidence": "The test asserts the header does not contain `update the lines`. The current header says \"update the lines here\" (line 10), so that part fails before the change, but nothing checks the other line-number advice. Line 3 (\"its `line` in docs/decisions.md\") and lines 22-23 (\"The `line` of the new link must match the phrase\") could survive the rewrite and the test would still pass. Fix: Assert that no comment line of the real list mentions `line` as a key, for example that no header line contains \"`line`\", in addition to the no-key and no-duplicate-pair checks.",
+      "location": "Plan Demonstrations, Criterion 3; docs/decision-links.toml:3-4, 10, 22-23",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Doc comments that say a link carries a line number are not in the edit list",
+      "evidence": "decisions.rs:8-9 says the parse \"lists every hit with its line\" (still true of `Hit`), but decisions.rs:44-45 documents `Link` as \"the line of the phrase in docs/decisions.md\", and :12 cites \"line 322\". decision_links.rs:68 says \"Other fields are read by the log's own parse\". The decision_links.rs fixtures at lines 242, 250 and 390 also still carry `line`. Fix: Add these comment and fixture updates to steps 2 and 5.",
+      "location": "crates/athena-cli/src/decisions.rs:8-12, 44-45; crates/athena-data/src/decision_links.rs:68",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot with Read and Grep. Its references are accurate. `decision_gate` (checks.rs:21) is called from the producer loop (producer.rs:499 via `unreconciled_in_snapshot`) and at the candidate (mod.rs:1944). The phrase parse in backtest.rs:45-199 depends only on itself, so it can move to athena-data. `Link` (decisions.rs:47) has no deny_unknown_fields, so a list that still has `line` keys parses. `ls_tree_under` exists (athena-git lib.rs:950). The duplicate D46/D79 and D87/D88 pairs carry the same status, so merging them loses nothing. The last heading is D186. D156 is not governed: only D08 is, over snapshot.rs and candidate.rs. The demonstrations name real seams (`governed_repo`, `governed_job`, `run_on`, `repo_file`), and each would fail without the behavior. One design problem is major. The new loop check carries over only one direction of the backtest's condition (a): a link that no phrase names. The other two conditions stay late: a new `Amends/Supersedes Dnn` phrase with no matching link, and a phrase with no target id. Those are still caught only at the final verdict. That contradicts the plan's own Decision 1, which rejects partial checks because they \"still fail the backtest at the final verdict\". Smaller issues: the gate's unreconciled message and the producer brief do not tell the producer to write the phrase, which the new check now requires. The listing never reaches the producer. Matching on ids is noisy for \"checked and stands\" amendments. Some doc comments still say links carry a line."
+}
