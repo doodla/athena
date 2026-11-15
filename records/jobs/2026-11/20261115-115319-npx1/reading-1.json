@@ -1,0 +1,181 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261115-115319-npx1",
+  "n": 1,
+  "at": "2026-11-15T13:58:58.056320585Z",
+  "invocation_seq": 4,
+  "base_commit": "4232fe763db1b00cfc49984738fd5f9ef9ded697",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Queue jobs for a single build-folder slot so two can run at once",
+  "summary": "Add a disk-slot gate so only one job at a time holds a build folder. A second job may read and plan, and waits for the slot before its producer builds, instead of being held or discarded for low disk. With the gate in place, max_concurrency goes back to 2. The audience is the owner running the drain on a disk that fits one build folder.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests added for the slot gate; cargo test and clippy criteria."
+    },
+    {
+      "id": "mechanism",
+      "how": "Gate enforced in code, not prose."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the drain with two jobs and check peak slot holders."
+    },
+    {
+      "id": "designed",
+      "how": "A new decision entry records alternatives."
+    },
+    {
+      "id": "root-cause",
+      "how": "Gate on disk use directly rather than limiting job count."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/admission.rs, crates/athena-core/src/disk.rs, crates/athena-core/src/state.rs, crates/athena-cli/src/drain.rs, crates/athena-cli/src/commands.rs and crates/athena-data/src/config.rs. Grep shows max_concurrency and build-slot handling in these files. The entry point is the drain in crates/athena-cli/src/drain.rs. Admission and the disk gate run before a job is started. The producer build step is where the new wait goes. Direct measurement is the count of jobs holding a build folder at the same moment, not a proxy. The producer should confirm the exact functions before editing. Any new record or data file under crates/ must be covered by check_record_file, AnyRecord or the round-trip test; prefer no new record type.",
+    "Term ladder: not used. Build-folder slot means a single exclusive hold on the right to create or keep a per-job build directory (target folder). It is taken before the producer builds and freed when the job lands, is rejected or is discarded.",
+    "Reading of the request: planning, reading and verification need no slot. Only the producer build phase waits. A job waiting for the slot is neither discarded nor held for low disk. If free space is below the low-disk gate for a reason other than another job's folder, existing behavior stays.",
+    "Field meaning: max_concurrency in athena.toml (line 205, live value 2 in this copy) bounds concurrent jobs. Its meaning is unchanged. Part 1 may already have set it to 1. This job ends with it at 2. Consumers: crates/athena-data/src/config.rs, crates/athena-cli/src/drain.rs, crates/athena-core/src/admission.rs.",
+    "The slot count is one, fixed by design, and the reason is that the disk fits one 15-24 GB build folder. Whether a config key for the slot count is added is left to the planner, with default 1.",
+    "Environment: none. No CI workflow, push or records read is needed. Verification uses cargo test, clippy and fmt on the working copy."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/tests/drain.rs (or crates/athena-core/src/run/tests.rs) drains two jobs with max_concurrency = 2. It asserts that both jobs reach planning together, that the second producer starts only after the first job frees its build folder, and that the peak count of build-folder holders is 1. Both jobs land, and neither is discarded or held for low disk. Run with cargo test; the test fails if the slot gate is removed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows a job waiting for the slot does not count as a low-disk hold or discard. With a simulated free-space value below the gate while another job holds the folder, the waiting job stays queued and is later started. Run with cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows the slot is freed on every exit path (landed, rejected, failed or discarded job). A second job that was waiting then proceeds. Run with cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The slot gate is enforced in code, in crates/athena-core/src/admission.rs, crates/athena-core/src/disk.rs or crates/athena-cli/src/drain.rs, and is not prose only. A Grep shows it called from the producer-start path.",
+      "kind": "content"
+    },
+    {
+      "text": "athena.toml has max_concurrency = 2 at line 205 in the final tree (git diff shows it unchanged or restored from 1 to 2). The CHANGELOG.md entry says the stopgap is lifted.",
+      "kind": "content"
+    },
+    {
+      "text": "A new appended entry in docs/decisions.md, with a Provenance bullet, records the design: one build-folder slot, the alternatives considered (a global max_concurrency of 1, a free-disk check only), and why. docs/design/parallel-jobs.md or docs/design/agent-and-build-slots.md is updated to describe the disk slot. No existing decisions entry is edited.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo test, cargo clippy and cargo fmt --check pass on the final tree, with no new clippy warnings.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Changing the low-disk gate threshold itself.",
+    "Running a live drain on the owner's machine to prove free space; tests simulate it.",
+    "Adding more than one build-folder slot or a cleanup of old build folders.",
+    "Edits to records/ or existing docs/decisions.md entries."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 1.0,
+        "p50": 2.6,
+        "p90": 7.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2700.0,
+        "p90": 6000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6811352253756261,
+      "p_user_intervenes": 0.06126126126126126,
+      "cost_usd": {
+        "p10": 0.5536097425035597,
+        "p50": 1.5036058,
+        "p90": 6.315186408644463
+      },
+      "wall_time_s": {
+        "p10": 608.2157598541473,
+        "p50": 2172.727437871244,
+        "p90": 4498.465244469671
+      }
+    }
+  },
+  "departures": "Cross-cutting drain and admission change with concurrency tests, so cost and time are above the reference and passing is a little lower.",
+  "hard_reason": "It adds a gate that holds work (waiting for a build-folder slot) and changes the drain and admission pipeline, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
