@@ -352,7 +352,7 @@ pub fn median(values: &[f64]) -> f64 {
     }
 }
 
-fn minutes_between(from: jiff::Timestamp, to: jiff::Timestamp) -> f64 {
+pub(super) fn minutes_between(from: jiff::Timestamp, to: jiff::Timestamp) -> f64 {
     to.duration_since(from).as_secs_f64() / 60.0
 }
 
@@ -386,8 +386,9 @@ fn check_minutes(job: &JobRecords) -> f64 {
     })
 }
 
-/// When the landing record for `job` was written: the newest `landings/` record with a job-landing commit
-/// of the job. None when there is none.
+/// When the landing record for `job` was written: the oldest `landings/` record with a job-landing commit
+/// of the job. None when there is none. Each later landing record lists the earlier job landings again, so
+/// the newest one would stretch a job's landing stage to the time of a landing that came after it.
 fn landing_record_time(records: &Records, job: &JobRecords) -> Option<jiff::Timestamp> {
     records
         .landings
@@ -399,7 +400,7 @@ fn landing_record_time(records: &Records, job: &JobRecords) -> Option<jiff::Time
             })
         })
         .map(|l| l.created_at)
-        .max()
+        .min()
 }
 
 /// The end of a landed job's landing and rebuild: the later of the landing outcome and the landing record.

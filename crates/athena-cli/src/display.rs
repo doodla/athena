@@ -1245,6 +1245,9 @@ pub fn snapshot_status(v: &athena_core::snapshot::SnapshotView) -> String {
     if let Some(throughput) = &v.throughput {
         let _ = writeln!(out, "{}", throughput.text());
     }
+    if !v.job_stages.is_empty() {
+        let _ = writeln!(out, "{}", athena_core::status::stages_text(&v.job_stages));
+    }
     out
 }
 
@@ -1363,6 +1366,9 @@ pub fn status(v: &StatusView) -> String {
     out.push_str(&duties_lines(&v.duties));
     if let Some(throughput) = &v.throughput {
         let _ = writeln!(out, "{}", throughput.text());
+    }
+    if !v.job_stages.is_empty() {
+        let _ = writeln!(out, "{}", athena_core::status::stages_text(&v.job_stages));
     }
     let _ = writeln!(out, "{}", v.build_measurement);
     let _ = writeln!(out, "{}", v.improvement_cycle);

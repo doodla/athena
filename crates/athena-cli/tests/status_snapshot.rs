@@ -131,10 +131,37 @@ fn status_snapshot_reads_records_and_history_from_the_snapshot_with_no_records_i
         "{shown}"
     );
     assert!(shown.contains(&head[..12]), "{shown}");
+    // The summary lists counts, not jobs; the one place a job id appears is the per-stage section.
+    let outside_stages: Vec<&str> = shown
+        .lines()
+        .filter(|l| !l.starts_with("stages "))
+        .collect();
     assert!(
-        !shown.contains(job.as_str()),
-        "the summary lists counts, not jobs"
+        outside_stages.iter().all(|l| !l.contains(job.as_str())),
+        "{shown}"
     );
+    // Per-stage durations with a reason, and `not recorded` where no record holds a figure.
+    assert!(
+        shown.contains(&format!("stages     {}", job.as_str())),
+        "{shown}"
+    );
+    for stage in ["reading", "producer", "verifier", "landing", "disk wait"] {
+        assert!(
+            shown
+                .lines()
+                .any(|l| l.trim_start().starts_with(stage) && l.contains("reason:")),
+            "no {stage} line with a reason in:\n{shown}"
+        );
+    }
+    let disk = shown
+        .lines()
+        .find(|l| l.trim_start().starts_with("disk wait"))
+        .unwrap();
+    assert!(
+        disk.contains("not recorded · reason: not recorded"),
+        "{disk}"
+    );
+    assert!(!disk.contains("0.0 min"), "{disk}");
 }
 
 #[test]
