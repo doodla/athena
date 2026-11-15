@@ -1043,6 +1043,9 @@ impl Athena {
         if reading.config_sha256 != jc.config_sha256
             || reading.defaults_sha256 != jc.defaults_sha256
         {
+            // The re-read spends the reader only, bounded by its cap (`check_budget`), and starts no planning:
+            // the next `go` is judged by the `Dispatch` preflight below before any other spend. An admission
+            // check here would count every planning round and refuse corrections that are affordable.
             ui.line("reading    the configuration that bears on a reading changed since this reading; reading again under the new configuration");
             let proposal = self.reread_after_configuration_change(&jc, records, job, ui)?;
             // A non-interactive caller (`--yes`, drain) accepts a reading that promises the same work; any
@@ -1104,7 +1107,8 @@ impl Athena {
             p.plans(reading.hard_reason.is_some() || asks_for_fails_without_run(&reading))
         }) && !capability.pins_repo();
         // The whole path still to run (every planning round, the producer and the verifier) must be
-        // affordable before anything is committed.
+        // affordable before anything is committed. This judges every job that reaches a planner or a
+        // producer, including one whose reading was corrected or read again (those spend the reader only).
         self.preflight(&jc, job.spent_usd(), ReserveStage::Dispatch { planned })?;
         let redactor = self.redactor(&jc.config, Some(&id))?;
 

@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045733-smbn",
+  "round": 3,
+  "at": "2026-11-15T05:22:45.467250408Z",
+  "invocation_seq": 8,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "As specified, `set_job_usd` asserts `job_usd = 50.00` on every call, so its second call in `preflight_retry` panics.",
+      "evidence": "Step 2 says `set_job_usd` reads athena.toml, asserts it contains `job_usd = 50.00`, replaces it and commits. `preflight_retry` calls it twice on the same repository: first with 16.99, then with 17.00 (the Risks section says so: \"after two athena.toml commits (16.99, then 17.00)\"). After the first call the file reads `job_usd = 16.99`, so the second call's assertion panics before the exact-reserve row runs. `preflight_ask` has the same problem if its 21.49 and 21.50 rows share one repository. Fix: Have `set_job_usd` replace whatever line starts with `job_usd = ` and assert that exactly one line was replaced, like `with_job_usd` in crates/athena-cli/tests/common/mod.rs:102-115. Alternatively, build a fresh repository for each row.",
+      "location": "Step 2 (`set_job_usd`) and the criterion 3 demonstration (b) `preflight_retry`; Risks bullet 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The syntax-tree scan cannot see cap sums written inside macro calls such as `format!` or `bail!`.",
+      "evidence": "In syn 2, `syn::visit::Visit` does not look inside macro calls: a `Macro`'s body is an opaque `TokenStream`, so no `ExprBinary` is ever visited there. A sum written as an argument to `format!`, `bail!`, `json!`, `assert!` or `anyhow!` (for example `bail!(\"... {}\", jc.config.budget.producer_usd + jc.config.budget.verifier_usd)`) would pass the scan. Budget messages are mostly built with these macros (for example `check_budget` at reading.rs:477-482), so this is a realistic place for a second sum. The plan's claim that the scan \"hides nothing\" is too strong. Fix: Override `visit_macro` in the visitor. Try to parse the macro body as `Punctuated<Expr, Token![,]>` and visit each expression. If that parse fails, fall back to scanning the tokens for a cap identifier next to a `+` punctuation token. Add a planted fixture with a cap sum inside `format!(...)` to the self-test.",
+      "location": "Decision 6 and the criterion 2 demonstration (`no_second_sum_of_stage_caps_in_core`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The scanner's planted test strings add new matches to criterion 2's literal grep under crates/athena-core/src.",
+      "evidence": "Criterion 2 is stated as a literal grep for `planner_usd + ` or `producer_usd + ` under crates/athena-core/src. The new self-test in run/tests.rs embeds strings such as `a.producer_usd + a.verifier_usd`, so this change adds new grep matches in core. The verifier would have to tell them apart from real sums, on top of the existing test-oracle lines in reading.rs (for example 1681 and 1739). Fix: Write the fixtures so they contain no literal `producer_usd + ` or `planner_usd + `, for example by assembling the cap name with `concat!` or by naming the cap through a placeholder that is substituted at run time. Or state in the test's doc comment and in the CHANGELOG entry that the grep's remaining matches are test strings and oracles, and that the syntax-tree scan is the authoritative check.",
+      "location": "The criterion 2 demonstration (planted fixtures 1, 6 and 7 in `cap_sum_scanner_flags_planted_sums_and_ignores_test_code`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The left-budget figure quoted for the re-read test is $1.00 too low; its conclusion still holds.",
+      "evidence": "The plan says \"Left is 45.50 in (i) and 45.49 in (j)\". In (j), `set_job_usd` raises job_usd to 51.00 before the re-read, and the job has spent 4.50, so $46.50 is left before the re-read and $46.49 after it. The conclusion still holds, because $46.50 is below the $47.00 Admission reserve. Fix: Correct the figure to 46.50 before the re-read and 46.49 after it, so the test's comment and assertions match the arithmetic.",
+      "location": "The criterion 3 demonstration (j) `preflight_reread_is_not_gated_by_admission`",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan relies on and checked its claims against it. All six preflight call sites are where the plan says: reading.rs:1203 and 1303, run/mod.rs:1108 and 1367, planning.rs:116 and 336. `budget_reserve` (reading.rs:116-138) and the Config sums (config.rs:898-935) match the plan's description. Working from that code, I recomputed every literal reserve and coefficient in criteria 3 and 4 (for example, Critic round 2 at R=3 is 0.75 + 1.5 + 15 = 17.25) and every held row and exact row in the planner, critic, run-stage, dispatch, resumed-read and drain scenarios. Each one lands on the intended side of the `reserve > left + 1e-9` check. Several other claims also hold. `JobConfig::at` does not call `check_budget`, so a test can set job_usd below the reserve. `[budget]` is part of `reading_inputs` (config.rs:674-685), so the re-read test does trigger a re-read. The drain's run-side hold produces the `item <id> is left queued:` note and the `budget short` outcome (drain.rs:1732-1757, 4700-4711). athena-core already depends on syn 2 with `visit`. The only production calls of the four Config sum methods in core are inside `budget_reserve`. The CHANGELOG finders the plan lists key on phrases the new bullet will avoid. The reading is consistent with the request: the root cause is already fixed and recorded in CHANGELOG.md:2184-2200, so the remaining work is proof. No step calls an external service, and the change adds no athena.toml field and no landing logic. I found no blocker or major problem, only four small ones. First, the `set_job_usd` helper as specified will panic on its second call in `preflight_retry`. Second, the syntax-tree scan cannot see sums written inside macro calls. Third, the scanner's planted test strings add new matches to criterion 2's literal grep. Fourth, the left-budget figures quoted for the re-read test are off by $1.00, though its conclusion still holds."
+}

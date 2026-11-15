@@ -4063,6 +4063,123 @@ fn real_steps_read_an_unread_but_specifiable_request_once_and_then_run_it() {
     assert_eq!(readers, 1, "read by the pass, not again to run");
 }
 
+/// The default scenario's agents, with the reader costing `first` for the request that names the first demo
+/// study and `others` for every other request, and every invocation recorded as its role and job.
+fn reader_costing(
+    first: f64,
+    others: f64,
+    calls: Arc<std::sync::Mutex<Vec<(Role, String)>>>,
+) -> Script {
+    let inner = Scenario::default().script();
+    Box::new(move |spec| {
+        calls
+            .lock()
+            .unwrap()
+            .push((spec.role, spec.job.to_string()));
+        let mut turn = inner(spec);
+        if spec.role == Role::Reader {
+            turn.cost_usd = if spec.user_prompt.contains("first demo study") {
+                first
+            } else {
+                others
+            };
+        }
+        turn
+    })
+}
+
+/// Two queued requests, each with an acceptance bullet so the plan is complete before it is read.
+fn queue_two_demo_studies(athena: &Athena) -> (String, String) {
+    let (first, _) = athena
+        .queue("Add the first demo study to studies/demo/\n- the demo study has a pin")
+        .unwrap();
+    let (second, _) = athena
+        .queue("Add the second demo study to studies/demo/\n- the demo study has a pin")
+        .unwrap();
+    (first.as_str().to_string(), second.as_str().to_string())
+}
+
+#[test]
+fn budget_short_dispatch_leaves_the_item_queued_and_the_next_runs() {
+    // No `[job_plan]`: a job needs the reader 2.00, the producer 10.00 and the verifier 5.00, so admission is
+    // 17.00 and dispatch (after the read) is 15.00. The budget is 17.00. The first item's reader costs 2.01,
+    // so 14.99 is left at dispatch: one cent short. Admission at spend 0 passed (exactly 17.00).
+    let fx = Fixture::with_config(&with_job_usd(&test_config(), "17.00"));
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let athena = fx.athena(reader_costing(2.01, 0.01, calls.clone()));
+    let (first, second) = queue_two_demo_studies(&athena);
+    let lander = RecordingLander::default();
+    let report = drain::drain(&real_steps(&athena, &lander), work_everything(), &Quiet).unwrap();
+    let text = display::drain(&report);
+
+    // The first item is held once: one note, outcome `budget short`, with the shortfall and the config line.
+    let prefix = format!("item {first} is left queued:");
+    let notes: Vec<&String> = report
+        .notes
+        .iter()
+        .filter(|n| n.starts_with(&prefix))
+        .collect();
+    assert_eq!(notes.len(), 1, "{:?}", report.notes);
+    assert!(notes[0].contains("$0.01 short"), "{}", notes[0]);
+    assert!(notes[0].contains("[budget] job_usd"), "{}", notes[0]);
+    assert!(!notes[0].contains('\n'));
+    let held: Vec<_> = report.jobs.iter().filter(|j| j.item == first).collect();
+    assert_eq!(held.len(), 1, "{text}");
+    assert_eq!(held[0].outcome, "budget short", "{text}");
+    // It was read, and nothing after the reader ran for it; it is still queued, not failed or closed.
+    let calls = calls.lock().unwrap().clone();
+    let roles_of_first: Vec<Role> = calls
+        .iter()
+        .filter(|(_, job)| *job == first)
+        .map(|(role, _)| *role)
+        .collect();
+    assert_eq!(roles_of_first, [Role::Reader], "{text}");
+    assert!(queued_ids(&fx).contains(&first), "{text}");
+    // The next item has the budget: it is read, run and landed.
+    let landed: Vec<String> = lander
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(job, _)| job.clone())
+        .collect();
+    assert_eq!(landed, [second], "{text}");
+    assert_eq!(report.landed, 1, "{text}");
+}
+
+#[test]
+fn budget_short_exactly_at_the_reserve_runs() {
+    // The same budget, with the reader costing 2.00: exactly the 15.00 dispatch reserve is left, so nothing is
+    // held and the item lands. (One item only: the scenario's producer has nothing left to change for a second.)
+    let fx = Fixture::with_config(&with_job_usd(&test_config(), "17.00"));
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let athena = fx.athena(reader_costing(2.00, 0.01, calls.clone()));
+    let (first, _) = athena
+        .queue("Add the first demo study to studies/demo/\n- the demo study has a pin")
+        .unwrap();
+    let lander = RecordingLander::default();
+    let report = drain::drain(&real_steps(&athena, &lander), work_everything(), &Quiet).unwrap();
+    let text = display::drain(&report);
+    assert!(
+        !report.notes.iter().any(|n| n.contains("is left queued")),
+        "{:?}",
+        report.notes
+    );
+    assert!(
+        report.jobs.iter().all(|j| j.outcome != "budget short"),
+        "{text}"
+    );
+    let landed: Vec<String> = lander
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(job, _)| job.clone())
+        .collect();
+    assert_eq!(landed, [first.as_str()], "{text}");
+    assert_eq!(report.landed, 1, "{text}");
+}
+
 const UNREAD_FIRST: &str =
     "Add the first demo study to studies/demo/\n- the demo study has a pin, claims and an intro";
 const UNREAD_SECOND: &str =

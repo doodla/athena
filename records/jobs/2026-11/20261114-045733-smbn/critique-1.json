@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-045733-smbn",
+  "round": 1,
+  "at": "2026-11-15T04:59:35.415391878Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The new checks in `correct` and the config-change re-read use the Admission reserve, which always counts every planning round. Against earlier spend, they refuse jobs that are in fact affordable, and the '0% newly refused' claim does not cover them.",
+      "evidence": "`budget_required` (config.rs:929-935) adds `planning_usd(max_rounds)` whenever `[job_plan]` is enabled. The shipped values are reader 2, planner and critic 3, max_rounds 5, producer 10 and verifier 5, which gives an Admission reserve of 47.00 against job_usd 50.00 (athena.toml:44-48, 220-226). That leaves $3.00 of headroom. `mode = \"hard\"` means most readings are not planned, so dispatch only needs `Dispatch{planned:false}` = 15 (run/mod.rs:1103-1108). Today a correction costs one reader call (capped at 2) and then passes dispatch with about $17 left. With the plan, any job whose earlier reads total more than $3.00 is refused at `correct`, or held at the re-read. That can be one read retried after a refusal (two reader calls, up to $4), or two readings, and max_readings is 5. Spend never goes down, so the job stays blocked until the operator raises job_usd, and drain would leave it queued on every pass. The plan's 0% figure comes from the shipped job_usd exceeding the reserve at spend 0. That argument does not carry over to checks made against earlier spend. The request requires that a refusal rule state the share of past accepted readings it would refuse, and the plan has not measured that share (the size of this effect is my estimate; I could not read records/). Fix: Pick one of these and say why. (a) Add a `ReserveStage::Reread { planned }` arm to `budget_reserve`, equal to reader_usd + the `Dispatch{planned}` reserve, with `planned` computed the way dispatch does from the current reading. The dispatch preflight that runs after the re-read already catches a reading whose planned status changes. The sum stays in `budget_reserve`, so criterion 2 still holds. (b) Keep Admission, but measure from records the share of past accepted readings and corrections with earlier spend above job_usd − budget_required, and state it in the plan and the CHANGELOG. (c) Leave out the two checks, because the existing Dispatch preflight already stops a job before any planning spend; the only spend not covered is one reader call, which is already capped. Whichever you choose, add a test row where a non-planned job with earlier spend above $3 and below job_usd − 17 can still be corrected under a hard-mode config.",
+      "location": "Decision 1; Approach (\"No new refusal rule … 0%\"); reading.rs:1344 and run/mod.rs:1046 call sites",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out three existing athena-cli tests that call `Athena::correct`, which gets the new refusal.",
+      "evidence": "Grep for `.correct(` finds crates/athena-cli/tests/lifecycle.rs:1152, crates/athena-cli/tests/retry.rs:126 and crates/athena-cli/tests/introspection.rs:898, in addition to main.rs:1008 and commands.rs:237. The plan lists only the two binary callers and the new `preflight_correct`. No test in athena-core calls `correct` today, so these three are the only existing tests of the path that changes. Fix: Add lifecycle.rs:1152, retry.rs:126 and introspection.rs:898 to the dependent entry. State the config each one uses (test_config: no [job_plan], reserve 17.00, job_usd 50) and their earlier spend, and name them in step 8 as tests that must pass unchanged.",
+      "location": "Dependents: 'New Admission preflight in `Athena::correct`'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The setup for `preflight_critic_round` does not say the round-1 critique must ask for a revision, and without one there is no critic in round 2.",
+      "evidence": "Row (d) names a 'revising critique', but row (e) gives only 'R=3, reader 0.01, planner 16.00, critic costs [0.75]'. With `accepting_critique()`, as in run/tests.rs:2143, planning ends after round 1, so the expected 'critic is called twice' can never happen, and the row would not test planning.rs:336 at round 2. Fix: State that row (e) uses `planning_script(vec![good_plan()], vec![revising_critique()], …)`, as row (d) and run/tests.rs:2244 do.",
+      "location": "Demonstrations, criterion 3 (e)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The source scan for a second sum of caps is a text heuristic that misses common ways of writing the same sum.",
+      "evidence": "It only matches `<role>_usd +` with the cap on the left and a space before the plus. It misses `x + cfg.budget.producer_usd`, `producer_usd+verifier_usd`, and sums written with `.sum()` or `+=`. It also cuts each file at its first `#[cfg(test)]`, so a `#[cfg(test)]` helper early in a file would hide all the production code after it. reading.rs tests already contain `reader_usd +` (reading.rs:1669), so the cut matters. Fix: Also match `\\+\\s*[\\w.]*_(planner|critic|producer|verifier|reader)_usd\\b` and `_usd\\s*\\+`. Cut at `#[cfg(test)]\\s*mod ` (the test module) rather than at the first attribute. Or flag any read of `budget.(producer|verifier|reader)_usd` or `job_plan…(planner|critic)_usd` in core non-test code outside a short allow-list (the cap checks in producer.rs:362, verification.rs:216 and read_once).",
+      "location": "Decision/criterion 2: `no_second_sum_of_stage_caps_in_core`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Removing the retry preflight to make a mutation test work also changes which error the user sees. That change falls outside the accepted reading, which only extends the existing checks.",
+      "evidence": "Today a short retry fails at reading.rs:1303 with BudgetShort, before `ask` → `first_reading` → `earlier_attempt_with` (reading.rs:1198), which refuses jobs that cannot be retried. After the change, a job that cannot be retried and is also short gets the state refusal instead. The reading says the change 'extends' the preflight and does not mention removing a call. The test benefit is only that criterion 4's mutation check can tell the two checks apart, and the reading also lets that be shown 'by reading the test'. Fix: Either keep the retry preflight and say that its own effect is that no resume note is printed (criterion 4 can be met by reading `preflight_retry`), or keep the removal and add the changed error order to the CHANGELOG entry and the dependents list.",
+      "location": "Decision 2; reading.rs:1300-1303",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly. I checked its claims in the code and they hold: `budget_reserve` (reading.rs:116), `preflight` (490), the preflight calls at reading.rs:1203 and 1303 and run/mod.rs:1108, and the two re-read paths that are not covered (`correct` → `read_for` at reading.rs:1419, and `reread_after_configuration_change` at run/pin.rs:167, called from run/mod.rs:1047). Both only check the reader cap (reading.rs:586). I worked through the arithmetic for test rows (c) to (i) and the table coefficients by hand against `budget_reserve` and `Config::budget_required`, and they are right. The design has one real problem. The two new checks use the `Admission` reserve against the job's earlier spend. Admission always counts every planning round. Under the shipped config that is 2 + 5×6 + 15 = 47 against job_usd 50, with `mode = \"hard\"` (athena.toml:44-48, 220-226). So a correction, or a re-read after a config change, on any job whose earlier reads cost more than $3.00 would now be refused, for good, even when the job will not be planned and only needs about $17. The plan says 'no new refusal rule, 0% newly refused', but that figure was worked out at spend 0, where `Config::check_budget` already guarantees the reserve fits. It does not apply to these new checks. Also, the dependents list leaves out three existing callers of `correct` in the athena-cli tests. The rest of the plan is sound. The demonstrations name real seams and fail without the behavior: the planner test uses round 2 because round 1 cannot be told apart from dispatch, and the critic round 2 test is exact to the cent."
+}
