@@ -1,0 +1,127 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261114-112646-s4bn",
+  "base_commit": "26a94984f70f0180ba1fcc619bc9c71c95cf09cc",
+  "base_fingerprint": "sha256:6e03388702f0e0426aa0df2c806bd1618ad93fffaa745e8e088f0d0f800f0f76",
+  "previous_job": "20261115-115319-npx1",
+  "candidate_commit": "e0b4626e3a55aa3f8cbc621dc200dfd7dc6ace84",
+  "candidate_tree": "cf7b4418a26a0e9d081295564faae7867cfb8bf3",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 495939
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 226369
+    },
+    {
+      "path": "crates/athena-context/src/briefs/planner.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14301
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26616
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 496044
+    }
+  ],
+  "fingerprint": "sha256:5cd7e9653370b4a80055738f808ca778ff3ffe05ee9ef2c5e4bc18622d73fac5",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: the planner's fixed `planner_timeout_s` deadline was never stated to it, so it explored until it was killed and left no plan. Two jobs failed this way (20261114-041123-hvyh and 20261030-113229-kgrg). The fix is in the planner brief: `PlannerInputs.deadline_s` is filled from `cfg.planner_timeout_s`, the same value passed to `agent_spec`. A new `DEADLINE_RULE` renders as a `## Deadline` section before `## Report` in first-round and revision briefs. The rule says a planner stopped at the deadline sends no plan. It says the planner has no clock, so it counts tool calls against a reading order. It sets the stop-exploring point at half the deadline. It asks for the best complete plan, with unresolved items as `User:` or `Host:` questions. I added a unit test for deadlines 600 and 1200 in both rounds, and a run test for 600 and 4321. The run test checks the brief figure equals the enforced timeout and that a planner stopped at the deadline still ends the job as a planning stop. A CHANGELOG entry records the cause. It notes that commit 740a9e4 already raised the live limit to 86400, so this change covers any configured deadline. No refusal rule, prompt file or config is changed.",
+    "files": [
+      "crates/athena-context/src/briefs/planner.rs",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/run/planning.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting"
+      },
+      {
+        "command": "cargo test -p athena-context",
+        "result": "pass",
+        "note": "158 passed, including the new deadline test"
+      },
+      {
+        "command": "cargo test -p athena-core the_planner_brief_states",
+        "result": "pass",
+        "note": "new run test passes"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "22 passed"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "crates/athena-context/src/briefs/planner.rs adds a `deadline_s` field to PlannerInputs and a rule constant with a doc comment that names the root cause (the planner's fixed deadline was never stated to it; jobs 20261114-041123-hvyh and 20261030-113229-kgrg); `planner_brief` includes the rule text.",
+        "status": "met",
+        "evidence": "planner.rs has `pub deadline_s: u64` and `DEADLINE_RULE`. Its doc comment names the root cause and both job ids. `planner_brief` writes it through `deadline_section` as a `## Deadline` section. The new unit test passes."
+      },
+      {
+        "criterion": "The rule in the planner brief states the deadline in seconds and says that a planner killed at the deadline produces no plan. It tells the planner to sort its reading by what the criteria need, to stop exploring well before the deadline (the rule gives a fraction of the deadline), and to return the best complete plan it has, with unresolved items as `User:` or `Host:` open questions. Check with Grep on the constant in planner.rs.",
+        "status": "met",
+        "evidence": "The constant holds 'deadline of {deadline_s} seconds', 'sends no plan', 'You have no clock of your own', 'Sort your reading by what the acceptance criteria need', 'stop exploring by {stop_s} seconds (half the deadline)' and `User:` / `Host:`. It has no newline. The unit test asserts the rendered text."
+      },
+      {
+        "criterion": "crates/athena-core/src/run/planning.rs fills PlannerInputs.deadline_s from `cfg.planner_timeout_s`, the same value passed to agent_spec, so the figure shown cannot differ from the enforced deadline. Check with git diff.",
+        "status": "met",
+        "evidence": "The diff adds `deadline_s: cfg.planner_timeout_s` to the literal in planning_round. The run test shows the brief figure equals the recorded spec.timeout for 600 and 4321."
+      },
+      {
+        "criterion": "A new unit test in crates/athena-context/src/briefs.rs builds planner briefs with two different `deadline_s` values (600 and 1200) for a first-round and a revision input. It asserts that each brief contains its own deadline figure and the stop-early instruction. It fails on the base tree, where no brief mentions the deadline. Run `cargo test -p athena-context`.",
+        "status": "met",
+        "evidence": "`planner_brief_states_its_deadline_and_the_stop_early_rule_in_both_rounds` passes in `cargo test -p athena-context` (158 passed). On the base tree it does not compile, because `deadline_s` and `DEADLINE_RULE` do not exist. I did not run it on the base."
+      },
+      {
+        "criterion": "A new test in crates/athena-core/src/run/tests.rs runs planning with the fake agent and `planner_timeout_s = 600`. It asserts the recorded planner invocation brief contains `600`. It also asserts that a planner stop at the deadline still ends the job as a planning stop with the reason 'deadline of …s reached', so existing behavior is unchanged. Run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "`the_planner_brief_states_the_enforced_deadline_and_a_planner_deadline_still_stops_planning` passes. It runs for 600 and 4321 and checks the brief text, the timeout, the Failed state, PLANNING_STOPPED_PREFIX and the reason text. I ran it with the filter `the_planner_brief_states`. I did not run the whole of `cargo test -p athena-core`."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry for this change that names the root cause. No prompt file, athena.toml, defaults.toml, workflow, docs/decisions.md or records/ file is modified.",
+        "status": "met",
+        "evidence": "A new first bullet under Unreleased / Added names the root cause, both job ids and 740a9e4. Only the five deliverable files were edited."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass. The recorded Athena checks on the final tree count as evidence (D115). Existing planner-brief tests still pass with the new field set in each PlannerInputs literal.",
+        "status": "met",
+        "evidence": "left to Athena's checks for fmt and the full test run. I ran clippy clean, ran cargo fmt --all, and all 158 athena-context tests pass, including the existing planner-brief tests with the helper literal set to `deadline_s: 600`."
+      }
+    ],
+    "open_issues": [
+      "The live planner_timeout_s is 86400 since commit 740a9e4, so the rule matters most when a shorter deadline is configured. Whether planners follow it is not measured, and half the deadline is an estimate.",
+      "I did not run the full `cargo test --locked` or the whole of `cargo test -p athena-core`. I also did not run `cargo test -p athena-cli --test mirrors`; I did not check whether it exists. Athena's checks cover the full suite."
+    ],
+    "mistakes": [],
+    "learnings": [
+      "The producer's Bash hook rejects pipes to tail and grep, so cargo output must be read in full.",
+      "The new run test lives in the `produce_and_verify_order_tests` module of run/tests.rs."
+    ],
+    "desires": []
+  }
+}

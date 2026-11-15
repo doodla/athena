@@ -1,0 +1,259 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261114-112646-s4bn",
+  "round": 1,
+  "at": "2026-11-15T17:48:33.169247064Z",
+  "invocation_seq": 3,
+  "approach": "Give the planner the deadline it runs under. Add `deadline_s: u64` to `PlannerInputs` (planner.rs:33) and a `pub(super) const DEADLINE_RULE` with a root-cause doc comment, following CODE_CLAIMS_RULE (planner.rs:82-90) and the producer's `time_budget_section` (briefs.rs:758-776), which already states the producer's own limit the same way. `planner_brief` renders the rule in its own `## Deadline` section after the revision block and before `## Report` (planner.rs:156). The rule states the deadline in seconds and says a planner stopped at the deadline sends no plan. It tells the planner to sort its reading by what the criteria need, to stop exploring by half the deadline, and to return the best complete plan it has, with unresolved items as `User:` or `Host:` open questions. It is prose: information, not enforcement. `planning_round` (planning.rs:129) sets `deadline_s: cfg.planner_timeout_s`, the same `cfg` field passed to `agent_spec` at planning.rs:162, which becomes `AgentInvocation.timeout = Duration::from_secs(timeout_s)` (reading.rs:469). The figure shown is therefore the figure enforced. No refusal rule, prompt file, config, record shape or resume machinery changes. Two tests pin it: a unit test on the brief text for two deadlines and both rounds, and a run test through `Athena::go` with a planner that times out. Criterion 7 names its seam: the existing planner-brief tests and planning run tests, plus the three check commands, run over the final tree.",
+  "decisions": [
+    {
+      "choice": "New field `PlannerInputs.deadline_s: u64`, filled from `JobPlanConfig.planner_timeout_s`. It mirrors the enforced limit and does not reuse a config key for another meaning.",
+      "reason": "The config field (crates/athena-data/src/config.rs:229) has no doc comment, so its meaning is read from its use. `planning_round` passes it to `agent_spec` as `timeout_s` (planning.rs:162). `agent_spec` stores it as `AgentInvocation.timeout: Duration` (reading.rs:420 and 469; athena-agent/src/lib.rs:76). A pass beyond it records 'deadline of {secs}s reached' (athena-agent/src/procs.rs:19-21). So it is the wall-clock limit of one planner call, which is what the planner must size its work to. Config validation refuses zero (config.rs:812-813), so the figure is at least 1. Live value for the planner: athena.toml:224 `planner_timeout_s = 86400`. The run tests set 600 (run/tests.rs:297). The brief prints whatever config holds.",
+      "rejected": [
+        {
+          "option": "Persist a draft plan and resume or retry after a planner timeout",
+          "why": "Out of scope in the accepted reading: it needs streamed agent output, and the brief is the smaller fix. A timed-out call still ends as a planning stop (planning.rs:190-198)."
+        },
+        {
+          "option": "A refusal or sizing gate in admission",
+          "why": "Giving the planner the deadline can prevent the failure, so a refusal rule is not allowed. None is added, so no refused-share figure applies (0 of past readings refused)."
+        }
+      ]
+    },
+    {
+      "choice": "Render the rule in its own `## Deadline` section before `## Report`, not inside the Report text.",
+      "reason": "The Report size pin (briefs.rs:3963-4003) bounds the Report to the base plus the three named rules. Tests split on `## Report` and take `nth(1)` (briefs.rs:1820, 1846, 3971, 4010). A separate section leaves those pins unchanged. The rule constant has no newline and does not contain the text `## Report`, as CODE_CLAIMS_RULE is pinned (briefs.rs:1837-1838). The section is built after the revision block (planner.rs:133-155), so a revision brief carries it too.",
+      "rejected": [
+        {
+          "option": "Append to the Report and raise PLANNER_REPORT_BASE_BYTES",
+          "why": "It edits an existing pin for no gain, and it puts the figure after the long rules."
+        },
+        {
+          "option": "Put the section near the top, after the title",
+          "why": "Not needed. The section sits in every brief shape, including a revision, and the test checks that it appears once."
+        }
+      ]
+    },
+    {
+      "choice": "The rule gives a computed fraction: stop exploring by half the deadline, `stop_s = (deadline_s / 2).max(1)`. It is a single-line template with `{deadline_s}` and `{stop_s}` placeholders, filled by a private `fn deadline_section(deadline_s: u64) -> String` that uses `str::replace`.",
+      "reason": "A concrete figure is checkable (600 gives 300, 1200 gives 600) and scales with the configured deadline, as the producer's `time_budget_section` takes its figure from the caller and never from a constant (briefs.rs:758-763). Half is a judgement call and an estimate, not a measured value. The doc comment says so.",
+      "rejected": [
+        {
+          "option": "Say only 'well before the deadline' with no figure",
+          "why": "The criterion asks for a fraction, and a figure is testable."
+        },
+        {
+          "option": "Use `format!` with a raw template",
+          "why": "The constant must stay a plain `&str` that the test can read and check for no newline, like the other rules. `replace` on the two placeholders keeps that."
+        }
+      ]
+    },
+    {
+      "choice": "Name the test seam for criterion 7: the existing planner-brief unit tests and planning run tests, and the three check commands, all run on the final tree.",
+      "reason": "Criterion 7 is a behavior criterion. Its demonstration must name an entry point, a fixture and whether the seam exists. The entry points are `planner_brief(&PlannerInputs)` (planner.rs:95) through the existing tests at briefs.rs:1767, 1802, 1819, 1835, 2817, 2853, 2880, 2999, 3027, 3970 and 4009, and `Athena::go` through `planning_round` through the existing planning run tests (run/tests.rs:1980 and others that use `run_planned`). The fixtures are the `planner_inputs(revision)` helper (briefs.rs:2776-2813) and `repo_with_planning`, `planning_script` and `athena_with` (run/tests.rs:294, 1322, 1356). All exist today. The only change is one new field in the helper literal (plan step 5).",
+      "rejected": [
+        {
+          "option": "Leave criterion 7 as a command with no seam",
+          "why": "That is the finding: a behavior criterion needs a named seam."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs/planner.rs",
+      "action": "modify",
+      "purpose": "Add `deadline_s` to PlannerInputs, add DEADLINE_RULE with a root-cause doc comment and the private function that fills its two figures, and add the `## Deadline` section to planner_brief before `## Report`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `deadline_s: 600` to the `planner_inputs` test helper literal and add the unit test for two deadlines in both rounds.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Fill `PlannerInputs.deadline_s` from `cfg.planner_timeout_s` in planning_round.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the run test: the brief shows 600, the spec timeout is 600 s, and a planner stop at the deadline still ends the job as a planning stop with the unchanged reason.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased / Added entry that names the root cause, the fix and its limits.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-context/src/briefs/planner.rs, add `pub deadline_s: u64` to `PlannerInputs` with a doc comment: the wall-clock limit of one planner call in seconds, as enforced by `agent_spec`.",
+    "Add `pub(super) const DEADLINE_RULE: &str`, a single-line template with `{deadline_s}` and `{stop_s}`, with a doc comment that names the root cause (the planner's fixed deadline was never stated to it, so it explored until killed and left no plan; jobs 20261114-041123-hvyh and 20261030-113229-kgrg), says it is information and not a refusal, says the half-deadline figure is a judgement, and says a test in briefs.rs pins it. The text: this planning call has a deadline of {deadline_s} seconds of wall-clock time; a planner stopped at the deadline sends no plan and planning for the job stops; sort the reading by what the acceptance criteria need and read what each criterion and deliverable touches first; stop exploring by {stop_s} seconds (half the deadline) and write the plan; return the best complete plan you have, with anything unresolved as an open question beginning `User:` or `Host:`, instead of reading on. It has no newline and no `## Report`.",
+    "Add a private `fn deadline_section(deadline_s: u64) -> String` that returns `## Deadline` plus the rule with its two placeholders replaced, `stop_s = (deadline_s / 2).max(1)`. In `planner_brief`, after the revision block (planner.rs:155) and before the `## Report` writeln (planner.rs:156), write `\\n{section}\\n`. Leave the Report text and its constants unchanged.",
+    "In crates/athena-core/src/run/planning.rs, add `deadline_s: cfg.planner_timeout_s` to the `PlannerInputs` literal at planning.rs:129.",
+    "In crates/athena-context/src/briefs.rs, add `deadline_s: 600` to the `planner_inputs` helper literal (briefs.rs:2788), then add `planner_brief_states_its_deadline_and_the_stop_early_rule_in_both_rounds` as in demonstration 4.",
+    "In crates/athena-core/src/run/tests.rs, add `the_planner_brief_states_the_enforced_deadline_and_a_planner_deadline_still_stops_planning` as in demonstration 5, near the other planning tests (around line 1980).",
+    "Add the CHANGELOG.md entry under `## [Unreleased]` / `### Added` (CHANGELOG.md:8, 30). Name the root cause, the fix, that it is information only with no refusal rule (0% of past readings refused), that no resume or draft persistence is added, that the live value is 86400 (athena.toml:224) and the brief shows whatever config says, that whether planners follow the rule is not measured, and the test names. Do not touch any prompt file, athena.toml, defaults.toml, workflow, docs/decisions.md or records/.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-context`, `cargo test -p athena-core` and `cargo test --locked`. Fix any failure in the files listed."
+  ],
+  "risks": [
+    {
+      "risk": "The live planner deadline is 86400 s, so the rule matters less in this repository today than when the two jobs failed at 600 s.",
+      "mitigation": "The brief prints whatever `planner_timeout_s` holds, so it stays correct. The 600 s in the accepted reading is the test repository value (run/tests.rs:297). The live athena.toml:224 is 86400, and the changelog entry says so. With 86400 the rule tells the planner to stop exploring at 43200 s, which is harmless but weak. The rule's value is in its fixed 'a planner stopped at the deadline sends no plan' text and in any smaller configured deadline."
+    },
+    {
+      "risk": "A prose rule does not force the planner to finish in time, so a planner can still hit the deadline.",
+      "mitigation": "The doc comment marks the rule prose-only, and the tests pin the brief text, not planner behavior. The changelog says that whether planners follow it is not measured. The half-deadline figure is an estimate and a judgement call."
+    },
+    {
+      "risk": "A new section could disturb tests that split the brief on `## Report` or pin its size.",
+      "mitigation": "The section sits before `## Report` and the rule has no `## Report` text, so every split on `## Report` and the size pin (briefs.rs:3988) are unchanged. Step 8 runs the whole of `cargo test -p athena-context` to check this."
+    },
+    {
+      "risk": "The shown figure could drift from the enforced one.",
+      "mitigation": "The run test asserts both the brief figure and `spec.timeout` from the same run. Both come from `cfg.planner_timeout_s`, which is read once at planning.rs:98."
+    },
+    {
+      "risk": "The two-deadline test could pass by accident because 1200 / 2 = 600.",
+      "mitigation": "The test asserts the other value's deadline phrase (`deadline of 1200 seconds`), never a bare figure, because the 1200 brief's stop figure is 600."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "planner_brief / PlannerInputs (new field deadline_s)",
+      "dependent": "crates/athena-core/src/run/planning.rs `planning_round` (planning.rs:129), the only production caller of `planner_brief`. It is reached from `plan_round` for round 1, later rounds, mechanical revisions and a resumed-from seed. It reads `cfg` (`jc.config.job_plan`, planning.rs:98-101), the accepted reading, checks and the revision.",
+      "kind": "code",
+      "test": "cargo test -p athena-core the_planner_brief_states_the_enforced_deadline (round 1). Other planner-round tests in run/tests.rs (for example 1980 and those using `run_planned`) still pass, since every round fills the field from the same `cfg`.",
+      "reason": null
+    },
+    {
+      "name": "PlannerInputs struct literal in tests",
+      "dependent": "crates/athena-context/src/briefs.rs tests that use `planner_inputs` and `planner_brief` (briefs.rs:1767, 1802, 1819, 1835, 2817, 2853, 2880, 2999, 3027, 3970, 4009). The `PlannerInputs` literal at briefs.rs:2788 is the only test construction site.",
+      "kind": "code",
+      "test": "cargo test -p athena-context. The helper literal gets `deadline_s: 600`, and the new unit test also runs there.",
+      "reason": null
+    },
+    {
+      "name": "planner brief Report section text",
+      "dependent": "Report-size pin (`PLANNER_REPORT_BASE_BYTES`, briefs.rs:3965 and 3988) and the tests that split the brief on `## Report` (briefs.rs:1820, 1846, 3971, 4010)",
+      "kind": "rule",
+      "test": "cargo test -p athena-context the_planner_brief_states_the_real_records_rule_once_within_its_bound",
+      "reason": "The Report text and its constants are unchanged. The new `## Deadline` section comes before `## Report`, and the rule constant contains neither a newline nor the text `## Report`, so every `split(\"## Report\").nth(1)` sees the same Report. The new unit test asserts the rule is absent from the Report."
+    },
+    {
+      "name": "PlannerInputs re-export",
+      "dependent": "crates/athena-core/src/run/mod.rs:30 (re-export of `PlannerInputs`)",
+      "kind": "code",
+      "test": null,
+      "reason": "The re-export names the type only and builds no literal. Grep of `PlannerInputs {` in crates/ finds only planning.rs:129 and briefs.rs:2788. The CLI crate and xtask have no use of `planner_brief` or `PlannerInputs` (Grep over the repository)."
+    },
+    {
+      "name": "planner timeout stop reason 'the planner did not complete: deadline of Ns reached'",
+      "dependent": "Planner timeout stop: `format!(\"deadline of {secs}s reached\")` at crates/athena-agent/src/procs.rs:19-21; the stop path at planning.rs:190-198 and `stop_planning` at planning.rs:8-14; tests at crates/athena-core/src/run_pin_tests.rs:799-841",
+      "kind": "code",
+      "test": "cargo test -p athena-core the_planner_brief_states_the_enforced_deadline pins the planner path. The change adds text to the brief and one field. It does not touch the timeout path.",
+      "reason": null
+    },
+    {
+      "name": "text 'deadline of' in output and notes",
+      "dependent": "crates/athena-core/src/checks.rs:567-577 (`DEADLINE_NOTE_START`, 'killed at the deadline of ') and `timed_out`",
+      "kind": "code",
+      "test": null,
+      "reason": "`timed_out` reads the note of a check run, not an agent brief. The rule's text 'deadline of N seconds' is in the planner brief only, and no code scans a brief for it."
+    },
+    {
+      "name": "prompt budgets",
+      "dependent": "Prompt-set token budgets (planner 1105 of 1200) in docs/system-facts.md and crates/athena-cli/tests/budgets.rs (`system_facts_budgets_match_computed`)",
+      "kind": "rule",
+      "test": "cargo test --locked (includes crates/athena-cli/tests/budgets.rs)",
+      "reason": "The rule is a Rust constant in the brief, and briefs sit outside the prompt sets (docs/system-facts.md, 'Prompt sets and budgets'). No prompt file is edited, so no budget line changes."
+    },
+    {
+      "name": "[job_plan] planner_timeout_s",
+      "dependent": "athena.toml:224 (`planner_timeout_s = 86400`) and crates/athena-data/src/config.rs:229, 812-813 (zero refused) and 993 (default test reads 86400), 1539 (reads 600)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Read only, not changed. The brief shows whatever value is set. Config validation refuses zero, so `deadline_s >= 1`. The run tests use 600 (run/tests.rs:297, 1452, 9496, 10357). The config tests read the default and are untouched."
+    },
+    {
+      "name": "refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and the reading and admission checks in crates/athena-core/src/reading.rs and admission.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No refusal, parser, stem list or reading check is added or changed, so no corpus case is needed and no refused-share figure applies."
+    },
+    {
+      "name": "critic brief and critic deadline",
+      "dependent": "critic_brief in crates/athena-context/src/briefs/planner.rs:175 and `CriticInputs`; the critic's `critic_timeout_s`",
+      "kind": "code",
+      "test": null,
+      "reason": "`CriticInputs` and `critic_brief` are not edited. The critic deadline is out of scope per the accepted reading."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of planner.rs. It shows `pub deadline_s: u64` in PlannerInputs with a doc comment, a `pub(super) const DEADLINE_RULE` whose doc comment names the root cause (the planner's fixed deadline was never stated to the planner, so it explored until killed with no plan) and cites jobs 20261114-041123-hvyh and 20261030-113229-kgrg, and a `## Deadline` section in `planner_brief` that writes the rule.",
+      "command": "git diff -- crates/athena-context/src/briefs/planner.rs",
+      "observes": "The field, the documented constant and its use in `planner_brief` are all in the diff.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the DEADLINE_RULE text in the diff. It must state the deadline in seconds (`{deadline_s}`), say a planner stopped at the deadline sends no plan, say to sort the reading by what the acceptance criteria need, say to stop exploring by half the deadline (`{stop_s}`), and say to return the best complete plan with unresolved items as `User:` or `Host:` open questions. The constant has no newline. The rendered text is also asserted by the criterion 4 test.",
+      "command": "git diff -- crates/athena-context/src/briefs/planner.rs",
+      "observes": "Every required instruction is in the constant; the constant is one line.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Read the diff of planning.rs. The `PlannerInputs` literal at planning.rs:129 gains `deadline_s: cfg.planner_timeout_s`. `cfg` is the `JobPlanConfig` copy read at planning.rs:98-101, and the same `cfg.planner_timeout_s` goes to `agent_spec` at planning.rs:162. The criterion 5 test confirms they agree: the spec timeout is 600 s and the brief shows 600.",
+      "command": "git diff -- crates/athena-core/src/run/planning.rs",
+      "observes": "One config value feeds both the shown figure and the enforced limit.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "New unit test `planner_brief_states_its_deadline_and_the_stop_early_rule_in_both_rounds` in briefs.rs, next to the planner-brief tests. For deadline 600 and 1200, and for `planner_inputs(None)` and `planner_inputs(Some(PlanRevision{ previous: plan(1), findings: vec![finding(Severity::Major, FindingSource::Critic, \"F\")], resumed_from: None }))`, set `inputs.deadline_s` and build the brief. For each of the four briefs assert: it contains its own phrase `deadline of {n} seconds`; it contains the stop figure (`Stop exploring by 300 seconds` for 600, `by 600 seconds` for 1200); it contains `sends no plan`, `User:` and `Host:` from the rule; it does NOT contain the other value's deadline phrase (not the stop figure, because 1200/2 = 600); the section appears exactly once; the `## Deadline` heading comes before `## Report`; and the rule text is absent from the part after `## Report`, so the Report size pin holds. Also assert `!DEADLINE_RULE.contains('\\n')` and `!DEADLINE_RULE.contains(\"## Report\")`.",
+      "command": "cargo test -p athena-context planner_brief_states_its_deadline",
+      "observes": "Each of the four briefs carries its own deadline figure, its own stop figure and the stop-early instruction, and no brief carries the other deadline.",
+      "fails_without": "On the base tree the test does not compile, because `deadline_s` and `DEADLINE_RULE` do not exist. With the field but no rule text, every brief-contains assertion fails, because no brief names 'deadline of 600 seconds'. If the figure were hard-coded to 600, the 1200 briefs would fail. If the stop figure were not computed, the 1200 briefs would fail on `by 600 seconds`. If the rule were left out of a revision brief, the revision cases would fail.",
+      "seam": "Production entry point: `athena_context::briefs::planner_brief(&PlannerInputs)` (planner.rs:95), reached from the tests module of briefs.rs. Fixture: the existing `planner_inputs(revision)` helper (briefs.rs:2776-2813), `plan(1)` and `finding(...)` (used at briefs.rs:2853-2857 and 1839-1843), injected by setting `inputs.deadline_s` on the returned struct. Exists today. Step 5 adds the `deadline_s` field to the helper literal. No double: the brief builder is production code."
+    },
+    {
+      "criterion": 5,
+      "method": "New test `the_planner_brief_states_the_enforced_deadline_and_a_planner_deadline_still_stops_planning` in run/tests.rs, next to the planning tests (near line 1980). Use `repo_with_planning(1)` (run/tests.rs:294-299, `planner_timeout_s = 600`), an `Arc<Mutex<Vec<Duration>>>` for planner timeouts, a `Calls` log (1318), and `planning_script(vec![good_plan()], vec![], calls.clone())` (1322). Wrap it in an outer `athena_agent::fake::Script`. For `Role::Planner` the wrapper pushes `spec.timeout`, calls the inner script, then sets `turn.outcome = InvocationOutcome::TimedOut`, `turn.structured = None` and `turn.detail = Some(\"deadline of 600s reached\".into())`, as `timing_out` does for the producer (7208-7219). Run it with `athena_with(&repo, &state, PASSES, crate::test_support::plenty_of_space, script)` and `finished_job(&athena)` (2439). Assert: the first planner prompt in `calls` (via `prompts_of(&calls, Role::Planner)`) contains `deadline of 600 seconds`; the recorded planner timeout equals `Duration::from_secs(600)`; the finished job's state is `OutcomeState::Failed`; the reason starts with `athena_data::records::PLANNING_STOPPED_PREFIX` and contains `the planner did not complete: deadline of 600s reached`; no `Role::Producer` call is in `calls`.",
+      "command": "cargo test -p athena-core the_planner_brief_states_the_enforced_deadline",
+      "observes": "The brief the fake agent received carries 600, the enforced timeout is 600 s, and a planner stop at the deadline still ends the job as a planning stop with the unchanged reason.",
+      "fails_without": "On the base tree the planner prompt has no 'deadline of 600 seconds', so the brief assertion fails. If planning.rs filled the field from any value other than `cfg.planner_timeout_s`, the brief figure would differ from the `spec.timeout == 600 s` assertion. If the change altered the timeout path (planning.rs:190-198), the reason or state assertion would fail.",
+      "seam": "Production entry point: `Athena::go` into `planning_round` (planning.rs:129-198), with `stop_planning` (planning.rs:8-14) and `failure` producing the Failed state. Fixture: a fake agent script (`athena_agent::fake::Script`) injected through `athena_with(...)` (as in `run_planned`, run/tests.rs:1356-1373, and `timing_out`, 7208-7219). The wrapper only records `spec.timeout` and rewrites the planner's turn outcome and detail. Brief building, `agent_spec` timeout and the stop reason stay production code. Exists today: all helpers are read at the cited lines. No plan step adds a helper; step 6 adds only the test function."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the CHANGELOG.md hunk and the diff stat. The new bullet goes under `## [Unreleased]` / `### Added` (CHANGELOG.md:8 and 30). It names the root cause (the planner's fixed deadline was never stated to it, jobs 20261114-041123-hvyh and 20261030-113229-kgrg), the fix (`deadline_s`, `DEADLINE_RULE`, the `## Deadline` section), that it is information only with no refusal rule (0% of past readings refused) and no resume or draft persistence, that the live value is 86400 (athena.toml:224) and the brief shows whatever config says, and the test names. The stat lists only the five deliverables.",
+      "command": "git diff --stat",
+      "observes": "Only the five deliverable files appear. No prompt file, athena.toml, defaults.toml, workflow, docs/decisions.md or records/ path is in the stat, and the changelog hunk names the root cause.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three checks Athena runs, on the final tree. Existing planner-brief tests and planning run tests are the regression guard for the shared paths this change touches. They pass only if (a) the `planner_inputs` helper literal carries `deadline_s` (the only test construction site of `PlannerInputs`; the other is planning.rs:129), (b) the new `## Deadline` section leaves the Report text and its size pin intact (briefs.rs:3963-4003) and does not disturb the `split(\"## Report\").nth(1)` tests (briefs.rs:1820, 1846, 3971, 4010), (c) the planner prompt-set budgets are unchanged (`system_facts_budgets_match_computed`, crates/athena-cli/tests/budgets.rs), and (d) the planning round-trip tests in run/tests.rs (for example 1980 and the ones that use `run_planned`) still run with the field filled from `cfg`. The recorded Athena checks on the final tree count as evidence (D115).",
+      "command": "cargo test --locked",
+      "observes": "`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` exit 0, so every existing planner-brief and planning run test passes with the new field set.",
+      "fails_without": "A `PlannerInputs` literal missing `deadline_s` fails to compile (E0063), so `cargo test` and clippy fail. Text added inside the Report, or a rule constant that contains `## Report` or a newline, fails the pins at briefs.rs:1837-1838 or 3988. An unformatted new line fails `cargo fmt --check`. An unused or needlessly cloned helper in planner.rs fails `clippy -D warnings`. A prompt-file edit would fail `system_facts_budgets_match_computed`.",
+      "seam": "Production entry points: `planner_brief(&PlannerInputs)` (planner.rs:95) through the existing tests in briefs.rs at 1767, 1802, 1819, 1835, 2817, 2853, 2880, 2999, 3027, 3970 and 4009; and `Athena::go` into `planning_round` through the existing planning run tests in run/tests.rs (for example 1980, via `run_planned`). Fixtures: the `planner_inputs(revision)` helper (briefs.rs:2776-2813) and `repo_with_planning`, `planning_script` and `athena_with` (run/tests.rs:294, 1322, 1356), injected as in those tests. The seam exists today (read at the cited lines). Plan step 5 adds `deadline_s: 600` to the helper literal. The fmt and clippy checks run the real cargo commands on the real final tree with no double."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "9847edff05c010eaee41dc7d32728aa6cce948b7a4f144708676513c8a1d92ef"
+}

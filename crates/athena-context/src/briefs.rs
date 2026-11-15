@@ -1861,6 +1861,46 @@ mod tests {
     }
 
     #[test]
+    fn planner_brief_states_its_deadline_and_the_stop_early_rule_in_both_rounds() {
+        use super::planner::DEADLINE_RULE;
+        assert!(!DEADLINE_RULE.contains('\n'));
+        assert!(!DEADLINE_RULE.contains("## Report"));
+        assert!(DEADLINE_RULE.contains("{deadline_s}") && DEADLINE_RULE.contains("{stop_s}"));
+        for (n, other) in [(600u64, 1200u64), (1200, 600)] {
+            for revised in [false, true] {
+                let revision = PlanRevision {
+                    previous: plan(1),
+                    findings: vec![finding(Severity::Major, FindingSource::Critic, "F")],
+                    resumed_from: None,
+                };
+                let mut inputs = planner_inputs(revised.then_some(revision));
+                inputs.deadline_s = n;
+                let brief = planner_brief(&inputs);
+                assert_eq!(brief.matches("## Deadline").count(), 1);
+                let (head, report) = brief.split_once("## Report").expect("report section");
+                let section = head.split("## Deadline").nth(1).expect("deadline section");
+                for needle in [
+                    format!("deadline of {n} seconds"),
+                    format!("stop exploring by {} seconds", n / 2),
+                    "sends no plan".to_string(),
+                    "You have no clock of your own".to_string(),
+                    "User:".to_string(),
+                    "Host:".to_string(),
+                ] {
+                    assert!(section.contains(&needle), "missing: {needle}");
+                }
+                for absent in [
+                    format!("deadline of {other} seconds"),
+                    format!("stop exploring by {} seconds", other / 2),
+                ] {
+                    assert!(!section.contains(&absent), "unexpected: {absent}");
+                }
+                assert!(!report.contains("stop exploring by"));
+            }
+        }
+    }
+
+    #[test]
     fn planner_briefs_have_no_criteria_check_section() {
         // Only the producer reports criteria_check.
         let accepted = AcceptedReading::new(&reading(), &defaults(), |_| false);
@@ -2809,6 +2849,7 @@ mod tests {
                 },
             ],
             revision,
+            deadline_s: 600,
         }
     }
 
