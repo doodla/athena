@@ -1,0 +1,193 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261115-113508-66w1",
+  "round": 1,
+  "at": "2026-11-15T20:28:07.208013948Z",
+  "invocation_seq": 2,
+  "approach": "In `planning_round` (planning.rs), move the model/effort choice (currently lines 144-148) above the `planner_brief` call (line 129). Keep the ordinary effort in `base_effort`. After `planner_revision_setting` returns, set `timeout_s = cfg.planner_timeout_s.saturating_mul(PLANNER_ESCALATED_TIMEOUT_FACTOR)` only when the returned effort differs from `base_effort`. Otherwise `timeout_s = cfg.planner_timeout_s`. That comparison is exact because `Models::planner_revision_setting` (config.rs:380-396) returns the key's effort only when the key is set and ranks at least as high as the current effort. An equal key returns the same string, and a weaker or unranked key leaves the current effort, so a string difference means a stronger effort. Pass `timeout_s` to `deadline_s` in `PlannerInputs` (line 137) and to `agent_spec` (line 163). That keeps the brief's stated deadline equal to the enforced timeout, the invariant the test at tests.rs:1437 pins. Add `pub(super) const PLANNER_ESCALATED_TIMEOUT_FACTOR: u64 = 2` beside `MAX_MECHANICAL_PASSES` (planning.rs:509). Its doc comment cites job 20261114-041123-hvyh (round 2 at xhigh ran 606 s against a 600 s limit). Extend the `run_for_revision` test helper in tests.rs to record each planner call's `spec.timeout`, and add tests that drive the real `go` flow with the fake agent script. Add a CHANGELOG.md entry under `[Unreleased]` / `### Changed`.",
+  "decisions": [
+    {
+      "choice": "Detect escalation by comparing the effort `planner_revision_setting` returns with the planner's own effort (string inequality), not by re-implementing the rank comparison.",
+      "reason": "`planner_revision_setting` already keeps the current effort for an unset, weaker, equal or unranked key (config.rs:389-394). A string difference is therefore exactly 'raised'. One source of truth, and the change touches no config code.",
+      "rejected": [
+        {
+          "option": "Re-rank both efforts with `EFFORT_LEVELS` in planning.rs",
+          "why": "It duplicates the rule in config.rs and could drift from it."
+        },
+        {
+          "option": "Scale on every call with `round > 1 || mechanical_passes > 0`",
+          "why": "A revision with the key unset, weaker or equal would get a longer limit with no extra effort. Criterion 2 forbids that."
+        }
+      ]
+    },
+    {
+      "choice": "Scale only on an effort raise, not on a model change alone.",
+      "reason": "The reading and the failing case (606 s at xhigh) concern effort. 'Changing which rounds escalate' is out of scope.",
+      "rejected": [
+        {
+          "option": "Also scale when the revision model differs",
+          "why": "The brief ties scaling to effort. The model key cannot be the cause of the extra time at the same effort."
+        }
+      ]
+    },
+    {
+      "choice": "Compute the timeout before building the planner brief and use it for both `deadline_s` and `agent_spec`.",
+      "reason": "The brief tells the planner its deadline and half of it (planner.rs:94-115). The existing test at tests.rs:1437 asserts that the stated figure equals the enforced timeout. A brief that said 600 while the limit was 1200 would break that invariant.",
+      "rejected": [
+        {
+          "option": "Scale only the `agent_spec` argument and leave `deadline_s` unscaled",
+          "why": "The planner would stop exploring at half of the old limit and the stated deadline would be wrong."
+        }
+      ]
+    },
+    {
+      "choice": "Use a named constant `PLANNER_ESCALATED_TIMEOUT_FACTOR = 2` and `saturating_mul`, with no config key.",
+      "reason": "The brief asks for it. A key would touch athena.toml, config.rs and the Consumers rule, all out of scope. The live `planner_timeout_s` is 86400 (athena.toml:224), so 172800 is far from overflow.",
+      "rejected": [
+        {
+          "option": "A new `[job_plan]` key for the factor",
+          "why": "It touches governance and config files that are out of scope."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Add the constant `PLANNER_ESCALATED_TIMEOUT_FACTOR`. In `planning_round`, move the model/effort selection above `planner_brief`, compute `timeout_s` (scaled only when the revision raised the effort), and use it for `deadline_s` and `agent_spec`. Update the `plan_round` doc comment about the time limit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Extend `run_for_revision` and `RevisionRun` with the planner call timeouts. Add the escalated-scaling test and the unchanged-limit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased / Changed entry for the scaled planner time limit on an escalated revision, citing job 20261114-041123-hvyh.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read planning.rs lines 125-175 and 500-510 once more and tests.rs lines 1498-1612 to match the current code before editing.",
+    "In planning.rs, add a doc comment and `pub(super) const PLANNER_ESCALATED_TIMEOUT_FACTOR: u64 = 2;` after `MAX_MECHANICAL_PASSES`. The doc comment says a planner revision call that runs at a stronger effort gets its time limit multiplied by this factor, citing job 20261114-041123-hvyh (round 2 at xhigh ran 606 s against a 600 s limit). It says the factor 2 is an estimate and not measured.",
+    "In `planning_round`, before `planner_brief(...)`, add `let base_effort = jc.config.effort_for(Role::Planner).to_string(); let mut model = ctx.reading.producer_model.clone(); let mut effort = base_effort.clone(); let mut timeout_s = cfg.planner_timeout_s;`. In the `if round > 1 || mechanical_passes > 0` block, call `planner_revision_setting`, then `if effort != base_effort { timeout_s = cfg.planner_timeout_s.saturating_mul(PLANNER_ESCALATED_TIMEOUT_FACTOR); }`. Remove the old declarations at lines 144-148. Set `deadline_s: timeout_s` and pass `timeout_s` to `agent_spec` in place of `cfg.planner_timeout_s`. Keep `spec.effort = effort.clone()`. Update the comment at 142-143 and the `plan_round` doc comment to mention the time limit.",
+    "In tests.rs, in `run_for_revision` record `spec.timeout` for planner calls (a new `Arc<Mutex<Vec<std::time::Duration>>>`, read as at tests.rs:1447-1453), add `planner_timeouts: Vec<std::time::Duration>` to `RevisionRun`, and pass a `Calls` into `planning_script` so the round-2 brief can be read with `prompts_of` (add a `prompts` field or return it).",
+    "Add test `planner_revision_escalated_effort_scales_the_planner_time_limit` (criterion 1, with the mechanical-pass case) and test `planner_time_limit_is_unchanged_when_the_revision_does_not_raise_the_effort` (criterion 2), with the cases listed in the demonstrations.",
+    "Add the CHANGELOG.md bullet at the top of `### Changed` under `## [Unreleased]`: root cause (job 20261114-041123-hvyh, 606 s against a 600 s limit at xhigh in round 2), the fix (`PLANNER_ESCALATED_TIMEOUT_FACTOR = 2`, applied only when `planner_revision_setting` raised the effort, also shown in the brief's stated deadline), limits (factor 2 is an estimate; the live limit is 86400 so it matters for short limits; no config key), and the tests' names.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test -p athena-core`, then confirm with `git diff --stat` that only the three files changed."
+  ],
+  "risks": [
+    {
+      "risk": "Moving the model/effort block above the brief changes the order of statements in a long function.",
+      "mitigation": "Reordering is safe: the moved block reads only `ctx.reading.producer_model`, `jc.config` and `round`/`mechanical_passes`, all in scope before line 129. It has no side effects. The existing round-1 deadline test and the `planner_revision_*` tests cover the change."
+    },
+    {
+      "risk": "A string comparison could treat an effort that cannot be ranked as escalated.",
+      "mitigation": "The test asserts exact values (600 s versus 1200 s) for each case, including the equal, weaker and unset keys, and it asserts both the spec timeout and the stated deadline."
+    },
+    {
+      "risk": "A factor of 2 may still be too short for some xhigh rounds.",
+      "mitigation": "The limit is scaled by 2, an estimate chosen from one 606 s observation against 600 s. It is not measured as sufficient for xhigh rounds in general. The CHANGELOG says so. The live limit is already 86400, so the factor matters mainly for repositories with short limits."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "planner AgentSpec timeout (cfg.planner_timeout_s passed to agent_spec)",
+      "dependent": "crates/athena-core/src/run/planning.rs `planning_round` callers: `plan_round` (planning.rs:57) for rounds 1..max_rounds, for each mechanical pass, and for a seeded or resumed first call. Escalation is read from `round > 1 || mechanical_passes > 0` at line 146, unchanged.",
+      "kind": "code",
+      "test": "cargo test -p athena-core planner_revision_escalated_effort_scales_the_planner_time_limit and planner_time_limit_is_unchanged cover round 1, a critic revise and a mechanical pass. The seeded first call (round 1, mechanical_passes 0) never reaches the escalation branch, as in the `planner_revision_*` tests.",
+      "reason": null
+    },
+    {
+      "name": "deadline stated in the planner brief",
+      "dependent": "crates/athena-context/src/briefs/planner.rs `deadline_section` / `DEADLINE_RULE` (lines 102-115), fed by `PlannerInputs.deadline_s` at planning.rs:137",
+      "kind": "code",
+      "test": "cargo test -p athena-core the_planner_brief_states_the_enforced_deadline_and_a_planner_deadline_still_stops_planning stays green because round 1 is unscaled. The new test checks the round-2 brief states 1200.",
+      "reason": null
+    },
+    {
+      "name": "spec.timeout consumed by the agent runner",
+      "dependent": "crates/athena-agent invocation timeout enforcement and `invoke_and_record` (planning.rs:167), which read `spec.timeout`",
+      "kind": "code",
+      "test": null,
+      "reason": "It takes a Duration built from `timeout_s` in `agent_spec` (reading.rs:420). A larger value needs no other change. The scaled value uses `saturating_mul`, so it cannot overflow. The live planner_timeout_s is 86400 (athena.toml:224), giving 172800."
+    },
+    {
+      "name": "planner_revision_setting return value",
+      "dependent": "`Models::planner_revision_setting` in crates/athena-data/src/config.rs:380 and its tests (config.rs:1267, 1309) and crates/athena-cli/tests/drain.rs:8124,8132",
+      "kind": "code",
+      "test": null,
+      "reason": "Read only, not modified. The plan compares its output with the input and changes no config or drain code."
+    },
+    {
+      "name": "planner cost cap (`planner_usd`)",
+      "dependent": "Budget gates: `preflight` with `ReserveStage::Planner` (planning.rs:116), `Config::planning_usd` and `budget_reserve` in config.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "They read `planner_usd`, not the timeout, and the cap passed at line 162 is unchanged. The change adds no spend cap and moves no reserve."
+    },
+    {
+      "name": "live planner_revision_effort and planner_timeout_s",
+      "dependent": "athena.toml `[models] planner_revision_effort = \"xhigh\"` (line 35) and `[job_plan] planner_timeout_s = 86400` (line 224), the host settings the live behavior reads",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Neither is edited. With the live values a revision round runs at xhigh with a 172800 s limit, since the planner's own effort (verifier_effort, config.rs:884-890) is below xhigh. That is the intended effect."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A unit test builds the repo with `repo_with_revision_keys(3, None, Some(\"xhigh\"))` (planner_timeout_s = 600 at tests.rs:1516, planner effort high). It runs `run_for_revision` with `[good_plan()]` and `[revising_critique(), accepting_critique()]`, so round 1 is followed by a round 2 planner call. It asserts the planner call efforts are `high`, `xhigh` and the recorded planner timeouts are `[600 s, 1200 s]`, so round 2 is greater than 600 s. It also asserts the round-2 prompt contains `deadline of 1200 seconds`.",
+      "command": "cargo test -p athena-core planner_revision_escalated_effort_scales_the_planner_time_limit",
+      "observes": "The planner spec timeouts are 600 s then 1200 s, and the round-2 brief states 1200 seconds.",
+      "fails_without": "Without the scaling, the round-2 planner call keeps a timeout of 600 s and the assertion `timeouts[1] == 1200 s` fails.",
+      "seam": "Production entry point: `Athena::go` into `plan_round` and `planning_round` (planning.rs:29, 83). The fake agent `Script` closure in `run_for_revision` (tests.rs:1559) already records `spec.role`, model and effort. Step 4 makes it also push `spec.timeout` for `Role::Planner` into a new `planner_timeouts` field on `RevisionRun`. The Script seam exists (read at tests.rs:1450 and 1559). The timeout field is read the same way at tests.rs:1451. The production logic stays out of the double."
+    },
+    {
+      "criterion": 2,
+      "method": "One test runs three cases with a critic revise (so round 2 occurs) and asserts every planner timeout is exactly 600 s. Case (a): keys unset, effort high on both calls. Case (b): `planner_revision_effort = \"medium\"`, which is weaker and so is ignored (the same rule as tests.rs:1694). Case (c): `planner_revision_effort = \"high\"`, equal to the planner effort. In every case round 1's call is 600 s. A separate assertion in the escalated test covers a mechanical-pass revision (`bad_plan`, then `good_plan`) with `planner_revision_effort = \"xhigh\"` and expects its second call at 1200 s.",
+      "command": "cargo test -p athena-core planner_time_limit_is_unchanged",
+      "observes": "All planner timeouts are 600 s in cases a to c; round 1 is 600 s in all cases.",
+      "fails_without": "If the scaling were unconditional or keyed on `round > 1`, the unset, weaker and equal cases would show 1200 s and the test would fail.",
+      "seam": "The same `run_for_revision` helper and `repo_with_revision_keys` (tests.rs:1500, 1549), both existing, with the `planner_timeouts` field added in step 4. Efforts come from the config the fake runs under. Nothing in the double decides the timeout."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the diff. It shows `PLANNER_ESCALATED_TIMEOUT_FACTOR` with a doc comment naming job 20261114-041123-hvyh (606 s against 600 s at xhigh). It shows the timeout multiplied only inside a branch that compares the returned effort with the base effort, and `saturating_mul` used.",
+      "command": "git diff -- crates/athena-core/src/run/planning.rs",
+      "observes": "The constant, its doc comment citing the job id, the single guarded multiplication, and the same timeout value feeding `deadline_s` and `agent_spec`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "List the changed files. Only crates/athena-core/src/run/planning.rs, crates/athena-core/src/run/tests.rs and CHANGELOG.md appear. athena.toml, defaults.toml, hestia.rs, crates/athena-data/src/config.rs, docs/decisions.md, prompt files and records/ are absent.",
+      "command": "git diff --stat",
+      "observes": "Exactly three paths in the stat.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff. It adds one bullet under `## [Unreleased]` / `### Changed`. The bullet says the planner time limit is multiplied by 2 when a revision raises the effort and is unchanged otherwise. It cites job 20261114-041123-hvyh (606 s against 600 s at xhigh) and names `PLANNER_ESCALATED_TIMEOUT_FACTOR` and the tests.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new Unreleased bullet with the job id and the cause.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks on the final tree. The existing tests that must stay green: `the_planner_brief_states_the_enforced_deadline_and_a_planner_deadline_still_stops_planning` (tests.rs:1437, round 1 only, factor not applied), the four `planner_revision_*` tests (tests.rs:1617-1758) and the drain.rs `planner_revision_setting` uses (drain.rs:8124, 8132, unchanged API).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three commands exit 0.",
+      "fails_without": "A formatting slip, an unused field (`planner_timeouts` not read) or an existing test broken by the reordering would fail one of the three commands.",
+      "seam": "The commands are the Athena checks themselves. No double is involved."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "85d0c2469be8cca826bbb59bde94a9ca9d78aeb3c1acbe7125a96f7b89be62d6"
+}
