@@ -20,7 +20,8 @@ impl Athena {
     /// [`MAX_MECHANICAL_PASSES`] times per round; a plan that still breaks a rule after that stops the job.
     /// Round 1's first call runs at the ordinary planner model and effort; every later call, after a critic
     /// revise or a mechanical revision, runs at `[models] planner_revision_*` where set and not weaker
-    /// (see `Models::planner_revision_setting`).
+    /// (see `Models::planner_revision_setting`). A call whose effort that setting raised also gets its time
+    /// limit multiplied by [`PLANNER_ESCALATED_TIMEOUT_FACTOR`]; any other call keeps `planner_timeout_s`.
     /// A critic's revise sends the planner a revision brief that quotes the previous plan and every
     /// finding. On accept, the invocations, plans and critiques go into `closing` and the rendered
     /// producer section is returned. Reject, a reading the critic judged a misread, revise in the last
@@ -126,6 +127,24 @@ impl Athena {
                 bytes,
             });
         }
+        // A revision call (after a critic revise or a mechanical plan-rule revision) may run at the
+        // `[models] planner_revision_*` setting; round 1 and a seeded first call keep the ordinary one. When
+        // the revision raises the effort, the time limit grows by PLANNER_ESCALATED_TIMEOUT_FACTOR; the brief
+        // states the same limit the agent is run with.
+        let base_effort = jc.config.effort_for(Role::Planner).to_string();
+        let mut model = ctx.reading.producer_model.clone();
+        let mut effort = base_effort.clone();
+        let mut timeout_s = cfg.planner_timeout_s;
+        if round > 1 || mechanical_passes > 0 {
+            (model, effort) = jc.config.models.planner_revision_setting(&model, &effort);
+            // `planner_revision_setting` keeps the current effort for an unset, equal or weaker key, so a
+            // different string means the effort was raised.
+            if effort != base_effort {
+                timeout_s = cfg
+                    .planner_timeout_s
+                    .saturating_mul(PLANNER_ESCALATED_TIMEOUT_FACTOR);
+            }
+        }
         let planner_brief_text = planner_brief(&PlannerInputs {
             job: id.as_str().to_string(),
             request: request.clone(),
@@ -134,18 +153,11 @@ impl Athena {
             verifier_commands: athena_agent::policy::describe_commands(&verifier_commands),
             deliverable_facts: facts,
             revision,
-            deadline_s: cfg.planner_timeout_s,
+            deadline_s: timeout_s,
         });
         let composed = compose(&[CONTRACT.into(), PLANNER_FRAME.into()]);
         crate::pin::remove_tree(&snap_dir)?;
         Snapshot::create(&self.git, &p, &p, &snap_dir, SnapshotRepo::PlainWithHistory)?;
-        // A revision call (after a critic revise or a mechanical plan-rule revision) may run at the
-        // `[models] planner_revision_*` setting; round 1 and a seeded first call keep the ordinary one.
-        let mut model = ctx.reading.producer_model.clone();
-        let mut effort = jc.config.effort_for(Role::Planner).to_string();
-        if round > 1 || mechanical_passes > 0 {
-            (model, effort) = jc.config.models.planner_revision_setting(&model, &effort);
-        }
         let seq = ctx.next_seq(closing);
         let mut spec = self.agent_spec(
             jc,
@@ -160,7 +172,7 @@ impl Athena {
             Side::Read,
             &no_env,
             cfg.planner_usd,
-            cfg.planner_timeout_s,
+            timeout_s,
             plan_schema(),
         )?;
         spec.effort = effort.clone();
@@ -507,6 +519,12 @@ impl Athena {
 /// before the critic sees it. These passes call no critic and do not count toward `max_rounds`. A plan that
 /// still breaks a rule after this many passes stops the job in planning.
 pub(super) const MAX_MECHANICAL_PASSES: u32 = 2;
+
+/// The factor applied to `planner_timeout_s` for a planner call whose effort `[models] planner_revision_effort`
+/// raised above the planner's own. A stronger effort takes longer: in job 20261114-041123-hvyh, round 2 ran at
+/// xhigh for 606 s against a 600 s limit and was stopped. The factor 2 is an estimate from that one
+/// observation, not a measured bound. A call at the ordinary effort keeps `planner_timeout_s` unchanged.
+pub(super) const PLANNER_ESCALATED_TIMEOUT_FACTOR: u64 = 2;
 
 /// Which planner call of which planning round is being made.
 struct Attempt {
