@@ -1,0 +1,149 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-112646-s4bn",
+  "n": 1,
+  "at": "2026-11-15T17:44:21.521326772Z",
+  "invocation_seq": 1,
+  "base_commit": "5ae53f8963b9a44a43099d70e293e53e31d0ebba",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Tell the planner its deadline and to answer within it",
+  "summary": "Root cause: the planner's 600s `planner_timeout_s` kills it with no plan, and nothing in its brief states that deadline or tells it to size its reading to it (jobs 20261114-041123-hvyh and 20261030-113229-kgrg both ended 'the planner did not complete: deadline of 600s reached'). Fix by giving the planner the deadline in its brief with a rule to return the plan within it. Adds no refusal rule and no resume machinery.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check that the planner's brief shows the deadline and the stop-early rule, and that the value matches the enforced timeout, not that a field exists."
+    },
+    {
+      "id": "tested",
+      "how": "Unit and run tests are added, and fmt, clippy and test must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is in the brief that all planner calls use, so every planning job gets the deadline, not just the two named jobs."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is a prose rule in the brief, pinned by tests that check the brief text; it is marked as information, not enforcement."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the planner agent (it receives the brief) and the owner who reads failed-job records. The job lets the planner see the deadline it runs under, so it stops reading and returns a plan in time.",
+    "Previous jobs: 20261114-041123-hvyh and 20261030-113229-kgrg each failed in planning at the 600s deadline and have no candidate, so no prior files are kept or dropped. Their own requests (follow-up queueing, kill-switch resume) are not addressed here: this change is the shared cause only, and their scopes (followups.rs, steward.rs, manage.rs, state.rs, status.rs, commands.rs, docs/decisions.md) are out of scope and dropped. Their original requests can be retried afterwards, and the planner deadline will then be stated to the planner.",
+    "Code survey: crates/athena-core/src/run/planning.rs (planning_round passes cfg.planner_timeout_s to agent_spec at line 162; a non-Success outcome calls stop_planning with 'the planner did not complete: <detail>' at line 190; plan_round seeds a PlanRevision, so a kept plan can be revised), crates/athena-context/src/briefs/planner.rs (PlannerInputs at line 33 and planner_brief at line 95 carry no deadline; the brief ends with rule constants), crates/athena-context/src/briefs.rs (tests for the planner brief, for example near lines 1818, 1835 and 2816), crates/athena-data/src/config.rs (planner_timeout_s at line 229, default 86400 in tests, 600 in athena.toml). The records allow-list is not touched: no new record or data file is added, so check_record_file and AnyRecord are unaffected. The property is measured directly: the text of planner_brief output built from PlannerInputs.",
+    "Existing code: crates/athena-context/src/briefs/planner.rs (PlannerInputs, planner_brief and its rule constants such as CODE_CLAIMS_RULE) and crates/athena-core/src/run/planning.rs (planning_round builds PlannerInputs) are extended, with a new DEADLINE rule constant that follows the existing pattern; nothing is rebuilt.",
+    "Field meaning: PlannerInputs.deadline_s is a new field, not a reuse. It is filled from the existing `[job_plan] planner_timeout_s` (crates/athena-data/src/config.rs:229, a wall-clock limit on one planner call, live athena.toml value 600) and is shown only to the planner role.",
+    "No refusal rule is added, so no expected-refusal-share figure applies. A refusal rule is not needed here: the planner failed for lack of the deadline information, and giving it that information can prevent the failure.",
+    "Prompt files are not edited. The rule lives as a Rust constant in the brief (like the existing rules), so the planner prompt token headroom (95 tokens) is not used.",
+    "Config: athena.toml and defaults.toml are not changed. The 600s value stays and the brief reports whatever the config says.",
+    "Resume or retry of a timed-out plan, persisting partial drafts, and the kill-switch resume are out of scope. They need agent streaming, and the brief information is the smaller fix that addresses the cause."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-context/src/briefs/planner.rs adds a `deadline_s` field to PlannerInputs and a rule constant with a doc comment that names the root cause (the planner's fixed deadline was never stated to it; jobs 20261114-041123-hvyh and 20261030-113229-kgrg); `planner_brief` includes the rule text.",
+      "kind": "content"
+    },
+    {
+      "text": "The rule in the planner brief states the deadline in seconds and says that a planner killed at the deadline produces no plan. It tells the planner to sort its reading by what the criteria need, to stop exploring well before the deadline (the rule gives a fraction of the deadline), and to return the best complete plan it has, with unresolved items as `User:` or `Host:` open questions. Check with Grep on the constant in planner.rs.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-core/src/run/planning.rs fills PlannerInputs.deadline_s from `cfg.planner_timeout_s`, the same value passed to agent_spec, so the figure shown cannot differ from the enforced deadline. Check with git diff.",
+      "kind": "content"
+    },
+    {
+      "text": "A new unit test in crates/athena-context/src/briefs.rs builds planner briefs with two different `deadline_s` values (600 and 1200) for a first-round and a revision input. It asserts that each brief contains its own deadline figure and the stop-early instruction. It fails on the base tree, where no brief mentions the deadline. Run `cargo test -p athena-context`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test in crates/athena-core/src/run/tests.rs runs planning with the fake agent and `planner_timeout_s = 600`. It asserts the recorded planner invocation brief contains `600`. It also asserts that a planner stop at the deadline still ends the job as a planning stop with the reason 'deadline of …s reached', so existing behavior is unchanged. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry for this change that names the root cause. No prompt file, athena.toml, defaults.toml, workflow, docs/decisions.md or records/ file is modified.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass. The recorded Athena checks on the final tree count as evidence (D115). Existing planner-brief tests still pass with the new field set in each PlannerInputs literal.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-context/src/briefs/planner.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.93
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    }
+  ],
+  "out_of_scope": [
+    "Persisting a draft plan, resume or retry after a planner deadline, and holding the job as resumable (needs streamed agent output; the brief change is the smaller fix).",
+    "Job 20261114-041123-hvyh's follow-up queueing (followups.rs, steward.rs, manage.rs, reading.rs, lib.rs, drain.rs) and job 20261030-113229-kgrg's kill-switch stop and resume (run/mod.rs, state.rs, status.rs, commands.rs, introspection.rs, docs/decisions.md): neither job produced a candidate, so there is nothing to keep, and both stay as separate requests.",
+    "New refusal rules or sizing gates in admission, changes to prompt files, athena.toml, defaults.toml, workflows, docs/decisions.md and records/.",
+    "Changing the 600s value or the critic and producer deadlines."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.65,
+      "p_user_intervenes": 0.06,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6816666666666666,
+      "p_user_intervenes": 0.06116941529235382,
+      "cost_usd": {
+        "p10": 0.5536381546903528,
+        "p50": 1.5164948072931013,
+        "p90": 6.38366801321028
+      },
+      "wall_time_s": {
+        "p10": 608.5399836888494,
+        "p50": 2176.0663615359995,
+        "p90": 4515.936248516599
+      }
+    }
+  },
+  "departures": "The reference forecast is kept. The change is small and touches few files, but this job's two predecessors both failed in planning, so the planning stage carries some timeout risk.",
+  "urgent_reason": "Cuts repeated planning-stage timeouts that fail jobs before any code is written (2 jobs, both ended at the 600s planner deadline)."
+}
