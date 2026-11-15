@@ -52,7 +52,7 @@ use athena_data::records::{
     INTROSPECTION_LIST_CAP, INTROSPECTION_PROSE_FIELDS, INTROSPECTION_SCHEMA, InterventionCategory,
     IntrospectionEvidence, IntrospectionJev, IntrospectionRecord, IntrospectionStatus,
     IntrospectionTrigger, JevClassAnswer, JevContextAnswer, OutcomeState, PreventionKind,
-    ProposalRecord, Role,
+    ProducerReport, ProposalRecord, Role,
 };
 use athena_data::records::{
     CheckRun, CriterionResult, Finding as VerificationFinding, Severity, Verdict, Verification,
@@ -969,6 +969,68 @@ fn clip_tail(text: &str, cap: usize) -> String {
     format!("...{kept}")
 }
 
+/// The phrase shown for an unmet criterion the producer's stored report does not cover.
+const NO_PRE_VERDICT_CHECK: &str = "no pre-verdict check recorded";
+
+/// A criterion's text reduced for comparison: no leading number (`1.`, `2)`, `3:`), no leading `[kind]`
+/// tag, lowercase, single spaces, no trailing punctuation. Shared by the producer's send-back and the
+/// introspection event, so both match a producer's criterion to an accepted one the same way.
+pub(crate) fn criterion_key(text: &str) -> String {
+    let mut rest = text.trim();
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0
+        && let Some(after) = rest[digits..].strip_prefix(['.', ')', ':'])
+    {
+        rest = after.trim_start();
+    }
+    if let Some(inner) = rest.strip_prefix('[')
+        && let Some(end) = inner.find(']')
+        && inner[..end].chars().all(|c| c.is_ascii_alphabetic())
+    {
+        rest = inner[end + 1..].trim_start();
+    }
+    let words = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+    words
+        .trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '`' && c != ')')
+        .trim_end()
+        .to_lowercase()
+}
+
+/// The producer's own stored check of each unmet criterion, taken before the verdict.
+fn pre_verdict_block(unmet: &[&CriterionResult], report: Option<&ProducerReport>) -> String {
+    let heading = "\n\nProducer's own check of each unmet criterion, before the verdict:";
+    let Some(report) = report else {
+        return format!(
+            "{heading} {NO_PRE_VERDICT_CHECK} (the job has no stored producer report)."
+        );
+    };
+    let mut out = format!("{heading}\n");
+    for c in unmet.iter().take(DETAIL_CAP) {
+        let key = criterion_key(&c.criterion);
+        let text = clip(&c.criterion, TEXT_CAP);
+        match report
+            .criteria_check
+            .iter()
+            .find(|r| criterion_key(&r.criterion) == key)
+        {
+            Some(r) => {
+                let evidence = if r.evidence.trim().is_empty() {
+                    "no evidence given".to_string()
+                } else {
+                    clip(&r.evidence, TEXT_CAP)
+                };
+                out.push_str(&format!(
+                    "- {text}: the producer marked it {}; its evidence: {evidence}\n",
+                    clip(&r.status, TEXT_CAP)
+                ));
+            }
+            None => out.push_str(&format!("- {text}: {NO_PRE_VERDICT_CHECK}\n")),
+        }
+    }
+    out.push_str(&more(unmet.len()));
+    out
+}
+
 fn more(total: usize) -> String {
     if total > DETAIL_CAP {
         format!("- ({} more not shown)\n", total - DETAIL_CAP)
@@ -979,9 +1041,11 @@ fn more(total: usize) -> String {
 
 /// What a failed verification adds to an event's `what`: each unmet criterion, each blocker or major finding,
 /// and, under their own heading, each failed check. Counts and text are capped. Nothing is added when the
-/// verification passed. The text comes from the stored `verification.json` only; check output was redacted
-/// when it was stored, and this text is not redacted again.
-fn failure_details(v: &Verification) -> String {
+/// verification passed. When a criterion is unmet, the producer's stored pre-verdict status and evidence for
+/// it (from `report`) follow the list, or a statement that none was recorded. The rest of the text comes from
+/// the stored `verification.json`; check output and the report were redacted when stored, and this text is
+/// not redacted again.
+fn failure_details(v: &Verification, report: Option<&ProducerReport>) -> String {
     if v.final_verdict == Verdict::Pass {
         return String::new();
     }
@@ -1018,6 +1082,7 @@ fn failure_details(v: &Verification) -> String {
             out.push_str(&format!("- {}\n", clip(&c.criterion, TEXT_CAP)));
         }
         out.push_str(&more(unmet.len()));
+        out.push_str(&pre_verdict_block(&unmet, report));
     }
     if !findings.is_empty() {
         out.push_str(&format!(
@@ -1496,7 +1561,13 @@ impl Athena {
                 job_records
                     .verification
                     .as_ref()
-                    .map(failure_details)
+                    .map(|v| failure_details(
+                        v,
+                        job_records
+                            .candidate
+                            .as_ref()
+                            .and_then(|c| c.producer_report.as_ref())
+                    ))
                     .unwrap_or_default()
             ),
             why: format!("the job ended {category}"),
@@ -1966,7 +2037,9 @@ mod tests {
     use crate::fake::CountingPinner;
     use crate::state::StateDir;
     use athena_agent::fake::{FakeAgentDriver, FakeTurn};
-    use athena_data::records::{Build, CriterionKind, FindingSource, Outcome};
+    use athena_data::records::{
+        Build, Candidate, CriterionKind, FindingSource, Outcome, ReportedCriterion,
+    };
     use athena_data::{Quantity, Unit};
     use athena_git::Git;
 
@@ -2081,6 +2154,14 @@ mod tests {
     fn athena_with(
         verification: Option<Verification>,
     ) -> (tempfile::TempDir, tempfile::TempDir, Athena) {
+        athena_with_candidate(verification, None)
+    }
+
+    /// As [`athena_with`], and, when given, the job's candidate committed as a stored record.
+    fn athena_with_candidate(
+        verification: Option<Verification>,
+        candidate: Option<Candidate>,
+    ) -> (tempfile::TempDir, tempfile::TempDir, Athena) {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let git = Git::at(dir.path());
@@ -2112,6 +2193,9 @@ mod tests {
         let mut files = vec![NewFile::record(&AnyRecord::Outcome(Box::new(outcome)))];
         if let Some(v) = verification {
             files.push(NewFile::record(&AnyRecord::Verification(Box::new(v))));
+        }
+        if let Some(c) = candidate {
+            files.push(NewFile::record(&AnyRecord::Candidate(Box::new(c))));
         }
         for file in &files {
             let path = dir.path().join(&file.path);
@@ -2742,6 +2826,154 @@ mod tests {
         assert!(!what.contains("wording slip"), "{what}");
         assert!(!what.contains("must not be copied"), "{what}");
         assert!(!what.contains("Failed checks"), "{what}");
+    }
+
+    fn what_of_with(verification: Option<Verification>, candidate: Option<Candidate>) -> String {
+        let (_dir, _state, athena) = athena_with_candidate(verification, candidate);
+        athena
+            .event_of_job(&JobId::parse(JOB).unwrap())
+            .unwrap()
+            .unwrap()
+            .what
+    }
+
+    fn producer_report(entries: &[(&str, &str, &str)]) -> ProducerReport {
+        ProducerReport {
+            summary: String::new(),
+            files: Vec::new(),
+            checks_run: Vec::new(),
+            criteria_check: entries
+                .iter()
+                .map(|(criterion, status, evidence)| ReportedCriterion {
+                    criterion: (*criterion).into(),
+                    status: (*status).into(),
+                    evidence: (*evidence).into(),
+                })
+                .collect(),
+            open_issues: Vec::new(),
+            mistakes: Vec::new(),
+            learnings: Vec::new(),
+            desires: Vec::new(),
+            no_change: None,
+        }
+    }
+
+    fn candidate_with(report: Option<ProducerReport>) -> Candidate {
+        Candidate {
+            job: JobId::parse(JOB).unwrap(),
+            base_commit: "0".repeat(40),
+            base_fingerprint: None,
+            previous_job: None,
+            candidate_commit: Some("1".repeat(40)),
+            candidate_tree: None,
+            changes: Vec::new(),
+            fingerprint: None,
+            violations: Vec::new(),
+            producer_report: report,
+        }
+    }
+
+    const C: &str = "Tests call event_of_job itself";
+
+    fn failed_on_c() -> Verification {
+        verification(
+            vec![
+                criterion(C, false),
+                criterion("The changelog has an entry", true),
+            ],
+            vec![finding(
+                Severity::Major,
+                "No test reaches event_of_job",
+                Some("crates/athena-core/src/introspect.rs"),
+            )],
+            Vec::new(),
+            Verdict::Fail,
+        )
+    }
+
+    #[test]
+    fn an_unmet_criterion_shows_the_producers_pre_verdict_check() {
+        for stored in [C, "[behavior] Tests call event_of_job itself."] {
+            let report = producer_report(&[(stored, "met", "ran the new test and it passed")]);
+            let what = what_of_with(Some(failed_on_c()), Some(candidate_with(Some(report))));
+            assert!(what.contains("Unmet acceptance criteria (1):"), "{what}");
+            assert!(
+                what.contains(&format!("- {C}: the producer marked it met")),
+                "{what}"
+            );
+            assert!(
+                what.contains("its evidence: ran the new test and it passed"),
+                "{what}"
+            );
+            assert!(
+                what.contains(
+                    "major: No test reaches event_of_job at crates/athena-core/src/introspect.rs"
+                ),
+                "{what}"
+            );
+            assert!(!what.contains("must not be copied"), "{what}");
+            assert!(!what.contains("Failed checks"), "{what}");
+            assert!(!what.contains(NO_PRE_VERDICT_CHECK), "{what}");
+        }
+    }
+
+    #[test]
+    fn an_unmet_criterion_with_no_pre_verdict_check_says_so() {
+        let other = producer_report(&[("Something else", "met", "other evidence")]);
+        for report in [Some(other), Some(producer_report(&[])), None] {
+            let what = what_of_with(Some(failed_on_c()), Some(candidate_with(report)));
+            assert!(what.contains(&format!("- {C}")), "{what}");
+            assert!(what.contains(NO_PRE_VERDICT_CHECK), "{what}");
+            assert!(!what.contains("other evidence"), "{what}");
+            assert!(!what.contains("the producer marked it"), "{what}");
+        }
+    }
+
+    #[test]
+    fn a_job_without_a_candidate_says_no_pre_verdict_check_was_recorded() {
+        let what = what_of(Some(failed_on_c()));
+        assert!(what.contains(NO_PRE_VERDICT_CHECK), "{what}");
+        assert!(what.contains("Unmet acceptance criteria (1):"), "{what}");
+        assert!(what.contains(&format!("- {C}")), "{what}");
+        assert!(
+            what.contains(
+                "major: No test reaches event_of_job at crates/athena-core/src/introspect.rs"
+            ),
+            "{what}"
+        );
+        assert!(!what.contains("Failed checks"), "{what}");
+        let with_check = what_of(Some(verification(
+            vec![criterion(C, false)],
+            Vec::new(),
+            vec![check("test", false, "thread panicked")],
+            Verdict::Fail,
+        )));
+        assert!(with_check.contains(NO_PRE_VERDICT_CHECK), "{with_check}");
+        assert!(with_check.contains("Failed checks"), "{with_check}");
+        assert!(
+            with_check.contains("- test: thread panicked"),
+            "{with_check}"
+        );
+    }
+
+    #[test]
+    fn the_producers_pre_verdict_evidence_is_capped() {
+        let texts: Vec<String> = (0..11).map(|i| format!("Criterion number {i}")).collect();
+        let long = "e".repeat(3 * TEXT_CAP);
+        let entries: Vec<(&str, &str, &str)> = texts
+            .iter()
+            .map(|t| (t.as_str(), "met", long.as_str()))
+            .collect();
+        let report = producer_report(&entries);
+        let v = verification(
+            texts.iter().map(|t| criterion(t, false)).collect(),
+            Vec::new(),
+            Vec::new(),
+            Verdict::Fail,
+        );
+        let what = what_of_with(Some(v), Some(candidate_with(Some(report))));
+        assert!(!what.contains(&"e".repeat(TEXT_CAP + 1)), "{what}");
+        assert_eq!(what.matches("the producer marked it").count(), DETAIL_CAP);
     }
 
     #[test]

@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261114-160745-8e6x",
+  "round": 1,
+  "at": "2026-11-15T19:01:04.246384246Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The fix stores data where the stage that reported the failure never looks, so the failure class stays.",
+      "evidence": "`event_of_job` builds `what` as `title: outcome.reason` plus `failure_details(verification)`. No invocation detail and no candidate record goes into the event. SYSTEM_PROMPT: 'You are given the stored fields of one event ... You have no tools and cannot read anything else.' The plan only changes `Invocation.detail` of the producer, so introspection's input is unchanged and every later rejection on an unmet criterion still looks like 'no check before the verdict'. The reading also lists the verifier as an audience, but records.rs:812 says the producer report is 'never shown to the verifier (D32)'. Fix: Add the pre-verdict criteria check to the introspection event. In `event_of_job`, for each criterion the verification marks unmet, add the producer's stored pre-verdict status and evidence for it, taken from `job_records.candidate.producer_report.criteria_check` and the 'self-check failed' details on the producer invocations, using `criterion_key` matching. Name `event_of_job`/`failure_details` as the place where the fault starts. The producer.rs block is optional on top of that.",
+      "location": "Reading root cause; plan Approach and Decision 1; crates/athena-core/src/introspect.rs:1473-1508, 984-1060, 1062-1064",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The claim that a passing self-check leaves no stored record is false: the passing report's per-criterion check is already stored.",
+      "evidence": "`break Some(report)` hands the redacted ProducerReport to `build_candidate`, which stores it as `candidate.producer_report`. ProducerReport has `criteria_check: Vec<ReportedCriterion>` (criterion, status, evidence). On the passing path every criterion is met or left to Athena by definition, so the new `self-check passed: criteria: ...` text can be derived from data already stored. Fix: Correct the root-cause statement in the plan and in the CHANGELOG/doc paragraph: the check is recorded, but it is not in the inputs of the stages that judge the failure. Point the fix at those inputs instead of duplicating the report into `detail`.",
+      "location": "Reading root cause; plan Approach ('A check that finds every criterion met ... stores nothing'); crates/athena-core/src/run/candidate.rs:64-83; crates/athena-data/src/records.rs:815-821, 863",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The tests only show that the producer's own record gained a string. They do not show that the reader of the stored event (introspection) now sees the pre-verdict check.",
+      "evidence": "Both tests read `Records::load(...)` producer invocation `detail`. Nothing asserts on `Event.what` or on the introspection prompt (`user_prompt`). An existing test pattern, `an_event_carries_the_unmet_criterion_and_the_major_finding` (introspect.rs:2715), shows how to assert on the event. Fix: Add a test, in the style of introspect.rs:2715, that builds the event for a job rejected on criterion C whose candidate's producer_report marked C met with some evidence. Assert that `what` contains C's pre-verdict status and evidence. It must fail on the base tree, where `what` holds only the reason and the verification details.",
+      "location": "Demonstrations for criteria 3 and 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Putting free-text evidence before `; redacted report: ` can break the existing parse of the stored detail.",
+      "evidence": "The test parses `detail.split(\"redacted report: \").nth(1)`, which takes the first occurrence. The criteria block puts producer-written evidence (and criterion text) in front of the marker. If either contains 'redacted report: ', the JSON slice is wrong. Fix: Keep the JSON last, but have any reader split on the last occurrence (`rsplit_once`). Alternatively, escape or quote the evidence text in the block so it cannot contain the marker.",
+      "location": "Plan Decision 3 / Step 4; crates/athena-core/src/run_pin_tests.rs:1799",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "briefs.rs is an expected deliverable, but the plan leaves it unchanged. Without a reason in the report, the producer gets sent back for an unchanged planned file.",
+      "evidence": "`planned_paths(closing.plans.last(), accepted)` feeds `unchanged_planned_files`. A deliverable left unchanged with no reason in the report is a send-back problem. Fix: State in the plan that the producer's report must give the reason briefs.rs is unchanged. Alternatively, if the introspection fix needs no brief change either, say so for both files.",
+      "location": "Expected deliverables vs plan Files (briefs.rs); crates/athena-core/src/run/producer.rs:337, 484",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Setting `attempt.detail` on the passing path overwrites any detail the driver set on a successful run.",
+      "evidence": "producer.rs:406 pushes `record` with the driver's `detail`. Today a success usually has None (claude.rs tests), but that is not guaranteed. Fix: If a detail is already present, append to it rather than replacing it.",
+      "location": "Plan Step 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The request names the failure \"Nothing in the stored event shows the unmet criterion being checked before the final verdict\". It asks that the failing stage be given the missing information through \"its brief, the system facts it is shown, or the inputs its reader receives\". The stored event is the introspection `Event` built in `event_of_job` (introspect.rs:1473-1508), from outcome.reason plus verification failure details only. The reading instead treats it as the producer invocation record, and claims a passing check \"leaves no stored event\". But the passing report's criteria_check is already stored in `candidate.producer_report`. The real gap is that introspection's input never includes it, and the reading's fix does not touch that input.",
+  "summary": "The plan matches the accepted reading: it makes the producer's per-criterion self-check get written to the producer's invocation `detail` on every attempt, not only when the producer is sent back. The tests it names would fail on the base tree and pass with the change, and the dependents it lists are mostly right. But the reading's root cause does not hold up against the code, and the plan inherits the error. The failure class was reported by introspection, and introspection builds its \"stored event\" only from the job's title, the outcome reason and verification.json (`event_of_job` and `failure_details` in introspect.rs). Its system prompt says it can read nothing else. It never sees producer invocation details. The verifier never sees the producer report either (D32). The producer's per-criterion check, with status and evidence for every criterion, is also already stored on the passing path in `candidate.producer_report` (candidate.rs:83, records.rs:821). So the change mostly copies data that already exists into a field that neither audience reads. The next failed job would still produce \"nothing in the stored event shows the criterion being checked\". The request asked to give the information to the failing stage's inputs. That place is `event_of_job` and the introspection event, not `producer_loop`. The planner can fix this by keeping the producer.rs change if wanted, and adding the pre-verdict check (from `candidate.producer_report.criteria_check` and the stored self-check details) to the event's `what`. It also needs a test that builds an event for a job rejected on an unmet criterion and asserts the pre-verdict status of that criterion appears in it."
+}

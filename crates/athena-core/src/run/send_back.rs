@@ -6,6 +6,7 @@ use athena_context::briefs::{
 };
 use athena_context::outputs::{CriterionCheckOutput, CriterionStatusOutput, ProducerOutput};
 
+use crate::introspect::criterion_key;
 use crate::mirrors::Drift;
 
 /// The accepted criteria the report does not show as met: marked unmet, or missing from `criteria_check`.
@@ -354,29 +355,6 @@ pub(crate) fn append_check_failures(text: String, failures: &[CheckFailure]) -> 
         }
     }
     text
-}
-
-/// A criterion's text reduced for comparison: no leading number (`1.`, `2)`, `3:`), no leading `[kind]`
-/// tag, lowercase, single spaces, no trailing punctuation.
-fn criterion_key(text: &str) -> String {
-    let mut rest = text.trim();
-    let digits = rest.chars().take_while(char::is_ascii_digit).count();
-    if digits > 0
-        && let Some(after) = rest[digits..].strip_prefix(['.', ')', ':'])
-    {
-        rest = after.trim_start();
-    }
-    if let Some(inner) = rest.strip_prefix('[')
-        && let Some(end) = inner.find(']')
-        && inner[..end].chars().all(|c| c.is_ascii_alphabetic())
-    {
-        rest = inner[end + 1..].trim_start();
-    }
-    let words = rest.split_whitespace().collect::<Vec<_>>().join(" ");
-    words
-        .trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '`' && c != ')')
-        .trim_end()
-        .to_lowercase()
 }
 
 #[cfg(test)]

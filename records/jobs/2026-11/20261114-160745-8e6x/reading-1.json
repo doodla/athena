@@ -1,0 +1,146 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261114-160745-8e6x",
+  "n": 1,
+  "at": "2026-11-15T18:57:10.877250465Z",
+  "invocation_seq": 1,
+  "base_commit": "57936647585249fa8b3272b67956865346dc4636",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Record the pre-verdict criteria self-check on every producer attempt",
+  "summary": "Root cause: the producer's per-criterion self-check (unmet_criteria in run/send_back.rs, run in run/producer.rs) is stored on the attempt's invocation detail only when it fails and sends the producer back. A passing check, or one that reports met, leaves no stored event, so a criterion the verifier later finds unmet shows no earlier check. The fix stores the check on every attempt, passing included, and shows what it ran against.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "The fix is at the single place where the self-check outcome is recorded, covering all jobs."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus the fmt, clippy and test gate."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria assert the stored detail content, not that wiring exists."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: whoever reads a stored job record (the owner, introspection and the verifier) after a job fails final verification. They need to see the criterion check that ran before the verdict.",
+    "Code survey: read crates/athena-core/src/run/send_back.rs (unmet_criteria, left_to_athena, send_back_text), crates/athena-core/src/run/producer.rs lines 440-710 (the self-check loop, the invocation detail set only at send-back, and PRODUCER_SEND_BACKS) and crates/athena-context/prompts/producer.md (it already asks for criteria_check). No record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are unaffected. The detail field already exists on the invocation record, so the schema is unchanged. The property is measured directly by reading the stored invocation detail in the run tests.",
+    "The producer already receives its brief with every criterion and a send-back for unmet ones. The missing part is the stored evidence, not the producer's information, so no refusal rule is added; this follows the 'give information, not refusal' preference.",
+    "Prior jobs 20261014-170031-2r9b, 20261014-172342-rqgb and 20261014-174937-hrzn are treated as a different, already-rejected effort on role prompts. Their changed files (prompts/reader.md, producer.md, verifier.md, athena-context/src/lib.rs, athena-core/src/verify.rs, docs/decisions.md, docs/design/*, docs/records.md) are dropped as out of scope, and CHANGELOG.md is kept as a deliverable.",
+    "Existing code: crates/athena-core/src/run/producer.rs, crates/athena-core/src/run/send_back.rs and crates/athena-core/src/run/tests.rs are extended, not replaced.",
+    "The verifier model and the reader/verifier prompt budgets stay unchanged; reader.md has 2 tokens of headroom, so prompt edits are avoided."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description names the root cause: the producer's per-criterion self-check is stored (invocation detail in crates/athena-core/src/run/producer.rs) only when it fails and sends the producer back, so a passing check or one reported as met leaves no stored event before the final verdict.",
+      "kind": "content"
+    },
+    {
+      "text": "In crates/athena-core/src/run/producer.rs, the attempt's invocation detail is set on the passing path (the `break Some(report)` at the empty-problems branch) as well as the send-back path. It lists each accepted criterion with its met, unmet or left-to-Athena status. A diff reader can find this in the producer.rs hunk.",
+      "kind": "content"
+    },
+    {
+      "text": "A new test in crates/athena-core/src/run/tests.rs runs the producer stage with the fake agent, on a report that marks every criterion met. It asserts that the stored invocation detail names each criterion and its status. It fails on the base tree and passes with the change; check with `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second new test in run/tests.rs covers the case where the report omits a criterion and the send-back is used up. It asserts that the stored detail still lists that criterion as unmet, so the stored event shows the check ran. Check with `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The existing 'self-check failed' details asserted in run/tests.rs and run_pin_tests.rs keep their wording. The change adds no refusal rule, so no replay share applies: expected 0% of newly refused readings.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry for this change. It does not edit docs/decisions.md or anything under records/. Prior jobs 20261014-170031-2r9b, 20261014-172342-rqgb and 20261014-174937-hrzn changed role prompts and the reader budget, and their findings (stale 1,800 mentions, over-wide doc lines) do not apply here. None of their files are kept except CHANGELOG.md.",
+      "kind": "content"
+    },
+    {
+      "text": "Athena's recorded checks for the final tree (cargo fmt --check, cargo clippy --all-targets, cargo test) all passed.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Prompt edits: crates/athena-context/prompts/reader.md, producer.md and verifier.md, and the reader token budget (the prior jobs' work, dropped)",
+    "crates/athena-context/src/lib.rs, crates/athena-core/src/verify.rs, crates/athena-cli/tests/budgets.rs (dropped)",
+    "docs/decisions.md, docs/records.md and docs/design/* edits from prior jobs 20261014-170031-2r9b, 20261014-172342-rqgb, 20261014-174937-hrzn (dropped)",
+    "A new repair loop or changing PRODUCER_SEND_BACKS",
+    "Changing the verifier or its verdict rules",
+    "Edits to records/ or owner files"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6821963394342762,
+      "p_user_intervenes": 0.06107784431137724,
+      "cost_usd": {
+        "p10": 0.5536665683353074,
+        "p50": 1.5294943,
+        "p90": 6.376786526679223
+      },
+      "wall_time_s": {
+        "p10": 608.8643803587555,
+        "p50": 2182.889733868193,
+        "p90": 4511.952446018034
+      }
+    }
+  },
+  "departures": "The prior jobs were rejected on a different task, and this request's task is narrower, so I kept the reference figures with slightly lower acceptance because the root cause is an inference from the code.",
+  "urgent_reason": "It stops the same failure class, seen in 43 jobs, from repeating and wasting retries.",
+  "hard_reason": "This job changes the run pipeline (what the producer stage stores about its self-check before the verifier), so a mistake would be hard to see.",
+  "producer_effort": "high"
+}

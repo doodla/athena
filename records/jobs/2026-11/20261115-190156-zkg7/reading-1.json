@@ -1,0 +1,123 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261115-190156-zkg7",
+  "n": 1,
+  "at": "2026-11-15T19:02:29.348752994Z",
+  "invocation_seq": 1,
+  "base_commit": "cde05f1646dee5b856d4b477315823dd8179a2c1",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Show the producer's pre-verdict criteria check in introspection events",
+  "summary": "Retry of job 20261114-160745-8e6x. The failure class \"nothing in the stored event shows the unmet criterion checked before the verdict\" is about the introspection Event built in `event_of_job`, which reads only the outcome reason and verification.json. The fix adds, for each criterion the verification marks unmet, the producer's stored pre-verdict status and evidence from `candidate.producer_report.criteria_check`. The audience is the introspection stage, whose prompt says it can read nothing else.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests plus fmt, clippy, test criterion."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix at the introspection event builder, not at one job."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests assert on the event's `what`, the consuming stage's input."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261114-160745-8e6x (failed at planning, no candidate, no files changed): the critic found the reading misread 'stored event' as the producer invocation detail and wrongly claimed a passing self-check is not stored. This reading addresses each finding: the root cause is now the introspection event input (`event_of_job`, `failure_details`); the passing check is acknowledged as already stored in `candidate.producer_report`; a test asserts on the event's `what` and fails on base; the producer.rs invocation-detail change, the `; redacted report: ` parse risk, the briefs.rs unchanged-file send-back and the detail-overwrite nit no longer apply because producer.rs, send_back.rs and briefs.rs are not changed.",
+    "Code survey: read crates/athena-core/src/introspect.rs (`event_of_job` at ~1473 builds Event.what from title, outcome.reason and `failure_details(verification)`; `failure_details` ~984 lists unmet criteria, blocker/major findings and failed checks; tests `what_of`, `athena_with` ~2081 commit only outcome and verification; `an_event_carries_the_unmet_criterion_and_the_major_finding` ~2715), crates/athena-data/src/records.rs (`ReportedCriterion {criterion,status,evidence}`, `ProducerReport.criteria_check`, `Candidate.producer_report`), and the job records struct with `candidate: Option<Candidate>` (crates/athena-core/src/store.rs:37 and athena-gate jobs.rs). No new record or data file is added, so no records allow-list or AnyRecord round-trip change applies. Candidate is stored as a record file; the test must commit it like the Verification in `athena_with`.",
+    "Consuming stage: the introspection stage, whose input is built in `event_of_job`. Matching of producer criteria to verification criteria uses the same normalisation as `criterion_key` in crates/athena-core/src/run/send_back.rs (reuse it by making it pub(crate), or an equivalent trim/lowercase compare). Evidence text is clipped with the existing `clip` and TEXT_CAP, and the count with DETAIL_CAP.",
+    "Adds no refusal rule: expected 0% of newly refused readings.",
+    "Existing code: crates/athena-core/src/introspect.rs `event_of_job`, `failure_details`, `clip`; crates/athena-data/src/records.rs `ProducerReport`; crates/athena-core/src/run/send_back.rs `criterion_key`."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-core/src/introspect.rs: `event_of_job` loads the job's stored candidate and, for each criterion the verification marks unmet, appends to `what` the producer's pre-verdict status and evidence taken from `candidate.producer_report.criteria_check` (clipped with the existing caps). A criterion the producer did not list is shown as having no recorded pre-verdict check. Nothing is added when the verification passed or no candidate/report is stored.",
+      "kind": "content"
+    },
+    {
+      "text": "A new test in crates/athena-core/src/introspect.rs, in the style of `an_event_carries_the_unmet_criterion_and_the_major_finding`, commits a Candidate whose producer_report marks criterion C as met with some evidence plus a failed Verification with C unmet. It calls `event_of_job` and asserts `what` contains C's pre-verdict status and evidence. It fails on the base tree and passes with the change; check with `cargo test -p athena-core introspect`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second new test covers an unmet criterion absent from criteria_check, and a job with no stored candidate. It asserts `what` states no pre-verdict check was recorded and that the existing assertions on `what` (unmet list, major findings, failed checks) still hold; check with `cargo test -p athena-core introspect`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The root cause is named in the CHANGELOG.md entry (a new entry; docs/decisions.md and records/ are not edited): the self-check was already stored in candidate.producer_report, but the introspection event built in `event_of_job` never included it, so the stage that reports the failure could not see the check.",
+      "kind": "content"
+    },
+    {
+      "text": "Existing introspect and run_pin tests still pass: `cargo test` passes on the final tree, as does `cargo clippy --all-targets` and `cargo fmt --check`, as recorded by Athena's checks.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "crates/athena-core/src/run/producer.rs, crates/athena-core/src/run/tests.rs and crates/athena-context/src/briefs.rs: the prior job's planned files, dropped (no candidate existed); no change to producer invocation detail",
+    "Prompt edits (reader.md, producer.md, verifier.md), the reader token budget, crates/athena-context/src/lib.rs, crates/athena-core/src/verify.rs, crates/athena-cli/tests/budgets.rs",
+    "docs/decisions.md, docs/records.md, docs/design/* edits and anything under records/ or owner files",
+    "A new repair loop, changing PRODUCER_SEND_BACKS, or changing the verifier or its verdict rules",
+    "Any new refusal rule"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.68,
+      "p_user_intervenes": 0.05,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6821963394342762,
+      "p_user_intervenes": 0.06098654708520179,
+      "cost_usd": {
+        "p10": 0.5536949834384981,
+        "p50": 1.5164948072931013,
+        "p90": 6.3699124582746665
+      },
+      "wall_time_s": {
+        "p10": 605.9510246679998,
+        "p50": 2176.0663615359995,
+        "p90": 4507.972157892001
+      }
+    }
+  },
+  "departures": "Slightly higher acceptance than reference: the reading follows the critic's findings and the proposed request."
+}
