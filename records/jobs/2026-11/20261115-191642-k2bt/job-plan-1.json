@@ -1,0 +1,289 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261115-191642-k2bt",
+  "round": 1,
+  "at": "2026-11-15T21:56:46.89407347Z",
+  "invocation_seq": 2,
+  "approach": "Delete the two announced-deadline sections and the plumbing that only fed them, and add one rule to the planner prompt. (1) In `briefs/planner.rs` remove `DEADLINE_RULE`, `deadline_section`, the `writeln!` at line 181 and `PlannerInputs.deadline_s` (line 44). (2) In `briefs.rs` remove `time_budget_section` (763-776), its call (696) and `ProducerInputs.deadline_s` (373). (3) Drop `deadline_s:` from every struct literal: `planning.rs:156`, `run/mod.rs:1244`, `reading.rs:3612`, and the `briefs.rs` test literals (1648, 1676, 1713, 1746, 1925, 1979, 2535, 2559, 2581, 2609, 2852). The enforced limits stay: `timeout_s` (planning.rs:137-147, passed to `agent_spec` at 175) and `producer_deadline_s` (producer.rs:363) keep feeding the agent spec. Only their doc and comment lines that say the brief states the limit are reworded. (4) Replace the old pinning tests with absence tests: `briefs.rs` 1863-1901, 1998-2083 and `run/tests.rs` 1089-1094, 1161-1165, 1438-1496, 1661-1662, 1699. The enforced-timeout assertions in those run tests stay, so they still show the limit is applied. (5) Add one bullet to `prompts/planner.md`: for a queued fix or retry, first check from code and config whether its problem still exists. If not, say so in `approach` with the file:line evidence and list no file. Then update the planner line in `docs/system-facts.md`, as `system_facts_budgets_match_computed` requires. (6) Add a `CHANGELOG.md` Unreleased entry. `crates/athena-cli/tests/lifecycle.rs` and `crates/athena-core/src/iris.rs` are listed as deliverables, but the Grep for `deadline_s`, `Time budget`, `## Deadline`, `ProducerInputs` and `PlannerInputs` found no use in either file. The plan leaves both unchanged, and the producer should leave them unchanged unless `cargo clippy --all-targets` shows a compile error there. `lifecycle.rs`'s \"deadline of 1800s reached\" strings come from the fake agent's `TimedOut` detail (`procs.rs:21`), not from a brief, so they stay.",
+  "decisions": [
+    {
+      "choice": "Remove `deadline_s` from `PlannerInputs` and `ProducerInputs` instead of keeping it unused.",
+      "reason": "Criterion 2 asks for the fields that only fed the sections to go. Once the sections are gone nothing reads the fields, so the compiler flags every leftover literal. The enforced limit does not depend on them: it comes from `agent_spec(.., timeout_s)` (planning.rs:175) and `producer_deadline_s(jc)` (producer.rs:363).",
+      "rejected": [
+        {
+          "option": "Keep the field and ignore it.",
+          "why": "Dead input that suggests the brief still states a limit; clippy may also flag it later."
+        }
+      ]
+    },
+    {
+      "choice": "Keep `producer_deadline_s` (producer.rs:51) and reword its doc to say it is the limit the invocation runs under.",
+      "reason": "It is still the single source for `agent_spec` at producer.rs:363. Only the claim that the brief states it is false now.",
+      "rejected": [
+        {
+          "option": "Inline `jc.config.budget.producer_timeout_s` at producer.rs:363 and delete the function.",
+          "why": "A larger diff that touches the enforced-limit line the request says to keep unchanged."
+        }
+      ]
+    },
+    {
+      "choice": "Delete the whole `## Time budget` section, including its pacing advice (smallest change first, targeted tests, full suite once, `date`).",
+      "reason": "The request says to remove 'deadline and pacing text'. The part that matters, 'run the suite at most once, targeted tests', is already in `prompts/producer.md:9`, so no rule is lost.",
+      "rejected": [
+        {
+          "option": "Keep the pacing paragraph and drop only the seconds figure.",
+          "why": "Sri called a model telling pace against a clock pointless; the section is about pacing, and the producer prompt already covers the part with value."
+        }
+      ]
+    },
+    {
+      "choice": "Do the second 'also do that' as one prompt bullet in `planner.md`, not as Rust that closes queued jobs.",
+      "reason": "The brief's reading, accepted by the user, scopes it to a planner-prompt rule. The planner has Read, Grep and Glob, so it can check code and config. The headroom is 95 tokens (planner.md 2383 bytes; the system-facts line says 1105 of 1200).",
+      "rejected": [
+        {
+          "option": "A Rust check at queue or dispatch time that closes stale jobs.",
+          "why": "Out of scope in the brief, and whether a problem still exists cannot be decided by code."
+        }
+      ]
+    },
+    {
+      "choice": "Leave the 66w1 scaling (`PLANNER_ESCALATED_TIMEOUT_FACTOR`, planning.rs:134-147) as is.",
+      "reason": "Criterion 6 and the reading keep it. It still sets the enforced timeout. Only the comment at planning.rs:130-133 is trimmed because the brief no longer states the limit.",
+      "rejected": [
+        {
+          "option": "Revert the scaling because limits are now 24 hours.",
+          "why": "Listed out of scope; it is an enforced-limit behavior, not brief text."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs/planner.rs",
+      "action": "modify",
+      "purpose": "Remove `DEADLINE_RULE`, `deadline_section`, its `writeln!` and `PlannerInputs.deadline_s`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Remove `time_budget_section`, its call and `ProducerInputs.deadline_s`. Drop the field from the test literals. Replace the two pinning tests (1863-1901, 1998-2083) with absence tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/planner.md",
+      "action": "modify",
+      "purpose": "Add one bullet: for a queued fix or retry, check first from code and config whether the problem still exists; if not, say so in `approach` with the evidence and plan no change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add a test asserting `PLANNER_FRAME.text` carries the new rule, next to `planner_and_critic_frames_are_short_and_fit_the_budgets`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Update the line `- budget planner: 1105 of 1200` to the computed size, as `system_facts_budgets_match_computed` requires after planner.md grows.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Drop `deadline_s: timeout_s` (156) and trim the comment at 130-133. The scaling and `timeout_s` stay.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Reword the doc comment on `producer_deadline_s` (49-50); the function and its use at 363 stay.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Drop `deadline_s: producer::producer_deadline_s(&jc)` at line 1244.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Delete `time_budget_of`; invert the stored-brief test (1097) and the planner-deadline test (1438); turn the prompt asserts at 1661-1662 and 1699 into absence asserts.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Drop `deadline_s: 1800` from the `ProducerInputs` literal in the retry-brief test (3612).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the Unreleased entry for this change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Edit `briefs/planner.rs`: delete `DEADLINE_RULE`, `deadline_section`, the `writeln!(out, \"\\n{}\", deadline_section(..))` at 181 and `PlannerInputs.deadline_s` with its doc (43-44).",
+    "Edit `briefs.rs`: delete `time_budget_section` and its doc (758-776), the call at 696 and `ProducerInputs.deadline_s` with its doc (371-373). Remove `deadline_s:` from every test literal (1648, 1676, 1713, 1746, 1925, 1979, 2535, 2559, 2581, 2609, 2852).",
+    "In `briefs.rs` tests, replace 1863-1901 with `planner_brief_has_no_deadline_or_pacing_text` (rounds 1 and revised; absent: '## Deadline', 'deadline of', 'seconds of wall-clock', 'stop exploring by', 'no clock of your own'). Replace 1998-2083 with `producer_brief_has_no_time_budget_section` over the five shapes (absent: '## Time budget', 'Time budget', 'seconds of wall-clock', 'deadline of'). Keep the `seed()` and `producer_inputs` helpers.",
+    "Edit `planning.rs`: remove line 156 and rewrite the comment at 130-133 to say only that the revision may raise the effort and scale the limit. Edit `run/mod.rs`: remove line 1244. Edit `producer.rs`: reword the doc at 49-50. Edit `reading.rs:3612`: remove the field line.",
+    "Edit `run/tests.rs`: delete `time_budget_of` (1089-1094). In the stored-brief test (1097) keep every timeout and caps assertion and replace 1161-1165 with `assert!(!stored.contains(\"## Time budget\") && !stored.contains(\"4321\"))`, keeping the `prompt.starts_with(...)` check at 1175-1178. In 1438: rename to `a_planner_deadline_still_stops_planning_and_the_brief_does_not_state_it`, change 1473-1474 to absence assertions, and keep the timeout vec and the reason checks. Change 1661-1662 and 1699 to absence assertions.",
+    "Edit `prompts/planner.md`: add after the `On a revision` bullet, in 190 bytes or less: '- A queued fix or retry: first check from the code and config whether the problem it was filed for still exists. If not, say so in `approach` with the file:line evidence and list no file.' Add the presence test in `lib.rs` (next to line 559). Run `cargo test -p athena-cli --test budgets`, read the computed planner size from its failure message, and set `docs/system-facts.md` line 28 to it.",
+    "Add the `### Changed` bullet to `CHANGELOG.md` under Unreleased. It cites Sri's request, jobs 6ee6c79d844c and 64a92cc76d29, the removed sections and inputs, the new planner rule, and that the enforced limits and the 66w1 scaling are unchanged.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Grep `crates/` for 'Time budget', '## Deadline' and `deadline_s` in brief inputs to confirm none remain. `git diff` must show no change to `athena.toml`, `defaults.toml` or `PLANNER_ESCALATED_TIMEOUT_FACTOR`."
+  ],
+  "risks": [
+    {
+      "risk": "The planner.md bullet pushes the planner set over 1200 tokens (95 headroom, an estimate from the 1105 figure) or makes the system-facts line stale.",
+      "mitigation": "Add a short bullet of 190 bytes or less (about 64 tokens, an estimate) and let the budgets test report the computed size. The producer copies that figure into `docs/system-facts.md`. The test fails loudly on any mismatch, so no guessing is needed."
+    },
+    {
+      "risk": "A struct literal or a caller of `PlannerInputs` or `ProducerInputs` that the Grep missed breaks compilation, for example in `cap-change`, `cap-study` or xtask.",
+      "mitigation": "Grep for `deadline_s` over `crates/` after the edit and run `cargo clippy --all-targets --locked`. The compiler lists every missed struct literal, since the field is removed rather than ignored. `lifecycle.rs` and `iris.rs` showed no use in this survey."
+    },
+    {
+      "risk": "A planner that finds a stale queued fix has no formal plan outcome meaning 'nothing to change'; the plan schema has `files` and `demonstrations` as required.",
+      "mitigation": "The rule says to state the finding in `approach` and list no file. `producer.md:9` and the producer's `no_change: already_done` report already cover the pacing advice and the unchanged-tree case. The open question above asks the user to settle the empty-plan path."
+    },
+    {
+      "risk": "The changelog entry trips the boundary-words scan or a changelog format rule.",
+      "mitigation": "Write the entry with plain words and no email address, host or machine name; the xtask boundary and `[personal_data]` scans then pass. Run `cargo test --locked`, which covers `xtask/tests/policy.rs`."
+    },
+    {
+      "risk": "Removing the brief figures weakens the 66w1 tests, whose positive asserts at 1661-1662 only showed the brief matched the limit.",
+      "mitigation": "In the same step, edit `run_for_revision` consumers to assert absence and keep every `planner_timeouts` assertion. Run `cargo test -p athena-core planner_`."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "PlannerInputs.deadline_s",
+      "dependent": "crates/athena-core/src/run/planning.rs:148-157 and 175 (`planner_brief(&PlannerInputs{..})`; `agent_spec(.., timeout_s, ..)`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core planner_revision_escalated_effort_scales_the_planner_time_limit; the timeout still reaches `agent_spec`, shown by `secs(&[600, 1200])`.",
+      "reason": null
+    },
+    {
+      "name": "ProducerInputs.deadline_s and producer_deadline_s",
+      "dependent": "crates/athena-core/src/run/mod.rs:1244 (producer brief build) and run/producer.rs:363 (`agent_spec` timeout)",
+      "kind": "code",
+      "test": "cargo test -p athena-core the_producer_deadline_in_the_stored_brief_is_the_one_the_invocation_runs_under (kept, inverted for the brief): `spec.timeout` and `caps.timeout_s` are 4321.",
+      "reason": null
+    },
+    {
+      "name": "ProducerInputs literal",
+      "dependent": "crates/athena-core/src/reading.rs:3612 (test literal of `ProducerInputs`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core with the reading.rs retry-brief test (which uses `producer_brief` at 3630); compile-checked by clippy --all-targets.",
+      "reason": null
+    },
+    {
+      "name": "The text 'deadline of Ns reached' and the timed_out outcome",
+      "dependent": "crates/athena-agent/src/procs.rs:19-21, crates/athena-cli/tests/lifecycle.rs:1201,2999 and 3034-3044, crates/athena-core/src/run_pin_tests.rs:799-841, run/tests.rs:7367,7753-7759, verify.rs:2269, disk.rs:1858, checks.rs:567",
+      "kind": "code",
+      "test": null,
+      "reason": "This text is the agent driver's own detail for an enforced timeout, produced by `procs.rs:21`. It is not read from any brief, and the enforced limits are unchanged, so these tests are unaffected."
+    },
+    {
+      "name": "Producer pacing guidance",
+      "dependent": "crates/athena-context/prompts/producer.md:9 ('run the suite at most once')",
+      "kind": "rule",
+      "test": null,
+      "reason": "The line in the always-loaded producer prompt keeps the 'targeted tests, suite at most once' rule after the brief section is gone. `docs/decisions.md:2667-2674` records the user's 'at most once' choice, and the prompt still states it."
+    },
+    {
+      "name": "planner.md size and wording",
+      "dependent": "crates/athena-cli/tests/budgets.rs:125 (`system_facts_budgets_match_computed`) and :381 (planner set within producer budget); docs/system-facts.md:28; crates/athena-context/src/lib.rs:559-569 and 640-700",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets and cargo test -p athena-context: the planner row in system-facts.md is updated to the computed size, and the existing wording pins ('seam, fake or fixture', 'refusal_corpus', lib.rs 650-691) are kept.",
+      "reason": null
+    },
+    {
+      "name": "planner.md path",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs:233 (lists planner.md as a file name in the fixture set)",
+      "kind": "code",
+      "test": null,
+      "reason": "It uses the path only as an existing-file fixture name and does not read the file's text. The change adds no refusal or matching rule, so no corpus case is needed and the refusal-corpus demonstration is not required."
+    },
+    {
+      "name": "Enforced time limits",
+      "dependent": "athena.toml:51 (`producer_timeout_s = 86400`), athena.toml:224 (`planner_timeout_s = 86400`), `[budget]` in defaults.toml",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The plan only stops announcing them in briefs; no key or value is changed, and `git diff` shows neither toml file."
+    },
+    {
+      "name": "Documentation that says the brief states the deadline",
+      "dependent": "CHANGELOG.md line 12 (the 66w1 entry says the brief states the limit) and docs/design/job-planning.md",
+      "kind": "rule",
+      "test": null,
+      "reason": "The older changelog entry is history and is not edited. The new entry says it is superseded for the brief. Searching docs/ for the deadline text in briefs found no other document that describes the section."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new test in `briefs.rs`, replacing `planner_brief_states_its_deadline_and_the_stop_early_rule_in_both_rounds` (1863-1901). It builds the planner brief for round 1 and for a revision. After the change, `Grep 'Deadline' crates/athena-context/src/briefs/planner.rs` also finds nothing and `git diff` shows the removal.",
+      "command": "cargo test -p athena-context planner_brief_has_no_deadline_or_pacing_text",
+      "observes": "Neither brief contains '## Deadline', 'deadline of', 'seconds of wall-clock', 'stop exploring' or 'no clock of your own'. The test and the Grep both pass.",
+      "fails_without": "Restoring `deadline_section` or its call makes the new test fail, because `planner_brief` would again contain '## Deadline' and 'deadline of'.",
+      "seam": "Entry point `planner_brief(&PlannerInputs)` (planner.rs:120). The fixture is `planner_inputs(revision)` (briefs.rs:2816), which exists; the revision fixtures `plan(1)` and `finding(..)` are used by the old test. No double is needed because the brief is a pure function."
+    },
+    {
+      "criterion": 2,
+      "method": "A new test replaces `time_budget_states_each_jobs_own_deadline` (1998-2067) and `a_small_job_brief_carries_its_short_deadline` (2069-2083). `Grep 'Time budget' crates/` finds nothing and `Grep 'deadline_s' crates/` finds nothing in the brief inputs or callers. `cargo clippy --all-targets --locked -- -D warnings` shows every `deadline_s` literal was dropped; a missed one is a compile error.",
+      "command": "cargo test -p athena-context producer_brief_has_no_time_budget_section",
+      "observes": "The producer brief for each of five shapes has no '## Time budget'. The Grep results are empty. The crates compile without the field.",
+      "fails_without": "Restoring `time_budget_section` or its call at briefs.rs:696 makes the new test fail.",
+      "seam": "Entry point `producer_brief(&ProducerInputs)` (briefs.rs:678). The fixtures `producer_inputs(None)` (1968) and `seed()` (1983) exist; the five shapes are fresh, seeded retry, resume, stale conflict and unseeded retry, copied from the old test."
+    },
+    {
+      "criterion": 3,
+      "method": "Four tests are inverted or removed. In `briefs.rs`: the planner and producer tests above. In `run/tests.rs`: `the_producer_deadline_in_the_stored_brief_is_the_one_the_invocation_runs_under` (1097) keeps its `spec.timeout == 4321` and caps assertions but now asserts the stored brief and the prompt lack '## Time budget' and '4321'; the `time_budget_of` helper (1089-1094) is deleted. `the_planner_brief_states_the_enforced_deadline_and_a_planner_deadline_still_stops_planning` (1438) is renamed and keeps the timeout vec and the `PLANNING_STOPPED_PREFIX` reason checks; its two positive brief asserts at 1473-1474 become absence asserts. The 1661-1662 and 1699 prompt asserts become absence asserts, and their `secs(&[600, 1200])` timeout asserts stay.",
+      "command": "cargo test -p athena-context && cargo test -p athena-core",
+      "observes": "All tests pass: rendered briefs contain neither 'deadline of', 'seconds of wall-clock' nor 'Time budget', and the agents still run under 4321 s, 600 s and 1200 s.",
+      "fails_without": "The planner and producer absence assertions fail if either section returns. Separately, the enforced-limit assertions fail if the plumbing change broke the timeout: the agent's `spec.timeout` for the planner and producer, and the recorded `caps.timeout_s`.",
+      "seam": "Entry points `planner_brief`, `producer_brief`, and `Athena::go` through the existing fake agent (`athena_with`, `athena_agent::fake::Script` in `run/tests.rs`, as in tests.rs:1110-1126). The helpers `run_for_revision` (1553), `repo_with_config` and `repo_with_revision_keys` (1500) exist. The fake records `spec.timeout` and `spec.user_prompt`; no step adds a seam."
+    },
+    {
+      "criterion": 4,
+      "method": "Add the bullet to `planner.md` and a `lib.rs` test next to `planner_and_critic_frames_are_short_and_fit_the_budgets` (559) that asserts `PLANNER_FRAME.text` contains 'queued' and 'still exists'. The planner row in `docs/system-facts.md` line 28 is updated to the size the budgets test reports. The test message is 'the facts file says X of 1200, the computed value is Y of 1200'.",
+      "command": "cargo test -p athena-context && cargo test -p athena-cli --test budgets",
+      "observes": "`PLANNER_FRAME.text` carries the rule; the planner set stays at or under 1200 tokens; the facts line equals the computed value (about 1169 of 1200; an estimate from adding about 190 bytes, to be replaced by the computed figure).",
+      "fails_without": "Without the bullet, the new content assertion on `PLANNER_FRAME.text` fails. With a bullet too long, `check_budget` (lib.rs:226) or `system_facts_budgets_match_computed` (budgets.rs:125) fails.",
+      "seam": "Entry points `compose` and `check_budget` (lib.rs) and `PLANNER_FRAME` (lib.rs:57). The budgets test exists; the new text assertion is added in step 6. No double."
+    },
+    {
+      "criterion": 5,
+      "method": "Add a `### Changed` bullet under Unreleased in `CHANGELOG.md`. It names Sri's request, jobs 6ee6c79d844c and 64a92cc76d29, the removed `## Deadline` and `## Time budget` sections, the removed `deadline_s` inputs, the new planner rule, and that the enforced limits (86400 s in athena.toml:51 and :224) are unchanged. It gives the root cause: a model has no clock to pace against, and the limits are now 24 hours.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "fmt, clippy and the full test suite pass on the final tree; `git diff CHANGELOG.md` shows the entry.",
+      "fails_without": "Not a behavior criterion; a leftover `deadline_s` literal or a missed edit fails clippy or the test build. A missing entry is seen by reading the diff of `CHANGELOG.md`."
+    },
+    {
+      "criterion": 6,
+      "method": "Run `git diff` and look at `planning.rs`, `athena.toml` and `defaults.toml`. Then run `cargo test -p athena-core planner_`.",
+      "command": "git diff --stat",
+      "observes": "The planning.rs diff holds only the `deadline_s: timeout_s,` line (156) and the comment at 130-133. `PLANNER_ESCALATED_TIMEOUT_FACTOR` and the `timeout_s` computation (137-147) are untouched, and `athena.toml` and `defaults.toml` do not appear in the diff.",
+      "fails_without": "If the scaling were edited, the existing escalation tests `planner_revision_escalated_effort_scales_the_planner_time_limit` (1643) and `planner_time_limit_is_unchanged_when_the_revision_does_not_raise_the_effort` (1678) would fail on their timeout assertions."
+    }
+  ],
+  "open_questions": [
+    "User: `docs/system-facts.md` and `crates/athena-context/src/lib.rs` are not among the expected deliverables, but the plan modifies both. The first is needed because `system_facts_budgets_match_computed` fails once `planner.md` grows. The second is optional: it holds one new test that asserts the rule is present. Is editing both acceptable, or should the bullet be dropped, or the rule go in the brief's `## Report` text, which the planner budget does not count?",
+    "User: Should a planner that finds a queued fix's problem already gone return a plan with an empty `files` list and a `no-change` explanation in `approach`? I did not read the plan admission checks beyond `plan_findings` (admission.rs:177), so I cannot show that such a plan is accepted. If not, the rule needs another way to report it."
+  ],
+  "producer_section_sha256": "a5ecbe37bf1c37b741e5c03fade8df0ba92cfb345f8fad35fe27b0d04637e852"
+}

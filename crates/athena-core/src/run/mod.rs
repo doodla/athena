@@ -1241,7 +1241,6 @@ impl Athena {
                     findings,
                 }),
                 failure_classes: class_summaries(&records.introspections, &records.classes),
-                deadline_s: producer::producer_deadline_s(&jc),
             },
             Some(&evidence_stored),
         );

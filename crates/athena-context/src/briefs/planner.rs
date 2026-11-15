@@ -40,8 +40,6 @@ pub struct PlannerInputs {
     pub deliverable_facts: Vec<DeliverableFact>,
     /// Set for a second or third round.
     pub revision: Option<PlanRevision>,
-    /// The wall-clock limit of one planner call in seconds, as enforced by `agent_spec`.
-    pub deadline_s: u64,
 }
 
 /// The planner's rule for a plan that adds or changes a refusal or matching rule. The planner has Read, Grep
@@ -91,28 +89,15 @@ pub(super) const FIELD_MEANING_RULE: &str = "A plan that reuses an existing stru
 pub(super) const CODE_CLAIMS_RULE: &str = "Each claim about existing behavior (what consumes a state, which sites produce each error or state class, which input forms an existing rule accepts, which records a gate must reconcile, a role or config limit) names the function and file:line you read, not a guess. A plan that classifies errors or states lists every producer site (every bail!/Err site feeding the arm) with its class. \
 On a revision, settle each finding that names a file and function by reading that code and citing file:line, not by assertion or by leaving it open. Answer a finding about an unlisted adjacent path (for example the max_concurrency path, role limits, records read from the branch) by listing that path in dependents.";
 
-/// The planner's rule about its own deadline. Root cause: the planner's fixed wall-clock deadline was never
-/// stated to it, so it explored until it was killed and left no plan (jobs 20261114-041123-hvyh and
-/// 20261030-113229-kgrg, both under a 600 s planner limit). Commit 740a9e4 later raised the live
-/// `planner_timeout_s` to 86400, but the rule covers any configured deadline: the run tests and other
-/// repositories use short ones. This is information, not a refusal. The planner has Read, Grep and Glob only
-/// (`planning_grant`), so it cannot read a clock: the rule gives a reading order to count tool calls against.
-/// Half the deadline is a judgement, an estimate and not measured. `{deadline_s}` and `{stop_s}` are filled by
-/// `deadline_section`. Pinned by a test in `briefs.rs`.
-pub(super) const DEADLINE_RULE: &str = "This planning call has a deadline of {deadline_s} seconds of wall-clock time. A planner stopped at the deadline sends no plan, and planning for the job stops with nothing kept. \
-You have no clock of your own: your tools are Read, Grep and Glob, which show no time, so count your tool calls against the order below. \
-Sort your reading by what the acceptance criteria need: read the deliverables first, then the callers, tests and config each criterion names, and read anything else only once every criterion has a demonstration and a seam. \
-Size the reading to stop exploring by {stop_s} seconds (half the deadline): once every criterion has a demonstration and a seam, write the plan, even if you have not read everything. \
-Return the best complete plan you have, with anything unresolved as an open question beginning `User:` or `Host:`, instead of reading on.";
-
-/// The `## Deadline` section: the rule with the configured deadline and half of it filled in.
-fn deadline_section(deadline_s: u64) -> String {
-    let stop_s = (deadline_s / 2).max(1);
-    let rule = DEADLINE_RULE
-        .replace("{deadline_s}", &deadline_s.to_string())
-        .replace("{stop_s}", &stop_s.to_string());
-    format!("## Deadline\n\n{rule}")
-}
+/// The critic's rule for a plan that says the request's problem no longer exists. The planner marks such a plan
+/// by starting `approach` with `No change:` and lists no file; no code matches the marker, the critic reads it.
+/// A critic verdict of reject stops planning before any producer run, and Athena records the critic's summary as
+/// the reason (`stop_planning` in `crates/athena-core/src/run/planning.rs`). This is information, not a refusal:
+/// whether the evidence holds cannot be judged by code. Pinned by a test in `briefs.rs`; it avoids the words the
+/// critic brief must never carry.
+pub(super) const NO_CHANGE_PLAN_RULE: &str = "A plan whose approach begins `No change:` says the request's problem no longer exists, and lists no file. Check its file:line evidence in the snapshot. \
+If the evidence holds, give the verdict reject and say in the summary what is already in place and where: Athena records the summary as the reason the job stops in planning. \
+If it does not hold, give the verdict revise and name what fails.";
 
 /// The planner's brief: the request, the reading with each criterion numbered by kind, the checks, the
 /// verifier's commands and the state of the deliverables; a revision also quotes the previous plan and every
@@ -178,7 +163,6 @@ pub fn planner_brief(inputs: &PlannerInputs) -> String {
         );
         findings_list(&mut out, &rev.findings, "(no findings were recorded)");
     }
-    let _ = writeln!(out, "\n{}", deadline_section(inputs.deadline_s));
     let _ = writeln!(
         out,
         "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above. Each names the production entry point it calls, its guards and preconditions, the seam, fake or fixture and how it is injected, and whether that seam exists today (checked by reading the code) or which plan step adds it. Never put the logic under test inside the test double.\n\n{REFUSAL_CORPUS_RULE}\n\n{OPEN_QUESTION_RULE}\n\n{REAL_RECORDS_RULE}\n\n{FIELD_MEANING_RULE}\n\n{CODE_CLAIMS_RULE}"
@@ -220,7 +204,7 @@ pub fn critic_brief(inputs: &CriticInputs) -> String {
     );
     let _ = writeln!(
         out,
-        "## Critique\n\nEnd with the critique as your structured output."
+        "## Critique\n\n{NO_CHANGE_PLAN_RULE}\n\nEnd with the critique as your structured output."
     );
     out
 }

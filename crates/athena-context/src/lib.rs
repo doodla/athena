@@ -565,8 +565,9 @@ mod tests {
             let composed = compose(&[CONTRACT.into(), frame.into()]);
             assert!(check_budget(set, &composed).is_ok(), "{}", frame.id);
             // Each frame stays inside the producer and verifier budgets checked above; this bound keeps a
-            // frame from growing toward them.
-            assert!(estimate_tokens(frame.text) < 800, "{} is short", frame.id);
+            // frame from growing toward them. The planner frame passed 800 estimated tokens with the stale-fix
+            // bullet (878), so the bound is 900.
+            assert!(estimate_tokens(frame.text) < 900, "{} is short", frame.id);
         }
     }
 
