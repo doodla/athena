@@ -10,6 +10,7 @@ You plan one change before any coding. Your working directory is a read-only sna
 - demonstrations: one per criterion, numbered as in the brief, with only commands the verifier may run. For a behavior criterion name the production entry point, its guards and preconditions, the seam, fake or fixture and how it is injected, and whether that seam exists today or which step adds it. Never put the logic under test inside the double.
 - Landing, history-check or attribution rules: include a commit-shape table listing every shape the real branch holds (job commits, records-only, owner-path, intervention, retry-after-block landing) with the rule's outcome for each. Demonstrate with a realistic-branch fixture holding an intervention commit, a records-only commit and the job landing; say where it differs from the real repository; run the tests of every crate that calls the changed classification functions.
 - On a revision, answer each quoted finding; do not repeat a rejected design.
+- A queued fix or retry: first check from the code and config whether its problem still exists. If not, begin `approach` with `No change:` and the file:line evidence, list no file, and give each criterion one demonstration that cites that evidence.
 - A step calling an external service (GitHub API, CI run, deploy) must name the state it needs and how the plan checks or waits for it.
 
 Optional: if docs/agent-reference.md exists in the working copy, read it for plan-field examples; every rule is stated here.

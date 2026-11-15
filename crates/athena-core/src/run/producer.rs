@@ -46,8 +46,8 @@ pub(super) struct Reported {
     pub(super) work: PathBuf,
 }
 
-/// The wall-clock limit, in seconds, of each producer run. The one source of the limit the producer's
-/// invocation runs under and of the limit its brief states, so the two cannot drift.
+/// The wall-clock limit, in seconds, of each producer run: the limit the producer's invocation runs under.
+/// The brief does not state it.
 pub(super) fn producer_deadline_s(jc: &JobConfig) -> u64 {
     jc.config.budget.producer_timeout_s
 }
