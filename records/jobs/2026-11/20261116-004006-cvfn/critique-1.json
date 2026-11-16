@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261116-004006-cvfn",
+  "round": 1,
+  "at": "2026-11-16T02:14:21.44669056Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The textual scan's 'stop at a column-0 #[cfg(test)]' rule drops large parts of production code in core-flow files",
+      "evidence": "crates/athena-core/src/run/mod.rs:1605 is a column-0 `#[cfg(test)]` on `pub(crate) mod check_seam`. Production code follows it up to line 2660: planned_paths at :1686, a second `impl Athena` at :1777 with produce_and_verify at :1872, check_and_verify at :1958, loop_replay at :2385. crates/athena-core/src/run/tests.rs:1 is also `#[cfg(test)]`, followed by more test modules at :73, :11580 and :11654. With the planned rule, a mod.rs deliverable would list none of the functions after line 1605. That hides the adjacent core-flow paths this job exists to show. Any equivalent cut-off in call_index would also lose call sites. The demonstration fixture for criterion 3 has no mid-file `#[cfg(test)]` item, so it would pass despite this defect. Fix: Skip only the item that `#[cfg(test)]` marks, not the rest of the file. The simplest correct way is the syn approach in the next finding. If the plan stays textual, exclude only the ranges of top-level test modules, which `athena_core::code_health::test_module_ranges` (code_health.rs:170) already computes. In either case, add a fixture case with a production fn after a mid-file `#[cfg(test)] mod seam { }` and assert that fn is still listed.",
+      "location": "Plan steps 3 and 4 (function_names / call_index); Decision 4",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Rejecting a Rust parser rests on a false claim: athena-core already depends on syn and already uses it in production code for exactly this kind of scan",
+      "evidence": "crates/athena-core/Cargo.toml:23 lists `syn.workspace = true` under [dependencies]. Cargo.toml:51 enables the features full, parsing and visit. crates/athena-core/src/code_health.rs:75-141 defines is_cfg_test, is_test_fn and a syn::visit::Visit over ItemFn, ImplItemFn and TraitItemFn, and skips `#[cfg(test)]` modules. A token scan that only skips comment lines also matches `name(` inside string literals, doc examples and test fixtures (for example run/tests.rs:9560 embeds Rust source in a string). That is a guess where the code could be parsed. Fix: Use syn, which costs no new dependency. Collect non-test fn names from ItemFn, ImplItemFn and TraitItemFn, reusing or sharing code_health's is_test_fn and is_cfg_test. Collect call sites with visit_expr_call (last path segment) and visit_expr_method_call, taking line numbers from spans as code_health's line_of does. For a file that fails to parse, skip it and say so in the brief's label. Correct the claim in Decision 2, and keep the label that the list is approximate (trait dispatch and macros remain).",
+      "location": "Decision 2, rejected alternative 'Parse Rust with syn or a call graph'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan reads blobs one spawn at a time, although Git has a batch reader",
+      "evidence": "crates/athena-git/src/lib.rs:988 has `pub fn cat_blobs(&self, oids: &[String])`, which reads many blobs through one `git cat-file --batch`. The plan instead calls cat_blob per `.rs` blob, a few hundred spawns per planner call by its own estimate. Fix: Build the index from one ls_tree plus one cat_blobs call, and correct the list of Git methods in Decision 2.",
+      "location": "Decision 2 rejected alternative ('Git exposes no grep (only ls_tree, show_file, cat_blob)'); step 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two of the rendered lines have no cap",
+      "evidence": "Only the functions with callers elsewhere are capped (30). The lines 'called only inside this file' and 'no callers found' list every remaining function. run/mod.rs alone declares about 60 functions (grep of `fn` at mod.rs:198-2669), so a large deliverable could add a long line to every planner call. Fix: Cap both lines too (for example 30 names, then '+N more'), and assert the cap in the briefs.rs test.",
+      "location": "Step 2 rendering; Decision 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The demonstration cites run_planned_behavior as the model for replacing the deliverables, but that function only changes the criterion kind",
+      "evidence": "run/tests.rs:1379-1386 sets only `reading[\"acceptance_criteria\"][0][\"kind\"]`. The pattern that replaces deliverables is at run/tests.rs:10876-10884 (`reading[\"deliverables\"][0][\"path\"] = json!(path)`). Fix: Cite run/tests.rs:10876 as the pattern for setting the reader's deliverable path to crates/x/src/core.rs.",
+      "location": "Demonstrations, criterion 3, second test",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes the right thing in the right place. The planner was told in prose to list callers but was never given them, so the fix adds computed caller facts per deliverable to the planner brief, adds an exits rule, and adds no refusal rule. The files, functions and seams it names all exist: DeliverableFact at planner.rs:16, the inline loop at planning.rs:121-129, Git::ls_tree/show_file/cat_blob, and the test helpers repo_with_config, commit_file, athena_with, planning_script and Calls. The dependents list matches what I found by grep: DeliverableFact is used only in planner.rs, briefs.rs, run/mod.rs:29 and planning.rs:124. The Report size test at briefs.rs:4164 is handled. The design of the caller scan has one major flaw, and it rests on a false claim. The plan rejects a Rust parser because \"athena-core has no syn dependency\". In fact syn (full + visit) is a normal dependency of athena-core (crates/athena-core/Cargo.toml:23), and production code already uses it in code_health.rs:75-141 to skip test modules and test functions. Instead the plan uses a textual rule that stops reading at the first column-0 `#[cfg(test)]`. In run/mod.rs that line is 1605, which would drop about 1000 lines of production code (produce_and_verify, check_and_verify, planned_paths) from the core-flow file. In run/tests.rs that line is line 1, so the file would be reported as declaring no functions. This would hide exactly the adjacent paths the fix exists to show, so the plan needs revision."
+}

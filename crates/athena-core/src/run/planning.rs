@@ -1,6 +1,274 @@
 //! Job planning: the planner and critic rounds, the plan record and the planning tool grant (design §3.4).
 
 use super::*;
+use athena_context::briefs::{CallSite, CallerList, FunctionCallers};
+use std::collections::{BTreeMap, BTreeSet};
+use syn::visit::Visit;
+
+/// How many call sites of one function are put in the brief.
+const CALL_SITES_SHOWN: usize = 4;
+/// How many blobs one `cat-file --batch` call reads, so that only a few megabytes of source are held at once.
+const BLOB_CHUNK: usize = 200;
+
+/// What one Rust source file declares and calls, found by parsing it. Root cause of the scan: the planner
+/// brief gave no computed callers of the functions in the deliverable files, only prose (see
+/// `athena_context::briefs::CallSite`).
+#[derive(Default)]
+struct SourceScan {
+    /// Functions declared outside test code: name and the line of the name.
+    functions: Vec<(String, u32)>,
+    /// Calls by name: name, line, and whether the call is in test code.
+    calls: Vec<(String, u32, bool)>,
+    /// How many enclosing test items the visitor is inside.
+    in_test: usize,
+}
+
+impl SourceScan {
+    fn note_call(&mut self, name: &syn::Ident) {
+        let line = name.span().start().line as u32;
+        self.calls.push((name.to_string(), line, self.in_test > 0));
+    }
+
+    fn note_fn(&mut self, attrs: &[syn::Attribute], sig: &syn::Signature) {
+        if self.in_test == 0 && !crate::code_health::is_test_fn(attrs) {
+            let line = sig.ident.span().start().line as u32;
+            self.functions.push((sig.ident.to_string(), line));
+        }
+    }
+
+    /// Every identifier directly followed by a parenthesis group, in a macro's tokens. An identifier after
+    /// `fn` or `$` is a declaration or a macro variable, not a call.
+    fn walk_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        use proc_macro2::{Delimiter, TokenTree};
+        let (mut before, mut prev): (Option<TokenTree>, Option<TokenTree>) = (None, None);
+        for tree in tokens {
+            if let TokenTree::Group(group) = &tree {
+                if group.delimiter() == Delimiter::Parenthesis
+                    && let Some(TokenTree::Ident(name)) = &prev
+                {
+                    let declared = match &before {
+                        Some(TokenTree::Ident(word)) => word == "fn",
+                        Some(TokenTree::Punct(p)) => p.as_char() == '$',
+                        _ => false,
+                    };
+                    if !declared {
+                        self.note_call(name);
+                    }
+                }
+                self.walk_tokens(group.stream());
+            }
+            before = prev.take();
+            prev = Some(tree);
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for SourceScan {
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        let test = crate::code_health::is_cfg_test(&m.attrs);
+        self.in_test += usize::from(test);
+        syn::visit::visit_item_mod(self, m);
+        self.in_test -= usize::from(test);
+    }
+
+    fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+        let test = crate::code_health::is_cfg_test(&i.attrs);
+        self.in_test += usize::from(test);
+        syn::visit::visit_item_impl(self, i);
+        self.in_test -= usize::from(test);
+    }
+
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        self.note_fn(&f.attrs, &f.sig);
+        let test = crate::code_health::is_test_fn(&f.attrs);
+        self.in_test += usize::from(test);
+        syn::visit::visit_item_fn(self, f);
+        self.in_test -= usize::from(test);
+    }
+
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        self.note_fn(&f.attrs, &f.sig);
+        let test = crate::code_health::is_test_fn(&f.attrs);
+        self.in_test += usize::from(test);
+        syn::visit::visit_impl_item_fn(self, f);
+        self.in_test -= usize::from(test);
+    }
+
+    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+        self.note_fn(&f.attrs, &f.sig);
+        let test = crate::code_health::is_test_fn(&f.attrs);
+        self.in_test += usize::from(test);
+        syn::visit::visit_trait_item_fn(self, f);
+        self.in_test -= usize::from(test);
+    }
+
+    fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(p) = &*c.func
+            && let Some(last) = p.path.segments.last()
+        {
+            self.note_call(&last.ident);
+        }
+        syn::visit::visit_expr_call(self, c);
+    }
+
+    fn visit_expr_method_call(&mut self, c: &'ast syn::ExprMethodCall) {
+        self.note_call(&c.method);
+        syn::visit::visit_expr_method_call(self, c);
+    }
+
+    fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        if !m.path.is_ident("macro_rules") {
+            self.walk_tokens(m.tokens.clone());
+        }
+    }
+}
+
+/// Parses Rust source and lists its functions and calls; `None` when it does not parse.
+fn scan_source(text: &str) -> Option<SourceScan> {
+    let file = syn::parse_file(text).ok()?;
+    let mut scan = SourceScan::default();
+    scan.visit_file(&file);
+    Some(scan)
+}
+
+impl Athena {
+    /// What the planner is told about each deliverable in the base snapshot `treeish`: whether it exists, its
+    /// size, and, for an existing Rust file, the callers of its functions in the other Rust files of the
+    /// snapshot. Root cause: the planner brief gave no computed list of callers for the functions in the
+    /// deliverable files, only prose, so plans skipped adjacent paths such as `[parallel] max_concurrency`
+    /// into landing. The list is a textual name search (parsed, so strings and comments do not count) and
+    /// approximate; the brief says so. It reads git only, so nothing is written and jobs planning side by
+    /// side do not interact. A job with no existing Rust deliverable reads no blob.
+    pub(super) fn deliverable_facts(
+        &self,
+        treeish: &str,
+        paths: &[String],
+    ) -> Result<Vec<DeliverableFact>> {
+        let mut facts = Vec::new();
+        for path in paths {
+            let bytes = self.git.show_file(treeish, path)?.map(|b| b.len() as u64);
+            facts.push(DeliverableFact {
+                path: path.clone(),
+                exists: bytes.is_some(),
+                bytes,
+                callers: None,
+            });
+        }
+        let rust: BTreeSet<String> = facts
+            .iter()
+            .filter(|f| f.exists && f.path.ends_with(".rs"))
+            .map(|f| f.path.clone())
+            .collect();
+        if rust.is_empty() {
+            return Ok(facts);
+        }
+        let entries: Vec<_> = self
+            .git
+            .ls_tree(treeish)?
+            .into_iter()
+            .filter(|e| e.kind == "blob" && e.mode != "120000" && e.path.ends_with(".rs"))
+            .collect();
+        // The deliverables first: their function names say which calls to keep from every other file.
+        let mut own: BTreeMap<String, SourceScan> = BTreeMap::new();
+        let (mine, others): (Vec<_>, Vec<_>) = entries.iter().partition(|e| rust.contains(&e.path));
+        for chunk in mine.chunks(BLOB_CHUNK) {
+            let oids: Vec<String> = chunk.iter().map(|e| e.oid.clone()).collect();
+            for (entry, blob) in chunk.iter().zip(self.git.cat_blobs(&oids)?) {
+                if let Some(scan) = scan_source(&String::from_utf8_lossy(&blob)) {
+                    own.insert(entry.path.clone(), scan);
+                }
+            }
+        }
+        let wanted: BTreeSet<&str> = own
+            .values()
+            .flat_map(|s| s.functions.iter().map(|(n, _)| n.as_str()))
+            .collect();
+        // name -> (path, line, in test code) over every Rust file, the deliverables included.
+        let mut index: BTreeMap<String, Vec<(String, u32, bool)>> = BTreeMap::new();
+        let mut keep = |path: &str, scan: &SourceScan| {
+            for (name, line, test) in &scan.calls {
+                if wanted.contains(name.as_str()) {
+                    index
+                        .entry(name.clone())
+                        .or_default()
+                        .push((path.to_string(), *line, *test));
+                }
+            }
+        };
+        for (path, scan) in &own {
+            keep(path, scan);
+        }
+        let mut not_searched: Vec<String> = Vec::new();
+        for chunk in others.chunks(BLOB_CHUNK) {
+            let oids: Vec<String> = chunk.iter().map(|e| e.oid.clone()).collect();
+            for (entry, blob) in chunk.iter().zip(self.git.cat_blobs(&oids)?) {
+                match scan_source(&String::from_utf8_lossy(&blob)) {
+                    Some(scan) => keep(&entry.path, &scan),
+                    None => not_searched.push(entry.path.clone()),
+                }
+            }
+        }
+        for fact in &mut facts {
+            if !rust.contains(&fact.path) {
+                continue;
+            }
+            let Some(scan) = own.get(&fact.path) else {
+                fact.callers = Some(CallerList {
+                    deliverable_parsed: false,
+                    functions: Vec::new(),
+                    unparsed: not_searched.clone(),
+                });
+                continue;
+            };
+            fact.callers = Some(CallerList {
+                deliverable_parsed: true,
+                functions: callers_of(&fact.path, scan, &index),
+                unparsed: not_searched.clone(),
+            });
+        }
+        Ok(facts)
+    }
+}
+
+/// The functions `scan` declares in `path`, merged by name under the first declaration, with the call sites
+/// found in `index`: other files first (production before test, at most [`CALL_SITES_SHOWN`] shown), and a
+/// count of the sites in the file itself. Most-called-elsewhere functions come first.
+fn callers_of(
+    path: &str,
+    scan: &SourceScan,
+    index: &BTreeMap<String, Vec<(String, u32, bool)>>,
+) -> Vec<FunctionCallers> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for (name, line) in &scan.functions {
+        if !seen.insert(name.as_str()) {
+            continue;
+        }
+        let all = index.get(name).map(Vec::as_slice).unwrap_or_default();
+        let same_file = all.iter().filter(|(p, _, _)| p == path).count();
+        let mut elsewhere: Vec<CallSite> = all
+            .iter()
+            .filter(|(p, _, _)| p != path)
+            .map(|(p, l, test)| CallSite {
+                path: p.clone(),
+                line: *l,
+                test: *test || !crate::code_health::is_measured(p),
+            })
+            .collect();
+        elsewhere.sort_by(|a, b| (a.test, &a.path, a.line).cmp(&(b.test, &b.path, b.line)));
+        let total = elsewhere.len();
+        elsewhere.truncate(CALL_SITES_SHOWN);
+        out.push(FunctionCallers {
+            function: name.clone(),
+            line: *line,
+            elsewhere: total,
+            same_file,
+            sites: elsewhere,
+        });
+    }
+    out.sort_by(|a, b| (b.elsewhere, b.same_file, a.line).cmp(&(a.elsewhere, a.same_file, b.line)));
+    out
+}
 
 impl Athena {
     /// Ends the job in planning: it fails before any code was written. Its verification result is unknown,
@@ -118,15 +386,8 @@ impl Athena {
             self.stop_planning(ctx, closing, &format!("{e}"));
             return Ok(RoundEnd::Stopped);
         }
-        let mut facts = Vec::new();
-        for d in &accepted.deliverables {
-            let bytes = self.git.show_file(&p, &d.0)?.map(|b| b.len() as u64);
-            facts.push(DeliverableFact {
-                path: d.0.clone(),
-                exists: bytes.is_some(),
-                bytes,
-            });
-        }
+        let paths: Vec<String> = accepted.deliverables.iter().map(|d| d.0.clone()).collect();
+        let facts = self.deliverable_facts(&p, &paths)?;
         // A revision call (after a critic revise or a mechanical plan-rule revision) may run at the
         // `[models] planner_revision_*` setting; round 1 and a seeded first call keep the ordinary one. When
         // the revision raises the effort, the time limit grows by PLANNER_ESCALATED_TIMEOUT_FACTOR.
@@ -731,5 +992,116 @@ mod planning_grant_tests {
             athena_context::briefs::HISTORY_LIMIT,
             athena_git::snapshot::HISTORY_LIMIT
         );
+    }
+}
+
+#[cfg(test)]
+mod caller_scan_tests {
+    use super::*;
+
+    fn names(scan: &SourceScan) -> Vec<&str> {
+        scan.functions.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    fn calls_of(scan: &SourceScan, name: &str) -> Vec<(u32, bool)> {
+        scan.calls
+            .iter()
+            .filter(|(n, _, _)| n == name)
+            .map(|(_, l, t)| (*l, *t))
+            .collect()
+    }
+
+    #[test]
+    fn functions_and_calls_come_with_their_lines() {
+        let text =
+            "fn alpha() {\n    beta();\n    x.gamma(1);\n    Foo::delta();\n}\nfn beta() {}\n";
+        let scan = scan_source(text).unwrap();
+        assert_eq!(
+            scan.functions,
+            [("alpha".to_string(), 1), ("beta".to_string(), 6)]
+        );
+        assert_eq!(calls_of(&scan, "beta"), [(2, false)]);
+        assert_eq!(calls_of(&scan, "gamma"), [(3, false)]);
+        assert_eq!(calls_of(&scan, "delta"), [(4, false)]);
+    }
+
+    #[test]
+    fn a_production_fn_after_a_mid_file_test_module_is_still_listed() {
+        let text = "fn before() {}\n#[cfg(test)]\nmod seam {\n    fn seam_only() {}\n}\nfn after_the_seam() {\n    before();\n}\n\
+                    #[test]\nfn a_test() {\n    before();\n}\n";
+        let scan = scan_source(text).unwrap();
+        assert_eq!(names(&scan), ["before", "after_the_seam"]);
+        // One production call (line 7) and one test call (line 11).
+        assert_eq!(calls_of(&scan, "before"), [(7, false), (11, true)]);
+    }
+
+    #[test]
+    fn calls_in_macro_arguments_are_found_and_declarations_in_macros_are_not() {
+        let text = "fn run() {\n    assert_eq!(land(1), 2);\n    let t = format!(\"{}\", cost(&r));\n}\n\
+                    macro_rules! m { ($x:expr) => { skipped($x) }; }\nfn other() { helper!(fn inner() {}); }\n";
+        let scan = scan_source(text).unwrap();
+        assert_eq!(calls_of(&scan, "land"), [(2, false)]);
+        assert_eq!(calls_of(&scan, "cost"), [(3, false)]);
+        assert!(calls_of(&scan, "skipped").is_empty(), "macro_rules body");
+        assert!(calls_of(&scan, "inner").is_empty(), "a fn declaration");
+    }
+
+    #[test]
+    fn strings_comments_declarations_and_names_passed_by_value_are_not_calls() {
+        let text = "fn target() {}\nfn user() {\n    let s = \"target(\";\n    // target(\n    let f = target;\n    run(target);\n}\n";
+        let scan = scan_source(text).unwrap();
+        assert!(calls_of(&scan, "target").is_empty(), "{:?}", scan.calls);
+        assert_eq!(calls_of(&scan, "run"), [(6, false)]);
+    }
+
+    #[test]
+    fn a_test_item_marks_the_calls_inside_it_and_duplicate_names_are_kept_for_the_merge() {
+        let text = "struct S;\nimpl S {\n    fn new() {}\n}\nstruct T;\nimpl T {\n    fn new() {}\n}\n\
+                    #[cfg(test)]\nimpl S {\n    fn helper() { new(); }\n}\n";
+        let scan = scan_source(text).unwrap();
+        assert_eq!(names(&scan), ["new", "new"]);
+        assert_eq!(calls_of(&scan, "new"), [(11, true)]);
+    }
+
+    #[test]
+    fn text_that_does_not_parse_gives_none() {
+        assert!(scan_source("fn broken( {").is_none());
+    }
+
+    #[test]
+    fn duplicate_names_merge_under_the_first_declaration_and_sites_are_capped_and_ordered() {
+        let scan = scan_source("fn new() {}\nfn new() {}\nfn zero() {}\n").unwrap();
+        let mut index: BTreeMap<String, Vec<(String, u32, bool)>> = BTreeMap::new();
+        let mut sites = vec![
+            ("tests/it.rs".to_string(), 1, true),
+            ("src/b.rs".to_string(), 9, false),
+            ("src/a.rs".to_string(), 5, false),
+            ("src/a.rs".to_string(), 2, false),
+            ("src/c.rs".to_string(), 3, false),
+            ("src/self.rs".to_string(), 8, false),
+        ];
+        sites.push(("src/d.rs".to_string(), 4, true));
+        index.insert("new".into(), sites);
+        let list = callers_of("src/self.rs", &scan, &index);
+        assert_eq!(list.len(), 2, "the two `new` merge");
+        let new = &list[0];
+        assert_eq!((new.function.as_str(), new.line), ("new", 1));
+        assert_eq!((new.elsewhere, new.same_file), (6, 1));
+        let shown: Vec<(&str, u32, bool)> = new
+            .sites
+            .iter()
+            .map(|s| (s.path.as_str(), s.line, s.test))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("src/a.rs", 2, false),
+                ("src/a.rs", 5, false),
+                ("src/b.rs", 9, false),
+                ("src/c.rs", 3, false)
+            ]
+        );
+        assert_eq!(list[1].function, "zero");
+        assert_eq!((list[1].elsewhere, list[1].same_file), (0, 0));
     }
 }

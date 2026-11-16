@@ -1,0 +1,254 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261116-004006-cvfn",
+  "round": 1,
+  "at": "2026-11-16T02:12:48.969859497Z",
+  "invocation_seq": 2,
+  "approach": "Root cause: the planner brief tells the planner in prose to list every caller and mode of what it changes (`OPEN_QUESTION_RULE`, `crates/athena-context/src/briefs/planner.rs:66-68`) but never shows it the callers of the functions in the deliverable files. The brief's deliverable facts are only path, exists and bytes (`DeliverableFact`, planner.rs:16-21; built at `crates/athena-core/src/run/planning.rs:121-129`). The planner has Read, Grep and Glob only (`planning_grant`, planning.rs:701-708), so it finds callers by search and stops at the first paths it meets, for example missing the `[parallel] max_concurrency` path into landing. No rule asks it to tabulate each exit of a changed stage. Fix at the input, not as a refusal: (1) in athena-core, a new `pub(super) fn deliverable_facts` on `Athena` replaces the inline loop at planning.rs:121-129. For each existing `.rs` deliverable it lists the non-test `fn` names, reads every `.rs` blob of the base commit through `self.git.ls_tree` and `cat_blob`, builds one index of call-like tokens (identifier directly followed by `(`, not preceded by `fn`, comment lines skipped), and returns per function the call sites in other files (`path:line`, non-test paths first, capped at 4) plus counts of other-file and same-file sites. A non-Rust or missing deliverable gets `callers: None`. (2) In athena-context, `DeliverableFact` gains `callers: Option<Vec<FunctionCallers>>`, and `planner_brief` renders under each Rust deliverable a labelled, approximate list: functions with callers elsewhere (file:line), functions called only in their own file, and functions with no callers found, so a deliverable with none shows 'no callers found'. (3) A new `EXITS_RULE` const is added to the Report after `CODE_CLAIMS_RULE`, for both the first-round and the revision brief, and says a plan that changes a stage or core flow must tabulate every exit (success, fail, error, hold, interrupt) with the file:line that handles it, the state it leaves and the code that reads that state. (4) CHANGELOG.md names the root cause. `admission.rs` and the reading checks are untouched, so the share of past accepted readings newly refused is 0%.",
+  "decisions": [
+    {
+      "choice": "Compute the caller list in Athena from the base commit and put it in the brief as data, labelled approximate and a starting list the planner must extend.",
+      "reason": "The failure class is missing information, not missing rules: the prose rule exists (planner.rs:66-68, :91-92) and the planner has no git or shell (planning.rs:701-708). A computed list puts the adjacent callers in front of it before round 1. The label keeps it from treating a textual search as complete.",
+      "rejected": [
+        {
+          "option": "Refuse a plan whose dependents omit a caller found by Athena's search",
+          "why": "The brief says a refusal rule is allowed only when the information cannot prevent the failure. A textual search has false positives (same method name on another type), so a refusal would block valid plans. The reading checks and admission.rs are out of scope."
+        },
+        {
+          "option": "Tell the planner to Grep for callers more thoroughly (prose only)",
+          "why": "That is the existing rule, and nine jobs show it is not enough."
+        }
+      ]
+    },
+    {
+      "choice": "Match call-like tokens (`name(` not preceded by `fn`) in one pass over all `.rs` blobs, building a name-to-sites index.",
+      "reason": "It needs no parser, runs in time linear in the source, and works on a fixture of a few files. The tests.rs deliverable is about 500 KB with hundreds of functions, so a per-function scan of every line would be too slow. Using the same index for all functions keeps cost at one read of the tree per round.",
+      "rejected": [
+        {
+          "option": "Parse Rust with syn or a call graph",
+          "why": "athena-core has no syn dependency (only the crates in the system facts' Cargo reach list); a new dependency is more than the smallest design needs and would still not resolve trait calls."
+        },
+        {
+          "option": "Run `git grep` per function through Git",
+          "why": "`Git` exposes no grep (only ls_tree, show_file, cat_blob; crates/athena-git/src/lib.rs:516-549), and one spawn per function is slow for large deliverables."
+        }
+      ]
+    },
+    {
+      "choice": "Add a new field `callers` to `DeliverableFact` rather than reuse `bytes` or `exists`.",
+      "reason": "`DeliverableFact` (planner.rs:14-21) documents only path, existence and size; none of them means callers. `Option` distinguishes 'not computed' (non-Rust or missing file) from 'computed, none found'.",
+      "rejected": [
+        {
+          "option": "Put the callers into the existing `path` string or a separate parameter of `PlannerInputs`",
+          "why": "It would split one deliverable's facts across two inputs and break the one-line-per-deliverable rendering that briefs.rs:2812 pins."
+        }
+      ]
+    },
+    {
+      "choice": "Show callers in other files first and only count same-file call sites; skip `#[test]` functions and stop at a column-0 `#[cfg(test)]`; list at most 30 functions with callers elsewhere per deliverable and say how many more.",
+      "reason": "The failure was missing adjacent paths in other files. Test helpers and same-file calls would swamp a 500 KB tests.rs deliverable. Caps keep the brief small (worst case about 6 KB per Rust deliverable, an estimate, not measured).",
+      "rejected": [
+        {
+          "option": "List every call site",
+          "why": "Common names such as `new` have thousands of sites and would bury the useful ones."
+        }
+      ]
+    },
+    {
+      "choice": "Add `EXITS_RULE` as its own const after `CODE_CLAIMS_RULE` in the Report, one line without newlines, pinned by a test like the other rules.",
+      "reason": "The latest introspection (job 20261115-202532-6mng) names an exit table for a changed stage as the missing piece. The rule sits where the other planner rules are, so it appears exactly once in both the first-round and revision brief (planner.rs:168-171 is shared by both).",
+      "rejected": [
+        {
+          "option": "Put the exit table wording in prompts/planner.md",
+          "why": "Out of scope: the prompt files have almost no token headroom (planner 1188 of 1200 in docs/system-facts.md)."
+        },
+        {
+          "option": "Have admission.rs check the plan for an exits table",
+          "why": "Out of scope and a refusal rule. Whether a table is complete cannot be judged by code, so the critic reads it."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs/planner.rs",
+      "action": "modify",
+      "purpose": "Add `FunctionCallers` and the `callers: Option<Vec<FunctionCallers>>` field to `DeliverableFact`, with a doc comment naming the root cause. Render the callers under each Rust deliverable in `planner_brief`. Add `EXITS_RULE` and append it to the Report.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Export `FunctionCallers`; add `callers: None` to the two `DeliverableFact` literals; add the callers rendering test and the exits-rule test; update the Report size bound test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Add `Athena::deliverable_facts` and the pure helpers (`function_names`, `call_index`, caller selection) with unit tests; replace the inline loop in `planning_round` with it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the git-fixture tests for `deliverable_facts` and for the planner prompt carrying the callers (names beginning `deliverable_callers`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under [Unreleased] / Changed naming the root cause, the change, its limits and the tests.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-context/src/briefs/planner.rs add `pub struct FunctionCallers { pub function: String, pub elsewhere: usize, pub same_file: usize, pub sites: Vec<String> }` (sites are `path:line`) and `pub callers: Option<Vec<FunctionCallers>>` on `DeliverableFact`, both with doc comments that state the root cause (the brief gave no computed callers or exits, only prose), that None means not computed (not a Rust file or missing) and that the list is approximate. Export `FunctionCallers` next to `DeliverableFact` in briefs.rs:26.",
+    "In planner.rs render the callers inside the Deliverables loop of `planner_brief` (lines 132-144): after the `exists` line, for `Some(list)` write an indented intro line saying it is a textual search of the base snapshot's Rust files for `name(`, approximate and not complete, to be extended with Grep; then one line per function with callers elsewhere (`- \\`f\\`: a.rs:10, b.rs:20 (+3 more)`, at most 30, then '+N more functions with callers elsewhere'), one line `called only inside this file: \\`g\\` (2 sites), ...`, and one line `no callers found: \\`h\\`, ...`; an empty list says the file declares no functions. Keep the text free of `## Report`. Add `pub(super) const EXITS_RULE: &str` (one line, no newline, with a doc comment that names the root cause and says it is information, not a refusal) requiring a plan that adds or changes a stage or core flow to tabulate every exit (success, fail, error, hold, interrupt) of each new or changed stage with the file:line that handles it, the state or record it leaves and the code that reads that state. Append `\\n\\n{EXITS_RULE}` after `{CODE_CLAIMS_RULE}` in the Report format string (planner.rs:170).",
+    "In crates/athena-core/src/run/planning.rs add private pure helpers: `function_names(source) -> Vec<String>` (a `fn name` token not inside a line comment; skip a function whose previous non-blank line is `#[test]`; stop at a line equal to `#[cfg(test)]`), and `call_index(files: &[(String, String)]) -> BTreeMap<String, Vec<(usize, usize)>>` (identifier directly followed by `(`, not preceded by the token `fn`, comment lines skipped, line numbers from 1). Then `pub(super) fn deliverable_facts(&self, treeish: &str, paths: &[String]) -> Result<Vec<DeliverableFact>>`: for each path call `self.git.show_file`; for an existing `.rs` file compute `callers` from the index built once per call (lazily, from `self.git.ls_tree(treeish)` blob entries ending `.rs`, bytes through `self.git.cat_blob(oid)`, lossy UTF-8); other paths get `callers: None`. Order sites non-test paths first (a path with `tests` as a component or file stem is a test path), then path and line, capped at 4. Use it in `planning_round` in place of lines 121-129 with `accepted.deliverables.iter().map(|d| d.0.clone())`.",
+    "Add tests in planning.rs's test module for the pure helpers (a `#[test]` fn and a `fn` in a comment are skipped; a `fn name(` declaration is not a call; `x.name(` and `Foo::name(` are calls; text after `#[cfg(test)]` is ignored). In crates/athena-core/src/run/tests.rs add `deliverable_callers_lists_both_callers_and_shows_a_deliverable_with_none` (real git repo, direct call to `deliverable_facts(\"HEAD\", ...)`) and `deliverable_callers_reach_the_planner_prompt` (reader deliverables replaced as in `run_planned_behavior`, the first planner prompt in `calls` carries both caller lines).",
+    "In crates/athena-context/src/briefs.rs add `callers: None` to the two literals at lines 2780-2790; add `a_planner_brief_lists_the_callers_of_each_deliverable` and `the_planner_brief_requires_an_exit_table_once_in_both_rounds` (first-round and revision brief, count 1, wording needles); update the Report size bound at lines 4164-4179 to add `EXITS_RULE.len() + 2` and the matching message.",
+    "Add the CHANGELOG.md bullet at the head of `### Changed` under `## [Unreleased]` (CHANGELOG.md:10-12): root cause, the three changes, limits (approximate textual search, caps, the planner may ignore the table, the saving in round-cap stops is not measured), no refusal rule (0% newly refused) and the test filters. Do not touch docs/system-facts.md (briefs sit outside the budgets), admission.rs, any prompt .md file, athena.toml or records/.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-context` and `cargo test -p athena-core` and fix findings (the checks are fmt, clippy and `cargo test --locked`)."
+  ],
+  "risks": [
+    {
+      "risk": "The textual search finds false callers (a method with the same name on another type) or misses callers through macros, trait objects or paths split across lines, so the planner may trust the list too much.",
+      "mitigation": "The brief labels the list as approximate and a starting list to extend with Grep, and the existing `OPEN_QUESTION_RULE` and `CODE_CLAIMS_RULE` still require the planner to cite what it read. Tests pin the label wording."
+    },
+    {
+      "risk": "Brief size or time grows: one `cat-file` per `.rs` blob per planner call (about a few hundred spawns) and up to about 6 KB of text per Rust deliverable (estimate, not measured).",
+      "mitigation": "One read of the tree per call; functions shown are capped at 30 with a 'more' count and sites at 4; test functions and same-file sites are only counted. Planner calls take minutes, so a read of the tree is small by comparison. A git error still ends the call exactly as the old `show_file` call did."
+    },
+    {
+      "risk": "Common function names (`new`, `run`) make the list noisy for a deliverable such as a large tests.rs.",
+      "mitigation": "Test functions are skipped, other-file sites come first with non-test paths ahead of test paths, and a function with only same-file calls is folded into one line."
+    },
+    {
+      "risk": "A model planner may still ignore the exit table; only the critic reads it.",
+      "mitigation": "This is information, not a refusal; the rule says what to tabulate and where to cite. Whether it reduces round-cap stops is not measured here and the changelog says so."
+    },
+    {
+      "risk": "Adding the rule makes the Report size bound test (briefs.rs:4164) fail until it is updated.",
+      "mitigation": "Step 5 updates the bound to count `EXITS_RULE`; the test run in the demonstrations catches a miss."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`DeliverableFact` struct shape (new `callers` field)",
+      "dependent": "crates/athena-context/src/briefs.rs:2780-2790 (test helper `planner_inputs` builds `DeliverableFact` literals) and every test that calls it (briefs.rs:1740, 1793, 1810, 1836, 1862, 2797, 2833, 2860, 3175, 3203, 4146, 4185)",
+      "kind": "code",
+      "test": "cargo test -p athena-context (the two literals get `callers: None`, so the existing assertions such as 'exists, 1234 bytes' at briefs.rs:2812 are unchanged; the new test in criterion 2 covers the field)",
+      "reason": null
+    },
+    {
+      "name": "how deliverable facts are built in `planning_round`",
+      "dependent": "crates/athena-core/src/run/planning.rs:121-129 (the only production constructor of `DeliverableFact`) and the re-export at crates/athena-core/src/run/mod.rs:29",
+      "kind": "code",
+      "test": "cargo test -p athena-core deliverable_callers (direct call to `deliverable_facts` and the planner prompt seen through `planning_script`); every other planning test in run/tests.rs (for example a_planner_deadline_still_stops_planning_and_the_brief_does_not_state_it, run/tests.rs:1432) runs through the new method with a README.md deliverable, which gives `callers: None`",
+      "reason": null
+    },
+    {
+      "name": "size of the planner brief's Report section",
+      "dependent": "crates/athena-context/src/briefs.rs:4141-4172 (`PLANNER_REPORT_BASE_BYTES` bound test `the_planner_brief_states_the_real_records_rule_once_within_its_bound`)",
+      "kind": "code",
+      "test": "Updated in step 5 to add `EXITS_RULE.len() + 2`; run by cargo test -p athena-context",
+      "reason": null
+    },
+    {
+      "name": "Report section wording and order",
+      "dependent": "All planner_brief callers in the Report tests: briefs.rs:1792 (refusal corpus rule), 1809 (OPEN_QUESTION_RULE wording), 1826 (CODE_CLAIMS_RULE), 4183 (FIELD_MEANING_RULE order after REAL_RECORDS_RULE)",
+      "kind": "code",
+      "test": "cargo test -p athena-context planner_brief",
+      "reason": "The new rule is appended after `CODE_CLAIMS_RULE` and no existing rule's text changes, so each test's `contains` and `matches(..).count() == 1` assertions still hold; the field-meaning ordering test compares only REAL_RECORDS_RULE and FIELD_MEANING_RULE positions."
+    },
+    {
+      "name": "callers of `planning_round`/`plan_round` that now run `deliverable_facts` once per planner call",
+      "dependent": "The `[parallel] max_concurrency` path (`dispatch` in crates/athena-core/src/run/mod.rs, which runs `plan_round` for each job concurrently under the drain) and the `plan_round` seeded-resume path (`seed: Option<PlanRevision>`, planning.rs:36)",
+      "kind": "code",
+      "test": "cargo test -p athena-core planner_revision_applies_after_a_mechanical_plan_rule_revision (run/tests.rs:1727, goes through repeated planner calls on one job)",
+      "reason": "`deliverable_facts` reads the job's own base commit through `self.git` (no shared state, no writes, no state-dir files), so two concurrent jobs do not interact; a seeded resume and a mechanical-pass retry run the same code path as round 1 and recompute the list. A git error is returned with `?` exactly as `show_file` was at planning.rs:123, so the failure exit is unchanged."
+    },
+    {
+      "name": "prompt-set budgets",
+      "dependent": "docs/system-facts.md budget lines (`budget planner: 1188 of 1200`), checked by `system_facts_budgets_match_computed` and crates/athena-cli/tests/budgets.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "The system facts say the briefs sit outside the budget sets, and no prompt .md file or frame changes, so the computed sizes are unchanged."
+    },
+    {
+      "name": "refusal and admission rules",
+      "dependent": "crates/athena-core/src/admission.rs and the reading checks (`check_*` in crates/athena-core/src/reading.rs), crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No file is changed. The new field and rule are brief text only; no check reads `DeliverableFact` (searched `DeliverableFact` in crates: only briefs.rs, planner.rs, run/mod.rs and planning.rs). No refusal rule is added, so the refusal corpus needs no new case and the share of past accepted readings newly refused is 0%."
+    },
+    {
+      "name": "critic brief",
+      "dependent": "The critic brief (`critic_brief`, planner.rs:355) and its tests (briefs.rs:1877)",
+      "kind": "code",
+      "test": "cargo test -p athena-context critic_brief",
+      "reason": "`critic_brief` neither reads `PlannerInputs` nor includes the Deliverables section or the Report rules; it is unchanged, and the critic's own rule text (`NO_CHANGE_PLAN_RULE`) is untouched."
+    },
+    {
+      "name": "planner snapshot and Athena's own plan checks",
+      "dependent": "The snapshot read by the planner (`Snapshot::create` ... `PlainWithHistory`, planning.rs:158) and the `plan_findings` checks at planning.rs:239-250",
+      "kind": "code",
+      "test": null,
+      "reason": "The caller list is read from the base commit `p` (`ctx.prediction`) in git, not from `snap_dir`, so the snapshot and `plan_findings` are not touched."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff. The CHANGELOG entry under Unreleased/Changed and the doc comment on `FunctionCallers`/`DeliverableFact` and `EXITS_RULE` each state the cause: the brief gave no computed callers or exits for the functions in the deliverable files, only prose, so plans skipped adjacent paths such as `[parallel] max_concurrency` into landing. They also cite the nine introspections' job ids (for example 20261030-013555-f5qm) and say no refusal rule is added.",
+      "command": "git diff -- CHANGELOG.md crates/athena-context/src/briefs/planner.rs",
+      "observes": "The diff shows an entry and a doc comment containing the words 'no computed' (or equivalent) callers, exits, and `[parallel] max_concurrency`. Content check only; no seam is needed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "New test in briefs.rs next to `planner_briefs_number_criteria_flag_governance_and_list_the_verifiers_commands`. It builds `planner_inputs(None)` and replaces `deliverable_facts` with a Rust deliverable whose `callers` hold three functions: one with two other-file sites, one called only in its own file and one with none. It calls `planner_brief` and takes the text between the Deliverables heading and the next `## `. It asserts each `path:line` is there, the '+N more' count, the only-in-this-file line and the 'no callers found' line. It also asserts a deliverable with `callers: None` (CHANGELOG.md) has no callers line and that the existing `- athena.toml: exists, 1234 bytes` line still holds.",
+      "command": "cargo test -p athena-context a_planner_brief_lists_the_callers_of_each_deliverable",
+      "observes": "All call-site strings appear in the deliverables section, none in the Report; the none and same-file cases are shown as such.",
+      "fails_without": "Without the `callers` field and its rendering, the test does not compile; with the field but no rendering, the assertion that 'crates/a/src/x.rs:10' and the other file:line strings appear after '## Deliverables in the base snapshot' and before the next heading fails.",
+      "seam": "Production entry point `planner_brief` (crates/athena-context/src/briefs/planner.rs:107, exists). The fixture is a `PlannerInputs` from the test helper `planner_inputs` (briefs.rs:2756, exists) with `deliverable_facts` overridden in the test; the `callers` field and its rendering are added by plan steps 1 and 2. Existing literals at briefs.rs:2780 and 2785 get `callers: None`."
+    },
+    {
+      "criterion": 3,
+      "method": "Two tests. (a) A unit test in planning.rs's test module for the pure helpers (`function_names`, `call_index`) on in-memory strings. (b) In run/tests.rs, build a real git repo with `repo_with_config` and `commit_file`: `crates/x/src/core.rs` declares `fn land_job()` and `fn unused_helper()`; `crates/x/src/a.rs` and `crates/x/src/b.rs` each call `land_job(`; `crates/x/src/other.rs` is a second deliverable with no callers; README.md is a non-Rust deliverable. It builds `athena_with(...)` and calls `athena.deliverable_facts(\"HEAD\", &paths)`. Asserts that `land_job` lists `crates/x/src/a.rs:N` and `crates/x/src/b.rs:M` with the right line numbers, that `unused_helper` and the `other.rs` functions are present with zero sites (not omitted) and that README.md has `callers: None`. A second test uses the fake driver path of `run_planned` with the reader's deliverables replaced (as `run_planned_behavior` does at run/tests.rs:1379-1386) to point at `crates/x/src/core.rs`, and asserts the first planner prompt in `calls` contains both `a.rs:` and `b.rs:` lines, which shows `planning_round` is wired.",
+      "command": "cargo test -p athena-core deliverable_callers",
+      "observes": "Both caller files are listed by file:line; a deliverable with no callers reads 'no callers found'; the planner's real prompt carries them.",
+      "fails_without": "Without `deliverable_facts`/the call index the planner brief has no callers and the test's assertions on the rendered prompt and on the returned facts fail; without the 'no callers' case being kept as `Some(vec of zero-site functions)` the third assertion fails.",
+      "seam": "Production entry point `Athena::deliverable_facts` (new `pub(super)` method in crates/athena-core/src/run/planning.rs, extracted from the loop at planning.rs:121-129; added by step 3), which calls `Git::ls_tree`, `Git::cat_blob` and `Git::show_file` (crates/athena-git/src/lib.rs:516, 552, 539, exist). The fixture is a real temp git repo from `repo_with_config` (run/tests.rs:302, exists) plus `commit_file` (run/tests.rs:359, exists), with `Athena` from `athena_with` (run/tests.rs:192, exists). The second test injects the planner and critic answers through `planning_script` (run/tests.rs:1316, exists) and reads `Calls`; the double returns canned plans only and holds none of the caller logic."
+    },
+    {
+      "criterion": 4,
+      "method": "New test in briefs.rs modelled on `planner_brief_requires_code_claims_to_cite_the_code_in_both_rounds` (briefs.rs:1826). It loops over `planner_inputs(None)` and `planner_inputs(Some(PlanRevision{..}))`, takes the text after `## Report` and asserts `EXITS_RULE` occurs exactly once, has no newline, and contains the words `success`, `fail`, `error`, `hold`, `interrupt`, `file:line`, `stage` and `core flow`. The existing size bound test (briefs.rs:4164-4172) is updated to add `EXITS_RULE.len() + 2`.",
+      "command": "cargo test -p athena-context the_planner_brief_requires_an_exit_table_once_in_both_rounds",
+      "observes": "One occurrence per brief in both modes; the size bound still holds with the new rule counted.",
+      "fails_without": "Without `EXITS_RULE` the test does not compile; if the rule were not in the shared Report, or were written twice, the `matches(EXITS_RULE).count() == 1` assertion fails for the first-round or revision brief.",
+      "seam": "Production entry point `planner_brief` (planner.rs:107, exists), fixture `planner_inputs` and `plan(1)` and `finding` helpers (briefs.rs:2756, exists); `EXITS_RULE` is a `pub(super)` const added by step 2."
+    },
+    {
+      "criterion": 5,
+      "method": "Show that the diff touches none of admission.rs, the reading checks or the refusal corpus, and `cargo test -p athena-core --test refusal_corpus` is not changed by the plan. Expected share of past accepted readings newly refused: 0%, because no check reads the new field or the new rule and the brief text does not affect admission.",
+      "command": "git diff --stat -- crates/athena-core/src/admission.rs crates/athena-core/src/reading.rs crates/athena-core/tests/refusal_corpus.rs",
+      "observes": "An empty diff stat for those paths.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of CHANGELOG.md: one new bullet at the head of `## [Unreleased]` / `### Changed` (the list starts at CHANGELOG.md:12) that names the root cause, the three code changes, the limits (textual and approximate search; capped lists; the model may still ignore the table) and the tests by `cargo test` filter, and says no refusal rule is added (0%).",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One new bullet under Unreleased, in the style of the entries above it.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "0b67283e67133e279886079b755148f4bf765e774c6b0ff79de4e6bb7353d0c6"
+}
