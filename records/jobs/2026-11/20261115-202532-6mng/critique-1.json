@@ -1,0 +1,97 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261115-202532-6mng",
+  "round": 1,
+  "at": "2026-11-15T23:58:40.50681025Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/lifecycle.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/lifecycle.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/retry.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/retry.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/introspection.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/introspection.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "A job that is repaired and then fails again still hides the first check from the introspector, so the failure class is reported again",
+      "evidence": "introspect.rs:1538-1578: event_of_job builds `what` only from outcome.reason and failure_details(verification, producer_report). It never reads Invocation.detail. The plan stores the first verdict only in the first verifier invocation's detail. It adds the first verdict's reasons to happened.reason only when round two ends in a stop, not when it ends in a second fail verdict. The second Verification record replaces the first. So for a repaired job that fails again, the introspector sees the same record as before this change: nothing shows the unmet criterion being checked before the final verdict. That is the cause text of class criterion-unmet-at-final-verification. The plan calls this reader 'Unchanged'. That is wrong for the case the request cares about. Fix: When a repaired round ends in a fail verdict (not only in a stop), make the closing reason or failure_details name the repair: the first verdict's unmet criteria and blocking findings, that one repair pass ran, and then the second verdict. Add an introspect test (cargo test -p athena-core introspect) that runs an always-failing verifier through go and asserts that event_of_job's `what` contains the first-round criterion and the repair. Also extend the criterion-4 test to the always-fail case.",
+      "location": "Dependents entry 'The stored event the introspections read' (introspect.rs); plan step 8; Risks bullet 3",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Several readers of a repaired job's invocations and verification are missing from the dependents list",
+      "evidence": "(1) The landing gate: athena-gate invariant.rs:713-736 finds the verifier by verification.verifier_invocation, requires it to be a successful Verifier, and reconciles the outcome against every invocation. jobs.rs:556-577 (dispatch_order_problem) takes the newest producer with a seq below the verifier's and checks the times. A repaired landing is the first landing with two producer/verifier pairs. No dependents entry or test covers it. (2) status/planning.rs:432-438 counts a job as first-pass only when verifier_runs <= 1, so the producer-settings statistics change for repaired jobs. (3) status/throughput.rs:428-440 places all check minutes before the first verifier, which is wrong when checks ran twice. The plan lists none of these three. Fix: Add each one to the dependents list. For the gate, add a test that puts a repaired job's landing records through the gate (athena_gate check, or the run path that calls it) and shows they pass. For the first-pass and throughput readers, state the intended meaning (a repaired job is not first-pass; checks run in both rounds) and add or adjust a test for each.",
+      "location": "Dependents list (whole); Closing contents after two rounds",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The repair brief does not tell the producer what its new situation is",
+      "evidence": "The repair round starts a fresh producer session in a new BaseThenTree snapshot. Its brief is the original one, whose Working directory section (briefs.rs:710-714) says 'A snapshot of the base commit's files... Your edits become the candidate'. The shared send-back intro (send_back.rs:162-173) says 'Your previous report did not show every acceptance criterion as met', 'This is the only send-back' and 'A run that leaves no change fails'. All three are false here. A seeded run that adds nothing still goes on as the candidate (candidate.rs:168-171), and producer_loop can send round two back again. The plan adds only 'one leading sentence'. Fix: Have the repair sentence or section say four things: the working directory is a fresh snapshot that already holds the first candidate's changes (git diff shows them); the verifier, not the producer's own report, found the items below; a run that adds nothing keeps the first candidate; and the verdict after this round is final. Pin that text in the new run_pin_tests case.",
+      "location": "Plan step 4 (send_back_text_repaired intro); Approach 2 (fresh snapshot seeded from the candidate)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan writes a new formatter for verifier findings although retry helpers already do this",
+      "evidence": "reading/retry.rs:416-459 already formats unmet criteria as '{criterion}: {evidence}' and findings with finding_text (severity, location, summary, evidence), and picks the blocking ones with finding_blocks. briefs.rs:592-629 (retry_section, must_address_block) shows them to a seeded retry. A new RepairView and section that format the same data again is close to the 'parallel builder' criterion 5 rules out, and the two paths would describe the same finding differently. Fix: Build the repair view's strings with reading::retry::finding_text and the same unmet-text form. Reuse must_address_block's wording, or a function shared with it, inside the send-back chain.",
+      "location": "Plan step 2 (RepairView, repair_send_back_section in briefs.rs)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The repair also starts on findings the producer cannot fix",
+      "evidence": "verify.rs:627-633: request_misread adds a Major finding saying the reading does not match the request. A repair pass cannot change the reading, so the second verdict fails the same way and the round only adds cost. verify.rs:549-555 adds a Major 'Criterion N was not assessed' when the verifier skipped a criterion. That is the verifier's omission, not the producer's. Fix: Skip the repair when the only blocking items are a request misread, or say why such a round is still worth its cost. Add a repair_view unit test for the misread-only case.",
+      "location": "Decision 5 / plan step 3 (repair_view trigger)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The budget-skip test as described stops the job before round one",
+      "evidence": "mod.rs:1378 already calls preflight(ReserveStage::Run) before the producer, and dispatch (mod.rs:1116) preflights a wider reserve. With job_usd just below the Run reserve, the job is held as budget-short before any producer runs, so no skipped repair is ever shown. Fix: Set job_usd above the dispatch and Run reserves, and have the fake turns report a round-one cost large enough that the remaining budget is below the Run reserve when the repair is considered. Assert counts (1,1), the 'repair     skipped' line, and Rejected.",
+      "location": "Plan step 9, test repair_is_skipped_when_the_budget_cannot_pay_for_it",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The worst-case producer count leaves out the scope send-back",
+      "evidence": "producer.rs:633-634 grants one extra scope send-back (SCOPE_SEND_BACKS, mod.rs:1731) besides PRODUCER_SEND_BACKS. So one round can run the producer up to 3 times, and a repaired job up to 6 times, not 4. Fix: Recount the worst case, including every send-back counter, and state it in D189 and the CHANGELOG as an estimate.",
+      "location": "Risks bullet 2; plan step 12 (D189 tradeoff 'worst case 4 producer runs')",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Wrong line number for CRITERION",
+      "evidence": "`const CRITERION: &str = \"README.md describes the demo\";` is at run/tests.rs:88. Fix: Cite tests.rs:88, or the line where the reading's criterion kind is set.",
+      "location": "Demonstration for criterion 2 ('reading criterion CRITERION (kind content, tests.rs:238)')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot using Read and Grep. The plan reads the request correctly, and its main design fits the code. The code it names exists: produce_and_verify at mod.rs:1871, PRODUCER_SEND_BACKS at mod.rs:1681, the four-link send-back chain at send_back.rs:93-218, BaseThenTree seeding at producer.rs:148, judge_with_tree at verification.rs:412, and the Run preflight. Wrapping one round in a bounded repair loop is where the gap starts, and the demonstrations for criteria 2-4 drive the real Athena::go, with only the agent turns faked. Two problems need a revision. First, the plan says the introspection reader is unchanged. But event_of_job (introspect.rs:1538-1578) reads only the outcome reason and verification.json, so a job that is repaired and then fails again still looks exactly like the failure class this job targets. Second, the dependents list leaves out several readers of a job's invocations and verification: the landing gate (athena-gate invariant.rs:713-736 and jobs.rs dispatch_order_problem), the first-pass rate in status/planning.rs:432-438, and the checks window in status/throughput.rs:428-440. The smaller issues: the repair brief does not describe the seeded working directory, it formats findings again instead of using the retry helpers that already exist, the trigger includes findings the producer cannot fix, the budget-skip test is set up so it cannot run, and the worst-case producer count is wrong. Athena's own findings about the CLI test files are not repeated here."
+}

@@ -5576,3 +5576,58 @@ should replace those estimates with its figures.
   athena-core disk::tests`, `cargo test -p athena-cli --test drain the_live_config_allows_two_jobs_at_once`,
   `cargo test -p athena-core governed` and `cargo test -p athena-cli --test backtest`. Not measured: free space
   or the size of a build folder on the owner's disk, and how often a second job waits.
+
+## D189 · The plan critic is given the findings of earlier rounds and the planner's answers, and checks them from round 2
+
+- **Case:** The critic is a fresh model call each round and saw only the plan under review, never the findings of
+  earlier rounds or the planner's answers, and any major finding forces another round. Job 20261115-202532-6mng
+  ("Send unmet verifier criteria back to the producer once") stopped at the 5-round cap for $14.32: each round raised
+  one different major, and round 5's major repeated round 2's. 37 earlier jobs stopped the same way. The owner chose
+  to keep planning and make it cheaper by giving the critic the earlier findings, so later rounds check that they
+  were fixed.
+- **Decision:** From round 2, `critic_brief` (`crates/athena-context/src/briefs/planner.rs`) writes an "Earlier
+  rounds on this plan" section before "Plan under review": for each earlier round the findings the planner was shown,
+  and the planner's answer. The answer to a round before the last is the approach and the decisions of the plan that
+  followed it; the answer to the last earlier round is the plan under review, which is not printed twice. Code
+  compares the plan under review with the last reviewed plan one part at a time on exact text (`plan_changes`) and
+  prints "Changed or new" and "Removed" labels, so the critic is told what changed and does not have to find it. A
+  changed approach does not mark any other part. The history is built by `earlier_rounds` in
+  `crates/athena-core/src/run/planning.rs` from `closing.plans` and `closing.critiques`, which `end_round` fills in
+  step; nothing is stored and no record type is added. Round 1's brief is byte for byte what it was. Two bullets in
+  `crates/athena-context/prompts/critic.md`: from round 2, check that each earlier blocker and major was resolved and
+  raise any that was not again at its earlier severity; raise a new major only on a part the brief lists as changed
+  or new, or on a defect earlier rounds missed that stops the plan working or leaves a criterion unshown, with
+  file:line evidence, and report any other new finding as minor. `plan_verdict` is unchanged: an ignored earlier
+  major is raised again as a major and still forces a round. The 5-round cap and the any-major-forces-a-round rule
+  are unchanged; no refusal or matching rule is added. The critic's budget line in `docs/system-facts.md` follows
+  the longer prompt (1202 of 1300).
+- **Alternatives:** Print every earlier plan in full: the brief grows by a whole plan per round and the critic still
+  diffs by eye. Ask the critic in prose to remember: it is a new call each round and remembers nothing, and the
+  mechanism default says a rule that matters is supplied by code. Compare steps by position: one inserted step marks
+  every later step changed. Treat the approach as unchanged by default: it hides a change the critic should judge.
+  Forbid any new major from round 2: it hides real defects in changed parts and in parts no earlier round looked at.
+  Store the planner's answers in the plan record: it changes the planner's output schema and the record, which the
+  plan text already makes unnecessary. Say "otherwise minor" for any major on an unchanged part: it also downgrades an
+  earlier major the planner ignored, so an ignored finding could pass.
+- **Tradeoff:** The critic's rating is model judgment and is prose-only: the code supplies the history and the list of
+  changes, and checks that they reach the brief, not that the critic follows the two bullets. A critic can still
+  raise a major on a changed or new part, and the approach is one text that nearly every revision rewrites, so a
+  major tied to the approach text stays allowed every round. A part reworded without a real change is listed as
+  changed, which only lets the critic look again. The first critic round of a job resumed from an earlier job's kept
+  plan has no history, because that plan came from another job's records. The brief grows with each round, to at
+  most four rounds of findings, three older answers and one list of labels at the cap; this is an estimate, not
+  measured.
+- **Reversal cost:** Low; remove `EarlierRound`, `plan_changes` and `earlier_rounds_section` from `planner.rs`,
+  `earlier_rounds` in `planning.rs` and the field `CriticInputs.earlier_rounds`, the two bullets in `critic.md`, the
+  tests, and set the critic budget line in `docs/system-facts.md` back to 1056 of 1300.
+- **Provenance:** Read: `crates/athena-context/src/briefs/planner.rs` (`critic_brief`), `crates/athena-context/src/briefs/plan.rs`
+  (`plan_body`, `findings_list`), `crates/athena-core/src/run/planning.rs` (`plan_round`, `critic_round`, `end_round`),
+  `crates/athena-core/src/run/mod.rs` (`Closing`, `plan_verdict`), `crates/athena-context/prompts/critic.md`,
+  `crates/athena-cli/tests/budgets.rs` and `crates/athena-data/src/records/plan.rs`. Ran, before editing `critic_brief`:
+  `cargo test -p athena-context critic_brief_without_earlier_rounds_is_todays_brief` with a placeholder digest, which
+  failed and printed the SHA-256 of the round-1 brief from the history heading to the end,
+  222dbb680558f79a76fc9afc3d14d843e1cee318c10d35d77f037b85ecb95bd5; that literal is in the test and the test passed
+  after the change. Ran after: `cargo test -p athena-context`, `cargo test -p athena-core the_critic_of_round_three`,
+  `cargo test -p athena-cli --test job_plan the_second_critic_brief` and `cargo test -p athena-cli --test budgets`.
+  Not measured: whether a model critic follows the two bullets, how many 5-round planning stops this prevents, or
+  the added tokens per critic call.

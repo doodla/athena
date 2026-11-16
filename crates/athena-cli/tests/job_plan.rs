@@ -1039,6 +1039,57 @@ fn a_file_outside_the_deliverables_is_a_minor_finding_that_does_not_send_the_pla
 }
 
 #[test]
+fn the_second_critic_brief_carries_round_ones_findings_and_the_planners_answer() {
+    const FINDING: &str = "Demonstration 2 repeats demonstration 1 and shows nothing new";
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    let mut second_plan = good_plan();
+    second_plan["approach"] = "ANSWER-MARK add the greeting line and its test.".into();
+    second_plan["steps"] = json!(["Edit README.md.", "STEP-MARK add the greeting test."]);
+    scenario.plans = vec![good_plan(), second_plan];
+    scenario.critiques = vec![
+        critique_of("revise", &[("major", FINDING)], None),
+        critique_of("accept", &[], None),
+    ];
+    let critic_briefs: Arc<Mutex<Vec<String>>> = Arc::default();
+    let inner = scenario.script();
+    let seen = critic_briefs.clone();
+    let athena = fx.athena(Box::new(move |spec| {
+        if spec.role == Role::Critic {
+            seen.lock().unwrap().push(spec.user_prompt.clone());
+        }
+        inner(spec)
+    }));
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    let briefs = critic_briefs.lock().unwrap().clone();
+    assert_eq!(briefs.len(), 2);
+    assert!(!briefs[0].contains(FINDING) && !briefs[0].contains("Earlier rounds on this plan"));
+    let second = &briefs[1];
+    for text in [
+        "## Earlier rounds on this plan",
+        "### Round 1: findings",
+        &format!("[major] (critic) at demonstrations: {FINDING}"),
+        "Planner's answer: the plan under review below (round 2).",
+        "\nChanged or new: Approach; Step 2: STEP-MARK add the greeting test.\n",
+        "Every other part is unchanged since round 1.",
+    ] {
+        assert!(second.contains(text), "the brief omits {text:?}: {second}");
+    }
+    assert_eq!(second.matches("ANSWER-MARK").count(), 1, "{second}");
+    let under_review = second.find("## Plan under review").unwrap();
+    assert!(
+        !second[..under_review].contains("Add a greeting line to README.md."),
+        "round 1's approach is not repeated in the history"
+    );
+}
+
+#[test]
 fn a_retry_of_a_job_stopped_in_planning_carries_the_last_critiques_findings() {
     const FIRST: &str = "The first round finding about demonstrations";
     const LAST: &str = "The last round finding about the greeting test";

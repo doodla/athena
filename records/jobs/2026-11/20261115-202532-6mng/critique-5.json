@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261115-202532-6mng",
+  "round": 5,
+  "at": "2026-11-16T00:39:21.338061227Z",
+  "invocation_seq": 11,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading/retry.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading/retry.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/scope_guard.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/scope_guard.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "A hold in round two throws away round one's verdict and candidate, and the job reruns from the base.",
+      "evidence": "Before round two, step 8 clears `closing.verification`, `closing.verified` and `closing.candidate` and removes the resume mark. `producer_loop` returns a `SlotWait` error when the producer's cargo command waits out its build slot (mod.rs:1911-1915), and that becomes `hold_for_slot_wait`. Its doc comment says that a hold during the producer has \"no candidate and no resume mark, so the next drain starts from the start\" (close.rs:194-196). `commit_hold` commits `closing.files` and invocations with no Verification. So a round-two slot wait loses the first verdict and candidate and pays for a whole new run. Decision 2 rejects 'Hold the job for low disk before round two' because 'the first verdict would be thrown away', and decision 3 says 'With the restore the job ends where it ended before this change'. Both conflict with this path, and no test covers it. Fix: In the repair loop, catch a `SlotWait` returned before round two's candidate is admitted. Restore the first round and close the job Rejected with the 'repair pass stopped before a verdict' reason, like the other round-two stops. Add this case to `repair_events_round_two_stop_keeps_first_verdict_and_candidate`, for example as a second-producer override that returns the slot wait. State it in D189 and the CHANGELOG, and explain why disk holds at the checks or verifier in round two can stay holds: round two's candidate and resume mark exist, so `resume_candidate` re-verifies it.",
+      "location": "Decision 3 and step 8 (a hold from round two's `produce_round` is returned unchanged); crates/athena-core/src/run/mod.rs:1909-1917; crates/athena-core/src/run/close.rs:191-241",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The drain test fix keeps a `.nth(1)` lookup that will point at the first job's repair round.",
+      "evidence": "The test finds the retry's producer view with `watched.looks.iter().filter(|l| l.at == \"producer\").nth(1)` and checks its work tree is the retry job's `work` directory. With the repair, the second producer view belongs to the first job's repair round, so that check fails. Step 12 says to change only `producers.len()` and `producers[2]` and to 'keep the other assertions'. Fix: Change the lookup to `.nth(2)` too, and name it in step 12.",
+      "location": "Step 12 and the dependents entry 'stage order'; crates/athena-cli/tests/drain.rs:5243-5251",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The list of nested-run guards misses mod.rs:2110.",
+      "evidence": "A grep for `self.nested.is_none()` in run/mod.rs finds lines 1980, 2006, 2028 and 2110. The plan cites only the first three. Fix: Cite all four. The repair loop's `self.nested.is_some()` guard is unaffected.",
+      "location": "Decision 2 and dependents entry 'callers of check_and_verify and the nested-run guard'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. The fault is where the plan says: `produce_and_verify` (run/mod.rs:1871-1950) runs one round, so a fail verdict ends the job. Fixing it there with a bounded repair loop, a trigger computed from the stored Verification and the extended send-back chain is sound. Spot checks in the snapshot hold: `PRODUCER_SEND_BACKS` at mod.rs:1681; `finding_text` is `pub(super)` (retry.rs:446); `judge`'s text strings at verify.rs:544, 552, 602 and 631; `agent_verdict` (verify.rs:639-645); round two can be seeded from the first candidate through existing code (producer.rs:144-153, candidate.rs:168-181); the Run reserve is the producer plus verifier caps (reading.rs:148, config.rs:928); the scope-guard rig takes one verdict per verifier call (scope_guard.rs:1512); the landing gate's ordering check uses only the last producer before the named verifier (athena-gate jobs.rs:556-584). The demonstrations use the real `Athena::go` path and would fail on today's code. One major gap: a hold (error return) in round two, such as the producer's cargo command waiting out its build slot, goes to `commit_hold` after round one's candidate, verdict and resume mark were cleared. The first verdict is then lost and the next drain reruns the whole job from the base. The plan rejects exactly that outcome for the disk case in decision 2, says the opposite in decision 3, and has no test for it. Two smaller fixes: the drain test edit misses a `.nth(1)` lookup, and one nested-run guard citation is missing."
+}

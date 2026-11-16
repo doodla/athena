@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261115-202532-6mng",
+  "round": 4,
+  "at": "2026-11-16T00:31:17.580890436Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading/retry.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading/retry.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The scope guard's thrash signals (T1 to T5) and its tests are left out of the dependents list. A repaired attempt doubles its spend and time, which those signals read.",
+      "evidence": "scope_guard.rs:8-13 says the watcher builds attempt records from committed records after each attempt and evaluates T1 to T5 against spend, elapsed agent time and a forecast p90. Line 32 says every threshold is an estimate, to be tuned. The plan names only `attempt_of` and says a repaired attempt 'costs both rounds'. It does not say that `t3_cost` and the time signals can now flag or pause a line sooner, or whether that is intended. The scope_guard test rig pops one verdict per Verifier call (`plan.verdicts.lock().unwrap().pop_front()`, line 1512). With the repair, a failing entry is followed by a second pop in the same job, so the verdict sequence across attempts shifts. Neither scope_guard.rs nor its tests are in the 'tests that assumed one round' list. Fix: Add a dependents entry for the scope guard watcher: `evaluate_before_attempt`, `t3_cost`, the time signal and `near_complete`. State whether a repaired attempt's two-round spend should count in full toward T3 and the time signals, and record the choice in D189. Add `cargo test --locked -p athena-core scope_guard` to the checks and list scope_guard.rs tests among those to fix, with the rule for a verdict queue that a repair now reads twice. Alternatively, add a test that pins the expected flag or pause for one repaired attempt.",
+      "location": "Dependents: 'progress, cost and the introspection event'; Risks; crates/athena-core/src/scope_guard.rs:1-32, 677, 1353-1454, 1511-1519",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Repaired jobs make cost forecasts look worse, and no reader of forecast calibration is listed.",
+      "evidence": "The reading forecasts job cost; scope_guard.rs:12 reads `forecasts.reader.cost_usd.p90()`. A repaired job's actual cost includes a second producer and verifier round, so forecast-versus-actual measures drift up for these jobs. The plan only names throughput's check minutes and the first-pass rate as affected measures. Fix: Name the forecast and calibration readers that compare predicted and actual job cost. State in D189 and the CHANGELOG that a repaired job's actual cost includes both rounds. Leave the forecasts themselves unchanged.",
+      "location": "Risks: 'Cost'; Dependents",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After a repaired job passes, the first verdict survives only as free text in the first verifier invocation's `detail`. The first Verification record and its `brief-verifier.md` are replaced.",
+      "evidence": "The plan keeps one Verification path per job (records.rs:934) and replaces `brief-verifier.md` and the replay record through `put_file`. The structured first-round verdict (criteria met flags, finding severities and sources) is therefore not stored for a repaired job that passes. `Invocation.detail` is documented as free text about how an invocation ended. Criterion 4 is still met, because the detail and invocation order show it. Fix: Acceptable as is for this job. In D189, say that a repaired job keeps the first verdict only as text in the verifier invocation's detail. Name a typed first-round record as possible follow-up work.",
+      "location": "Decision 3; Criterion 4 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The cited line numbers for the existing nested-run guards do not match the snapshot.",
+      "evidence": "Grep for `self.nested.is_some()` in run/mod.rs finds lines 1800 and 2534 only. Other nested guards are in checks.rs:450, 881 and 936. Fix: Cite the real guard locations, or describe the guard without line numbers. The behaviour, no repair for a nested run, is unaffected.",
+      "location": "Decision 2 ('the same guard as mod.rs:1980, 2006, 2028'); Dependents 'callers of check_and_verify'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the plan against the snapshot, and its central claims hold. `produce_and_verify` (run/mod.rs:1871-1950) runs one round. `PRODUCER_SEND_BACKS` is at mod.rs:1681. The only writes to `closing.files` before close are at mod.rs:1008, mod.rs:2264-2268 and verification.rs:201. `judge`'s not-assessed text (verify.rs:544) and misread text (631) are not `format!` literals, while the not-assessed (552) and D43 (602) findings are, so the plan's way of keeping the `drift_haystack` test unchanged works. `finding_text` is `pub(super)` (retry.rs:446) and reaches `crate::reading` through the glob re-export at reading.rs:70 once it is widened. `BaseThenTree` seeding (producer.rs:144-153) and \"a seeded run that adds nothing is the candidate\" (candidate.rs:168-181) both hold. The design is sound and bounded, and the demonstrations use the production entry `Athena::go` with doubles that only return canned agent output. One dependent is missing. The scope guard (scope_guard.rs) judges each attempt by its cost and time against thresholds that are estimates. A repaired attempt now costs up to two rounds, so a line can pause sooner. The guard's own tests feed one verdict per verifier call from a queue (scope_guard.rs:1353, 1512), so a repair takes an extra verdict from the queue. Neither effect is in the dependents list or the tests-to-fix list. That is a major finding under the dependents rule, so the verdict is revise. The remaining findings are minor."
+}

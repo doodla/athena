@@ -23,7 +23,8 @@ pub use boundary::{
 };
 pub use plan::{producer_prompt_with_plan, render_plan_section};
 pub use planner::{
-    CriticInputs, DeliverableFact, PlanRevision, PlannerInputs, critic_brief, planner_brief,
+    CriticInputs, DeliverableFact, EarlierRound, PlanRevision, PlannerInputs, critic_brief,
+    planner_brief,
 };
 pub use reader::{
     CHANGELOG_DEFAULT_PHRASE, CHANGELOG_PATH, CODE_SURVEY_GUIDE, CRITERIA_RULES_HEADING,
@@ -1770,6 +1771,24 @@ mod tests {
     }
 
     #[test]
+    fn composed_critic_prompt_checks_earlier_findings_from_round_two() {
+        let composed = crate::compose(&[crate::CONTRACT.into(), crate::CRITIC_FRAME.into()]);
+        let text = composed.text;
+        for needle in [
+            "was resolved in the plan under review",
+            "again at its earlier severity",
+            "a new major only",
+            "changed or new",
+            "earlier rounds missed",
+            "stops the plan working or leaves a criterion unshown",
+            "even where a rule above says major",
+        ] {
+            assert!(text.contains(needle), "missing wording: {needle}");
+        }
+        assert_eq!(crate::CRITIC_FRAME.version, 2);
+    }
+
+    #[test]
     fn planner_prompt_and_brief_carry_the_refusal_corpus_rule() {
         let brief = planner_brief(&planner_inputs(None));
         let report = brief.split("## Report").nth(1).expect("report section");
@@ -2868,6 +2887,7 @@ mod tests {
                 FindingSource::Athena,
                 "ATHENA-FINDING-TEXT",
             )],
+            earlier_rounds: vec![],
         };
         let brief = critic_brief(&inputs);
         for d in &inputs.plan.demonstrations {
@@ -2952,7 +2972,202 @@ mod tests {
             reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
             plan: plan(1),
             athena_findings: vec![],
+            earlier_rounds: vec![],
         }
+    }
+
+    /// The SHA-256 of the critic brief's tail (from the history heading to the end) for round 1, recorded from
+    /// the code before earlier rounds were added. The head embeds the live defaults and the system facts, so it
+    /// is left out; the tail holds everything the earlier-rounds section can touch.
+    const ROUND_ONE_CRITIC_TAIL_SHA256: &str =
+        "222dbb680558f79a76fc9afc3d14d843e1cee318c10d35d77f037b85ecb95bd5";
+
+    #[test]
+    fn critic_brief_without_earlier_rounds_is_todays_brief() {
+        let brief = critic_brief(&critic_inputs());
+        let tail = &brief[brief.find("## History file").unwrap()..];
+        let digest = athena_data::sha256_hex(tail.as_bytes());
+        assert_eq!(
+            digest, ROUND_ONE_CRITIC_TAIL_SHA256,
+            "the round-1 critic brief tail changed"
+        );
+        // Exact structure, independent of when the digest was recorded.
+        let headings: Vec<&str> = tail.lines().filter(|l| l.starts_with("## ")).collect();
+        assert_eq!(
+            headings,
+            [
+                "## History file",
+                "## Plan under review (round 1)",
+                "## Athena's own findings on this plan",
+                "## Soundness",
+                "## Critique"
+            ]
+        );
+        let mut body = String::new();
+        super::plan::plan_body(&mut body, &plan(1));
+        assert!(tail.contains(&format!(
+            "## Plan under review (round 1)\n\n{body}\n## Athena's own findings on this plan\n\n"
+        )));
+        assert!(brief.ends_with("End with the critique as your structured output.\n"));
+        assert!(!brief.contains("## Earlier rounds"));
+    }
+
+    /// Round 1 and round 2 of one job, then a plan under review that differs from round 2 by a new approach, a
+    /// second step and a removed risk.
+    fn earlier_two_rounds() -> (Vec<EarlierRound>, JobPlan) {
+        let mut two = plan(2);
+        two.approach = "APPROACH-MARK two".into();
+        let mut three = plan(3);
+        three.approach = "APPROACH-MARK three".into();
+        three.steps.push("STEP-MARK second".into());
+        three.risks.clear();
+        let earlier = vec![
+            EarlierRound {
+                plan: plan(1),
+                findings: vec![
+                    finding(
+                        Severity::Major,
+                        FindingSource::Critic,
+                        "FIRST-ROUND-FINDING",
+                    ),
+                    finding(Severity::Minor, FindingSource::Athena, "FIRST-ROUND-MINOR"),
+                ],
+            },
+            EarlierRound {
+                plan: two,
+                findings: vec![finding(
+                    Severity::Blocker,
+                    FindingSource::Critic,
+                    "SECOND-ROUND-FINDING",
+                )],
+            },
+        ];
+        (earlier, three)
+    }
+
+    #[test]
+    fn critic_brief_lists_earlier_findings_the_planners_answers_and_what_changed() {
+        let (earlier, three) = earlier_two_rounds();
+        let brief = critic_brief(&CriticInputs {
+            plan: three.clone(),
+            earlier_rounds: earlier,
+            ..critic_inputs()
+        });
+        let history = brief.find("## History file").unwrap();
+        let start = brief.find("## Earlier rounds on this plan").unwrap();
+        let under_review = brief.find("## Plan under review (round 3)").unwrap();
+        assert!(history < start && start < under_review);
+        let section = &brief[start..under_review];
+        let first = section.find("### Round 1: findings").unwrap();
+        let second = section.find("### Round 2: findings").unwrap();
+        assert!(first < second);
+        for text in [
+            "1. [major] (critic) at files[0]: FIRST-ROUND-FINDING",
+            "evidence for FIRST-ROUND-FINDING",
+            "2. [minor] (athena) at files[0]: FIRST-ROUND-MINOR",
+            "1. [blocker] (critic) at files[0]: SECOND-ROUND-FINDING",
+            "evidence for SECOND-ROUND-FINDING",
+        ] {
+            assert!(section.contains(text), "the section omits {text}");
+        }
+        // Round 1's answer is round 2's plan: its approach and decisions, not its rejected options.
+        assert!(section.contains("Planner's answer (the round 2 plan):"));
+        assert!(section.contains("Approach: APPROACH-MARK two"));
+        assert!(
+            section.contains("1. CHOICE-MARK keep one file Reason: REASON-MARK it is smallest")
+        );
+        assert!(!section.contains("REJECTED-MARK"));
+        // Round 2's answer is the plan under review, which is not repeated.
+        assert!(section.contains("Planner's answer: the plan under review below (round 3)."));
+        assert!(!section.contains("APPROACH-MARK three"));
+        for line in [
+            "Changed or new: Approach; Step 2: STEP-MARK second\n",
+            "Removed: Risk: RISK-MARK drift\n",
+            "Every other part is unchanged since round 2.\n",
+            "### Changed in the plan under review since round 2\n",
+        ] {
+            assert!(section.contains(line), "the section omits {line:?}");
+        }
+        assert!(section.contains("A changed Approach alone does not make any other item changed"));
+        assert_eq!(brief.matches("APPROACH-MARK three").count(), 1);
+        // No cost, as in the other critic brief.
+        let lower = brief.to_lowercase();
+        for absent in ["cost", "usd", "$"] {
+            assert!(!lower.contains(absent), "the critic brief holds {absent}");
+        }
+        // Taking the section out leaves the brief of a first round for the same plan.
+        let first_round = critic_brief(&CriticInputs {
+            plan: three,
+            ..critic_inputs()
+        });
+        assert_eq!(
+            format!("{}{}", &brief[..start], &brief[under_review..]),
+            first_round
+        );
+        assert!(!first_round.contains("## Earlier rounds"));
+    }
+
+    #[test]
+    fn critic_brief_plan_changes_compare_items_by_exact_text() {
+        use super::planner::plan_changes;
+        use athena_data::records::{DependentKind, PlanDependent};
+        let base = plan(2);
+        let none: (Vec<String>, Vec<String>) = (vec![], vec![]);
+        assert_eq!(plan_changes(&base, &plan(3)), none);
+        let brief = critic_brief(&CriticInputs {
+            plan: plan(3),
+            earlier_rounds: vec![EarlierRound {
+                plan: base.clone(),
+                findings: vec![],
+            }],
+            ..critic_inputs()
+        });
+        assert!(
+            brief.contains(
+                "Nothing changed: the plan under review is identical to the round 2 plan."
+            )
+        );
+        assert!(brief.contains("### Round 2: findings\n\n(none)"));
+        // Order does not matter.
+        let mut a = plan(2);
+        a.steps = vec!["one".into(), "two".into()];
+        let mut b = plan(3);
+        b.steps = vec!["two".into(), "one".into()];
+        assert_eq!(plan_changes(&a, &b), none);
+        // A changed decision reason marks that decision only.
+        let mut c = plan(3);
+        c.decisions[0].reason = "a different reason".into();
+        assert_eq!(
+            plan_changes(&base, &c),
+            (
+                vec!["Decision 1: CHOICE-MARK keep one file".to_string()],
+                vec![]
+            )
+        );
+        // A changed approach alone marks only the approach.
+        let mut d = plan(3);
+        d.approach = "a new approach".into();
+        assert_eq!(
+            plan_changes(&base, &d),
+            (vec!["Approach".to_string()], vec![])
+        );
+        // Trailing white space is not a change.
+        let mut e = plan(3);
+        e.approach = format!("{}  \n", base.approach);
+        assert_eq!(plan_changes(&base, &e), none);
+        // A removed dependent is listed as removed.
+        let mut f = plan(2);
+        f.dependents = vec![PlanDependent {
+            name: "NAME-MARK reader".into(),
+            dependent: "a reader".into(),
+            kind: DependentKind::Code,
+            test: None,
+            reason: Some("unaffected".into()),
+        }];
+        assert_eq!(
+            plan_changes(&f, &plan(3)),
+            (vec![], vec!["NAME-MARK reader".to_string()])
+        );
     }
 
     #[test]

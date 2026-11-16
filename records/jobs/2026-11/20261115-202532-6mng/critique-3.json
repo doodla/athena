@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261115-202532-6mng",
+  "round": 3,
+  "at": "2026-11-16T00:23:49.117423847Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading/retry.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading/retry.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Moving the D43 summary out of `judge` breaks an existing test that checks the text is still inside `judge`, and the dependents list leaves that test out.",
+      "evidence": "`drift_haystack()` (verify.rs:3881-3920) takes only the `//!` header lines and the `format!(\"...\")` literals between `\\npub fn judge(` and the next `\\n}\\n`. `rule_sources_appear_in_the_header_or_judge_format_strings` (3923-3937) asserts that this text contains \"must cite commands that ran (D43)\". It also checks each `VERDICT_RULES` source, and the D43 rule's source at line 1383 is that same phrase. The header (line 7) does not carry the phrase. Step 2 replaces the `format!` at line 602 with a `d43_summary(n)` defined outside `judge`, so the test fails. The plan's dependents list names only the tests at 2294-2655 and says they keep passing. Fix: Leave the D43 `format!` literal inside `judge`, and have `repair_view` recognise the finding with a shared suffix const (for example, an Athena-sourced finding whose summary ends with \"must cite commands that ran (D43)\"). Add a unit test that `judge`'s D43 finding ends with that const. Or keep `d43_summary` but list the drift test as a dependent and say how it changes without losing what it guards. Do the same check for any other literal step 2 moves.",
+      "location": "Plan step 2 and the 'verdict computation and the Athena finding texts' dependent; crates/athena-core/src/verify.rs:600-603, 1383, 3880-3937",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Restoring round one after a round-two producer timeout or expired login leaves round two's progress note in the stored files, and it turns an environment stop into a Rejected job.",
+      "evidence": "On a deadline or environment stop, `keep_unfinished_work` pushes `{job}/progress-note.md` into `closing.files` (mod.rs:1008). That note names round two's kept candidate. The function also sets `closing.candidate` and gives the state TimedOut or an environment reason. The plan restores only candidate, verification and happened state, so the note stays and names a candidate the records no longer hold. Only `timeout_seed` reads the note, and only for TimedOut, so after the restore it is stale text. An expired login in round two would also close Rejected, which uses an attempt, where today it is an environment stop. Fix: When restoring, remove the files round two added (for example, keep the length of `closing.files` in `FirstRound` and truncate back to it, keeping round two's invocations). Say in D189 how an environment stop in round two is classed. Add one case to the stop-before-a-verdict test that times out round two's producer.",
+      "location": "Decision 3 (5) and Approach (d), round two ending before a verdict; crates/athena-core/src/run/mod.rs:959-1027 (`keep_unfinished_work`), 897-948 (`timeout_seed`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "If round two stops after its replay record is stored but before the verifier, the restore pairs round one's Verification with round two's replay record and verifier brief.",
+      "evidence": "The replay record is pushed at mod.rs:2264-2268, before `verification_stage` and before the disk gate that runs ahead of the verifier. With `put_file` replacing same-path files, a round-two stop between the replay and the verdict that returns Ok with no Verification would trigger the restore. The stored replay and `brief-verifier.md` would then be round two's, beside round one's Verification and candidate. Fix: Keep round one's replay and verifier-brief files in `FirstRound` and put them back on restore. Or state which round-two stop points can fall after the replay push and test one of them.",
+      "location": "Decision 3 (2) and step 6 (`Closing::put_file` for the replay record and `brief-verifier.md`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Excluding every D43-flagged criterion misses a common case, a Behavior criterion the verifier itself judged unmet (for example, 'a test fails without the change' when no such test exists) and cited no command for. The stored record has a signal that narrows the gap.",
+      "evidence": "`judge` sets `met = false` and adds the D43 finding whenever a Behavior criterion's cited commands were not all seen running (verify.rs:585-605). The verifier's own `met` is lost in the stored record, as the plan says. But `agent_verdict` is stored. When it is Pass, every D43 item was flipped by Athena. When it is Fail, the verifier itself found a fault, often in that same criterion. Fix: Treat D43 items as repairable when `agent_verdict` is Fail, and exclude them only when it is Pass. Or keep the current rule and add a `repair_view_*` case pinning the agent-Fail, D43-only verdict, so the gap is a decision the tests show and D189 states.",
+      "location": "Decision 5 (ii), the D43 exclusion",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 3 is a careful plan, and I checked its main claims against the code by reading it. `produce_and_verify` (run/mod.rs:1871-1950) runs exactly one producer, candidate, checks and verifier round. `PRODUCER_SEND_BACKS` is at mod.rs:1681. The four-arm send-back match is at producer.rs:684-700. `finding_text` is `pub(super)` at retry.rs:446. A seeded run that adds nothing still becomes a candidate (candidate.rs:168-181). `dispatch_order_problem` (jobs.rs:535-585) only compares the named verifier with the latest earlier producer, so a second producer and verifier pair passes it. The reading is sound: the fix sits in the pipeline where the fault starts, and no refusal rule is added. One problem stops me accepting. Step 2 moves the D43 finding text out of `judge` into a new `d43_summary(n)` function. An existing test, `rule_sources_appear_in_the_header_or_judge_format_strings` (verify.rs:3923), reads the `format!` string literals inside `judge` from the source file and asserts that \"must cite commands that ran (D43)\" is among them. Moving the text breaks that test, and the dependents list does not mention it. The minor findings: the restore after a stopped round two leaves some of round two's files behind (a timeout's progress note, a replaced replay record), and the D43 exclusion could be narrowed using `agent_verdict`. Each fix is small."
+}
