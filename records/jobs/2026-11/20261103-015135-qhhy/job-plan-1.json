@@ -1,0 +1,228 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261103-015135-qhhy",
+  "round": 1,
+  "at": "2026-11-16T05:20:45.269929259Z",
+  "invocation_seq": 2,
+  "approach": "A read that gives no reading now records its reader invocation as a failure with the error in `detail`, and the real driver now records why a \"successful\" run had no structured output. (1) In `read_once` (reading.rs:583-774), when the outcome is not Success, or the outcome is Success with `output.structured == None`, set `record.outcome` to Error (the non-success case keeps its own outcome) and `record.detail` to the error text, then rewrite the live mirror with `write_live`. Every read path goes through `read_once`: `ask`, `read_queued`, `read_unread`, `correct`, and the re-read at dispatch in run/pin.rs:167. (2) Cause: the stored error is only the fixed sentence at reading.rs:707, because `output_from_result` (claude.rs:250-275) sets `detail` only when `!ok` and drops the result's subtype, turn count and text when the CLI says success. Code rules out a budget stop (`--max-budget-usd` ends in a non-success result, claude.rs:131), a turn limit (no `--max-turns` flag in `command_line`, claude.rs:108-140, and `error_max_turns` maps to Error), a timeout or stall (those give TimedOut or Killed, claude.rs:660-666), and a denied StructuredOutput tool (policy.rs:154 allows it). What remains is a CLI result with subtype success and no `structured_output` (stream.rs:191-194), and the repository cannot say whether the model ended in prose or never called the tool. The fix at the origin is in `invoke_once` (claude.rs:651-659): when the result is ok but carries no structured output, set `detail` to `no structured output: result subtype \"success\"; N turns; tools used: …; result text: <first 300 characters>`. The detail is redacted by `invocation_record` (invocation.rs:155-157) and the tool list comes from `StreamState::tools_used()` (stream.rs:168, no callers today). Each later failure then names its own cause in the record. The record can show both the record and the error in the commit body. (3) A fake-reader test in run/tests.rs, a stand-in-CLI test in claude.rs, and a CHANGELOG entry that states the cause honestly: stored errors showed one sentence, the checked causes are ruled out, and the remaining one is unproven until the next record carries the new detail.",
+  "decisions": [
+    {
+      "choice": "Make the change in `read_once` (reading.rs), not in `first_reading`, `read_unread` or the commit-body code.",
+      "reason": "`read_once` is where the record and the error are both in hand, and `read_for` (reading.rs:524) is the only caller of it, so the fix covers all five read entry points. Exits of the changed stage: (a) driver error (`invoke_and_record` returns Err): bail at reading.rs:692, no invocation exists, unchanged. (b) outcome not Success: reading.rs:695-701 returns Failed(why) with the record's outcome kept and detail now always set, `read_for` returns vec![first] (542), `first_reading` commits it at 1233-1250 with subject '(the reader failed)', and the drain reads that state next via `read_unread` (run/mod.rs:483). (c) Success with no structured output (the new case): the record becomes Error with the error in detail, then the same path as (b). (d) reading refused by a rule (reading.rs:760-771): record stays Success with `reading_attempt` set, `read_for` re-reads once (541-577), unchanged; a refused reading is output the reader did give. (e) reading built (754-758): unchanged. (f) interrupt or kill: `interrupted_record` (invocation.rs:269-335) records Killed, and a stopped kill switch is the DriverError of (a); neither is touched. Hold: a budget hold happens before the reader runs, in `check_budget`/`preflight` (reading.rs:598, 1215), unchanged.",
+      "rejected": [
+        {
+          "option": "Set the outcome in `first_reading` and `read_unread` only",
+          "why": "Those two functions only commit; they would miss `correct` (reading.rs:1431) and run/pin.rs:167, and the record would be edited after the live mirror was written."
+        },
+        {
+          "option": "Add a new record type or file for failed reads",
+          "why": "Out of scope, and the invocation record's `outcome` and `detail` fields already carry a failure and its reason (records.rs:767-768)."
+        }
+      ]
+    },
+    {
+      "choice": "Reuse `InvocationOutcome::Error` and `Invocation.detail`. The outcome enum (records.rs:134-143) has Success, Error, Killed, TimedOut and Missing; `output_from_result` already uses Error for a CLI result that reports an error (claude.rs:252-256), with the reason in `detail`.",
+      "reason": "The field's existing use is an invocation that ran and failed, with the reason as detail (AgentOutput doc, lib.rs:127-129). A reader run that ended with no reading fits that meaning, so no new field and no athena.toml key is needed.",
+      "rejected": [
+        {
+          "option": "Add a new `InvocationOutcome` variant such as NoOutput",
+          "why": "It would change the records schema and every match on the enum (status.rs:958, display.rs:498, 1882), for no information Error with a detail does not give."
+        }
+      ]
+    },
+    {
+      "choice": "Name the cause by recording what the CLI said, in `invoke_once` of claude.rs (a new helper beside `output_from_result`), and leave `output_from_result` and its signature alone.",
+      "reason": "The tool names live in `StreamState` (stream.rs:54, 168) and not in the result event, so only `invoke_once` (claude.rs:593-659) has both. `output_from_result` is called from tests (invocation.rs:411, disk.rs:584, tests/retry.rs:1306) and keeps its behavior. Every other consumer reads `detail` only after `outcome != Success` (producer.rs:407-420, planning.rs:462 and 666, verification.rs:277, steward.rs:1306, pin.rs:476, auditor.rs:397, audience.rs:285, hestia.rs:2886, introspect.rs:1681), and `api_error_status` and `usage_limit_hit` (claude.rs:300, 334) return None for text that starts with 'no structured output'.",
+      "rejected": [
+        {
+          "option": "Parse `result.text` as JSON or take the last StructuredOutput tool_use input in stream.rs as a fallback reading",
+          "why": "It guesses a cause the repository cannot show, and it would change what every role accepts. The new detail shows which case it is; a fallback can follow once a record names it."
+        },
+        {
+          "option": "Change the reader schema, brief (briefs.rs) or budget now",
+          "why": "Nothing in the code shows the schema, brief or budget is at fault: reader_usd and the 86400 s timeout (config.rs:1028) end in non-success outcomes, not in a success with no output. A change would be a guess and would alter the reader prompt for every job."
+        },
+        {
+          "option": "Re-read automatically in `read_for` when no structured output comes back",
+          "why": "It spends another reader call per failure ($0.12-0.17 each) before the cause is known; the drain already reads an unread job again once (drain.rs:4219 test)."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "In `read_once` (695-710), set `record.outcome` to Error (non-success outcomes keep theirs) and `record.detail` to the error text before returning Failed, rewrite the live mirror with `write_live`, and keep the returned `ReadError::Failed` text containing 'the reader returned no structured reading' (the drain tests match on it).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "purpose": "In `invoke_once` (651-659), add a helper that sets `detail` on an ok result with no structured output (subtype, turns, `state.tools_used()`, first 300 characters of the result text); add a stand-in MODE `no_structured` and a test whose name contains `no_structured`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the fake-reader test `no_structured_reading_is_recorded_as_a_failed_invocation_with_the_error` (name contains `no_structured`) next to the tests that use `athena_with` and `Records::load`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add one bullet under `## [Unreleased]` / `### Fixed`: failed reads are recorded as failed invocations with the error in detail, the cause section (stored error, checked and ruled out, remaining cause) and the fix, with the test commands.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/src/reading.rs 683-711 and crates/athena-agent/src/claude.rs 536-686 again before editing.",
+    "In reading.rs `read_once`: after `invoke_and_record`, make a small helper `fail_record(&self, record: &mut Invocation, why: &str) -> Result<()>` that sets `record.outcome` to `InvocationOutcome::Error` only when it is Success, sets `record.detail = Some(why)`, and calls `self.state.write_live(job, &any.canonical_path(), any.to_json().as_bytes())` with `AnyRecord::Invocation(Box::new(record.clone()))` (as invocation.rs:259-261 does). Use it in the non-Success branch with `why` = the record's detail or 'the reader did not complete', and in the `structured == None` branch with 'the reader returned no structured reading', followed by ': ' and the driver's detail when the record already has one. Return `ReadError::Failed` with the same text.",
+    "In claude.rs add `fn note_missing_structured(output: &mut AgentOutput, result: &ResultEvent, tools: &[String])`, which for `output.outcome == Success && output.structured.is_none()` sets `output.detail` to `no structured output: result subtype \"<subtype>\"; <turns> turns; tools used: <names or none>; result text: <first 300 characters>`. Call it in `invoke_once` on the `(Some(result), _)` arm with `state.tools_used()`. Leave `output_from_result` unchanged.",
+    "Add the stand-in MODE `no_structured` to the `STAND_IN` script at claude.rs:879 (a success result with `is_error:false`, no structured_output and a `result` text) and a test `a_result_with_no_structured_output_says_so_in_the_detail_no_structured` that drives `driver.invoke` and asserts the outcome Success, `structured == None`, and the detail text. Run `cargo test -p athena-agent no_structured`.",
+    "Add the test `no_structured_reading_is_recorded_as_a_failed_invocation_with_the_error` to crates/athena-core/src/run/tests.rs, with a script wrapper that sets `turn.structured = None` for `Role::Reader`, a call to `athena.ask`, and assertions on the stored Reader invocation's outcome and detail after `Records::load`; also assert the same after `athena.read_unread` for a second read. Run `cargo test -p athena-core no_structured`. Check it fails when the step-2 assignments are temporarily removed.",
+    "Add the CHANGELOG bullet under `### Fixed` in `## [Unreleased]`: what changed (failed reads recorded as Error with the error in detail; the driver records why a success had no structured output), the stored error (one fixed sentence, reading.rs:707), what was checked and ruled out with file:line (budget, turn limit, timeout, stall, tool denial), that the cause between the model ending in prose and a CLI result without the field is not shown by the stored errors, the limits (cause not proven, effect on the failure rate not measured), and the tests by command.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix any existing test that expected `detail == None` on a success with no structured output only if it is a claude.rs stand-in test of the real driver."
+  ],
+  "risks": [
+    {
+      "risk": "The cause cannot be found from the code. The reader keeps returning no structured reading after this change; the change records why but does not by itself stop the failure.",
+      "mitigation": "The cause is not proven. The CHANGELOG entry says so and lists what was checked, the fix records the cause for the next failure, and the open question asks the host for the old runs' data. A follow-up fix (a fallback or a brief change) can then name its evidence."
+    },
+    {
+      "risk": "A claude.rs stand-in test, or a test elsewhere, asserts `detail` is None on a Success with no structured output.",
+      "mitigation": "The real-driver path is the only one changed. The producer runs `cargo test --locked` and `cargo test -p athena-agent`; if a stand-in test asserts `detail == None` on a success without a structured output, the new detail is the intended change and the test is updated in the same step."
+    },
+    {
+      "risk": "The result text quotes the request or a secret and lands in a record.",
+      "mitigation": "The text goes through `invocation_record`'s `redact_all` (invocation.rs:155-157) before it is stored, is cut to 300 characters, and `failed_reading_body` redacts again and truncates the commit body (reading.rs:1485-1495)."
+    },
+    {
+      "risk": "The live mirror written by `invoke_and_record` (invocation.rs:259-261) still holds the old Success record if the producer does not rewrite it.",
+      "mitigation": "The mirror is rewritten with the changed record in the same function (`write_live`), so `athena close` and the committed file agree."
+    },
+    {
+      "risk": "A measure from records that counts reader invocations by outcome changes.",
+      "mitigation": "Only the reader's record changes; a count of failed reads now exists as outcome Error with the reader's role, and the scoring code that reads readers (score/lib.rs:456-471) uses role and model, not outcome."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "the reader invocation record of a read with no reading (outcome and detail)",
+      "dependent": "crates/athena-core/src/reading.rs `first_reading` (1199-1262), `read_unread` (1185), `read_queued` (1170), `correct` (1431) and crates/athena-core/src/run/pin.rs:167 (the re-read at dispatch), via `read_for` (524) and `read_once` (583)",
+      "kind": "code",
+      "test": "cargo test -p athena-core no_structured (via `ask`); cargo test --locked -p athena-cli --test drain (a_reader_that_gives_no_reading_is_read_once_more_then_skipped_with_its_error, drain.rs:4219, covers the `read_unread` path and the commit bodies); cargo test -p athena-core preflight_resumed_unread_job (run/tests.rs:10686, which reads an unread job again with the spend counted)",
+      "reason": null
+    },
+    {
+      "name": "reader invocation `reading_attempt`",
+      "dependent": "crates/athena-core/src/status.rs:211 `ReadingRuleStats::compute` reads `reading_attempt` of reader invocations",
+      "kind": "code",
+      "test": null,
+      "reason": "A failed read never sets `reading_attempt` (it stays None, reading.rs:754-770 are reached only after a structured output exists), and the plan does not change it, so the first-reading window and counts are the same."
+    },
+    {
+      "name": "invocation outcome Error with a detail on a reader record",
+      "dependent": "crates/athena-gate/src/jobs.rs:388 and crates/athena-gate/src/invariant.rs:721 and 768 (rules about a reading's reader invocation and about verifier invocations)",
+      "kind": "rule",
+      "test": null,
+      "reason": "jobs.rs:388 runs only for a stored reading, which a failed read has none of; invariant.rs:721 applies to Verifier invocations only; invariant.rs:768 skips Reader records; reconcile.rs (check_invocation) checks tokens and cost, not outcome or detail (reconcile.rs grep: no outcome or detail rule)."
+    },
+    {
+      "name": "outcome string of a reader invocation",
+      "dependent": "crates/athena-cli/src/display.rs:498, 1882 and crates/athena-core/src/status.rs:958 (print the outcome of an invocation)",
+      "kind": "code",
+      "test": null,
+      "reason": "They print the outcome as text for any role; a reader record now shows 'error' where it showed 'success', which is the intended visible change; no branch depends on the value."
+    },
+    {
+      "name": "detail on a Success output from the real driver that carries no structured output",
+      "dependent": "crates/athena-core/src/producer.rs-side and other role consumers of AgentOutput.detail: run/producer.rs:407-420, run/planning.rs:462 and 666, run/verification.rs:277, steward.rs:1306, pin.rs:476, auditor.rs:397, audience.rs:285, hestia.rs:2886, introspect.rs:1681",
+      "kind": "code",
+      "test": null,
+      "reason": "Each of them reads `detail` only inside a branch for `outcome != Success`, and takes the structured output with `unwrap_or_default` or a 'returned no valid report' message otherwise, so a Success with a detail behaves as before."
+    },
+    {
+      "name": "detail text format on an invocation",
+      "dependent": "crates/athena-agent/src/claude.rs:488-491 (`invoke` retries only an Error whose detail is an API 401) and `api_error_status` / `usage_limit_hit` (claude.rs:300, 334, called from disk.rs:479-522)",
+      "kind": "code",
+      "test": "cargo test -p athena-agent (the existing 401, 429 and limit stand-in tests at claude.rs:1001-1413 still pass)",
+      "reason": "The retry fires only for outcome Error. The new detail starts with 'no structured output', so `api_error_status` (needs 'API Error: ' after an optional 'success: ' or 'error: ') and `usage_limit_hit` (needs 'you've hit your weekly|session limit') return None for it."
+    },
+    {
+      "name": "the fake driver and `output_from_result`",
+      "dependent": "tests that call `output_from_result` or `FakeAgentDriver` with `structured = None` (invocation.rs:411, disk.rs:584, athena-cli/tests/retry.rs:1306, run/tests.rs:1450, 1628, 7584, 7677, run_pin_tests.rs:798-2299, athena-cli/tests/lifecycle.rs:1200-2998, job_plan.rs:158)",
+      "kind": "code",
+      "test": "cargo test --locked (whole workspace)",
+      "reason": "`output_from_result` and the fake driver are not edited; the new note is added in `invoke_once`, which only the real driver runs, so these tests see the same output. Reader tests with `structured = None` through the fake now see a reader record with outcome Error (run/tests.rs:10444 `failing_first_read`, drain.rs:4201 `reader_fails_for_first_request`); none asserts the record's outcome as Success."
+    },
+    {
+      "name": "Invocation record shape",
+      "dependent": "crates/athena-data records validation and crates/athena-core/src/store.rs record loading for Invocation records",
+      "kind": "code",
+      "test": null,
+      "reason": "No field or type is added; `outcome` and `detail` are existing fields (records.rs:767-768, `deny_unknown_fields`), and no validation reads `detail` of an invocation (athena-data grep of `.detail` shows only the Denial and introspection tests). No records allow-list change."
+    },
+    {
+      "name": "reading refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (refusal and matching rules)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No refusal or matching rule is added or changed (admission.rs, reading/checks.rs and the reading checks are untouched), so no input form needs a refusal_corpus case and `cargo test -p athena-core --test refusal_corpus` is unaffected; it still runs under `cargo test --locked`."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of `read_once`, where `record.outcome` and `record.detail` are set before `Ok((None, record, Some(ReadError::Failed(..))))` returns, so `first_reading` commits the changed record through `invocation_files` (reading.rs:1233). The cargo test run shows the same behavior at run time.",
+      "command": "Grep pattern 'record.outcome =' in crates/athena-core/src/reading.rs, then `cargo test -p athena-core no_structured`",
+      "observes": "The diff has an assignment of a failure outcome (not Success) and a Some(detail) holding 'the reader returned no structured reading' in both the non-success branch and the missing-structured branch.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "New test in crates/athena-core/src/run/tests.rs, placed with the tests near line 1120 that use `athena_with(&repo, &state, PASSES, crate::test_support::plenty_of_space, script)`. The script wraps `base_script()` and sets `turn.structured = None` for `Role::Reader` (the pattern of `failing_first_read`, run/tests.rs:10444). It calls the production `Athena::ask` (reading.rs, through `first_reading` and `read_once`), asserts `proposal.reading.is_none()`, loads `Records::load(&athena.git, &athena.head().unwrap())` as in run/tests.rs:1130, finds the job's `Role::Reader` invocation in `job.invocations`, and asserts `outcome != Success` and that `detail` contains 'the reader returned no structured reading'. A second assertion covers `athena.read_unread` for a retry read. A second test in crates/athena-agent/src/claude.rs adds a stand-in MODE `no_structured` (a success result with no structured_output and a result text) beside the stand-in script at claude.rs:879, drives `ClaudeCodeDriver::invoke`, and asserts `outcome == Success`, `structured == None` and that `detail` contains 'no structured output', the subtype, the turn count, the tools used (Bash from the stand-in's assistant line, claude.rs:862) and the text. Run it with `cargo test -p athena-agent no_structured`.",
+      "command": "cargo test -p athena-core no_structured",
+      "observes": "Both tests pass; the core test fails when the production assignments in `read_once` are removed, and the agent test fails when the helper in `invoke_once` is removed.",
+      "fails_without": "On the old code the reader record keeps outcome Success and detail None (reading.rs:702-709 returns the error and leaves the record alone), so `assert_ne!(outcome, Success)` and the detail assertion both fail.",
+      "seam": "Production entry points `Athena::ask` (core) and `ClaudeCodeDriver::invoke` (agent). Fixtures: `FakeAgentDriver` with a `Script` closure injected through `athena_with` (exists, run/tests.rs:7595; fake.rs:43), and the shell stand-in `claude` written by `stand_in(dir)` (exists, claude.rs:882) with a new MODE branch added by plan step 5. The fake only drops `structured`; the code that sets the outcome and detail is in production."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the new CHANGELOG entry and the diff of `invoke_once` in claude.rs. The entry says the stored error was one fixed sentence (reading.rs:707), lists what was checked and ruled out (budget, turn limit, timeout, stall, tool denial, each with file:line), says the cause among the remaining ones is not shown by the stored errors, and names the fix: the driver records the result's subtype, turns, tools and text when it returns no structured output.",
+      "command": "Grep pattern 'no structured output' in crates/athena-agent/src/claude.rs and pattern 'no structured' in CHANGELOG.md",
+      "observes": "The entry names the cause (or says it is not shown), cites the stored error text, and the fix is in the agent layer where the information was dropped.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Read CHANGELOG.md under `## [Unreleased]`, `### Fixed` (line 25 of the base file): one new bullet.",
+      "command": "Grep pattern 'failed reads are recorded|failed invocation' in CHANGELOG.md",
+      "observes": "The bullet says a read with no reading is recorded as a failed invocation with the error in detail, gives the cause section and the fix, and lists the tests by command (`cargo test -p athena-core no_structured`, `cargo test -p athena-agent no_structured`).",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the changed paths. They are only crates/athena-core/src/reading.rs, crates/athena-core/src/run/tests.rs, crates/athena-agent/src/claude.rs and CHANGELOG.md. No file under gh/, ci_result.rs, checks.rs, routing.rs, run/checks.rs, verify.rs, briefs.rs, README.md, studies/ or xtask/ appears. The only edits to run/tests.rs and CHANGELOG.md are one added test and one added bullet.",
+      "command": "git diff --stat",
+      "observes": "The list of paths in the diff stat contains none of job qv3s's or job ab85's files except CHANGELOG.md and tests.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run each check as its own simple command. Athena's recorded fmt, clippy and test checks on the final tree count, as does `cargo test -p athena-core` for the reading tests and `cargo test --locked -p athena-cli --test drain` for the drain tests of the failed reader (drain.rs:4219-4295, which assert the error text appears twice in the committed bodies and the item is skipped).",
+      "command": "cargo fmt --all --check ; cargo clippy --all-targets --locked -- -D warnings ; cargo test --locked",
+      "observes": "All three exit 0 and the existing reader tests still pass, with the new tests listed.",
+      "fails_without": "A change that broke an existing test (for example a claude.rs stand-in test that asserts `detail == None` on a success without structured output, or a drain test counting the reader error text) would fail the test run.",
+      "seam": "Athena's own checks (fmt, clippy, test) on the final tree; cargo is a verifier command. Exists."
+    }
+  ],
+  "open_questions": [
+    "Host: What do the five failed reader runs show for result subtype, tools used and result text (for example in `stderr-NN.log` and the stream under the job's `agent/` directory in the state directory, or in the invocation records on `athena/records`)? The snapshot has neither, so the repository alone cannot say whether the model ended in prose or never called the StructuredOutput tool; the new detail will show it for the next failure."
+  ],
+  "producer_section_sha256": "0fcd39938cc3cfedf6f57292dd18405eb0d069fdb342e9bb4192fa183b16af16"
+}
