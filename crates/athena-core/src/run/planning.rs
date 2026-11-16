@@ -356,6 +356,7 @@ impl Athena {
             reading: accepted.clone(),
             plan: plan.clone(),
             athena_findings: athena_findings.clone(),
+            earlier_rounds: earlier_rounds(&closing.plans, &closing.critiques, round),
         });
         let composed = compose(&[CONTRACT.into(), CRITIC_FRAME.into()]);
         Snapshot::create(&self.git, &p, &p, &snap_dir, SnapshotRepo::PlainWithHistory)?;
@@ -511,6 +512,33 @@ impl Athena {
             }))),
         }
     }
+}
+
+/// The critic's history for a round: every earlier critic round of this job, oldest first, as the plan the
+/// critic reviewed and the findings on it (the critic's and Athena's, as stored in the critique). `plans` and
+/// `critiques` are the job's own lists, which `end_round` fills in step; a critique with no plan of the same
+/// round is skipped. The planner's answer to a round is the next plan, so no answer is stored. Nothing here is
+/// saved: the history is built from records the job already holds.
+fn earlier_rounds(
+    plans: &[JobPlan],
+    critiques: &[Critique],
+    before_round: u32,
+) -> Vec<EarlierRound> {
+    let mut rounds: Vec<EarlierRound> = critiques
+        .iter()
+        .filter(|c| c.round < before_round)
+        .filter_map(|c| {
+            plans
+                .iter()
+                .find(|p| p.round == c.round)
+                .map(|p| EarlierRound {
+                    plan: p.clone(),
+                    findings: c.findings.clone(),
+                })
+        })
+        .collect();
+    rounds.sort_by_key(|r| r.plan.round);
+    rounds
 }
 
 /// How many times in one planning round the planner may revise a plan that breaks Athena's own plan rules

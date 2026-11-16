@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261116-003949-yspg",
+  "round": 1,
+  "at": "2026-11-16T00:48:08.02698989Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "docs/system-facts.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/system-facts.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The critic is told to raise new majors only on changed parts, but the brief never shows what changed",
+      "evidence": "From round 2 the history shows each earlier round's findings plus the approach and decisions of the next plan. No earlier plan's files, steps, dependents or demonstrations appear, and the round-1 plan never appears. Decision 1 rejects 'Show every earlier plan in full', so no prior plan body reaches the critic. Yet the new bullet says to 'raise a new major only on a part of the plan that changed since the earlier round'. The critic has no way to tell whether, say, the dependents list or demonstration 2 changed since round N-1, so it will guess. Job 6mng's majors were exactly about such sections. Relying on the model to infer changes it cannot see also goes against the mechanism default the plan cites. Fix: Let code supply the change information. In `earlier_rounds`, compare the previous reviewed plan (`closing.plans.last()`) with the plan under review, item by item: approach, each decision, file, step, risk, dependent and demonstration, compared by their rendered text. Print a 'Changed since round N-1' list, or mark each item changed or unchanged. Bounding the extra text to one earlier plan also answers the size worry that led the plan to reject full plans. Add the changed-list content to the criterion-2 and criterion-4 tests.",
+      "location": "Approach; Decision 1; Step 1; Step 3 (critic.md second bullet)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The 'missed before' exception has no limit, and the new bullet clashes with existing bullets that make some findings always major",
+      "evidence": "Every new finding is by definition one earlier rounds did not raise, so 'a defect you can show earlier rounds missed' lets any new major through. Job 6mng raised a different major each round, and every one would qualify. critic.md also already makes some findings always major regardless of round. Line 8 covers a demonstration with no seam, line 10 says a missing dependent 'is a major finding', and line 15 covers landing plans. The new bullet says to report anything else as minor, and nothing says which instruction wins. A model may follow either, so rounds may still be forced by new majors on unchanged parts. Fix: Narrow the exception and state which rule wins. For example: 'From round 2, on a part listed as unchanged, raise a major only if the defect would make the plan not work or leave a criterion unshown, citing file:line evidence. This overrides the always-major rules above for unchanged parts.' Pin that override wording in `composed_critic_prompt_checks_earlier_findings_from_round_two`. State the remaining risk in D189.",
+      "location": "Step 3 (critic.md bullets); Risks, first item",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The criterion-4 test expects the wrong plans as answers, and its 3-plan queue makes round 3 repeat plan B",
+      "evidence": "`planning_script` repeats the last queue entry (tests.rs:1314-1335). With planner queue [bad_plan, A, B] and max_rounds 3, round 1 runs bad_plan as a mechanical pass, then A goes to the critic (F1). Round 2 reviews B (F2), and round 3 reviews B again. Under the plan's builder, critique k pairs with plan k+1. So critic 1's brief shows F1 answered by B, and critic 2's brief shows F1 answered by B and F2 answered by B. The demonstration instead says critic 1 holds 'the answer approach of plan A (shown twice)' and critic 2 holds 'the answers from plans A and B'. Plan A is the plan round 1 critiqued, not an answer. As written, the test fails against the correct builder, or it pushes the producer to pair each critique with its own plan. Fix: Use the planner queue [bad_plan(), A, B, C] with distinct approach markers. Expect critic 1 to hold F1 and B's marker twice (history and plan body), and not A's marker. Expect critic 2 to hold F1 answered by B and F2 answered by C, in round order. Expect no F3, A's marker in no history section, and no bad_plan finding text anywhere.",
+      "location": "Demonstrations, criterion 4; Step 6",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'Identical to today's output' is never compared with today's output",
+      "evidence": "Part (b) compares the new no-history brief with the new with-history brief after cutting out the section. Both come from the changed function, so a change outside the section would pass. The existing critic tests (briefs.rs:2859-2961) check selected substrings only, not the whole brief. Fix: Before editing `critic_brief`, record its output for `critic_inputs()`, for example as a SHA-256 or a literal kept in the test. Assert that the post-change empty-history output equals it.",
+      "location": "Demonstrations, criterion 2 (b)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The answer for the latest earlier round repeats the plan under review, and the stated mitigation does not address it",
+      "evidence": "For round N-1 the 'answer' is the approach and decisions of the plan under review, so in round N the same text is printed twice. The mitigation only says that 'Planner's answer' is used consistently and that test names are explicit, which does nothing for the critic reading the brief. Fix: For the latest earlier round, print 'Answered in the plan under review below' instead of repeating its approach and decisions. Keep the full answers for older rounds only, or show the changed-items list from the first finding. Adjust the criterion-1 assertion that the marker appears twice to match.",
+      "location": "Decision 1; Risks, last item",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the reading. Its code claims hold in the snapshot. `critic_brief` and `CriticInputs` are at planner.rs:173-210. `CriticInputs` is built only at planning.rs:353 and briefs.rs:2861/2949, with a struct update at 2922. `end_round` pushes the plan and critique at planning.rs:483-484, and mechanical passes return without pushing (251-269). Pairing critique k with plan k+1 is correct for the live loop. The criterion-1 CLI test fits the wrapper pattern at job_plan.rs:1054-1061. Three problems need a revision. (1) The new rule tells the critic to raise new majors only on parts of the plan that changed, but the critic is never shown what changed. It sees the current plan in full plus the approach and decisions of later plans. It never sees an earlier plan's files, steps, dependents or demonstrations, and it never sees round 1's plan at all. (2) The new bullet's \"missed before\" exception has no limit, because any new finding is one earlier rounds missed. The bullet also clashes with existing critic.md bullets that make certain findings always major. So the round-per-new-major pattern this job targets may go on. (3) The criterion-4 core test expects the wrong plan texts: it names plan A as an answer when plan A is the plan round 1 critiqued, and its 3-plan queue makes round 3 repeat plan B. The rest is minor: the \"identical to today's output\" claim is not shown against today's output, and the latest round's answer is printed twice."
+}

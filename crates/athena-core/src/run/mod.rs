@@ -27,7 +27,7 @@ use athena_agent::env::{EnvSpec, Side};
 use athena_agent::policy::Policy;
 use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
-    PlanRevision, PlannerInputs, ProducerInputs, REPLAY_BRIEF_MAX_LISTED, ReplayView,
+    EarlierRound, PlanRevision, PlannerInputs, ProducerInputs, REPLAY_BRIEF_MAX_LISTED, ReplayView,
     RetryFindings, RetrySeed, VerifierInputs, VerifierPlan, class_summaries, critic_brief,
     evidence_placeholder, planner_brief, producer_brief_with_evidence,
     producer_prompt_with_governing, producer_prompt_with_plan, render_plan_section,
@@ -137,7 +137,8 @@ struct Closing {
     /// Set only on a final verdict of pass.
     verified: Option<Verified>,
     happened: Happened,
-    /// The accepted plans of a planned job, written with the invocations.
+    /// The plans of a planned job, one per critic round (each reviewed plan, not only the accepted one),
+    /// written with the invocations.
     plans: Vec<JobPlan>,
     /// The critiques of those plans.
     critiques: Vec<Critique>,

@@ -2107,6 +2107,75 @@ mod produce_and_verify_order_tests {
         );
     }
 
+    /// A plan that passes Athena's rules, with a marker in its approach and these steps.
+    fn marked_plan(marker: &str, steps: &[&str]) -> serde_json::Value {
+        let mut plan = good_plan();
+        plan["approach"] = format!("{marker} edit the README.").into();
+        plan["steps"] = json!(steps);
+        plan
+    }
+
+    /// The critic of a later round is given the findings of every earlier round of this job and the planner's
+    /// answers, built from the job's own filed plans and critiques. Athena's own mechanical revision in round 1
+    /// is not a round.
+    #[test]
+    fn the_critic_of_round_three_is_given_rounds_one_and_twos_findings_and_the_planners_answers() {
+        const F1: &str = "FINDING-ONE the first demonstration shows nothing new";
+        const F2: &str = "FINDING-TWO the second demonstration repeats the first";
+        let repo = repo_with_planning(3);
+        let two_steps = ["Edit README.md.", "STEP-B add the greeting test."];
+        let mut first = revising_critique();
+        first["findings"][0]["summary"] = F1.into();
+        let mut second = revising_critique();
+        second["findings"][0]["summary"] = F2.into();
+        let (finished, calls) = run_planned(
+            &repo,
+            vec![
+                bad_plan(),
+                marked_plan("ANSWER-A", &["Edit README.md."]),
+                marked_plan("ANSWER-B", &two_steps),
+                marked_plan("ANSWER-C", &two_steps),
+            ],
+            vec![first, second, accepting_critique()],
+        );
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let critic = prompts_of(&calls, Role::Critic);
+        assert_eq!(critic.len(), 3);
+        // Round 1: no history.
+        assert!(!critic[0].contains("Earlier rounds on this plan") && !critic[0].contains(F1));
+        // Round 2: round 1's finding, and the plan under review is the answer.
+        assert!(critic[1].contains("### Round 1: findings") && critic[1].contains(F1));
+        assert!(critic[1].contains("Planner's answer: the plan under review below (round 2)."));
+        assert!(
+            critic[1]
+                .contains("\nChanged or new: Approach; Step 2: STEP-B add the greeting test.\n"),
+            "{}",
+            critic[1]
+        );
+        assert_eq!(critic[1].matches("ANSWER-B").count(), 1);
+        assert!(!critic[1].contains("ANSWER-A") && !critic[1].contains(F2));
+        assert!(!critic[1].contains("ANSWER-C"));
+        // Round 3: both rounds' findings in order, round 1's answer in full, the plan under review not repeated.
+        let history = &critic[2][critic[2].find("## Earlier rounds on this plan").unwrap()
+            ..critic[2].find("## Plan under review (round 3)").unwrap()];
+        assert_eq!(history.matches("### Round ").count(), 2, "{history}");
+        let (one, two) = (
+            history.find("### Round 1: findings").unwrap(),
+            history.find("### Round 2: findings").unwrap(),
+        );
+        assert!(one < history.find(F1).unwrap() && history.find(F1).unwrap() < two);
+        assert!(two < history.find(F2).unwrap());
+        assert!(history.contains("Planner's answer (the round 2 plan):"));
+        assert_eq!(history.matches("ANSWER-B").count(), 1);
+        assert!(history.contains("Planner's answer: the plan under review below (round 3)."));
+        assert!(
+            history.contains("\nChanged or new: Approach\n"),
+            "{history}"
+        );
+        assert_eq!(critic[2].matches("ANSWER-C").count(), 1);
+        assert!(!critic[2].contains("ANSWER-A"));
+    }
+
     #[test]
     fn after_a_mechanical_revision_the_critic_still_reviews_in_three_rounds() {
         let repo = repo_with_planning(3);

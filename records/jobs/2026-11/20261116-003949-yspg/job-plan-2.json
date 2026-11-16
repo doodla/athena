@@ -1,0 +1,379 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261116-003949-yspg",
+  "round": 2,
+  "at": "2026-11-16T00:55:48.436225702Z",
+  "invocation_seq": 5,
+  "approach": "The problem still exists: `critic_brief` (`crates/athena-context/src/briefs/planner.rs:185-210`) prints only the plan under review, and `critic_round` builds `CriticInputs` with only the current plan and Athena's findings (`crates/athena-core/src/run/planning.rs:353-359`). From round 2 on, code now adds a section \"Earlier rounds on this plan\" before \"Plan under review\". For each earlier critic round it prints the findings the planner was shown (the stored critique's findings: Athena's and the critic's). Beside each it prints the planner's answer. For a round before the last, the answer is the approach and decisions of the plan that followed it. For the last earlier round, the answer is the plan under review itself, which is not repeated; the brief says so and gives a code-computed list of what changed. That list compares the last reviewed plan with the plan under review, item by item on exact text (approach, each decision, file, step, risk, dependent, demonstration, open question). It prints the changed or new items and the removed items, and says every other part is unchanged since the critic last reviewed it. The history comes from `closing.plans` and `closing.critiques`, which `end_round` fills in step (`planning.rs:483-484`), through a new pure builder `earlier_rounds` in `planning.rs` and a new `EarlierRound { plan, findings }` brief input in the context crate. Nothing is stored and no record type is added. `critic.md` gets two bullets, 403 bytes in total so the frame stays under the 900-token bound at `lib.rs:570`. The first tells the critic to check from round 2 that each earlier blocker or major was resolved. The second tells it to raise a major only on a part the brief lists as changed or new, or on a defect earlier rounds missed that stops the plan working or leaves a criterion unshown, with file:line evidence, and otherwise to report it as minor, 'even where a rule above says major'. That wording settles the clash with the always-major lines (critic.md lines 8, 10, 15). Round 1's brief, the planner brief, the 5-round cap and the any-major-forces-a-round rule are not touched. No refusal or matching rule is added: `plan_changes` only describes differences, so the refusal corpus does not apply.",
+  "decisions": [
+    {
+      "choice": "Code supplies what changed. A private `plan_changes(previous, current)` in planner.rs (visible to briefs.rs tests as pub(super)) compares the last reviewed plan with the plan under review, one item at a time, using a small `Item` enum that derives PartialEq over the record structs (approach, steps and open questions compared trimmed). The brief prints 'Changed or new: ...', 'Removed: ...' (only when non-empty) and 'Every other part is unchanged since round N-1.', or 'Nothing changed: the plan under review is identical to the round N-1 plan.' Labels are short (Approach; Decision 2: first 60 chars; File path; Step 3: ...; Risk: ...; Dependent name; Demonstration for criterion 4; Open question: ...). Reordered but identical items count as unchanged.",
+      "reason": "Answers finding 2. The critic is told to limit new majors to changed parts, so the brief must show which parts those are; the critic cannot infer it from findings alone. The comparison is by exact text, so it is code, not model memory (the mechanism default). Only one earlier plan is compared (the last reviewed one), because that is the plan the critic last judged in full. The size stays small: labels, not plan text. The comparison errs toward over-reporting a reworded item as changed, which lets the critic look at it again and never hides a change.",
+      "rejected": [
+        {
+          "option": "Show every earlier plan in full",
+          "why": "Each round would add a whole plan of several KB; the brief grows without bound and the critic still has to diff by eye."
+        },
+        {
+          "option": "Ask the critic in prose to compare with what it remembers",
+          "why": "The critic is a fresh invocation each round and remembers nothing; this is the failure the request describes, and the mechanism default forbids relying on prose."
+        },
+        {
+          "option": "Compare by position, item by item (step 3 against step 3)",
+          "why": "One inserted step would mark every later step as changed. Matching on exact item text ignores position."
+        },
+        {
+          "option": "Show a line diff of the rendered plan bodies",
+          "why": "A line diff needs long context to read and breaks on harmless re-wrapping; labelled items match how the critic's findings cite locations."
+        }
+      ]
+    },
+    {
+      "choice": "The critic.md rule is narrowed and states which rule wins. Bullet A: 'From round 2, check first that each blocker and major finding under \"Earlier rounds\" was resolved in the plan under review; name any that was not.' Bullet B: 'From round 2, raise a major only on a part the brief lists as changed or new, or on a defect earlier rounds missed that stops the plan working or leaves a criterion unshown, with file:line evidence; otherwise minor, even where a rule above says major.' Both are added as the last list items, after the 'In round one' line, each on its own line.",
+      "reason": "Answers finding 3. Without a bar, any new defect counts as 'missed before'. Bullet B limits the exception to a defect that makes the plan fail or leaves a criterion unshown, requires evidence, and says it wins over the always-major lines 8, 10 and 15 for parts that did not change. Changed or new parts keep every existing rule. The two bullets total 403 bytes, so the frame is 2236+403 = 2639 bytes, about 880 estimated tokens, under the 900 bound at lib.rs:570. Line 16 ('In round one') already scopes an earlier rule by round, so the pattern exists. The wording is pinned by a test, and the remaining risk is stated in D189.",
+      "rejected": [
+        {
+          "option": "Keep the first draft ('a defect you can show earlier rounds missed' with no bar)",
+          "why": "Every new finding is by definition one earlier rounds did not raise, so it would let every new major through."
+        },
+        {
+          "option": "Edit lines 8, 10 and 15 to add 'except from round 2'",
+          "why": "Changes existing wording that other tests pin (lib.rs:640-706, briefs.rs:1741-1769) and costs more bytes than the room under the 900 bound allows."
+        },
+        {
+          "option": "Forbid any new major from round 2",
+          "why": "Hides real defects in changed parts and in the plan's untouched weak spots; criterion 3 keeps both exceptions."
+        }
+      ]
+    },
+    {
+      "choice": "Answer shape. For each earlier round before the last, print 'Planner's answer (the round k+1 plan):' with its approach and each decision as 'choice Reason: reason' (no rejected options). For the last earlier round, print 'Planner's answer: the plan under review below (round N).' and then the changed list, with no repeat of the plan's approach or decisions.",
+      "reason": "Answers finding 6. The latest answer is the plan under review, so repeating it prints the same text twice and blurs which text is under review. Older answers appear nowhere else in the brief, so they are printed. The extra text is bounded: at the 5-round cap there are at most 3 older answers.",
+      "rejected": [
+        {
+          "option": "Print approach and decisions for the latest round as well",
+          "why": "Duplicates the plan body and confuses which copy to review."
+        },
+        {
+          "option": "Print no older answers, only findings and the changed list",
+          "why": "The request asks for the planner's answers; older rounds' replies are not visible anywhere else in the brief."
+        }
+      ]
+    },
+    {
+      "choice": "History data model: `EarlierRound { plan: JobPlan, findings: Vec<Finding> }` in the context crate, one per earlier round, oldest first. `earlier_rounds(plans, critiques, before_round)` in planning.rs pairs each critique with the plan of the same round in `closing.plans` and skips a critique with no plan. The brief derives each round's answer from the next entry's plan, or from `inputs.plan` for the last.",
+      "reason": "`end_round` pushes the reviewed plan and its critique together (planning.rs:483-484), and the stop paths push both (312-313) or the plan alone (350) and then stop, so inside the loop the two lists line up by round. `Closing` is created fresh per run (mod.rs:299-300, 1362) and `plan_round` is called once (mod.rs:1372), so the lists hold only this job's rounds. A mechanical pass returns `RoundEnd::Mechanical` without pushing (planning.rs:251-269), so a plan sent back by Athena's own checks is never a round. Pairing by round number keeps the 'critique k belongs to plan k' rule in one place and leaves the 'answer to round k = plan k+1' rule to the brief builder. No field is added to JobPlan, Critique or PlanOutput (criterion 4).",
+      "rejected": [
+        {
+          "option": "Add an `answers` field to PlanOutput and JobPlan",
+          "why": "Changes the planner's output schema and prompt (out of scope), every plan fixture and a `deny_unknown_fields` record (records/plan.rs:95-97); the plan text already holds the answer."
+        },
+        {
+          "option": "Read the critique files back from the records branch",
+          "why": "Records are written only at close, so the in-memory Closing is the only same-run source; a file read adds failure paths."
+        }
+      ]
+    },
+    {
+      "choice": "Prove 'identical to today's output' with a recorded digest. Before editing `critic_brief`, add `critic_brief_without_earlier_rounds_is_todays_brief`: it takes `critic_brief(&critic_inputs())`, cuts it from '## History file' to the end, hashes that tail with `athena_data::sha256_hex`, and asserts the digest equals a literal recorded from the unmodified code. It also asserts the brief has no '## Earlier rounds' and equals the with-history brief after the section is cut out.",
+      "reason": "Answers finding 5. The old critic tests check substrings only (briefs.rs:2859-2961), so a stray change outside the section would pass. The tail from '## History file' holds everything the change can touch (the insertion point, plan body, Athena's findings, soundness, critique) and only fixed text and the `plan(1)` fixture. The head (title, request, reading, system facts) is left out on purpose: it embeds the live `defaults.toml` through `AcceptedReading::new(&reading(), &defaults(), ..)` (briefs.rs:1604-1606) and `SYSTEM_FACTS` (briefs.rs:1500), which this change itself edits, so a digest of the head would break on unrelated edits. The cut-equality check covers the head.",
+      "rejected": [
+        {
+          "option": "Hash the whole brief",
+          "why": "It embeds docs/system-facts.md, whose critic budget line this change edits, and the live defaults.toml."
+        },
+        {
+          "option": "Copy the old `critic_brief` body into the test as an oracle",
+          "why": "Puts a second copy of the logic under test in the test; the recorded digest is the data."
+        }
+      ]
+    },
+    {
+      "choice": "docs/system-facts.md gets one number changed (the critic budget line). `CRITIC_FRAME.version` stays 2. D189 avoids the log's link phrases.",
+      "reason": "Answers finding 1. `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs:125-129, `check_system_facts` 84-109) fails whenever a computed size differs from its facts line, so any growth of the listed deliverable critic.md forces this edit; it is a consequence of that deliverable, not added scope. The file is not governance: `is_governance` (admission.rs:63-68) matches only ROOT_GOVERNANCE (athena.toml, defaults.toml, setup.sh, rust-toolchain.toml, admission.rs:36-41), workflows and tool configs. The file is read by `include_str!` (briefs.rs:1500) and listed in the CI cache key (ci.yml:35, 175), so no workflow edit is needed. The plan lists it as a planned file, so the verifier does not count it as unplanned (verifier_plan_section, plan.rs:177-180). The frame version stays 2, as in earlier critic.md edits; the pin at briefs.rs:1769 asserts 2. The log gate reads 'amends', 'supersedes' and 'superseded by' as link phrases (decision_links.rs:254-258), so D189 does not use them and needs no [[link]].",
+      "rejected": [
+        {
+          "option": "Leave the facts line stale",
+          "why": "The budgets test fails, so cargo test fails."
+        },
+        {
+          "option": "Bump the frame version to 3",
+          "why": "No bump rule exists, and the briefs.rs:1769 pin would need a change for no behavior gain."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs/planner.rs",
+      "action": "modify",
+      "purpose": "Add `EarlierRound { plan, findings }`, the field `CriticInputs.earlier_rounds`, the private `Item` enum and `pub(super) plan_changes`, and the 'Earlier rounds on this plan' section in `critic_brief`, written only for a non-empty list and placed after the history section and before 'Plan under review'.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Re-export `EarlierRound`; add `earlier_rounds: vec![]` to the two CriticInputs literals; add the recorded-digest test, the history test, the change-comparison test and the critic.md wording pin.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Add the pure `earlier_rounds(plans, critiques, before_round)` builder (pairs each critique with the plan of the same round from the same job's closing) and pass its result in the `CriticInputs` built in `critic_round` at line 353.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Add `EarlierRound` to the `athena_context::briefs` import and correct the doc comment on `Closing.plans` (it holds each reviewed plan, not only the accepted one).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/critic.md",
+      "action": "modify",
+      "purpose": "Add the two round-2 bullets (resolve check; narrowed new-major rule with override) at the end of the list, 403 bytes in total, no existing line changed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Change only the critic budget line to the figure `system_facts_budgets_match_computed` computes after the critic.md edit. Forced by that test (budgets.rs:125); not a governance file.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the three-round loop test with the planner queue [bad_plan, A, B, C] that checks each critic prompt's history.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "Add the two-round loop test that captures critic briefs through a wrapper around the scenario script.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One new bullet under [Unreleased] / ### Changed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D189 after D188 with a Provenance bullet; no edit to earlier entries; no link phrase.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Step 1, record today's output first, before editing critic_brief: in crates/athena-context/src/briefs.rs add `critic_brief_without_earlier_rounds_is_todays_brief` with a placeholder digest. It cuts `critic_brief(&critic_inputs())` from '## History file' to the end and hashes it with `athena_data::sha256_hex`. Run `cargo test -p athena-context critic_brief_without_earlier_rounds_is_todays_brief`, read the digest from the failure message, paste it as the literal, and run it again to see it pass. Do not edit planner.rs until it passes.",
+    "Step 2, crates/athena-context/src/briefs/planner.rs: add `pub struct EarlierRound { pub plan: JobPlan, pub findings: Vec<Finding> }` (Debug, Clone, PartialEq) with a doc comment, and `pub earlier_rounds: Vec<EarlierRound>` on `CriticInputs` ('oldest first; empty in round 1'). Add a private `enum Item<'a>` deriving PartialEq with variants Approach(&str), Decision(&PlanDecision), File(&PlanFile), Step(&str), Risk(&PlanRisk), Dependent(&PlanDependent), Demonstration(&Demonstration) and Question(&str), each trimmed where it is a string, with a `label()` (Approach; 'Decision i: ' + first 60 chars of choice; 'File path'; 'Step i: ' + first 60 chars; 'Risk: ...'; 'Dependent name'; 'Demonstration for criterion c'; 'Open question: ...'). Add `pub(super) fn plan_changes(previous: &JobPlan, current: &JobPlan) -> (Vec<String>, Vec<String>)`: changed = labels of current items with no equal item in previous; removed = labels of previous items with no equal item in current.",
+    "Step 2 continued, in `critic_brief`: right after `history_section(&mut out)` and before the 'Plan under review' heading, when `inputs.earlier_rounds` is non-empty write '## Earlier rounds on this plan' and one intro paragraph (findings are quoted data; each round's answer follows; code compared the plan under review with the last reviewed plan, item by item on exact text), avoiding the words 'cost', 'usd' and '$'. For each round write '### Round r: findings' and `findings_list(.., \"(none)\")`. For a round before the last write 'Planner's answer (the round r+1 plan):' with the next entry's approach and each decision as 'n. choice Reason: reason' ('(none)' when empty). For the last earlier round write 'Planner's answer: the plan under review below (round N).' Then '### Changed in the plan under review since round M' (M is the last earlier plan's round) with 'Changed or new: a; b' (or '(none)'), 'Removed: ...' only when non-empty, and 'Every other part is unchanged since round M.' (or 'Nothing changed: the plan under review is identical to the round M plan.' when both lists are empty). Do not touch the empty-list path.",
+    "Step 3, crates/athena-context/src/briefs.rs: add `EarlierRound` to the `pub use planner::{..}` list (line 26); add `earlier_rounds: vec![]` to the literals at 2861 and 2949; add `critic_brief_lists_earlier_findings_the_planners_answers_and_what_changed`, `critic_brief_plan_changes_compare_items_by_exact_text` and `composed_critic_prompt_checks_earlier_findings_from_round_two` as the criterion 2 and 3 demonstrations describe. Re-run the step 1 test: it must still pass with the recorded digest.",
+    "Step 4, crates/athena-context/prompts/critic.md: append these two lines after the 'In round one' line (line 16), before the blank line, each on its own line: `- From round 2, check first that each blocker and major finding under \"Earlier rounds\" was resolved in the plan under review; name any that was not.` and `- From round 2, raise a major only on a part the brief lists as changed or new, or on a defect earlier rounds missed that stops the plan working or leaves a criterion unshown, with file:line evidence; otherwise minor, even where a rule above says major.` Keep the total at or under 461 bytes so the frame stays under 900 estimated tokens. Run `cargo test -p athena-context planner_and_critic_frames_are_short_and_fit_the_budgets`.",
+    "Step 5, docs/system-facts.md: run `cargo test -p athena-cli --test budgets`, read the computed critic size from the failure message and set the line `- budget critic: ... of 1300` to it (at or under 1300; estimate about 1190). Change no other line. Run the test again.",
+    "Step 6, crates/athena-core/src/run/mod.rs and planning.rs: add `EarlierRound` to the `athena_context::briefs` import and fix the `Closing.plans` doc comment. In planning.rs add `fn earlier_rounds(plans: &[JobPlan], critiques: &[Critique], before_round: u32) -> Vec<EarlierRound>`: for each critique with `round < before_round`, find the plan with the same round, skip when none, keep round order. Pass `earlier_rounds: earlier_rounds(&closing.plans, &closing.critiques, round)` in the `CriticInputs` literal at planning.rs:353.",
+    "Step 7, tests: in crates/athena-core/src/run/tests.rs add `the_critic_of_round_three_is_given_rounds_one_and_twos_findings_and_the_planners_answers` (planner queue [bad_plan(), A, B, C], three critiques F1, F2, accept, `repo_with_planning(3)`, assertions as the criterion 4 demonstration lists). In crates/athena-cli/tests/job_plan.rs add `the_second_critic_brief_carries_round_ones_findings_and_the_planners_answer` with the wrapper that captures critic prompts (pattern at job_plan.rs:1054-1061).",
+    "Step 8, docs: add one bullet to CHANGELOG.md under [Unreleased] / ### Changed in the file's style (root cause with job 20261115-202532-6mng, 5 rounds, $14.32 and the 37 earlier jobs; the fix with `critic_brief`, `earlier_rounds`, `plan_changes` and critic.md; the limits; the test names). Append `## D189 · ...` after D188 in docs/decisions.md with Case, Decision, Alternatives, Tradeoff (state the remaining risks), Reversal cost and a Provenance bullet that lists what was read and run and what was not measured. Do not use 'amends', 'supersedes' or 'superseded by'. Do not edit earlier entries.",
+    "Step 9, run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-context`, `cargo test -p athena-core`, `cargo test -p athena-cli` and `cargo test --locked`. Confirm `git diff --stat` lists only the files in this plan, and none under crates/athena-data, athena.toml, defaults.toml, workflows or records/."
+  ],
+  "risks": [
+    {
+      "risk": "A critic told to treat unchanged parts leniently may miss a real defect in them.",
+      "mitigation": "Bullet B limits a new major on an unchanged part to a defect that stops the plan working or leaves a criterion unshown, shown with file:line evidence, and says that rule wins over the always-major lines. Changed and new parts keep every rule. D189 and the changelog state the limit; whether a model critic follows the bullets, and how many 5-round stops this prevents, is not measured."
+    },
+    {
+      "risk": "A planner that rewords an untouched item without changing it makes that item look changed, so the critic may raise a major on it.",
+      "mitigation": "The comparison is by exact text, trimmed, and ignores order, so it errs toward listing a reworded item as changed, which lets the critic look at it again and never hides a change. The comparison is a unit test (`critic_brief_plan_changes_compare_items_by_exact_text`)."
+    },
+    {
+      "risk": "critic.md has only about 20 estimated tokens of room under the 900-token frame bound at lib.rs:570, and the facts line could be forgotten.",
+      "mitigation": "The two bullets are given verbatim (403 bytes) and total 880 estimated tokens against the 900 bound. The frame-size test and the budgets test fail loudly if the producer lengthens them, and the producer sets the facts line from the budgets test's failure message."
+    },
+    {
+      "risk": "The critic brief grows each round, which adds cost to later critic calls.",
+      "mitigation": "At the 5-round cap the brief holds at most 4 rounds of findings, 3 older answers (approach and decision text, no rejected options) and one label list. This is an estimate of a few KB, not measured. The caps are per invocation and do not read brief size (planning.rs:347)."
+    },
+    {
+      "risk": "The recorded digest in `critic_brief_without_earlier_rounds_is_todays_brief` breaks when another job edits the critic brief's fixed text.",
+      "mitigation": "The digest is of fixed text and the `plan(1)` fixture only. The failure message prints the new digest; a legitimate edit of the critic brief's fixed text (soundness text, no-change rule) updates the literal in the same change. The head is covered by the cut-equality check instead of the digest."
+    },
+    {
+      "risk": "The first critic round of a resumed job has no history (its seed comes from an earlier job, mod.rs:1366-1370).",
+      "mitigation": "The limit is stated in the changelog and D189. The seed's findings still reach the planner as before; round 1's brief stays unchanged, as the accepted reading says. The test for the resumed path is the existing `a_retry_of_a_job_stopped_in_planning_carries_the_last_critiques_findings` (job_plan.rs:1042), which reads the reader brief only."
+    },
+    {
+      "risk": "docs/system-facts.md is not in the reading's deliverable list, so a scope check could flag it.",
+      "mitigation": "The edit is one number, forced by budgets.rs:125; the file is not governance (admission.rs:36-41, 63-68) and is a planned file in this plan, so the verifier does not count it as unplanned (plan.rs:177-180)."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "CriticInputs (new field earlier_rounds)",
+      "dependent": "crates/athena-core/src/run/planning.rs:353 (the only production constructor); crates/athena-context/src/briefs.rs:2861 and 2949 (literals) and 2922 (struct update, inherits the field)",
+      "kind": "code",
+      "test": "cargo test -p athena-context critic_brief; cargo test -p athena-core the_critic_of_round_three_is_given_rounds_one_and_twos_findings_and_the_planners_answers",
+      "reason": "The grep of the repository for `CriticInputs` and `critic_brief` found no other constructor or caller (only the imports at run/mod.rs:29-31 and briefs.rs:26). The two literals get `earlier_rounds: vec![]`; the struct update at 2922 inherits it from `critic_inputs()`."
+    },
+    {
+      "name": "critic_brief output when there is no earlier round (round 1, and the first round of a resumed job)",
+      "dependent": "critic_brief tests in crates/athena-context/src/briefs.rs at 1858, 2859, 2901, 2959, 2987 and 3371, and the caller at planning.rs:353",
+      "kind": "code",
+      "test": "cargo test -p athena-context critic_brief_without_earlier_rounds_is_todays_brief and cargo test -p athena-context (the six existing tests unchanged)",
+      "reason": "The section is written only for a non-empty list, so these tests see the same bytes. They are not edited."
+    },
+    {
+      "name": "critic_brief output for round 2 and later",
+      "dependent": "Core planning tests that read critic prompts: crates/athena-core/src/run/tests.rs:1854, 2101, 2158, 2220; the three-round test at 2111 repeats `good_plan()` so rounds 2 and 3 now carry history; the fake critic in crates/athena-cli/tests/common/mod.rs:708-721; cli tests that name Role::Critic (job_plan.rs, lifecycle.rs, retry.rs, status_role_need.rs)",
+      "kind": "code",
+      "test": "cargo test -p athena-core planning; cargo test -p athena-cli --test job_plan",
+      "reason": "The existing assertions check only the '## Plan under review (round N)' heading and seam or open-question text, which are all still present (the section is inserted before the heading and adds text only). A grep for 'Plan under review' and 'Earlier rounds' in crates/ finds no cli test that reads the brief text. The fake critic returns scripted or deterministic JSON and does not parse the brief. At 2111 the plan repeats, so the new change list says 'Nothing changed'; the test asserts only the headings."
+    },
+    {
+      "name": "Planning loop states that feed or skip the history",
+      "dependent": "crates/athena-core/src/run/planning.rs `plan_round` (30-80), the resumed first round (43-56), the mechanical path (251-269), `stop_on_mechanical_limit` (312-313), the preflight stop (347-352)",
+      "kind": "code",
+      "test": "cargo test -p athena-core the_critic_of_round_three_is_given_rounds_one_and_twos_findings_and_the_planners_answers (a mechanical pass in round 1, then three critic rounds)",
+      "reason": "Round 1 has empty closing lists, so its brief is unchanged. A resumed job's seed comes from an earlier job (mod.rs:1366-1370), not from this closing, so its first critic round has no history; the changelog says so. A mechanical pass returns `RoundEnd::Mechanical` without pushing (planning.rs:251-269), so it never appears as a round. `stop_on_mechanical_limit` and the preflight stop push and then end planning, so no later critic brief reads them."
+    },
+    {
+      "name": "Closing.plans and Closing.critiques as the history source",
+      "dependent": "crates/athena-core/src/run/mod.rs:141-143 (`Closing.plans`, `.critiques`); writers `end_round` (planning.rs:483-484), planning.rs:312-313 and 350; other readers `planned_paths(closing.plans.last(), ..)` (mod.rs:1002, 1390), producer.rs:337, verification.rs:159-167 and close.rs:617-623",
+      "kind": "code",
+      "test": "cargo test -p athena-core planning; cargo test -p athena-cli --test job_plan",
+      "reason": "Read only inside `critic_round` before the current round is pushed; nothing pushes differently, so the other readers see the same lists. The doc comment on `Closing.plans` ('the accepted plans') is corrected to say it holds each reviewed plan."
+    },
+    {
+      "name": "JobPlan and Critique records",
+      "dependent": "crates/athena-data/src/records/plan.rs:97 (`JobPlan`, `deny_unknown_fields`) and 159 (`Critique`); store.rs, status.rs, introspect.rs and `check_record_file`, which read them",
+      "kind": "code",
+      "test": "cargo test -p athena-data",
+      "reason": "Not changed: no field, record type or file is added, and `EarlierRound` is an in-memory brief input that is never serialized. `git diff --stat` shows no crates/athena-data path."
+    },
+    {
+      "name": "plan_body and findings_list rendering",
+      "dependent": "`render_plan_section` and the `producer_section_sha256` it feeds (crates/athena-context/src/briefs/plan.rs:154; planning.rs:225-226); `plan_body` and `findings_list` used by the planner revision brief (planner.rs:159-164)",
+      "kind": "code",
+      "test": "cargo test -p athena-context (the render_plan_section assertions at briefs.rs:2942-2945 and the revision brief tests)",
+      "reason": "Neither function is edited: the new section calls `findings_list` as is and renders plan items through its own code in planner.rs, so the producer section hash and the planner revision brief are unchanged."
+    },
+    {
+      "name": "critic.md size (frame bound)",
+      "dependent": "crates/athena-context/src/lib.rs:559-572 `planner_and_critic_frames_are_short_and_fit_the_budgets` (each frame under 900 estimated tokens, `estimate_tokens` = ceil(bytes/3) at lib.rs:74-76)",
+      "kind": "code",
+      "test": "cargo test -p athena-context planner_and_critic_frames_are_short_and_fit_the_budgets",
+      "reason": "critic.md is 2236 bytes (about 746 tokens); the two bullets add 403 bytes, giving 2639 bytes and 880 tokens, so the bound holds with 20 tokens to spare. The plan gives the exact bullet text. lib.rs is not edited."
+    },
+    {
+      "name": "Critic prompt set budget line",
+      "dependent": "crates/athena-cli/tests/budgets.rs:125 `system_facts_budgets_match_computed` and docs/system-facts.md (`- budget critic: 1056 of 1300`); briefs.rs:3008-3060 facts tests (size under 6000, line pins)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets; cargo test -p athena-context system_facts",
+      "reason": "The test fails when the computed critic size differs from the facts line, so the producer reads the computed figure from the failure and sets the line (estimate: about 1190 of 1300, from 1056 plus 403/3). The facts tests pin the other lines and the file size, which a one-number edit does not move."
+    },
+    {
+      "name": "docs/system-facts.md content",
+      "dependent": ".github/workflows/ci.yml:35 and 175 (and the later hashFiles keys): the binary cache key lists docs/system-facts.md",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The key already names the file, so a content change only changes the cache key; no workflow edit is made or needed."
+    },
+    {
+      "name": "critic.md list structure",
+      "dependent": "crates/athena-core/src/mirrors.rs:145-150 (`Rule::PromptStructure` on crates/*/prompts/*.md) via `prompt_structure_problems` (514-541)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test mirrors; cargo test -p athena-core mirrors",
+      "reason": "The two new lines each start their own list item, hold no ' - ' or '1. ' second item head, and contain none of the base file's item heads mid-line (for example '- Findings:' or '- verdict:'), so the rule reports nothing. Existing lines are untouched."
+    },
+    {
+      "name": "Existing critic.md wording and frame version",
+      "dependent": "crates/athena-context/src/lib.rs:640-706 and 790-813 (wording and anchor pins on CRITIC_FRAME), crates/athena-context/src/briefs.rs:1741-1769 (seam wording, challenge rule, version 2) and docs/spec.toml:1303 (mechanism text for the critic prompt, 'frame.critic version 2')",
+      "kind": "rule",
+      "test": "cargo test -p athena-context composed_critic_prompt; cargo test -p athena-context frames_name_the_reference_doc_as_optional_and_it_exists",
+      "reason": "No existing line is edited or removed, so every pinned phrase stays, the optional-reference-doc pointer still appears once, and the version stays 2, which the spec text names."
+    },
+    {
+      "name": "Appending D189 to the decision log",
+      "dependent": "docs/decisions.md rules: `AppendOnly` (mirrors.rs:121), `DecisionEntries` (mirrors.rs:139), `link_problems` in `decision_gate` (crates/athena-core/src/run/checks.rs) and docs/decision-links.toml (the [[governs]] table lists D08 over snapshot.rs and candidate.rs only)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core mirrors; cargo test -p athena-data decision_links; cargo test -p athena-cli --test backtest",
+      "reason": "D189 is appended after D188 with a Provenance bullet and no link phrase ('amends', 'supersedes', 'superseded by'), so no [[link]] entry is needed; none of the plan's paths is governed by a [[governs]] entry."
+    },
+    {
+      "name": "Critic cost per call",
+      "dependent": "`critic_usd` and `critic_timeout_s` in athena.toml [job_plan]; `preflight(.., ReserveStage::Critic { round })` at planning.rs:347",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The caps are per-invocation limits and the reserve is a sum of caps; neither reads brief size, so a longer brief changes no admission or reserve arithmetic. The added tokens per critic call are an estimate and not measured."
+    },
+    {
+      "name": "Design prose and headroom text",
+      "dependent": "docs/design/job-planning.md:106 ('the critic sees only the plan that passes') and the reader brief's 'Prompt token headroom' rows (D185, computed from the same prompt files at run time in crates/athena-context/src/lib.rs)",
+      "kind": "rule",
+      "test": "cargo test -p athena-context headroom",
+      "reason": "The design line is prose that no check reads; D189 records the change and the design doc is not a deliverable. The headroom figures are computed from the files at run time and are not stored, so they follow critic.md."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Add `the_second_critic_brief_carries_round_ones_findings_and_the_planners_answer` to crates/athena-cli/tests/job_plan.rs. It builds `Fixture::with_config(&planned_config())` and a `Scenario` with two plans and two critiques. Plan 1 is `good_plan()`. Plan 2 is `good_plan()` with approach 'ANSWER-MARK add the greeting line and its test.' and steps ['Edit README.md.', 'STEP-MARK add the greeting test.']. Critique 1 is `critique_of(\"revise\", &[(\"major\", FINDING)], None)`; critique 2 is `critique_of(\"accept\", &[], None)`. The script is `scenario.script()` wrapped in a closure that pushes each `Role::Critic` `user_prompt` into a shared Vec (the wrapper pattern at job_plan.rs:1054-1061). The test calls `athena.ask` and `athena.go` and asserts the job lands. Critic brief 0 holds neither FINDING nor 'Earlier rounds on this plan'. Critic brief 1 holds '## Earlier rounds on this plan', '### Round 1: findings', FINDING with its '[major] (critic) at demonstrations' prefix, 'Planner's answer: the plan under review below (round 2).', the exact line 'Changed or new: Approach; Step 2: STEP-MARK add the greeting test.', and 'Every other part is unchanged since round 1.' It holds 'ANSWER-MARK' exactly once (in the plan body, not repeated in the history) and does not hold the round-1 plan's approach text 'Add a greeting line to README.md.' in the history section.",
+      "command": "cargo test -p athena-cli --test job_plan the_second_critic_brief_carries_round_ones_findings_and_the_planners_answer",
+      "observes": "Two critic prompts are captured through the real planning path (`Athena::go` -> `plan_round` -> `critic_round`). The first has no history. The second has round 1's finding, the planner's answer (the plan under review plus the code-computed change list), and no duplicate of the answer text.",
+      "fails_without": "Before the change the round-2 critic brief has no 'Earlier rounds on this plan' section, no round-1 finding text, no 'Planner's answer' line and no changed-items line, so the first assertion on critic brief 1 fails. The test compiles on the old code (it uses only public API).",
+      "seam": "Production entry point: `Athena::go`, which reaches `plan_round` and `critic_round` in crates/athena-core/src/run/planning.rs. Guards: planning enabled by `planned_config()` (`[job_plan] enabled = true`); both plans pass Athena's own plan rules like the existing `good_plan()`, so no mechanical pass intervenes. Fixture: `Fixture::with_config` and `Scenario` in crates/athena-cli/tests/common/mod.rs (exists; Scenario.plans and .critiques feed the fake planner and critic at common/mod.rs:690-721). Injection: a wrapper closure around `scenario.script()` passed to `fx.athena(..)`, as at job_plan.rs:1054-1061 (exists). The fake only returns scripted JSON; the brief text under test is built by the real `critic_brief` and `earlier_rounds`. The new test is added by step 7."
+    },
+    {
+      "criterion": 2,
+      "method": "In crates/athena-context/src/briefs.rs tests, next to the critic tests at line 2859, add three tests. (1) `critic_brief_without_earlier_rounds_is_todays_brief`, written first and run on the unmodified `critic_brief` to record the digest: it cuts `critic_brief(&critic_inputs())` from '## History file' to the end, hashes it with `athena_data::sha256_hex` and compares with the recorded literal; it asserts no '## Earlier rounds'; and it asserts the brief equals the with-history brief after the text from '## Earlier rounds' up to '## Plan under review' is removed. (2) `critic_brief_lists_earlier_findings_the_planners_answers_and_what_changed`: two `EarlierRound`s built from `plan(1)` and `plan(2)` with the existing `finding(..)` helper, and a plan under review `plan(3)` that differs from `plan(2)` by a new approach marker, a second step and a removed risk. It asserts: the section sits after '## History file' and before '## Plan under review'; '### Round 1: findings' comes before '### Round 2: findings'; each finding's severity, source, location, summary and evidence are present; round 1's answer prints plan 2's approach marker and 'CHOICE-MARK ... Reason: REASON-MARK' but not 'REJECTED-MARK' (checked inside the history section only); round 2's answer is 'Planner's answer: the plan under review below (round 3).' with the exact lines 'Changed or new: Approach; Step 2: STEP-MARK second', 'Removed: Risk: RISK-MARK drift' and 'Every other part is unchanged since round 2.'; and the lower-cased brief holds none of 'cost', 'usd', '$' (as at briefs.rs:2887-2897). (3) `critic_brief_plan_changes_compare_items_by_exact_text`: identical plans give 'Nothing changed: the plan under review is identical to the round 2 plan.'; reordered steps are unchanged; a changed decision reason marks 'Decision 1: ...'; trailing whitespace on the approach is unchanged; a removed dependent is listed under Removed.",
+      "command": "cargo test -p athena-context critic_brief",
+      "observes": "The section is present only with history, holds the findings and answers in round order with the right fields, the change list is exact, there are no banned words, and with no history the brief is byte-for-byte today's.",
+      "fails_without": "Without the new field and section the tests do not compile, or the history assertions fail. A stray change outside the section fails the tail digest. A section printed with an empty list fails the 'no ## Earlier rounds' assertion.",
+      "seam": "Production entry point: `critic_brief(&CriticInputs)` in crates/athena-context/src/briefs/planner.rs, and `plan_changes` (pub(super), called from the briefs.rs tests module). Fixtures: the existing `critic_inputs()` (briefs.rs:2948), `plan(n)` (2665), `finding(..)` (2727) and `reading()` helpers (exist). The new field is set by struct update, `CriticInputs { earlier_rounds: .., ..critic_inputs() }`, as at briefs.rs:2922-2925. The two struct literals at briefs.rs:2861 and 2949 get `earlier_rounds: vec![]` in step 3. No double is used."
+    },
+    {
+      "criterion": 3,
+      "method": "Add `composed_critic_prompt_checks_earlier_findings_from_round_two` to briefs.rs in the style of briefs.rs:1760-1770. It composes `CONTRACT` and `CRITIC_FRAME` and asserts the text contains 'was resolved in the plan under review', 'changed or new', 'earlier rounds missed', 'stops the plan working or leaves a criterion unshown' and 'even where a rule above says major' (the override wording), and that `CRITIC_FRAME.version` is still 2. Then run `cargo test -p athena-cli --test budgets`, `cargo test -p athena-cli --test mirrors` (PromptStructure rule, mirrors.rs:514-541) and `cargo test -p athena-context planner_and_critic_frames_are_short`. Finally read `git diff crates/athena-context/prompts/critic.md`: it must be two added list lines at the end of the list, each on its own line, with no existing line changed and no refusal or admission rule.",
+      "command": "cargo test -p athena-context composed_critic_prompt_checks_earlier_findings_from_round_two",
+      "observes": "The wording and its override are in the composed critic prompt; the diff only adds two bullets (403 bytes); the frame stays under 900 estimated tokens (about 880); the critic set stays at or under 1300; the facts file matches the computed figure.",
+      "fails_without": "Without the two bullets the pin test fails on the missing wording. Without the budget-line update `system_facts_budgets_match_computed` fails. A frame over 899 estimated tokens fails `planner_and_critic_frames_are_short_and_fit_the_budgets`.",
+      "seam": "Entry points: `crate::CRITIC_FRAME` and `compose` (exist, briefs.rs:1741-1769); `computed_rows()` and `check_system_facts` in crates/athena-cli/tests/budgets.rs:21 and 84 (exist); `prompt_structure_problems` in crates/athena-core/src/mirrors.rs:514 (exists). The pin test is added in step 3."
+    },
+    {
+      "criterion": 4,
+      "method": "Add the test to crates/athena-core/src/run/tests.rs with `repo_with_planning(3)` and `run_planned`. Planner queue: [`bad_plan()`, A, B, C], plans built from `good_plan()` with distinct approach markers 'ANSWER-A', 'ANSWER-B', 'ANSWER-C'; B and C have steps ['Edit README.md.', 'STEP-B add the greeting test.'] and A has the one default step. `planning_script` repeats only the last queue entry (tests.rs:1333-1335), so the four planner calls are: `bad_plan` (sent back mechanically in round 1, never filed: planning.rs:251-269), then A (round 1 critic), B (round 2 critic), C (round 3 critic). Critic queue: [`revising_critique()` with summary F1, `revising_critique()` with summary F2, `accepting_critique()`]. The job lands. Read `prompts_of(&calls, Role::Critic)`. Critic 0 (reviews A): no 'Earlier rounds on this plan', no F1. Critic 1 (reviews B): '### Round 1: findings' and F1; the line 'Planner's answer: the plan under review below (round 2).'; the exact line 'Changed or new: Approach; Step 2: STEP-B add the greeting test.'; 'ANSWER-B' exactly once (plan body); 'ANSWER-A' not at all; no F2; no 'ANSWER-C'. Critic 2 (reviews C): '### Round 1: findings' with F1 before '### Round 2: findings' with F2, exactly two '### Round' headings; round 1's answer 'Planner's answer (the round 2 plan):' holds 'ANSWER-B' (once); round 2's answer says the plan under review below (round 3); the exact line 'Changed or new: Approach' (no Step in the list); 'ANSWER-C' exactly once; 'ANSWER-A' not at all. Then `git diff --stat` shows no path under crates/athena-data, and planning.rs reads only `closing.plans` and `closing.critiques`.",
+      "command": "cargo test -p athena-core the_critic_of_round_three_is_given_rounds_one_and_twos_findings_and_the_planners_answers",
+      "observes": "The critic's history grows round by round from this job's own filed plans and critiques only. Critique k is paired with the plan it reviewed, the answer to round k is the next round's plan, and the planner's own mechanical revision is not a round.",
+      "fails_without": "Without the `earlier_rounds` builder the round-2 and round-3 critic prompts carry no history and the first history assertion fails. A builder that filed Athena's mechanical pass as a round would give 3 round headings in critic 2, not 2.",
+      "seam": "Production entry point: `Athena::go` through `plan_round` and `critic_round` (planning.rs:30 and 318). Guards: `repo_with_planning(3)` turns planning on with max_rounds 3 (tests.rs:294-299); round 3 is the last round, and an accepting critique ends planning cleanly. Fixture and injection: `run_planned(repo, planner_queue, critic_queue)` (tests.rs:1350) builds `planning_script` (tests.rs:1316), which feeds scripted JSON to the fake driver and records every prompt in `Calls`; `prompts_of` (tests.rs:1420) reads them. All exist. Only the test is added (step 7). The brief text is built by the real `critic_brief` and `earlier_rounds`; the fake returns scripted JSON and does not build the history."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three recorded checks on the final tree. The tests that could break outside the deliverables are named in dependents: budgets, mirrors, the frame-size test (lib.rs:559), the briefs tests, the core planning tests, job_plan.rs and the decision-log tests.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three commands exit 0.",
+      "fails_without": "A format or lint error, a missed `earlier_rounds` field in a `CriticInputs` literal, a stale critic budget line, a frame over the 900-token bound, or a failing new or existing test makes one of the three commands exit non-zero.",
+      "seam": "The recorded checks themselves (`fmt`, `clippy`, `test`), run by Athena and the verifier as cargo commands; no seam is needed."
+    },
+    {
+      "criterion": 6,
+      "method": "Read `git diff CHANGELOG.md docs/decisions.md docs/system-facts.md`. CHANGELOG.md gains one bullet under [Unreleased] / ### Changed in the file's style: root cause (job 20261115-202532-6mng, 5 rounds, $14.32, the 37 earlier jobs), the fix with file and function names, the limits (whether a model critic follows the new bullets and how many 5-round stops it prevents are not measured; a resumed job's first round has no history) and the test names. docs/decisions.md gains `## D189 · ...` appended after D188 with Case, Decision, Alternatives, Tradeoff (including the remaining risk that the critic can still raise majors on changed parts, and that the unchanged-part bar rests on the critic's judgment), Reversal cost and a Provenance bullet; no earlier line changes; it avoids 'amends', 'supersedes' and 'superseded by'. docs/system-facts.md changes only the critic budget line. `git diff --stat` lists only the files in this plan; no athena.toml, defaults.toml, workflow or records/ path appears. Then run `cargo test -p athena-core mirrors`, `cargo test -p athena-data decision_links`, `cargo test -p athena-cli --test backtest` and `cargo test -p athena-cli --test mirrors`.",
+      "command": "git diff --stat",
+      "observes": "An appended D189 with a Provenance bullet, one changelog bullet, one changed number in the facts file, no governance, workflow or records change, and the log guards pass.",
+      "fails_without": "A decision inserted inside an earlier entry, one without a Provenance bullet, or one using a link phrase fails the DecisionEntries or AppendOnly rule or the link tests. A missing changelog bullet shows in the diff.",
+      "seam": "Entry points: the `DecisionEntries` and `AppendOnly` rules (crates/athena-core/src/mirrors.rs:121 and 139), `link_problems` through `decision_gate` (crates/athena-core/src/run/checks.rs), `decision_links` (crates/athena-data/src/decision_links.rs), and the backtest and mirrors tests in crates/athena-cli/tests. All exist. `is_governance` (admission.rs:63-68) is false for each changed doc path."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "432cf64f8707871651c1ba8b90e4e2e30ffcc803a49aa0d780d2ad32c0138eee"
+}
