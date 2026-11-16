@@ -741,6 +741,7 @@ pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&s
     evidence_section(&mut out, evidence);
     let _ = writeln!(out, "## What the verifier sees\n\n{VERIFIER_VISIBILITY}\n");
     let _ = writeln!(out, "{}", checkable_evidence_section());
+    verifier_checks_section(&mut out, &inputs.reading);
     criteria_check_section(&mut out, &inputs.reading);
     let _ = writeln!(out, "{}", unchanged_files_section());
     let _ = writeln!(out, "{}", checks_before_verifier_section());
@@ -862,6 +863,147 @@ fn criteria_check_section(out: &mut String, reading: &AcceptedReading) {
     );
     for (text, _) in &reading.criteria {
         let _ = writeln!(out, "{text}");
+    }
+    out.push('\n');
+}
+
+/// Whether a criterion's text is one only Athena's recorded checks (fmt, clippy, the full test suite)
+/// can show: it names `cargo fmt`, `cargo clippy` or `cargo test`, and no targeted-test scope such as
+/// `-p`, `--package`, `--test`, `--lib`, `--bin`, `--doc`, `--bench` or `--example`.
+pub fn is_athena_check_criterion(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    if !["cargo fmt", "cargo clippy", "cargo test"]
+        .iter()
+        .any(|k| lower.contains(k))
+    {
+        return false;
+    }
+    const SCOPES: [&str; 8] = [
+        "-p",
+        "--package",
+        "--test",
+        "--lib",
+        "--bin",
+        "--doc",
+        "--bench",
+        "--example",
+    ];
+    !lower
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+        .any(|t| SCOPES.contains(&t))
+}
+
+/// Phrases that make a criterion a sweep: the old wording must be gone everywhere, so the producer needs a
+/// repo-wide search that returns nothing. Matched as whole words (see [`mentions`]).
+const SWEEP_PHRASES: [&str; 16] = [
+    "every mention",
+    "every occurrence",
+    "every place",
+    "every reference",
+    "all mentions",
+    "all occurrences",
+    "all references",
+    "no longer appear",
+    "no longer appears",
+    "no longer used",
+    "no longer mentioned",
+    "no remaining",
+    "zero remaining",
+    "no stale",
+    "nowhere",
+    "anywhere in the repo",
+];
+
+/// Phrases that make a criterion about the width of rewrapped prose. The plain word "wrap" is not one: it
+/// would fire on "wrapper".
+const WIDTH_PHRASES: [&str; 10] = [
+    "line width",
+    "line length",
+    "rewrap",
+    "rewrapped",
+    "rewrapping",
+    "re wrap",
+    "re wrapped",
+    "wrapped prose",
+    "wrapped lines",
+    "wrap width",
+];
+
+/// Whether `text` holds one of `phrases` as whole words: the text is lowercased, every character that is not
+/// a letter or digit becomes a space, and the words are joined by single spaces, so a hyphen, a capital or a
+/// trailing full stop does not matter and "wrapper" does not hold "wrap".
+fn mentions(text: &str, phrases: &[&str]) -> bool {
+    let words = text
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let padded = format!(" {words} ");
+    phrases.iter().any(|p| padded.contains(&format!(" {p} ")))
+}
+
+/// How the verifier checks one criterion: the evidence the producer should have in hand before it reports.
+/// The hint informs; nothing in it refuses or holds work.
+pub fn verifier_check_hint(text: &str, kind: CriterionKind) -> String {
+    let mut hint = if is_athena_check_criterion(text) {
+        format!(
+            "Athena's recorded checks show it (fmt, clippy, the full test suite): begin the evidence with \
+             \"{LEFT_TO_ATHENA}\"; the verifier judges it from the recorded checks."
+        )
+    } else {
+        match kind {
+            CriterionKind::Content => {
+                "a named file or diff line: cite the path, and the diff line, \
+                                       that shows it."
+                    .to_string()
+            }
+            CriterionKind::Behavior => {
+                "a command that ran: cite the exact command the verifier can run \
+                                        in a fresh snapshot, and what it printed."
+                    .to_string()
+            }
+        }
+    };
+    if mentions(text, &SWEEP_PHRASES) {
+        hint.push_str(
+            " Also a repo-wide search with zero remaining hits: Grep the whole repository for the old \
+             wording, cite the pattern and show the empty result.",
+        );
+    }
+    if mentions(text, &WIDTH_PHRASES) {
+        hint.push_str(
+            " Also a line-width check: search each changed file for a line wider than its limit, for \
+             example with `grep -nE '.{N,}' <file>` where N is one more than the limit, and cite the \
+             empty result.",
+        );
+    }
+    hint
+}
+
+/// The producer's "How the verifier checks each criterion" section: one line per accepted criterion, keyed
+/// by its number under "Acceptance criteria". Root cause it answers: the producer saw the criteria but not
+/// the evidence each one needs, so a "met" with no matching evidence went through until final verification.
+/// It writes nothing when the reading has no criteria.
+fn verifier_checks_section(out: &mut String, reading: &AcceptedReading) {
+    if reading.criteria.is_empty() {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "## How the verifier checks each criterion\n\n\
+         The verifier sees only the diff and the commands it runs itself. Before you report, check each \
+         criterion yourself the way its line below says, and give that evidence in its criteria_check \
+         entry. This is guidance: nothing here refuses or holds your work.\n"
+    );
+    for (i, (text, kind)) in reading.criteria.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "Criterion {}: {}",
+            i + 1,
+            verifier_check_hint(text, *kind)
+        );
     }
     out.push('\n');
 }
@@ -1670,6 +1812,138 @@ mod tests {
         ] {
             assert!(section.contains(needle), "missing instruction: {needle}");
         }
+    }
+
+    fn producer_inputs_with(criteria: &[(&str, CriterionKind)]) -> ProducerInputs {
+        let mut accepted = AcceptedReading::new(&reading(), &defaults(), |_| false);
+        accepted.criteria = criteria.iter().map(|(t, k)| (t.to_string(), *k)).collect();
+        ProducerInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog".into(),
+            reading: accepted,
+            checks: vec![],
+            commands: vec![],
+            pin: None,
+            retry_from: None,
+            retry_findings: None,
+            failure_classes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn producer_brief_says_how_the_verifier_checks_each_criterion() {
+        let criteria = [
+            (
+                "Every mention of the old budget is updated",
+                CriterionKind::Content,
+            ),
+            (
+                "The new test fails on the base tree: run `cargo test -p athena-core foo`",
+                CriterionKind::Behavior,
+            ),
+            (
+                "The rewrapped prose in the guide stays readable",
+                CriterionKind::Content,
+            ),
+            ("The README names the tool", CriterionKind::Content),
+            (
+                "The recorded cargo fmt --check and cargo clippy checks pass",
+                CriterionKind::Behavior,
+            ),
+            ("The cargo wrapper is installed", CriterionKind::Content),
+        ];
+        let brief = producer_brief(&producer_inputs_with(&criteria));
+        let heading = "## How the verifier checks each criterion\n";
+        let (before, rest) = brief
+            .split_once(heading)
+            .expect("the producer brief says how the verifier checks each criterion");
+        let section = rest.split("\n## ").next().unwrap();
+        assert!(before.contains("## Make your evidence checkable"));
+        assert!(rest.contains("## criteria_check: copy the line"));
+        let line = |n: usize| {
+            section
+                .lines()
+                .find(|l| l.starts_with(&format!("Criterion {n}: ")))
+                .unwrap_or_else(|| panic!("no hint line for criterion {n}: {section}"))
+        };
+        // A sweep criterion: a named file or diff line, plus a repo-wide search with zero remaining hits.
+        assert!(line(1).contains("named file or diff line"));
+        assert!(line(1).contains("repo-wide search with zero remaining hits"));
+        assert!(!line(1).contains("line-width check"));
+        // A behavior criterion: a command that ran.
+        assert!(line(2).contains("a command that ran"));
+        assert!(!line(2).contains("repo-wide search"));
+        // Rewrapped prose: a line-width check.
+        assert!(line(3).contains("line-width check"));
+        // A plain content criterion has neither extra.
+        assert!(line(4).contains("named file or diff line"));
+        assert!(!line(4).contains("repo-wide search") && !line(4).contains("line-width"));
+        // An Athena-check criterion is left to the recorded checks, not a command to run.
+        assert!(line(5).contains(LEFT_TO_ATHENA));
+        assert!(!line(5).contains("a command that ran"));
+        // Whole words only: "wrapper" is not "wrap".
+        assert!(!line(6).contains("line-width"));
+        // The hint does not echo criterion text, and carries no forecast words.
+        for (text, _) in criteria {
+            assert!(!section.contains(text), "the section repeats {text}");
+        }
+        for forecast in ["0.97", "0.8", "p10", "cost"] {
+            assert!(
+                !brief.contains(forecast),
+                "the producer brief must not contain {forecast}"
+            );
+        }
+    }
+
+    #[test]
+    fn producer_brief_without_criteria_has_no_verifier_checks_section() {
+        let brief = producer_brief(&producer_inputs_with(&[]));
+        assert!(!brief.contains("How the verifier checks each criterion"));
+    }
+
+    #[test]
+    fn verifier_check_hint_matches_whole_phrases_only() {
+        let sweep = "repo-wide search with zero remaining hits";
+        let width = "line-width check";
+        let c = CriterionKind::Content;
+        for text in [
+            "Every Mention of X is updated",
+            "The word no longer appears in docs.",
+            "ALL references are renamed",
+            "no-remaining stale hits",
+            "X is nowhere else",
+            "zero remaining uses",
+            "no longer used",
+        ] {
+            assert!(verifier_check_hint(text, c).contains(sweep), "{text}");
+        }
+        for text in [
+            "line-width stays under 100",
+            "The Line Length is kept",
+            "prose is rewrapped",
+            "Re-wrapped text",
+            "wrap width is 100",
+        ] {
+            assert!(verifier_check_hint(text, c).contains(width), "{text}");
+        }
+        for text in [
+            "the cargo wrapper is installed",
+            "wrapping paper",
+            "a mention of X",
+        ] {
+            let hint = verifier_check_hint(text, c);
+            assert!(!hint.contains(width) && !hint.contains(sweep), "{text}");
+        }
+    }
+
+    #[test]
+    fn is_athena_check_criterion_skips_scoped_cargo_commands() {
+        assert!(is_athena_check_criterion("cargo fmt --check passes"));
+        assert!(is_athena_check_criterion("`cargo test` passes"));
+        assert!(!is_athena_check_criterion(
+            "Run `cargo test -p athena-core`"
+        ));
+        assert!(!is_athena_check_criterion("The README names the tool"));
     }
 
     #[test]

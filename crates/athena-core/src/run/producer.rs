@@ -552,6 +552,17 @@ impl Athena {
                 && check_failures.is_empty()
                 && records_problems.is_empty()
             {
+                // The passing attempt keeps the per-criterion check it passed with (criterion, status and
+                // evidence), as the failing attempt does below. It is a copy of the candidate's stored
+                // report, so each attempt's invocation record is readable without joining to the candidate.
+                let attempt = closing
+                    .new_invocations
+                    .last_mut()
+                    .expect("the attempt's invocation was just recorded");
+                attempt.detail = Some(format!(
+                    "self-check passed; redacted report: {}",
+                    serde_json::to_string(&report)?
+                ));
                 break Some(report);
             }
             let mut problems = Vec::new();
