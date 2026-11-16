@@ -1,0 +1,384 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261116-041223-m3vc",
+  "round": 1,
+  "at": "2026-11-16T04:25:30.51544692Z",
+  "invocation_seq": 5,
+  "approach": "Add a read-only per-stage breakdown computed from existing records, with no new record type and no change to `Throughput::text`. A new `status/stages.rs` builds `StageBreakdown`. For each of the newest 5 landed jobs (`landed_jobs`, throughput.rs:472) it lists the stages in order: queue wait, reading, each planning round, producer, checks, verifier, landing, disk wait. Each stage is `{name, minutes: Option<f64>, reason: Option<String>, also: Vec<String>}`. Minutes come from record timestamps. Queue wait is the first reader `started_at` minus `Request.received_at`. Reading, producer and verifier are the summed wall time of that role's invocations. A planning round is the planner invocation named by `JobPlan.invocation_seq` plus the critic invocation named by `Critique.invocation_seq`. A job with no plan records gets one `planning` stage from its planner and critic invocations, or `not recorded` if it has none. Checks are the measured `CheckRun.duration` values. Landing runs from the last invocation end to the oldest landing record that names the job. Disk wait has no record, so it is always `not recorded`. The main reason is the first known item of: retries, tokens, turns and tool calls, model and effort. For checks it is the largest of test time, compile/lint time and build-slot wait. `throughput.rs` takes the OLDEST landing record instead of the newest, because docs/design/agent-and-build-slots.md:247-254 measured 4.3 to 11.0 minutes to the first record against 1220 to 2112 minutes to the newest. `display.rs` prints the breakdown after the throughput block in `athena status` and `athena status --snapshot`. A missing minute or reason prints `not recorded`. Revision: this answers the one finding. Criterion 3's demonstration command is now a plain command with the concrete absolute evidence path (derived from this plan's own working directory) and no angle brackets, redirection, variable or chaining; `git log` is a second, separate command.",
+  "decisions": [
+    {
+      "choice": "Put the breakdown in its own StageBreakdown (status/stages.rs) with its own StatusView and SnapshotView field. Leave Throughput and Throughput::text alone.",
+      "reason": "Throughput::text is embedded in the throughput review (hestia.rs:2548) and asserted by `shown.contains(&throughput)` in crates/athena-cli/tests/status_snapshot.rs:116-119 and by many status.rs tests. A separate section cannot break them. The --json equality at status_snapshot.rs:94-96 compares only `throughput`, so a new sibling field is unaffected. Documented fields reused, each for what its name and comment say: Invocation.model, effort (an `Option<String>`, 'The effort level the agent ran at (`--effort`)'), tokens (Tokens), turns, commands_run (records.rs:755-770); Request.received_at (records.rs:437); JobPlan.invocation_seq 'The planner's invocation, as numbered in the job's `invocations/` directory' (records/plan.rs:102-103); Critique.invocation_seq 'The critic's invocation; none when Athena's own checks stopped the round before any critic call' (plan.rs:164-165); CheckRun.duration (records.rs:874); CheckRun.queued_s, the seconds the check waited in the build-slot queue (records.rs:902-906). queued_s is a wait before the check starts, so it ranks beside the check durations and is not added to the stage minutes.",
+      "rejected": [
+        {
+          "option": "Extend Throughput with per-job stage vectors and change its text()",
+          "why": "Changes the text the throughput review stores and every test that matches its wording, and mixes a per-job view into a window median."
+        },
+        {
+          "option": "Add a new record type for stage timing",
+          "why": "Out of scope. The timestamps already exist, and the records allow-list (check_record_file, AnyRecord) stays untouched."
+        }
+      ]
+    },
+    {
+      "choice": "Landing record time is the oldest `created_at` among landing records that name the job as a JobLanding commit (`.min()`), not the newest. A new `pub(super) landing_record` returns that record so the landing stage can name its PR and merge method.",
+      "reason": "`Landing.created_at` is documented 'When the landing was recorded' (athena-data/src/history.rs:224-225). The current code takes `.max()` (throughput.rs:389-403). One job is listed in many records: docs/design/agent-and-build-slots.md:247-254 measured job 20261104-054754-b4f5 at 4.3 min to the first record against 2112.0 min to the newest, and the five-job median at 4.6 min against 1337.0 min. `commits()` (gh/records.rs:128-143) lists every PR commit between the expected base and the head, which is why a later PR re-lists a job. With one record per job, min equals max, so existing tests keep their figures. That doc marks 'the first record is the real merge' as inferred, not checked (docs/design/agent-and-build-slots.md:257-261); criterion 3 on the real records is the check. Landing record shapes: (a) one JobLanding record naming the job: the oldest and only one. (b) Several records naming the job: the oldest wins. (c) A record whose commits are only DeclaredIntervention or RecordsOnly (history.rs:149-156): filtered out by `kind == JobLanding` (throughput.rs:396-399), so an intervention or records-only commit never moves a job's landing. (d) A blocked or retried landing: `intent()` writes only a LandingIntent and `landing()` writes the Landing after the merge (gh/records.rs:178-250), so a blocked PR leaves no Landing record and the retry's record is the oldest that names the job. (e) A catch-up record: same type, same filter; if it is the only record its time is used, a stated limit. (f) No record: landing is `not recorded`.",
+      "rejected": [
+        {
+          "option": "Keep `max`",
+          "why": "It gave the 1000-plus minute landing figures measured in docs/design/agent-and-build-slots.md:247-254; the criterion-3 range check on real records would fail."
+        },
+        {
+          "option": "Use the host commit's committed_at from history.json",
+          "why": "Throughput::compute reads records only; history.json exists only in snapshot::status, and the independent range the criterion checks against must not be computed by the change."
+        }
+      ]
+    },
+    {
+      "choice": "Landing stage minutes are None (printed `not recorded`) when no landing record names the job. When one does, minutes run from the last invocation end to max(outcome time, oldest record time), as landing_end does (throughput.rs:405-413) and as LandedJob.stages.landing_and_rebuild already holds (throughput.rs:491).",
+      "reason": "The brief asks for durations measured from records, not a stand-in. landing_end falls back to the outcome time, which prints about 0.1 minutes. The existing Throughput medians keep that fallback unchanged, so no existing figure moves.",
+      "rejected": [
+        {
+          "option": "Print the outcome-time fallback as the landing time",
+          "why": "It is the 0.1 minute figure criterion 3 calls wrong."
+        }
+      ]
+    },
+    {
+      "choice": "The main reason is the first known item of a fixed order: retries, tokens, turns and tool calls, model and effort. The rest go in `also`. Tokens print as the sum of the known input, output, cache read and cache write values, with the split in the text. For checks the main reason is the largest of test time, compile/lint time and summed build-slot wait. A stage with no known item has reason None.",
+      "reason": "Deterministic, uses only stored fields, needs no cutoff. A retry is more than one invocation of the role in the stage, or a planning round after the first. The split keeps cache reads from reading as new work. Compile/lint time is every check not named `test`, because CheckRun keeps no kind; throughput.rs:47-53 already treats the check named `test` as the test check. A single `checks::is_test_check` becomes that one rule, shared with `test_check_seconds`.",
+      "rejected": [
+        {
+          "option": "Pick the reason by a slowness threshold",
+          "why": "Any threshold is a guess not measured here."
+        },
+        {
+          "option": "Use CheckSpec.kind (capability.rs:85) for compile/lint versus test",
+          "why": "CheckRun records no kind, only a name."
+        }
+      ]
+    },
+    {
+      "choice": "Disk wait is always a stage with minutes None and reason None, printed `not recorded`.",
+      "reason": "No record holds a disk-hold duration (Invocation, Outcome and CheckRun have no such span), and adding a record type is out of scope.",
+      "rejected": [
+        {
+          "option": "Infer disk wait from the gap between outcomes",
+          "why": "A stand-in, not a measurement."
+        }
+      ]
+    },
+    {
+      "choice": "Exits of the new breakdown computation, one per line. The reader of every None is `display::stage_lines`, which maps each None to the literal `not recorded`.",
+      "reason": "(a) No landed job: `StageBreakdown::compute` returns None, serde skips the field, display prints nothing; the same condition as Throughput::compute. (b) A landed job with no invocation: `landed_jobs` drops it (throughput.rs:479, the `?` on the last invocation end). (c) A reader, producer or verifier invocation missing: that stage's minutes and reason are None. (d) No Request record: queue wait is None. (e) A planner or critic invocation seq not found: that round's minutes are None. (f) No JobPlan or Critique record at all: one stage named `planning` is built from the job's planner and critic invocations, or None when it has none. (g) No Verification or all checks `not run`: checks minutes and reason are None (the same `basis() != \"not run\"` test as check_minutes, throughput.rs:381). (h) No landing record: landing minutes None, reason 'no landing record names this job'. (i) A negative gap from clock skew is clamped with `.max(0.0)` as role_minutes does (throughput.rs:365-373). (j) Interrupt, hold, failure and error cannot happen: only Closed(Landed) jobs are listed and the function reads records and writes nothing. `athena status` writes nothing, so no hold, interrupt or error state is left behind.",
+      "rejected": []
+    },
+    {
+      "choice": "The printed landing line uses the words `landing time N minutes` and every stage line prints `minutes`, not `min`.",
+      "reason": "D183 (docs/decisions.md:5321-5354) judges a real-records criterion by a measure phrase followed by a number and a whole-word unit of the range's family. The criterion's phrase is `landing time` (measure_phrase, records_criteria.rs:275-284, applied to criterion 3's text). The same wording lets Athena run criterion 3 on the producer's tree before the verifier. The criterion states no readable range after `expected range` (stated_range, records_criteria.rs:314-344, finds `from the landing...` and no number), so Athena records the run and does not judge it by range. A job with no landing record prints `landing time not recorded`, which has no figure and so is not judged.",
+      "rejected": [
+        {
+          "option": "Print `min` as the existing throughput text does",
+          "why": "D183 reads only whole-word units, so the figure would not be judged."
+        }
+      ]
+    },
+    {
+      "choice": "Answer to the finding on criterion 3: the demonstration command is `cargo run -p athena-cli -- status --snapshot <job>/evidence`. It has no angle brackets, redirection, variable, backtick or chaining. The `git log` comparison is a second, separate command.",
+      "reason": "The evidence directory is `evidence_dir(state, job)` = `state.job_dir(job).join(\"evidence\")` (snapshot.rs:34-36), and `job_dir` is `root/jobs/ID` (state.rs:94-96). Planning writes its snapshot at `job_dir(id)/plan-N` (run/planning.rs:380), and this plan's working directory is `<job>/plan-1`. So the state root is `<state>` and the evidence path is the one above. Dispatch writes the snapshot with `snapshot::write(&self.git, head, &evidence)?` (run/mod.rs:1174-1175), and a failure to write or lock it fails the dispatch. The verifier is given the same path when the directory exists (verification.rs:199-200), and its brief tells it to run exactly `cargo run -p athena-cli -- status --snapshot {path}` (briefs.rs:669). I could not list that directory (the read policy refuses paths outside plan-1), so the path is derived from code, not seen. If the verifier's brief names a different path, the verifier uses that one; the command is otherwise identical.",
+      "rejected": [
+        {
+          "option": "The placeholder `<job>/evidence` or `<committed evidence directory>` inside the command",
+          "why": "The command check reads the angle brackets as a redirection; that is the finding. (The criterion's own text keeps `<committed evidence directory>`; snapshot_args at records_criteria.rs:246-271 skips it through its closing `>`, which is how Athena maps it to the real path for its own run, and the plan does not edit the criterion.)"
+        },
+        {
+          "option": "The bare word `evidence` that records_criteria.rs:246-271 accepts",
+          "why": "Athena rewrites that word to the real path only for its own run on the producer's tree (records_criteria.rs:680-697); a verifier running it would resolve `evidence` against its own copy, which has no such directory."
+        },
+        {
+          "option": "One chained command with `&&` for status and git log",
+          "why": "The brief asks for git log as its own simple command, and a chain is judged one simple command at a time."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal or reading rule changes, so no refusal_corpus case is added.",
+      "reason": "The reading for this job was already accepted. `check_records_measure` and its accepting case `records-measure-change-with-real-records-range-history-json` (refusal_corpus.rs:343-427 onward) are not touched. `is_test_check` moves an existing equality (`name == \"test\"`) and parses no input. The corpus mentions throughput.rs only as a deliverable path string (lines 379-414), not as code it calls.",
+      "rejected": [
+        {
+          "option": "Add a corpus case for the new status output",
+          "why": "The corpus tests reading and plan refusal rules, not the status printer."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/status/stages.rs",
+      "action": "create",
+      "purpose": "Stage, JobStages and StageBreakdown::compute: the stages per recent landed job with minutes, main reason and also-facts; the reason rules; unit tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/status/throughput.rs",
+      "action": "modify",
+      "purpose": "Take the oldest landing record via a new pub(super) landing_record, make landing_record_time use it, use checks::is_test_check in test_check_seconds, update the StageMinutes and landing_record_time docs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Declare `mod stages; pub use stages::*;`, add `stage_breakdown: Option<StageBreakdown>` to StatusView (serde skip when None), fill it at the one literal, make the test helper `landing_of` pub(crate), add the two-record landing test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/snapshot.rs",
+      "action": "modify",
+      "purpose": "Add `stage_breakdown` to SnapshotView, fill it in status(), update the module doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Add `is_test_check(&CheckRun) -> bool` (name == \"test\") as the one test-versus-compile/lint rule, with a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Add stage_lines printing each stage's minutes and main reason with `not recorded` for None; call it after the throughput print in status and snapshot_status; unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/status_snapshot.rs",
+      "action": "modify",
+      "purpose": "New test: run `status --snapshot` on the landed() fixture and assert the stage lines, a `landing time` line, `disk wait ... not recorded`, and that the --json stage_breakdown equals the one computed from Records::load.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One `### Changed` bullet under [Unreleased] for per-stage timing and reasons, naming the oldest-landing-record fix, the limits and the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D190 with Case, Decision, Alternatives, Tradeoff, Reversal cost and a Provenance bullet noting the 24 h time limits (20261114-184053-050s) were dropped and timing is measured; edit no existing entry.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the code the edits fit into: throughput.rs 355-413 and 470-498, status.rs 405-470 and 1300-1338, snapshot.rs 232-279, display.rs 1196-1249 and 1354-1366, and the test helpers `invocation` (status.rs:2073), `timed_job` (status.rs:3022) and `landing_of` (status.rs:3290). Read the `landed()` fixture the CLI test uses and note whether it holds JobPlan records.",
+    "checks.rs: add `pub fn is_test_check(run: &CheckRun) -> bool { run.name == \"test\" }` with a doc comment saying it is the one test-versus-compile/lint rule and why (CheckRun keeps no kind), plus a unit test. In throughput.rs make `test_check_seconds` use it (same behavior).",
+    "throughput.rs: add `pub(super) fn landing_record(records, job) -> Option<&Landing>` returning the record with the smallest `created_at` (ties by id) among records with a JobLanding commit naming the job; rewrite `landing_record_time` as `landing_record(..).map(|l| l.created_at)`; update its doc and the StageMinutes doc to say 'oldest', with the reason (a later PR's commit list names the job again). In status.rs make `landing_of` `pub(crate)` and add test `a_second_landing_record_does_not_move_the_landing_time` beside the landing tests (status.rs:3323-3348), using records 6 and 400 minutes after the verifier ends and asserting the stage is 6.0.",
+    "Create status/stages.rs. Define `Stage { name: String, minutes: Option<f64>, reason: Option<String>, also: Vec<String> }`, `JobStages { id, landed_at: jiff::Timestamp, landing_found: bool, stages: Vec<Stage> }` and `StageBreakdown { jobs: Vec<JobStages> }` (Serialize, Debug, Clone, PartialEq). `StageBreakdown::compute(records)` takes the newest `STAGE_JOBS = 5` of `landed_jobs(records)`, newest first, and returns None when there are none. Per job build the stages in order: queue wait (first reader started_at minus Request.received_at, clamped at 0, reason `request channel NAME`); reading; one `planning round N` per round found in `plans` and `critiques` (planner invocation by JobPlan.invocation_seq plus critic invocation by Critique.invocation_seq; a round after the first is a retry), or one `planning` stage from the planner and critic invocations when there are no plan records; producer; checks (sum of measured durations for checks that ran; reason from the largest of test time, compile/lint time and summed queued_s; None when no check ran); verifier; landing (LandedJob.stages.landing_and_rebuild only when landing_found, reason from `landing_record`: PR number and merge method; otherwise None with reason 'no landing record names this job'); disk wait (None, None). A shared helper `invocation_reasons(&[&Invocation], retry: bool) -> (Option<String>, Vec<String>)` applies the order retries, tokens (sum of known Quantity::value() of input, output, cache read and cache write, with the split in the text; None if none is known), turns and tool calls, model and effort. Clamp every minute with `.max(0.0)` and `crate::store::positive_zero`. Write the unit tests of demonstrations 1 and 4 in this file's test module.",
+    "status.rs: add `mod stages;` and `pub use stages::*;` beside the other modules (status.rs:18-22); add the `stage_breakdown` field to StatusView after `throughput` with `#[serde(skip_serializing_if = \"Option::is_none\")]` and a doc comment; fill it at the literal at status.rs:1300 with `StageBreakdown::compute(&records)`. snapshot.rs: add the same field to SnapshotView, fill it in `status()` with `StageBreakdown::compute(&records)`, and update the module doc (lines 13-15).",
+    "display.rs: add `pub fn stage_lines(b: &StageBreakdown) -> String` and `const NOT_RECORDED: &str = \"not recorded\"`. Per job print a header with the job id and its landed timestamp, then one line per stage: NAME N.N minutes, a `main:` field with the reason or `not recorded`, and an `also:` field for each extra fact; a None minutes prints NAME `not recorded`. The landing line begins `landing time` and uses the whole word `minutes`. Call it right after the throughput print in `status` (display.rs:1364-1366) and in `snapshot_status` (display.rs:1245-1247). Add unit tests, with `stage_lines` in their names, for a fully recorded job, a job with None minutes and reason, and a job with no landing record.",
+    "status_snapshot.rs: add a test that builds the snapshot of the `landed()` fixture as the existing test does (status_snapshot.rs:58-66), runs `status --snapshot DIR` and with `--json`, and asserts the stage names in order (one `planning` line if the fixture has no plan records), a `landing time` line, a `disk wait` line holding `not recorded`, and `json[\"stage_breakdown\"]` equal to the serialised `StageBreakdown::compute` of `Records::load(&fx.git, &head)` (compared as parsed text on both sides, as lines 92-96 do).",
+    "CHANGELOG.md: add a `### Changed` bullet at the top of `[Unreleased]` covering what `athena status` prints per stage, that no record type is added, the landing-record change from newest to oldest and why, `not recorded` for missing figures and for disk wait, the fixed-order main reason and its limit, the check-name rule, and the tests. Append D190 to docs/decisions.md after D189 with Case, Decision, Alternatives, Tradeoff, Reversal cost and a Provenance bullet saying the stage time limits were raised to 24 h by job 20261114-184053-050s and timing is now measured instead, with 'Ran' and 'Not measured' lists. Edit no earlier entry.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, each as its own command.",
+    "Run criterion 3 on the real snapshot with the path from the producer brief's Evidence snapshot section, which is the same absolute path as the demonstration: `cargo run -p athena-cli -- status --snapshot <job>/evidence` (if the directory is missing the job already failed at dispatch, so there is nothing to wait for). As a separate command, run `git log --first-parent -n 30 --format=fuller`, and compare the printed landed timestamps and landing times with the committer times, using history.json in that directory if the copy has no history. Report any figure of 0.1 or of hundreds of minutes in open_issues without widening scope."
+  ],
+  "risks": [
+    {
+      "risk": "I could not read the real evidence directory or any records (the read policy refuses paths outside the plan working copy), so the claim that the newest landing record causes the out-of-range landing figures rests on code (throughput.rs:389-403, gh/records.rs:128-143, 221-250) and on the measured table in docs/design/agent-and-build-slots.md:247-254, not on data I saw. The evidence path in criterion 3 is derived from code (snapshot.rs:34-36, state.rs:94-96, planning.rs:380), not listed.",
+      "mitigation": "The producer runs criterion 3 on the real snapshot (Athena runs it too, D183) and compares the printed landed timestamps with the committer times in git log or history.json before finishing. If the oldest record still gives hundreds of minutes, it reports that in open_issues and does not widen scope. If the verifier's brief names a different evidence path, the verifier uses that one; the command is otherwise the same."
+    },
+    {
+      "risk": "The verifier's copy may hold no git history, so `git log` shows one commit.",
+      "mitigation": "The demonstration names history.json in the evidence directory as the fallback source of the same committer times (snapshot.rs:38-54); both are read-only reads."
+    },
+    {
+      "risk": "The main reason is a fixed-order pick, not a measured cause. Tokens are nearly always known, so tokens is usually the main reason for a single call.",
+      "mitigation": "Print the main reason and the `also` facts side by side, state the fixed order in the doc comment and in D190, and make no claim that it is the cause. D190 records the limit."
+    },
+    {
+      "risk": "Compile/lint time is every check not named `test`; a repository naming its checks differently is misread, because CheckRun keeps no kind.",
+      "mitigation": "Document the name rule in is_test_check; CHANGELOG and D190 list it as a limit."
+    },
+    {
+      "risk": "Taking the oldest record changes ordering and medians for any job with several landing records (throughput.rs:522-531), and a catch-up record that is the only record for a job still gives a late time.",
+      "mitigation": "A two-record test plus the dependents list; the change only moves rank for jobs with several records, which no existing fixture has. The catch-up case is listed as a limit in D190."
+    },
+    {
+      "risk": "The D183 judge reads figures after the measure phrase; a stage line shaped like job id and number entries separated by a middle dot inside parentheses could be read as a per-item list.",
+      "mitigation": "Stage lines use a fixed label column and put the reason after `main:` with no parenthesised list of job ids; tests assert exact stage names and order."
+    },
+    {
+      "risk": "The `landed()` fixture may hold no JobPlan records, so a test that expects `planning round 1` would fail on it.",
+      "mitigation": "The compute function falls back to one `planning` stage when there are no plan records. The CLI test asserts one line starting `planning` and the exact names of the other stages; the producer reads the fixture before fixing the strings."
+    },
+    {
+      "risk": "docs/decisions.md and CHANGELOG.md are large (485 KB and 508 KB); an edit that touches an old entry fails the D162 structure check.",
+      "mitigation": "Append only; the producer runs the full `cargo test --locked`."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "landing_record_time now returns the oldest record, not the newest (throughput.rs:389-403)",
+      "dependent": "crates/athena-core/src/hestia.rs:2369 (landed_jobs_among_first), :2548 (Throughput::compute), :2566 and :6461 (landed_jobs) use landing_end",
+      "kind": "code",
+      "test": "cargo test -p athena-core hestia and cargo test -p athena-core status::tests; the new test a_second_landing_record_does_not_move_the_landing_time covers the changed case. Each existing fixture has at most one landing record per job, so oldest equals newest and no figure moves.",
+      "reason": null
+    },
+    {
+      "name": "landing_record_time now returns the oldest record",
+      "dependent": "crates/athena-core/src/class_trend.rs:104 (landed_jobs, minutes per landed job by class)",
+      "kind": "code",
+      "test": null,
+      "reason": "It reads `stages.total()` and `landed_at` only. With one record per job the value is unchanged; with several it falls to the first merge, the intended correction. No class_trend or hestia fixture builds two records for one job."
+    },
+    {
+      "name": "landing_end ordering and duration key",
+      "dependent": "crates/athena-core/src/status/throughput.rs: waste_windows, ranked_landings (522-531), busy_intervals (418-448), time_spent (452-468), median_windows; callers of landing_end at lines 409, 442, 460, 478, 527",
+      "kind": "code",
+      "test": null,
+      "reason": "Only a job with two or more landing records changes rank or time, and then to its first landing, which is what the doc on `landed_jobs_among_first` ('a landing record written after the review can move a job's landing end') anticipates. No existing test builds two records for one job. The doc comments on StageMinutes and landing_record_time are updated to say 'oldest landing record'."
+    },
+    {
+      "name": "test-check name rule moved to checks::is_test_check",
+      "dependent": "crates/athena-core/src/status/throughput.rs:47 test_check_seconds, via check_durations (status.rs:1245)",
+      "kind": "code",
+      "test": "cargo test -p athena-core check_durations (status.rs tests at 2709-2756). The rule is the same `c.name == \"test\"`, so every figure is unchanged. Other `name == \"test\"` sites (routing.rs:286, code_health.rs:475) are left as they are.",
+      "reason": null
+    },
+    {
+      "name": "StatusView and SnapshotView gain `stage_breakdown`",
+      "dependent": "crates/athena-cli/src/display.rs:1196 snapshot_status and :1274 status; crates/athena-cli/src/commands.rs:473-498 which print them",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test status_snapshot (existing and new test). The checks `shown.contains(&throughput)` and the --json equality on `throughput` (status_snapshot.rs:94-119) still hold because Throughput and its text are unchanged and the new field is a sibling.",
+      "reason": null
+    },
+    {
+      "name": "StatusView gains a field",
+      "dependent": "crates/athena-core/src/reconcile.rs status_with_reconcile; the one StatusView literal at status.rs:1300",
+      "kind": "code",
+      "test": null,
+      "reason": "A search for `StatusView {` over crates/athena-core/src finds only the literal at status.rs:1300 (reconcile.rs holds no literal), so no other construction needs the field. The field has `skip_serializing_if = \"Option::is_none\"`, so JSON is unchanged when None."
+    },
+    {
+      "name": "SnapshotView gains `stage_breakdown`; the module doc says only the throughput text is printed",
+      "dependent": "crates/athena-core/src/snapshot.rs module doc (lines 13-15) and the `status()` literal (snapshot.rs:266)",
+      "kind": "code",
+      "test": "cargo test -p athena-core snapshot. The doc line is updated and the one SnapshotView literal in `status()` gets the field.",
+      "reason": null
+    },
+    {
+      "name": "status measure labels",
+      "dependent": "crates/athena-core/src/status.rs:313-332 STATUS_MEASURE_LABELS and test `every_measure_label_names_a_status_view_field_and_a_printed_line` (status.rs:1705, include_str! of status.rs and display.rs)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core every_measure_label_names_a_status_view_field_and_a_printed_line. No label is added and no listed label's field or printed line is edited. The new line labels (`queue wait`, `landing time`) are not in the list.",
+      "reason": null
+    },
+    {
+      "name": "output shape of `status --snapshot` that the real-records criterion judges",
+      "dependent": "crates/athena-core/src/run/records_criteria.rs and D183 (docs/decisions.md:5321-5354), which run criterion 3 on the producer's tree before the verifier",
+      "kind": "rule",
+      "test": "cargo test -p athena-core records_criteria",
+      "reason": "The criterion's phrase is `landing time` (records_criteria.rs:275-284). The new landing line has the phrase, a number and the whole word `minutes`, so the figure is judged. No line holds the phrase followed by a parenthesised list of job id and number entries separated by a middle dot, so the per-item rule (records_criteria.rs:54-57) does not misfire. The criterion states no readable range, so the run is recorded and not judged by range."
+    },
+    {
+      "name": "evidence snapshot path `<state>/jobs/ID/evidence` named in criterion 3's demonstration",
+      "dependent": "crates/athena-context/src/briefs.rs:647-673 (evidence_section, evidence_placeholder), crates/athena-core/src/run/verification.rs:199-200, crates/athena-core/src/run/producer.rs:710, crates/athena-core/src/reading.rs:427 (readers of the evidence directory)",
+      "kind": "code",
+      "test": null,
+      "reason": "The plan only reads the snapshot through the existing `status --snapshot` command. It changes no brief text, no snapshot writer and no placeholder rule, so these readers see the same directory and the same history.json."
+    },
+    {
+      "name": "reading rule `check_records_measure`",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (records-measure cases at lines 343-427 onward)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus (unchanged; I read the case ids, not a result)",
+      "reason": "The plan changes no reading, plan or refusal rule; the corpus uses throughput.rs only as a deliverable path string (lines 379-414). Its accepting case for a real-records criterion with a history.json range is the form criterion 3 has, and is unaffected."
+    },
+    {
+      "name": "appending D190 to docs/decisions.md",
+      "dependent": "docs/decisions.md D162 mirror/structure check and D187 link check (crates/athena-core/src/run/checks.rs decision_gate, docs/decision-links.toml)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core governed; cargo test -p athena-cli --test backtest",
+      "reason": "The edit only appends an entry in D189's form with no `Amends` or `Supersedes` phrase, so link_problems finds no phrase needing a link and no old entry is rewritten."
+    },
+    {
+      "name": "new prose in tracked files",
+      "dependent": "xtask/tests/policy.rs boundary scan and the [personal_data] allow-list in athena.toml over CHANGELOG.md and docs/decisions.md",
+      "kind": "rule",
+      "test": "cargo test --locked (xtask policy tests)",
+      "reason": "The new text names no email and none of the scan's banned words (docs/system-facts.md describes the scan without listing them). The request's user is already named in CHANGELOG.md, so no new class of text is added."
+    },
+    {
+      "name": "records and data files under crates/",
+      "dependent": "crates/athena-data records validation allow-list (check_record_file, AnyRecord) and the athena-readonly owner paths",
+      "kind": "rule",
+      "test": null,
+      "reason": "No record or data file is added or changed under crates/; the plan adds Rust sources only, so no allow-list entry is needed."
+    },
+    {
+      "name": "configuration and flows near the change",
+      "dependent": "athena.toml, defaults.toml, [parallel] max_concurrency, check_timeout_s, the drain, landing, check-slot and build-slot code",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The change is read-only over records. It touches no config key and no landing, drain, check-slot or build-slot code, so max_concurrency, check_timeout_s and the time limits kept from 20261114-184053-050s are unaffected. `queued_s` is read, not written."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in status/stages.rs build one landed job as in-memory records (request, reader, planner and critic invocations with JobPlan and Critique round records, producer, checks with queued_s, verifier, outcome, one landing record) and call StageBreakdown::compute. A second fixture has two planning rounds; a third has no plan records and falls back to one `planning` stage. The diff also shows the Stage struct fields `minutes`, `reason` and `also`.",
+      "command": "cargo test -p athena-core status::stages",
+      "observes": "Stage names come out in order: queue wait, reading, planning round 1, producer, checks, verifier, landing, disk wait. The two-round job lists `planning round 1` then `planning round 2`. Each stage has Some minutes equal to the fixture's timestamp differences, and a reason where the fixture holds the data.",
+      "fails_without": "Without stages.rs the StageBreakdown, JobStages and Stage types do not exist and the test module does not compile. Dropping a stage such as planning rounds or disk wait fails the assertion on stage names in `the_breakdown_lists_all_eight_stages_in_order`.",
+      "seam": "Production entry `StageBreakdown::compute(&Records)`, added by step 4. The fixture is in-memory `Records` and `JobRecords` built by the test. The existing helpers `invocation` (status.rs:2073) and `timed_job` (status.rs:3022) are `pub(crate)` inside the `#[cfg(test)] pub(crate) mod planning_cost_tests` (status.rs:2060-2061), so the sibling module reaches them as `crate::status::planning_cost_tests::{invocation, timed_job}`. `landing_of` (status.rs:3290) is private today; step 3 makes it `pub(crate)`. No double replaces any logic; the fixture is only records."
+    },
+    {
+      "criterion": 2,
+      "method": "Display unit tests in crates/athena-cli/src/display.rs call `stage_lines` on hand-built StageBreakdown values: one fully recorded job, one with a None minutes and a None reason, and one with no landing record. `stage_lines` is the function `display::status` and `display::snapshot_status` call after the throughput print. As its own command, `cargo test -p athena-cli --test status_snapshot` (step 7) runs the real binary on a snapshot of the lifecycle fixture.",
+      "command": "cargo test -p athena-cli stage_lines",
+      "observes": "A recorded stage prints its name, N.N minutes and `main:` with the reason. A missing minute prints `not recorded` and a missing reason prints `main: not recorded`; neither prints 0 or 0.0. The disk wait line prints `not recorded`. The landing line begins `landing time`.",
+      "fails_without": "Without the display change `stage_lines` does not exist and the CLI snapshot test finds no `disk wait` line. A version that printed 0.0 for a missing time fails the assertion that the line contains `not recorded` and not `0.0`.",
+      "seam": "Production entry `display::stage_lines` (added by step 6), called from `display::status` (display.rs:1364-1366) and `display::snapshot_status` (display.rs:1245-1247), both of which exist today. The unit-test input is a StageBreakdown value built in the test, with no double. The CLI test uses the existing `landed()` repository fixture and `athena_in` (status_snapshot.rs:40-52, 58-66)."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the command above on the real evidence snapshot Athena wrote at dispatch (run/mod.rs:1174-1175). Athena also runs it on the producer's tree before the verifier (D183). Then, as a separate simple command, run `git log --first-parent -n 30 --format=fuller` and compare each printed landed timestamp and `landing time` figure with the committer time of that job's host commit (its Athena-Job trailer names the job). If the verifier's copy has only one commit, read `history.json` in the same evidence directory with the Read tool; it holds the same committer times for the newest 200 first-parent commits (snapshot.rs:38-54, 98-110). The range comes from git history and history.json, which the change does not compute.",
+      "command": "cargo run -p athena-cli -- status --snapshot <job>/evidence",
+      "observes": "For each of the newest 5 landed jobs there is a header line naming the job id and its landed timestamp, then the stage lines in order, ending with `landing time` and `disk wait`. The landed timestamp is within a few to tens of minutes of the host commit's committer time. The `landing time` figure is a few to tens of minutes, not 0.1 and not hundreds (the old newest-record rule gave 1220 to 2112 minutes on five sampled jobs, docs/design/agent-and-build-slots.md:247-254). A job with no landing record prints `landing time not recorded`. The `disk wait` line prints `not recorded`.",
+      "fails_without": "Without the change the output has no per-stage lines, so the check that each recent landed job lists its stages fails. Using the newest record instead of the oldest prints a landing time of hundreds of minutes or more beyond the host commit time. The 0.1-minute outcome fallback is no longer printed, because that case prints `not recorded`.",
+      "seam": "The real binary through `cargo run -p athena-cli -- status --snapshot` on the real evidence directory. Entry points `snapshot::status` (snapshot.rs:251) and `display::snapshot_status` (display.rs:1196) exist today; the stage output they print is added by steps 4 to 6. Guards: `snapshot::status` fails if the directory is missing (snapshot.rs:252-257) or has no history.json; dispatch cannot succeed without the snapshot (run/mod.rs:1175) and Athena ends the job early if it is unreadable (records_criteria.rs:508-517, 759-767). No fake or fixture is injected; the data is real records."
+    },
+    {
+      "criterion": 4,
+      "method": "Run `cargo test -p athena-core` and, as its own command, `cargo test -p athena-cli`. New tests in status/stages.rs, status.rs, checks.rs, display.rs and status_snapshot.rs: (1) a planning round with one planner call and one critic call, about 40 minutes and 900000 tokens, has a main reason starting `tokens 900000`; a round-2 fixture (a second planner call after a revise) has a main reason starting `retry`. (2) A checks stage with test 20 min, clippy 5 min and queued_s 30 s names `test time`; clippy 20 min and test 2 min names `compile/lint time`; queued_s largest names `build-slot wait`. (3) A job whose producer invocation has pending tokens, turns None, no commands and an empty model has reason None, and its line prints `not recorded`. (4) Disk wait is None for every job and prints `not recorded`. (5) Two landing records naming one job, 6 and 400 minutes after the verifier, give landing time 6 minutes. (6) The status_snapshot.rs test runs the binary on the `landed()` fixture and asserts the `disk wait` line holds `not recorded` and a `landing time` line exists.",
+      "command": "cargo test -p athena-core",
+      "observes": "Each assertion holds after the change; the tests fail at base because the new symbols do not exist.",
+      "fails_without": "The new tests reference StageBreakdown, is_test_check and stage_lines, so without the change they do not compile. Behavior checks that also fail: `a_slow_planning_round_names_its_tokens_or_its_retry` fails if the reason were the model name only; `a_slow_check_names_build_versus_test_time` fails if every check reported test time; `a_second_landing_record_does_not_move_the_landing_time` fails with `max`; `a_missing_reason_prints_not_recorded` fails if None printed as 0 or an empty string.",
+      "seam": "Production entries `StageBreakdown::compute` (step 4), `landed_jobs` via `landing_record_time` (throughput.rs:472, 391), `checks::is_test_check` (step 2) and `display::stage_lines` (step 6). Core fixtures are in-memory Records built by the test with the existing helpers named under criterion 1; the CLI fixture is the existing `landed()` repository in status_snapshot.rs. No double replaces the logic under test."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three checks Athena records on the final tree, each as its own simple command: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked`.",
+      "command": "cargo test --locked",
+      "observes": "Each exits 0 with no warnings. The existing tests that read the landing stage and the check-duration tests (status.rs:2709-2756) still pass, because with one landing record per job min equals max and `is_test_check` keeps the `name == \"test\"` rule.",
+      "fails_without": "A formatting slip, a clippy warning, or a broken existing test (such as a throughput test whose figure moved) fails the matching command.",
+      "seam": "The recorded checks are the commands themselves. No seam is injected."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff. CHANGELOG.md has a new `### Changed` bullet at the top of `[Unreleased]` for per-stage timing and reasons. docs/decisions.md has only appended lines: a new D190 entry in D189's form with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance bullets.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md",
+      "observes": "The Provenance bullet says the 24 h time limits (job 20261114-184053-050s) were dropped and timing is measured instead. The decisions diff shows only added lines after D189. The entry uses `relates to`, not a statement phrase from docs/decision-links.toml, so no link entry is needed.",
+      "fails_without": "Without the edits the diff is empty for both files. The decision-log structure and mirror tests in `cargo test --locked` (D162) fail if D190 lacks its Provenance bullet or an old entry is edited."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "38862c6da6bc28f87b9b33b8b3cd8d1d2f71ccff9a278b8ba72618a5ad1911ce"
+}
