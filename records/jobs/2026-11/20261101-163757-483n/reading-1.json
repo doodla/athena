@@ -1,0 +1,149 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261101-163757-483n",
+  "n": 1,
+  "at": "2026-11-16T04:27:17.453972607Z",
+  "invocation_seq": 2,
+  "base_commit": "9115271bf6099d549ae5b711bbeaf0242bd3acbd",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Check agent login before dispatch and each stage; hold on expiry",
+  "summary": "Add a login-validity probe run before a job is dispatched and before each agent stage. If the login is expired, or expires within the stage deadline, hold the job as an environment stop with a re-authenticate message and start no producer, modelled on the existing disk_gate/hold_for_disk path. Audience: whoever drains jobs and sees an environment hold instead of a mid-run 401.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Criteria require cargo test, clippy and fmt --check to pass."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criterion checks the producer is never run on expired login."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced by a gate in code, with a test that fails without it."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/run/mod.rs (produce_and_verify, disk_gate and hold_for_disk run before the producer and hold the job as an environment stop with no candidate; producer_stop_reason in crates/athena-core/src/disk.rs gives the environment reason for an expired login) and crates/athena-agent/src/claude.rs (api_error_status classifies a 401; the driver retries it once after AUTH_RETRY_WAIT; tests use a shell stub with MODE=auth_always). Nothing checks the login before the producer starts. The new gate runs first in produce_and_verify and at dispatch, ahead of each agent stage, reusing the hold path and the 401 classifier.",
+    "Records validation: no new record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are not affected; the hold reuses the existing environment-stop closing.",
+    "The login check is a trait or method on the agent driver so a stub can return expired, valid, or expiring-soon; the real implementation uses a cheap authenticated call or the credential's expiry time. The stage deadline comes from the existing per-stage timeout config.",
+    "The named file records/failure-classes/2026-10/20261028-112757-sygc.json is the failure-class evidence and is read-only; it is not a deliverable.",
+    "Governance files (athena.toml, defaults.toml, workflows) are not changed; no new config key is added and the stage deadline reuses an existing value. Consumers: none found.",
+    "Environment: no CI workflow, push or PR is touched; tests run offline against stubs."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new login-validity check in crates/athena-agent/src/ (or the run module) returns expired when the login is expired or expires within the stage deadline; the diff shows it called in crates/athena-core/src/run/mod.rs before the producer starts and before each agent stage, not only after a 401.",
+      "kind": "content"
+    },
+    {
+      "text": "When the check fails, the job is held through the existing environment-stop path (like hold_for_disk), with a message telling the user to re-authenticate; the diff shows no candidate or resume mark is created.",
+      "kind": "content"
+    },
+    {
+      "text": "A new test in crates/athena-core/src/run/tests.rs uses an expired-login stub; it asserts dispatch holds the job as an environment stop and the producer stub is never invoked (a call counter or marker stays zero). Run cargo test; the test passes, and fails if the gate call is removed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second test with a valid-login stub shows the producer still runs and the job proceeds as before. Run cargo test and see it pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Existing tests still pass and no unrelated behavior changes: run cargo test (the whole suite), cargo clippy and cargo fmt --check, each as its own command, and all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md gains an entry for the change, and the new rule is stated in docs where hold rules are described, recorded as a new appended decision in docs/decisions.md with a Provenance bullet; no existing entry is edited.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.6
+    }
+  ],
+  "out_of_scope": [
+    "Changing the existing mid-run 401 retry behavior",
+    "Automatic re-authentication or token refresh",
+    "Edits to records/ or athena.toml"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.2,
+        "p90": 6.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2600.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.684297520661157,
+      "p_user_intervenes": 0.06044444444444444,
+      "cost_usd": {
+        "p10": 0.5539561510829174,
+        "p50": 1.5350815319454534,
+        "p90": 6.439481603055482
+      },
+      "wall_time_s": {
+        "p10": 607.8917087625641,
+        "p50": 2198.6818760249994,
+        "p90": 4523.914409046081
+      }
+    }
+  },
+  "departures": "Slightly higher cost and time than reference: a pipeline gate touching dispatch and several stages needs a new stub test.",
+  "urgent_reason": "Cuts failed attempts and wasted producer runs that end in a 401 mid-run.",
+  "hard_reason": "Adds a gate that can hold jobs and changes the run pipeline's dispatch and stage order, so a mistake is costly.",
+  "producer_effort": "high"
+}

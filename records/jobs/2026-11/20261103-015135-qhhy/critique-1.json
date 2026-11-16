@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-015135-qhhy",
+  "round": 1,
+  "at": "2026-11-16T05:24:04.885332269Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Two expected deliverables, stream.rs and briefs.rs, are left unchanged, and the plan does not say to report them with a reason.",
+      "evidence": "The reading lists crates/athena-agent/src/stream.rs and crates/athena-context/src/briefs.rs as deliverables to modify. `planned_paths` adds the accepted reading's deliverables to the plan's files. `unchanged_planned_files` flags any of those paths that the diff does not change unless the producer report's `unchanged_planned_files` names it with a reason, and a flagged path sends the candidate back to the producer before the verifier runs. The plan uses `tools_used()` as it stands and rejects changing the brief, so neither file is edited, but no step says to report them. Fix: Add a step: in the producer report, list stream.rs (`tools_used` is used as it is) and briefs.rs (decision 3 rejects a brief change) under `unchanged_planned_files`, each with its reason.",
+      "location": "Plan Files / Steps; crates/athena-core/src/run/mod.rs:1686-1729; crates/athena-core/src/run/producer.rs:337, 484",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No test checks that the live mirror is rewritten with the failed record.",
+      "evidence": "invocation.rs:259-261 writes the Success record to the live mirror before `read_once` changes it. The plan's mitigation is a `write_live` call, but the core test only checks the committed record loaded by `Records::load`. Removing the `write_live` call would leave a stale Success mirror and no test would fail. Fix: In the new core test, also read the job's live invocation file through the state directory and assert its outcome is not Success and its detail holds the error text.",
+      "location": "Plan step 2 and the Risks entry on the live mirror",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No test covers the driver's detail being joined to the reader's error text in the stored record.",
+      "evidence": "Step 2 builds the detail as 'the reader returned no structured reading' plus ': <driver detail>' when the record already has a detail. The core test uses `FakeAgentDriver` with detail None, so only the plain sentence is checked. The claude.rs test checks the driver detail, but not that it reaches the reader record. FakeTurn has a `detail` field (fake.rs:120) that could carry it. Fix: In the core test's script, also set `turn.detail = Some(\"no structured output: result subtype \\\"success\\\"; ...\")` for one read, and assert that the stored reader record's detail contains both the fixed sentence and the driver text.",
+      "location": "Plan step 5 / Criterion 2 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The CHANGELOG could name the likely remaining causes and how the new detail tells them apart.",
+      "evidence": "Two causes remain: the model ends in prose without calling StructuredOutput, or it calls the tool and its output is rejected. The new 'tools used' field separates them, because StructuredOutput is a tool_use that stream.rs:115-121 records by name. Fix: In the CHANGELOG cause section, say that 'tools used' containing StructuredOutput points to rejected output and its absence points to the model never calling the tool, so the next failure's record settles which cause it is.",
+      "location": "Plan step 6 / Criterion 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's claims against the snapshot and they hold. In `read_once` (reading.rs:583-774), every read path goes through `read_for`: `ask`, `read_queued`, `read_unread`, `correct` and the re-read in run/pin.rs:167. At reading.rs:702-709, a read with no structured output returns the record unchanged, with outcome Success and detail None. `invoke_and_record` writes the live mirror before that point (invocation.rs:258-261), so the plan is right to rewrite it. In claude.rs:250-275, `output_from_result` sets detail only when the result is not ok, and `StreamState::tools_used` (stream.rs:168) exists but nothing calls it. The new detail starts with 'no structured output', so neither `api_error_status` nor `usage_limit_hit` matches it, and the 401 retry still fires only for Error. I grepped the readers of invocation outcome and detail. Every role consumer reads detail only after outcome is not Success. status.rs and display.rs print the outcome as text, and invariant.rs:768 skips Reader records. Whether a job counts as unread depends on whether it has a reading, not on the reader's outcome (run/mod.rs:481-484). The existing failed-read tests (drain.rs:4219, run_pin_tests.rs:2236-2335) check the error text or the commit body, and the plan keeps both. The stand-in tests that assert `detail == None` (claude.rs:1014, 1185) use the default result line, which has structured output. The reader cap is 2.00 (athena.toml:44), far above the $0.12-0.17 spent, so the plan correctly rules out a budget stop. The root cause cannot be proven without the stored runs, and criterion 3 allows saying so. Recording the result subtype, turns, tools used and result text where the driver drops them is the right fix at the origin, not a guess: whether StructuredOutput appears in the tools used tells a model that never called the tool from one whose output was rejected. I found three minor gaps, none blocking."
+}

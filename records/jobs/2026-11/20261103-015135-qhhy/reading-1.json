@@ -1,0 +1,145 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261103-015135-qhhy",
+  "n": 1,
+  "at": "2026-11-16T05:16:19.732708727Z",
+  "invocation_seq": 1,
+  "base_commit": "060b6421963f37089f1e61cb35878d9cd614f102",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Record failed reads as failed invocations and fix the cause",
+  "summary": "Make a read that yields no reading record its invocation as a failure with the reader's error in detail (reading.rs first_reading/read_unread path), find why the reader returns no structured output and fix it at its origin, add a fake-reader test and a CHANGELOG entry. Jobs 20261102-205332-qv3s and 20261102-171907-ab85 are cited as evidence only and are not reworked.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New fake-reader test; fmt, clippy and test criterion."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix the cause where it starts, plus record the failure."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Test asserts the stored record's outcome and detail."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: Athena's operator needs failed reads to be visible and countable in invocation records, and the failures to stop. Audience: the operator and the verifier reading records.",
+    "Code survey: read crates/athena-core/src/reading.rs lines 640-775 (the read path: invoke_and_record, then a non-success outcome returns ReadError::Failed with record.detail, and missing structured output returns ReadError::Failed('the reader returned no structured reading') with the record untouched, so the record keeps outcome success and detail null). first_reading (~1199) and read_unread (~1185) write the error only into the commit subject/body. Also saw crates/athena-agent/src/stream.rs:192 (structured_output parsing) and claude.rs result handling. No new record type or file is added, so no records allow-list change is needed; the invocation record's existing outcome and detail fields are reused.",
+    "Field meaning: InvocationOutcome and the invocation record's detail already carry a failure and its reason for other roles; reusing them for the reader fits. No config key changes.",
+    "The cause is unknown from the repository copy because records and git history are absent; the producer must find it from the code path (why the reader exits successfully without structured output, e.g. turn or budget limits near the $0.12-0.17 spend, or schema mismatch). I assume one fix at the origin plus the recording change.",
+    "Existing tests for the reader live in reading.rs or run/tests.rs; the new test goes next to the existing fake-reader tests.",
+    "Out of reach: the verifier cannot read records/ or the git log, so GIT-LOG.txt counts are not criteria."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "In crates/athena-core/src/reading.rs, when the reader gives no reading (no structured output, or a non-success outcome), the invocation record written for that read has a failure outcome (not Success) and its detail holds the reader's error text, e.g. 'the reader returned no structured reading'. A diff line in first_reading/the read path sets record.outcome and record.detail before the record is stored.",
+      "kind": "content"
+    },
+    {
+      "text": "A new test with a fake reader that returns no structured reading (run with cargo test -p athena-core, test name containing 'no_structured') reads the stored invocation record and asserts a failure outcome and the error text in detail; it fails on the old code, where the outcome is success and detail is null.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The root cause of the failed reads is named in the CHANGELOG entry and fixed where it starts in the diff (the reader's schema, prompt, budget or turn limit, or the way the agent layer reports a missing structured output), with the stored error text cited, not just the symptom recorded; if the stored errors do not show a single cause, the entry says so and what was checked.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry saying that failed reads are recorded as failed invocations with the error in detail, and giving the cause and its fix.",
+      "kind": "content"
+    },
+    {
+      "text": "Job 20261102-205332-qv3s (landed, verdict pass; its changed files in gh/, ci_result.rs, checks.rs, routing.rs, run/checks.rs, run/tests.rs, verify.rs, briefs.rs, CHANGELOG.md are kept as landed, not reworked) and job 20261102-171907-ab85 (landed; its files stay as landed) are not re-done. The diff touches none of those files except CHANGELOG.md and tests.",
+      "kind": "content"
+    },
+    {
+      "text": "Athena's recorded fmt, clippy and test checks on the final tree pass, and the existing reading tests still pass (cargo test -p athena-core).",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-agent/src/stream.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Rework of job 20261102-205332-qv3s (CI failing-test hand-off to the verifier): its 12 changed files stay as landed.",
+    "Rework of job 20261102-171907-ab85 (homepage/README audience wording): README.md, studies/firstmate-work-handling/intro.json, xtask/src/site.rs and xtask/tests/site_page.rs stay as landed.",
+    "New record types or data files; changes to athena.toml or defaults.toml.",
+    "Changing verifier rules or the verdict rules."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.6,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2200.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.684297520661157,
+      "p_user_intervenes": 0.06044444444444444,
+      "cost_usd": {
+        "p10": 0.5539561510829174,
+        "p50": 1.5350815319454534,
+        "p90": 6.439481603055482
+      },
+      "wall_time_s": {
+        "p10": 607.8917087625641,
+        "p50": 2198.6818760249994,
+        "p90": 4523.914409046081
+      }
+    }
+  },
+  "departures": "The root cause is unknown, so cost and time lean above the reference.",
+  "urgent_reason": "Failed reads waste about $0.12-0.17 each, repeated 4 times per job, and block queued jobs such as qv3s.",
+  "hard_reason": "It changes the run pipeline's reading step (how a read is recorded and closed) and the records it writes.",
+  "producer_effort": "high"
+}

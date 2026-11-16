@@ -1,0 +1,345 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-212650-gh7t",
+  "round": 2,
+  "at": "2026-11-16T04:26:42.32482744Z",
+  "invocation_seq": 4,
+  "approach": "Add one reading check, `check_real_records_command(reading, request)`, in crates/athena-core/src/reading/surveys.rs. It runs as one new `step!` line in `refusing_check`, after `check_scope_limit` (checks.rs:547) and before `check_boundary_and_repo_files` (checks.rs:548). It examines the Behavior criteria of a reading that has a capability. A criterion is flagged when it runs an athena command, names the real records/ queue, and has no stand-in place, no `--snapshot` and no Depends exemption in the request. Commands: `athena <sub>`, or `cargo run ... athena-cli ... -- <sub>` (also `--bin athena`), with `<sub>` one of status, plan, queue, drain, drain-status, retry, go, land, backtest. A `-- <sub>` that does not follow `cargo run` with athena-cli, such as `cargo test -p athena-core -- plan`, is not a command. Real-records phrases: real records (also `real-records`), records/ queue, repository's records, repo's records, real queue, live records, live queue. A stand-in counts only as a place: a stand-in word (fixture, fixtures, temp, tmp, temporary, synthetic) within three words after a place word (on, in, against, with, using, into, from), and not when a negation (not, never, no, without, instead, than) directly precedes that place word. `sample` is not an exemption. The request exemption is `dependency_ids_in(request)` (topics.rs:25) containing 20261030-070002-d103: only a 'Depends on' line or the retry link counts, never a bare mention. The error names each flagged criterion by number and text and gives three repairs. (a) For the reader: `cargo run -p athena-cli -- status --snapshot <evidence directory>`, which reads the read-only evidence copy Athena makes for every job (run/mod.rs:1174-1175, briefs.rs:655-672). (b) A fixture or temp directory. (c) For the request author: depend on job 20261030-070002-d103 with a line `Depends on 20261030-070002-d103`. The `--snapshot` form is exempt because it does not read records/ (briefs.rs:671: the working copy still has no records/) and it is the form `check_records_measure` asks for (surveys.rs:593-595). Tests: unit tests in reading.rs built from the e5sg and sz3z shapes, a measure-reading test showing the error's `--snapshot` repair passes both checks, and 13 corpus cases. A CHANGELOG item records the check. No prompt text changes. Root cause: nothing compared the commands a criterion runs with what the producer's and verifier's working copy holds (no records/, briefs.rs:671), so criteria that need the real queue were admitted and could not be met. The check sits in the shared gate, not in one reading.",
+  "decisions": [
+    {
+      "choice": "Settle finding 1 (major): the error offers three repairs, and the one the reader can use is the `--snapshot` form. The error says the working copy has no records/. (a) Reader: run `cargo run -p athena-cli -- status --snapshot <evidence directory>`, which reads the evidence copy; `plan` and the other commands have no such form. (b) Run the command on a fixture or a temp directory that the change or test builds. (c) Request author: the job must depend on job 20261030-070002-d103 with a line `Depends on 20261030-070002-d103`; the reader cannot add it, so it uses (a) or (b). A criterion containing `--snapshot` is never flagged.",
+      "reason": "Read: reader.rs `refusal_section` (reader.rs:395) puts the error into the one re-read (reading.rs:732-740, `read_for`). The reader cannot edit the request, so (c) alone cannot pass. check_records_measure (surveys.rs:538-602, run earlier at checks.rs:541) needs a Behavior criterion with `real records`, an independent source and an `expected range`, and it does not need `--snapshot`. So 'Run `athena status` on the real records ... expected range from history.json' passes it and is then refused here; only the `--snapshot` form passes both. The evidence copy exists for every dispatched job (run/mod.rs:1174-1175) and both briefs name its path (briefs.rs:655-672, `evidence_section`). The `--snapshot` command runs in records_criteria.rs:221-232 on that copy. HISTORY.txt:1104 shows the snapshot work landed (commit 823dd32). Existing tests pass `--snapshot` criteria with gate_refuser None: reading.rs:8350, 8412, 8424, 8563, 8573 and corpus 354 and 441. The check's own error example for check_records_measure is the `--snapshot` command (surveys.rs:593-595). The new unit test `real_records_measure_reading_is_told_the_snapshot_form` shows a measure reading with the plain command is refused by check_real_records_command, and the same reading rewritten as the error says is accepted by refusing_check.",
+      "rejected": [
+        {
+          "option": "Refuse every status/plan criterion that names real records, `--snapshot` included, unless the request depends on d103",
+          "why": "It contradicts check_records_measure's own example criterion and records_criteria.rs, and breaks about a dozen existing tests and corpus cases."
+        },
+        {
+          "option": "Give only the Depends-on and fixture repairs",
+          "why": "A records-measure reading cannot pass a fixture (check_records_measure needs `real records`) and the reader cannot add a request line, so a re-read could never be accepted."
+        },
+        {
+          "option": "Read records inside the check to see whether d103 landed",
+          "why": "Reading checks take no records (the reader, planner and critic copies have none) and the brief puts it out of scope; the Depends line already makes admission order or hold the job (plan.rs:593-613, 731-737)."
+        }
+      ]
+    },
+    {
+      "choice": "Settle finding 4: tighten the lexical match and list the limits. (1) The `-- <sub>` form counts only after `cargo run` with `athena-cli` or `--bin athena` before the ` -- `, never after `cargo test`. (2) A stand-in counts only as a place: a stand-in word within 3 words after a place word, with no negation directly before the place word. (3) `sample` and any bare mention of a stand-in word elsewhere are not exemptions. (4) The phrase search reads hyphens as spaces (`real-records`), the command and `--snapshot` search does not. Limits in the doc comment: no negation or tense reading beyond the place word; a criterion that runs the command on a fixture and then on the real records is exempt; a bare 'Run `status` on the real records' names no athena and is not caught (reading.rs:8452 shape); `cargo run -- status` with no athena-cli is not caught; a criterion saying 'athena status ... real records' without running it is flagged; the sz3z wording is a guess.",
+      "reason": "Text is normalised with `straight_lowercase` (surveys.rs:286) after backticks become spaces; `has_phrase` (surveys.rs:39) gives whole-word matching; `plain_words` (surveys.rs:876) splits the stand-in search on non-alphanumerics, so `/tmp` reads as `tmp`. The old rule needed only 'athena' anywhere for `-- <sub>`, so `cargo test -p athena-core -- plan` plus 'real records' matched, and any one exemption word cleared a criterion, so 'not a fixture' passed. Unit test `real_records_matching_limits` and corpus cases `real-records-cargo-test-filter` and `real-records-command-not-a-fixture` pin these.",
+      "rejected": [
+        {
+          "option": "Keep any exemption word anywhere in the criterion",
+          "why": "'Run `athena status` on the real records, not a fixture' and '... and sample two jobs' would pass."
+        },
+        {
+          "option": "Match `-- <sub>` whenever the criterion names athena",
+          "why": "`-p athena-core` supplies 'athena', so a cargo test filter `-- plan` is read as an athena command."
+        }
+      ]
+    },
+    {
+      "choice": "Examine Behavior criteria only, and only when `reading.capability` is set. A Content criterion is not examined.",
+      "reason": "A Content criterion runs nothing (check_records_measure doc, surveys.rs:522-524; test at reading.rs:8444-8447). A docs criterion such as 'the guide says to run `athena status` on the real records' does not tell the producer to run it. check_criteria_evidence uses the same `capability.is_none()` gate (surveys.rs:92-94). The file_bound_text_fields doc (checks.rs:182-185) says a behavior criterion names a command to run. Corpus case `real-records-command-in-content-criterion` must be accepted.",
+      "rejected": [
+        {
+          "option": "Examine every criterion kind",
+          "why": "It would flag documentation criteria that only describe the command."
+        }
+      ]
+    },
+    {
+      "choice": "Place the `step!` after `check_scope_limit` and before `check_boundary_and_repo_files`.",
+      "reason": "Tests pin the neighbour of several steps: reading.rs:5028-5031, 5512-5514, 7535-7537, 8234-8236 and 8714-8716. Reading.rs:8447, 8458 and 8532 expect `check_records_measure` to refuse first, e.g. 'Run `status` on the real records and show the landing time'. Placing the step last-but-two keeps every earlier refuser first, and `scope_limit_has_one_step_line` (reading.rs:8978-8990) only counts lines.",
+      "rejected": [
+        {
+          "option": "Place it right after check_criteria_evidence, the nearest model check",
+          "why": "It would refuse readings that check_records_measure refuses today, and change which rule name those tests expect."
+        }
+      ]
+    },
+    {
+      "choice": "Do not change `READING_RULES` (reader.rs:287-309) or any prompt text. Do not touch briefs.rs, reader.rs or run_pin_tests.rs. The producer reports each of the three paths in the report's `unchanged_planned_files` with a reason (finding 2): 'reader set is 1998 of 2000 tokens (docs/system-facts.md), so no rule line fits; the refusal text is the guidance'; 'briefs.rs pins the rule count at 14 and the section size (briefs.rs:4415, 4855, 4483); the list at briefs.rs:4401-4413 names only some checks, and line 4055 is a replay-summary test'; 'run_pin_tests.rs:2011 and 2078 assert the rule name check_criteria_evidence, which does not change'.",
+      "reason": "unchanged_planned_files (run/mod.rs:1712-1729) sends the candidate back for a planned path that is unchanged and has no entry with a non-blank reason; the planned paths are the plan's files plus the reading's deliverables (planned_paths, run/mod.rs:1686-1704), so the three deliverables count. The reason strings above are read from the code cited. A new rule line breaks the budget test `system_facts_budgets_match_computed` or the pinned count.",
+      "rejected": [
+        {
+          "option": "Add a 15th rule line to READING_RULES",
+          "why": "It exceeds the 2-token headroom of the reader set and breaks the pinned counts."
+        },
+        {
+          "option": "Edit the three files with no behavior change to satisfy the deliverable list",
+          "why": "An edit with no purpose is churn, and it risks breaking the pinned prompt and budget tests."
+        }
+      ]
+    },
+    {
+      "choice": "The dependency exemption calls `dependency_ids_in(request)` (topics.rs:25-60) and checks it for `RecordId::parse(\"20261030-070002-d103\")`. It reads only a line that starts with 'Depends on' (any case; a `>`, list marker, `*`, `+` or number prefix and a colon allowed) or the retry link; a bare mention of the id is never an exemption.",
+      "reason": "topics.rs:21-24 says a job id elsewhere is a reference, not a dependency. Admission orders or holds a job by `depends_on` (plan.rs:593-613, 731-737), so the line is the landed condition; a bare mention does not make admission wait. Unit test forms: dash bullet, `1.` and `1)` prefix, colon, any case, plain line; negatives: a bare mention, another job id on the Depends line. Corpus cases `real-records-command-depends-on-d103`, `...-numbered`, `...-cites-d103-without-relying`, `...-other-dependency`.",
+      "rejected": [
+        {
+          "option": "Accept any request that contains the id text",
+          "why": "Admission does not wait on a bare mention, so the exemption would be false."
+        }
+      ]
+    },
+    {
+      "choice": "CHANGELOG item (finding 3): one item under `## [Unreleased]` / `### Added`, starting `- `. It names `reading::check_real_records_command` and no other `reading::check_` path. It does not contain `reading::check_scope_limit`, `reading::check_records_measure`, `reading::check_history_fixture` or `reading::check_defined_terms`; neighbours are named without the `reading::` prefix (for example 'the scope-limit check'). It also avoids the sentences other tests search for (reading.rs:5527-5528, 5869-5872, 8267). It states the root cause, jobs 20261029-233021-e5sg and 20261030-125332-sz3z, the `Depends on 20261030-070002-d103` exemption, the `--snapshot` boundary, 'higher refusal rate is intended', 'expected 3% of newly refused readings' as an estimate, the limits, and that the sz3z wording is a guess.",
+      "reason": "Tests take the first Unreleased item that contains a check path or cause sentence (reading.rs:9026-9029 `reading::check_scope_limit`, 8302 `reading::check_history_fixture`, 7670 `reading::check_defined_terms`, 5562 and 5904 the cause sentences). An item sharing none of those strings cannot be picked by them whatever its position. Items are lines that start `- ` (reading.rs:9016-9024), so the entry must start that way.",
+      "rejected": [
+        {
+          "option": "Describe the placement as 'after reading::check_scope_limit' in the item",
+          "why": "If it sits above the existing item, scope_limit_doc_and_changelog_name_the_cause would pick it and fail."
+        }
+      ]
+    },
+    {
+      "choice": "The sz3z case source says 'wording guessed; the request text is not in the snapshot' (finding 5). The e5sg source says the phrase 'run athena status on the real records' is from the job brief and the rest is rebuilt. The doc comment and CHANGELOG item state the gap as a limit so a later job can replace the cases with the recorded text.",
+      "reason": "A grep of the snapshot finds e5sg nowhere and sz3z only in a job-id list (docs/design/agent-and-build-slots.md:300), which gives the full id 20261030-125332-sz3z. The brief gives only the e5sg phrase. No test reads a case's `source` beyond non-empty (refusal_corpus.rs:2787).",
+      "rejected": [
+        {
+          "option": "Label the sz3z case 'rebuilt from the job brief'",
+          "why": "The brief does not hold the sz3z wording, so the label would overstate the evidence."
+        }
+      ]
+    },
+    {
+      "choice": "Refusal and matching rule: input forms and the corpus case for each. Command: `athena status`, `cargo run -p athena-cli -- plan`, `--bin athena`, `athena drain` -> cases e5sg-status, sz3z-plan, star-bullet-drain. Request bullets: dash, star, `1.` -> those three cases. Job cited without relying -> `real-records-command-cites-d103-without-relying`. Depends on d103: plain line, colon, `1.` criteria -> `...-depends-on-d103`, `...-depends-on-d103-numbered`. Depends on another job -> `...-other-dependency`. Stand-ins: fixture, temp dir -> `...-fixture-stand-in`, `...-temp-dir-stand-in`; negated -> `...-not-a-fixture`. `--snapshot` -> `real-records-snapshot-command`. Content criterion -> `real-records-command-in-content-criterion`. `cargo test ... -- plan` -> `real-records-cargo-test-filter`. Seven new tags are added to INPUT_FORMS (63 to 70): real-records-command, real-records-command-depends-on-d103, real-records-command-stand-in, real-records-command-negated-stand-in, real-records-snapshot-command, real-records-command-content-criterion, real-records-cargo-test-filter.",
+      "reason": "The instructions require each input form to map to a corpus case by id. Existing tags reused: dash-bullet, star-bullet, number-dot-parts, cites-job-without-relying (INPUT_FORMS, refusal_corpus.rs:90-154). `corpus_covers_the_listed_input_forms` (corpus 2826) fails on a tag no case holds or a case tag outside the list. Cases are built with `case()` (corpus 241) from a docs base reading, with the criterion kind set to Behavior (as measure_case does at corpus 369), and `repo_files = None` for accepting cases so `records/` tokens are not compared with the snapshot (check_reading_references returns Ok for None, checks.rs:412-414).",
+      "rejected": [
+        {
+          "option": "One refusing case and one accepting case only",
+          "why": "The listed forms (bullet styles, citation without Depends, negation, test filter) are the places the matcher already failed in earlier checks; each needs a case."
+        }
+      ]
+    },
+    {
+      "choice": "Exit table for the new check (a pure function, no stage, no I/O): success: `Ok(())` when the reading has no capability, no Behavior criterion is flagged, or the request depends on d103; the `step!` macro (checks.rs:527-533) goes on to the next check. fail: `bail!` with the refusal text; `step!` returns `Some((\"check_real_records_command\", error))`; `read_for` (reading.rs:732-740) turns it into the refusal, re-reads once with the text (`refusal_section`, reader.rs:395), and `check_reading_acceptance` (checks.rs:492-503) returns `Err`; a stored refusal carries the rule name as a string, which hestia.rs:686-692 reads as a free string. error: cannot happen (no I/O, no spawn, no lock); a parse failure inside `dependency_ids_in` gives an empty list (topics.rs:33-39), so the result is a refusal, not an error. hold: cannot happen (no queue or record state is read or written). interrupt: cannot happen (no wait or long call).",
+      "reason": "Every exit is the existing step! contract, so no new state or record is written, and the code that reads the outcome next is `read_for`, `check_reading_acceptance`, `check_reading_text` (replay.rs:54-65), steward.rs:424 and 2765, and main.rs:709 (`athena check-reading`).",
+      "rejected": [
+        {
+          "option": "Call the check directly inside check_reading_acceptance",
+          "why": "The corpus test `no_check_bypasses_refusing_check` (corpus 3210) fails on a direct `check_` call there; new checks are one `step!` line."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading/surveys.rs",
+      "action": "modify",
+      "purpose": "Add the public `check_real_records_command(reading, request)`, its const lists (athena subcommands, real-records phrases, stand-in words, place words, negations, the d103 id), the private helpers for command, phrase and stand-in matching, and a doc comment. The doc comment holds the root cause, the limits (lexical match; sz3z wording guessed), 'This check refuses more readings; the higher refusal rate is intended' and 'expected 3% of newly refused readings' as an estimate.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/checks.rs",
+      "action": "modify",
+      "purpose": "Add `step!(check_real_records_command(reading, request));` between the check_scope_limit and check_boundary_and_repo_files steps in `refusing_check`, and add [`check_real_records_command`] to the doc paragraph of `check_reading_acceptance` after the scope-limit sentence.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add the unit tests named `real_records_...` in the `mod tests` block that holds `governed_reading`, `add_behavior`, `code_reading`, `measure_reading` and `refuser_for`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add `real_records_command_cases()` (13 cases) to `cases()`, and 7 tags to INPUT_FORMS (63 to 70).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add one item under `## [Unreleased]` / `### Added` that names `reading::check_real_records_command` and no other `reading::check_` path.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-core/src/reading/surveys.rs add consts with names that do not clash with the glob exports: the athena subcommands (status, plan, queue, drain, drain-status, retry, go, land, backtest), the real-records phrases (real records, records/ queue, repository's records, repo's records, real queue, live records, live queue), STAND_IN_WORDS (fixture, fixtures, temp, tmp, temporary, synthetic), PLACE_WORDS (on, in, against, with, using, into, from), NEGATIONS (not, never, no, without, instead, than) and the d103 job id string. Add private helpers: `athena_subcommand(text)` (`has_phrase(text, \"athena <sub>\")`, or a `cargo run` whose text before the first ` -- ` holds `athena-cli` or `--bin athena` and whose text after it starts with `<sub>` as a whole word), `names_real_queue(text)` (the phrases on the text with hyphens read as spaces), `runs_on_stand_in(text)` (over `plain_words`: a stand-in word with a place word in the 3 words before it, and no negation directly before that place word) and `runs_athena_on_real_records(criterion)`. The last one normalises with backticks as spaces and `straight_lowercase`, and returns false when the text contains `--snapshot` or runs on a stand-in.",
+    "In the same file add `pub fn check_real_records_command(reading: &Reading, request: &str) -> Result<()>`. It returns Ok when `reading.capability` is None, or when `RecordId::parse(<d103 id>)` is in `dependency_ids_in(request)`. Otherwise it collects each Behavior criterion that `runs_athena_on_real_records` flags, as `criterion N (\"text\") runs athena on the real records/ queue`, and `bail!`s with: 'the reading was refused because ...; the producer's and the verifier's working copy has no records/ (Athena keeps a read-only copy outside it), so the command cannot read the queue it is told to read. Repair one of three ways: (a) run it on that copy: `cargo run -p athena-cli -- status --snapshot <evidence directory>`; plan and the other commands have no such form; (b) run it on a fixture or a temp directory that the change or the test builds; (c) the job must depend on job 20261030-070002-d103 (the request author writes a line `Depends on 20261030-070002-d103`; admission then orders the job after it); the reader cannot add that line, so it uses (a) or (b)'. Write the doc comment: root cause (nothing compared a criterion's commands with what the working copy holds; jobs 20261029-233021-e5sg, 20261030-125332-sz3z and one more), the matching rules, the limits (no negation reading beyond the place word; 'on a fixture, then on the real records' is exempt; a bare `status` with no athena is not caught; `cargo run -- status` without athena-cli is not caught; a criterion that only mentions the command is flagged; the sz3z wording is a guess), 'This check refuses more readings; the higher refusal rate is intended', 'expected 3% of newly refused readings' and that it is an estimate that the replay at verification measures.",
+    "In crates/athena-core/src/reading/checks.rs add `step!(check_real_records_command(reading, request));` after the check_scope_limit step (line 547) and before the check_boundary_and_repo_files step (line 548). Add [`check_real_records_command`] to the doc paragraph of `check_reading_acceptance` (lines 475-491), after the scope-limit sentence.",
+    "In crates/athena-core/src/reading.rs add the tests (place them after the scope-limit tests, near line 9061, inside the same `mod tests`): `real_records_command_has_one_step_line`, `real_records_error_names_the_criterion_and_the_repairs`, `real_records_e5sg_shape_is_refused_unless_it_depends_on_d103`, `real_records_sz3z_shape_is_refused_unless_it_depends_on_d103`, `real_records_stand_ins_snapshot_content_and_unchanged_are_not_refused`, `real_records_matching_limits`, `real_records_measure_reading_is_told_the_snapshot_form` and `real_records_check_doc_and_changelog_declare_the_share`. Use `governed_reading`, `add_behavior`, `add_content`, `measure_reading`, `gate_refuser` and `refuser_for`. Do not use digits before counted nouns in the criteria.",
+    "In crates/athena-core/tests/refusal_corpus.rs add `real_records_command_cases()` with the 13 cases listed under criterion 4 and extend `cases()` (line 303). Build each from `case()` with criteria[0].kind set to Behavior and `repo_files = None` for accepting cases. Add the seven tags to INPUT_FORMS and change its length from 63 to 70. The e5sg source says the phrase is from the job brief and the rest rebuilt; the sz3z source says 'wording guessed; the request text is not in the snapshot'. If an earlier check refuses a Refuse case first, reword that case's request.",
+    "In CHANGELOG.md add one item that starts `- ` under `## [Unreleased]` / `### Added`. It names `reading::check_real_records_command` and no other `reading::check_` path, so it holds none of `reading::check_scope_limit`, `reading::check_records_measure`, `reading::check_history_fixture` and `reading::check_defined_terms`; neighbours are named in words ('the scope-limit check'). It states the root cause, the jobs 20261029-233021-e5sg and 20261030-125332-sz3z, the `Depends on 20261030-070002-d103` exemption, the `--snapshot` boundary and the three repairs, 'higher refusal rate is intended', 'expected 3% of newly refused readings' (an estimate that the replay at verification measures), the limits, that the sz3z wording is a guess, and the test commands. Edit no file under records/, athena.toml, defaults.toml or .github/workflows/.",
+    "Leave crates/athena-context/src/briefs.rs, crates/athena-context/src/briefs/reader.rs and crates/athena-core/src/run_pin_tests.rs unchanged. In the report's `unchanged_planned_files` give each of the three paths a reason: reader.rs and briefs.rs: 'the reader set is 1998 of 2000 tokens and briefs.rs pins 14 rule lines and the section size (briefs.rs:4415, 4855, 4483), so no rule line fits; the refusal text is the guidance'; run_pin_tests.rs: 'its assertions name the rule check_criteria_evidence (lines 2011, 2078), which does not change'.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. If an existing test changes outcome, fix the matcher, not the test."
+  ],
+  "risks": [
+    {
+      "risk": "The e5sg and sz3z request texts are not in the snapshot (records/ is absent; a grep finds e5sg nowhere and sz3z only in docs/design/agent-and-build-slots.md:300). The e5sg shape comes from the brief's phrase and the sz3z wording is a guess, so a real phrase (for example 'on records/') could slip through.",
+      "mitigation": "The phrase list also covers `records/ queue`, `repository's records`, `repo's records`, `real queue`, `live records` and `live queue`. The sz3z case source says 'wording guessed; the request text is not in the snapshot', and the doc comment and CHANGELOG state the gap so a later job can replace the case with the recorded text. The replay at verification shows the real effect."
+    },
+    {
+      "risk": "A corpus or unit case reading may be refused first by an earlier check (check_defined_terms, check_environment_reach on records phrases at surveys.rs:792-810, check_outcome_state), so the new check would not be the refuser.",
+      "mitigation": "The producer runs `cargo test -p athena-core --test refusal_corpus` and `cargo test -p athena-core real_records`. If an earlier check refuses first, it rewords that case's request or adds an `Environment:` assumption to that base reading, and does not weaken the matcher. Avoid a digit before a counted noun in case criteria (quotes_counted_figure, surveys.rs:814)."
+    },
+    {
+      "risk": "A `--snapshot` command that still needs the real records/ queue is not flagged, so one form of the original fault remains. A `plan` criterion has no snapshot form, so a reader that must run plan on the live queue and cannot add a Depends line can only use a fixture; if it does not, the re-read is refused and the job fails at reading.",
+      "mitigation": "The `--snapshot` form is Athena's own path with an evidence copy (run/mod.rs:1174-1175; records_criteria.rs). The error names the fixture or temp-directory repair for the other commands and says the request author adds the Depends line. The doc comment names the boundary."
+    },
+    {
+      "risk": "The newly refused share is above the 3% estimate, or a stand-in phrase lets a real-records criterion through. The brief's criterion 5 is not in the 'N% of newly refused readings' form that the replay parses.",
+      "mitigation": "The share is declared as an estimate; the replay at verification measures it and holds the job above 10% (replay.rs:13). The stand-in rule is a place phrase only (a short list, a negation check, `sample` removed). The limits are listed in the doc comment."
+    },
+    {
+      "risk": "Placing a check between existing steps changes which rule name a mixed reading is refused by.",
+      "mitigation": "The position was chosen from the pinned neighbours (reading.rs:5028, 5512, 7535, 8234, 8714) and the check_records_measure expectations (reading.rs:8447, 8458, 8532). The full `cargo test --locked` run covers the rest."
+    },
+    {
+      "risk": "The new CHANGELOG item is picked by a test that searches for another check's item.",
+      "mitigation": "The item contains no `reading::check_` path other than its own and none of the cause sentences the tests search for; the share test asserts that."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusing_check order and the new rule name check_real_records_command",
+      "dependent": "crates/athena-core/src/reading.rs:732-740 (`read_for` calls `refusing_check` and re-reads once with the error), crates/athena-context/src/briefs/reader.rs:395 (`refusal_section`, which shows the error to the reader)",
+      "kind": "code",
+      "test": "cargo test -p athena-core real_records (the e5sg and sz3z tests check the rule name and the error text the reader gets); corpus case real-records-command-e5sg-status",
+      "reason": null
+    },
+    {
+      "name": "Stored and replayed readings that pass the gate",
+      "dependent": "crates/athena-core/src/reading/replay.rs:54-65 (`check_reading_text`, used by the replay of accepted readings at verification, by steward.rs:424 and 2765, and by `athena check-reading` at main.rs:709)",
+      "kind": "code",
+      "test": "cargo test -p athena-core real_records (the e5sg test calls check_reading_text with and without the Depends line)",
+      "reason": "The replay holds a job that newly refuses more than 10% (replay.rs:13) unless its criteria declare a share. This check's expected share is 3%, an estimate that the replay at verification measures and that I cannot run. Every caller passes the request text, so the Depends exemption works the same in each. Stored readings of queued requests that run athena on the real records leave the drain queue until a new read, as for any failing check."
+    },
+    {
+      "name": "Rule name of a stored refusal",
+      "dependent": "crates/athena-core/src/hestia.rs:608-692 (`READING_RULES_CHECK_ID` findings group refusals by `r.rule`, a free string)",
+      "kind": "code",
+      "test": null,
+      "reason": "It reads the rule name as a string from stored refusals and has no list of check names, so a new name appears with no code change; a search found no non-test source that lists `check_scope_limit` or the other names outside checks.rs, reader.rs and tests."
+    },
+    {
+      "name": "The step! line and the input-form tag list",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs:2875-2923 (`acceptance_check_names`, `every_acceptance_check_has_a_refusing_corpus_case`), 2826 (`corpus_covers_the_listed_input_forms`), 2926 (`an_extra_check_with_no_case_is_reported`), 3210 (`no_check_bypasses_refusing_check`), and the INPUT_FORMS array at line 90",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": null
+    },
+    {
+      "name": "Position of the step lines in refusing_check",
+      "dependent": "crates/athena-core/src/reading.rs:5028-5031, 5512-5514, 7535-7537, 8234-8236 and 8714-8716 (tests that pin the step that follows each of five checks); 8978-8990 (`scope_limit_has_one_step_line`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading::tests",
+      "reason": "The new step sits between check_scope_limit and check_boundary_and_repo_files, which none of those tests pin; `scope_limit_has_one_step_line` only counts lines that trim to its own step."
+    },
+    {
+      "name": "A real-records criterion run through `status --snapshot`",
+      "dependent": "crates/athena-core/src/reading/surveys.rs:538-602 (`check_records_measure`, the example criterion with `status --snapshot ... real records`); tests reading.rs:8350, 8412, 8424, 8527-8599, corpus 354 and 441",
+      "kind": "rule",
+      "test": "cargo test -p athena-core reading::tests::records_measure_with_a_real_records_criterion_is_accepted and the corpus cases records-measure-change-with-real-records-range-*; plus the new real_records_measure_reading_is_told_the_snapshot_form",
+      "reason": null
+    },
+    {
+      "name": "Criteria that run `status --snapshot` on real records",
+      "dependent": "crates/athena-core/src/run/records_criteria.rs:210-232 and crates/athena-core/src/run/mod.rs:1170-1179 (Athena runs behavior criteria that hold `status --snapshot` and `real records` on the evidence snapshot); crates/athena-core/src/run/tests.rs:5617",
+      "kind": "code",
+      "test": null,
+      "reason": "The new check never matches a criterion with `--snapshot`, so the criteria that records_criteria.rs runs are not refused. Nothing in run/ calls the new function, and the new check changes no record."
+    },
+    {
+      "name": "Reader prompt text and its token budget",
+      "dependent": "crates/athena-context/src/briefs/reader.rs:287-309 (`READING_RULES`, 14 lines), briefs.rs:4390-4415 and 4855 (rule count and size pins), briefs.rs:4401-4413 (checks that must have a rule line; the new check is not required there), docs/system-facts.md reader budget 1998 of 2000 (`system_facts_budgets_match_computed`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt text is edited, so the count, size and budget pins hold. The refusal text is the guidance. briefs.rs:4055 is a replay-summary test unrelated to check names."
+    },
+    {
+      "name": "The 'Depends on' line as the landed condition",
+      "dependent": "crates/athena-core/src/plan.rs:593-613 and 731-737 (`depends_on` ordering and `unmet_dependency`, plan.rs:404); `dependency_ids_in` callers at reading.rs:3230 and topics.rs:376",
+      "kind": "rule",
+      "test": "cargo test -p athena-core real_records_error_names_the_criterion_and_the_repairs (every Depends form)",
+      "reason": "The check only reads `dependency_ids_in`; it does not change it or the hold. The line forms it accepts are the ones admission already parses (topics.rs:25-60), so a request that passes the check is ordered by plan.rs after d103. HISTORY.txt:1104 shows d103 already landed, so a Depends line holds nothing now."
+    },
+    {
+      "name": "Other readings that pass through the gate",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:2011 and 2078 (rule name `check_criteria_evidence`), and the tests that call `check_reading_acceptance` with other criteria (reading.rs:4411, 4718, 4730 and about 48 more)",
+      "kind": "code",
+      "test": "cargo test --locked",
+      "reason": "The new check examines only Behavior criteria with an athena command, a real-records phrase, no stand-in place, no `--snapshot` and no Depends line. A search of crates/ for the phrase list found every existing criterion either with `--snapshot` (reading.rs:8350, 8412, 8424, 8563, 8573; corpus 354, 441; run/tests.rs:5617) or with no athena command (reading.rs:8452, run/tests.rs:6055, records_criteria.rs tests that do not go through the gate)."
+    },
+    {
+      "name": "The new CHANGELOG entry",
+      "dependent": "CHANGELOG.md `[Unreleased]` items read by reading.rs:5562, 5904, 7670, 8302, 9028 and corpus 3187, 1138-3128 (`include_str!` of the changelog)",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading::tests::scope_limit_doc_and_changelog_name_the_cause and the corpus tests that include CHANGELOG.md",
+      "reason": "Tests find an item by `reading::check_*` path or a cause sentence and take the first match. The new item holds none of those strings (it names only `reading::check_real_records_command`), so it cannot be picked in their place whatever its position. Corpus tests that search the whole changelog for needles (corpus 3187-3206) still find theirs."
+    },
+    {
+      "name": "Planned deliverables left unchanged: briefs.rs, reader.rs, run_pin_tests.rs",
+      "dependent": "crates/athena-core/src/run/mod.rs:1712-1729 (`unchanged_planned_files`), run/producer.rs:337 and 484",
+      "kind": "rule",
+      "test": null,
+      "reason": "The candidate is sent back for each planned path it leaves unchanged with no non-blank reason in `unchanged_planned_files`. Step 7 has the producer report all three with the reasons in the decision above. CHANGELOG.md is not excusable (send_back.rs:249-267) and is changed."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new unit test in crates/athena-core/src/reading.rs, written like `records_measure_has_one_step_line` (reading.rs:8698-8722) and `scope_limit_has_one_step_line` (reading.rs:8978-8990). It uses `reading_source()` (reading.rs:1590), which joins checks.rs and surveys.rs. It asserts the signature is in surveys.rs, that exactly one line of the `refusing_check` body trims to `step!(check_real_records_command(reading, request));` (line equality, so the quoted copy in the test does not count), that its neighbours are the `check_scope_limit` and `check_boundary_and_repo_files` lines, that `check_reading_acceptance` has no `check_` call (corpus 3210), and that the doc of `check_reading_acceptance` links [`check_real_records_command`].",
+      "command": "cargo test -p athena-core real_records_command_has_one_step_line",
+      "observes": "Passes with one public function and one step line between scope_limit and boundary; fails on any other shape.",
+      "fails_without": "The test fails if the step line is missing or duplicated, sits somewhere else, the function is not `pub fn check_real_records_command(reading: &Reading, request: &str) -> Result<()>` in surveys.rs, or the doc of check_reading_acceptance omits it.",
+      "seam": "Exists: `reading_source()` (reading.rs:1590), which reads the source text of checks.rs and surveys.rs. No fake. The test is added by plan step 4."
+    },
+    {
+      "criterion": 2,
+      "method": "The test builds a Behavior criterion with `governed_reading` and `add_behavior` (reading.rs:4647, 4794): 'Run `athena status` on the real records and report the landed jobs'. It calls `check_real_records_command(&reading, request)` with a request that has no Depends line. It asserts the error contains 'criterion 1', the criterion text, 'depend on job 20261030-070002-d103', 'Depends on 20261030-070002-d103', 'fixture', 'temp', 'cargo run -p athena-cli -- status --snapshot <evidence directory>' and 'has no records/'. It then asserts Ok for the request forms: a dash line `- Depends on 20261030-070002-d103`, `1. Depends on 20261030-070002-d103`, `1) depends on 20261030-070002-d103`, `Depends on: 20261030-070002-d103`, and a line that also lists another job. It asserts Err for 'see 20261030-070002-d103', '20261030-070002-d103 landed', and 'Depends on 20260101-000000-abcd'. The same reading with no capability is Ok.",
+      "command": "cargo test -p athena-core real_records_error_names_the_criterion_and_the_repairs",
+      "observes": "Error text carries the number, text and the three repairs; Ok exactly when dependency_ids_in holds d103; the dependency line is the only request exemption.",
+      "fails_without": "An exemption that read the id text anywhere would make the bare-mention and other-dependency cases pass instead of failing; an error without the number, the text, `status --snapshot`, the fixture repair or the Depends repair fails the text assertions.",
+      "seam": "Production entry point: `check_real_records_command` (new, surveys.rs) and inside it the existing `dependency_ids_in` (topics.rs:25). The fixture is an in-memory `Reading` from `governed_reading` and `add_behavior` (exist). Nothing is faked: the dependency rule runs on the request text. Added by plan step 4."
+    },
+    {
+      "criterion": 3,
+      "method": "New unit tests in reading.rs, all named `real_records_...`. (a) `real_records_e5sg_shape_...`: a Behavior criterion 'Run `athena status` on the real records and check the figure'. `refuser_for(&reading, request)` (reading.rs:7300) is Some(\"check_real_records_command\") without a Depends line and None with 'Depends on 20261030-070002-d103'. `check_reading_text` (replay.rs:54) gives Refuse naming 'real records', and Accept with the line. (b) `real_records_sz3z_shape_...`: 'Run `cargo run -p athena-cli -- plan` against this repository's records/ queue and list what it plans', same two outcomes. (c) `real_records_stand_ins_snapshot_content_...` (not refused): 'Run `athena status` on a fixture records directory', 'Run `athena plan` in a temp dir with a fixture queue', 'Run `cargo run -p athena-cli -- status --snapshot evidence`: on the real records the landing time ...', 'No file under records/ changes', 'Run `cargo test`: the real records are not read', a Content criterion 'The guide says to run `athena status` on the real records', and a reading with no capability. (d) `real_records_matching_limits`: 'Run `cargo test -p athena-core -- plan`: the real records are not read' is not flagged; 'Run `athena status` on the real records, not a fixture', '... not on a fixture', '... and sample two jobs' and 'Run `athena plan` on the real-records queue' are flagged; a bare 'Run `status` on the real records' is not flagged (limit). (e) `real_records_measure_reading_is_told_the_snapshot_form`: `measure_reading(LANDING_TIME_SUMMARY, &[\"crates/athena-core/src/status.rs\"], PLAIN)` (reading.rs:8355) with PLAIN 'Run `athena status` on the real records: the landing time it prints is within the expected range taken from the commit times in history.json'. `gate_refuser` is Some(\"check_real_records_command\") (check_records_measure passes it), the error holds `cargo run -p athena-cli -- status --snapshot <evidence directory>`, and the criterion rewritten with that command gives `gate_refuser` None and `accept` Ok. The plain criterion with a d103 Depends request also gives None.",
+      "command": "cargo test -p athena-core real_records",
+      "observes": "Refused without the dependency and accepted with it, for both shapes and through both the gate and the stored-reading seam; stand-in, snapshot, unchanged, content and no-capability forms accepted; the matching limits as listed; the repair the error names passes both check_records_measure and the new check.",
+      "fails_without": "With no check, the e5sg and sz3z tests get `refuser_for(...)` None and fail their `Some(\"check_real_records_command\")` assertions; a check that exempted any stand-in word or a bare `--` fails the limits test; a check that ignored the Depends line fails the with-dependency assertions.",
+      "seam": "Production entry points: `refusing_check` (checks.rs:520), `check_reading_acceptance` (checks.rs:492) and `check_reading_text` (replay.rs:54). The readings are built in memory with the existing helpers `governed_reading`, `add_behavior`, `add_content`, `code_reading`, `history_reading`, `measure_reading`, `gate_refuser` and `refuser_for` (reading.rs:4647, 4794, 7054, 7284, 8355, 7295, 7300). All exist; no fake; the tests are added by plan step 4. If an earlier check refuses a case first, the producer adds an `Environment:` assumption to that base reading and does not weaken the matcher."
+    },
+    {
+      "criterion": 4,
+      "method": "Add `real_records_command_cases()` to `cases()` (corpus 303-312, built like `records_measure_cases` at 347 with a `case()` base, criteria[0].kind set to Behavior, `repo_files = None` for accepting cases) and add the seven tags to INPUT_FORMS (63 to 70). The 13 case ids: real-records-command-e5sg-status (dash-bullet; source: the phrase from the job brief, the rest rebuilt) Refuse; real-records-command-sz3z-plan (number-dot-parts; source: 'job 20261030-125332-sz3z; wording guessed, the request text is not in the snapshot') Refuse; real-records-command-star-bullet-drain (star-bullet) Refuse; real-records-command-cites-d103-without-relying Refuse; real-records-command-depends-on-d103 (plain 'Depends on 20261030-070002-d103' line) Accept; real-records-command-depends-on-d103-numbered (`1.` criteria and 'Depends on: ...' line) Accept; real-records-command-other-dependency Refuse; real-records-command-fixture-stand-in Accept; real-records-command-temp-dir-stand-in Accept; real-records-command-not-a-fixture Refuse; real-records-snapshot-command Accept; real-records-command-in-content-criterion Accept; real-records-cargo-test-filter Accept. Each Refuse case is `Expected::Refuse(\"check_real_records_command\")`. The tests that also run: `corpus_cases_get_the_expected_outcome` (corpus 2781), `the_wrapper_agrees_with_refusing_check_on_every_case` (2801), `corpus_covers_the_listed_input_forms` (2826), `every_acceptance_check_has_a_refusing_corpus_case` (2905) and `an_extra_check_with_no_case_is_reported` (2926). I cannot run them; I cite only the case ids and test names read.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "Every case gets its expected outcome; the new step name is found by `acceptance_check_names` (corpus 2875) and has a refusing case; every new tag is held by a case.",
+      "fails_without": "Without the `step!` line the cases that expect a refusal by `check_real_records_command` get an accept; with the step line and no case, `every_acceptance_check_has_a_refusing_corpus_case` fails; a tag not in INPUT_FORMS or a listed tag no case holds fails `corpus_covers_the_listed_input_forms`.",
+      "seam": "Production entry point: `refusing_check`, driven by the corpus's `run(c)` for each case. The fixtures `case()` (corpus 241), `base_reading()` (172) and `repo_files()` (228) exist; the cases and tags are added by plan step 5. No double. If an earlier check refuses a case first (for example check_defined_terms on a structural word), the producer rewords that case's request, since the refusal must be by the new check."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the whole workspace test (the recorded `test` check is `cargo test --locked`). Existing tests that must stay green: criteria with `status --snapshot ... real records` (reading.rs:8350, 8412, 8424, 8563, 8573; corpus 354 and 441; run/tests.rs:5617), the pinned step neighbours (reading.rs:5028, 5512, 7535, 8234, 8714), the rule-count and size pins (briefs.rs:4415, 4855), the budget test, and the corpus coverage tests. A search of crates/ for criteria that name a real-records phrase found each existing one either has `--snapshot` or names no athena command (reading.rs:8452 is a bare `status`), so no existing test criterion is newly refused. The newly refused share of stored readings is an estimate of about 3% (not measured: few past criteria run athena on the real queue); the replay of accepted readings (replay.rs:9-13, hold at 10% undeclared) measures the real share at verification, and I cannot run it here. The brief's criterion 5 states 'about 3% ... at or below 8%'; it does not use the 'N% of newly refused readings' form that `replay_declaration` parses (replay.rs:223-263), and 3% is under the 10% hold either way.",
+      "command": "cargo test --locked",
+      "observes": "All workspace tests pass; no existing test changes outcome.",
+      "fails_without": "A match that flagged `--snapshot` criteria, or a step placed ahead of `check_records_measure`, fails the existing tests named here; a prompt edit fails briefs.rs:4415 and 4855 or `system_facts_budgets_match_computed`.",
+      "seam": "Existing entry points: `check_reading_acceptance` callers (reading.rs:732, replay.rs:55, the tests). No new seam."
+    },
+    {
+      "criterion": 6,
+      "method": "The verifier's snapshot is a two-commit repository, base then candidate (run/mod.rs:2069-2073), so `git diff --stat HEAD~1 HEAD` lists the candidate's changed paths. Expect CHANGELOG.md, surveys.rs, checks.rs, reading.rs and refusal_corpus.rs, and no path under records/, no athena.toml, no defaults.toml, no .github/workflows/ file. The verifier also runs `cargo test -p athena-core real_records_check_doc_and_changelog_declare_the_share`: the test reads the `///` block above `check_real_records_command` and the first Unreleased CHANGELOG item that contains `reading::check_real_records_command` (the pattern of reading.rs:8996-9061), and asserts each holds 'higher refusal rate is intended', 'expected 3% of newly refused readings', 'estimate', 'Depends on 20261030-070002-d103', 'status --snapshot', the jobs 20261029-233021-e5sg and 20261030-125332-sz3z, and 'wording guessed'. It also asserts the item does not contain `reading::check_scope_limit`, `reading::check_records_measure`, `reading::check_history_fixture` or `reading::check_defined_terms`.",
+      "command": "git diff --stat HEAD~1 HEAD",
+      "observes": "The diff lists CHANGELOG.md and the four code files and nothing under records/, athena.toml, defaults.toml or .github/workflows/; the share test passes.",
+      "fails_without": "A missing CHANGELOG item or a missing doc declaration fails the new share test; a stray edit of a governance or records file shows in the diff list.",
+      "seam": "Existing: git on the verifier's two-commit snapshot, and the `include_str!(\"../../../CHANGELOG.md\")` plus doc-comment pattern of reading.rs:9008-9029. The share test is added by plan step 4 and the item by step 6."
+    },
+    {
+      "criterion": 7,
+      "method": "Run `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`, the same commands Athena records as the fmt and clippy checks. The new code uses `bail!`, `Result`, `has_phrase`, `straight_lowercase`, `plain_words`, `dependency_ids_in` and `RecordId`, all in scope through `use super::*` (surveys.rs:3, reading.rs:67-73). New const names are distinct from the existing glob-exported names so `pub use surveys::*` does not clash. The producer runs `cargo fmt --all` first.",
+      "command": "cargo fmt --all --check",
+      "observes": "Both commands exit 0.",
+      "fails_without": "A formatting or lint fault in the new check or its tests (an over-long function, a needless collect or clone, an unused import) fails these commands.",
+      "seam": "Existing toolchain; no seam."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "a65a04d50334b891c9eba34e3b4daf593776a8a882f80b087e0f13bdc84d7f96"
+}

@@ -1,0 +1,463 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261106-021841-2w82",
+  "round": 2,
+  "at": "2026-11-16T13:07:24.811213422Z",
+  "invocation_seq": 5,
+  "approach": "Revision of round 1. The design keeps its shape and changes where the reviewers found faults. A new pure module `crates/athena-core/src/run/stale_text.rs` finds text that still says what the change made false. It runs in two places the decision gate already uses: `producer_loop` (once, as part of the one shared send-back) and the candidate step `check_and_verify` (closing the job before the PR, the checks and the verifier). \n\nWhat it searches for, per the findings:\n- (F2) Three sources feed it. (a) The diff: a `const`/`static` whose literal changed, and claim lines the change REPLACED. (b) The accepted reading, passed as `accepted` at both call sites (`producer_loop` has it at producer.rs:302, `check_and_verify` at mod.rs:1961): `from <old> to <new>` beside a named identifier, a quoted old claim after `no longer / instead of / replaces`, and a decision id cited with a reversal word. (c) Nothing is parsed from the reading beyond those three forms.\n- (F4) A claim comes only from a hunk of `git diff -U0` that has both removed and added lines. A pure deletion, a deleted function and a deleted file are never claims.\n- (F3, F7) A decision is \"marked\" only by `amended by D<n>` / `superseded by D<n>` in its own entry, a `[[link]]` with status `superseded`, or a `[[link]]` whose `newer` entry this change adds. A decision that an older entry merely amended still stands and is reported (D156 is the older of D187, decision-links.toml:188-191).\n\nAnswers to the eight findings:\n- F1: main.rs stays in the plan because criterion 5 asks for the diff of the file where each help string lives. It is one `User:` question.\n- F5: every doc comment in main.rs was re-surveyed against `pub const` limits (decision 6). The Hestia `review` help joins the conversion, with `urgent` corrected to `high`.\n- F6: D190 cites D187 only for what is already there (the gate runs in the loop). It claims only the new parts.\n- F8: the `default 1` string is built from `Parallel::default()`. `display.rs:705` is listed as rejected with its reason.\n\nThe help strings keep D156's placeholder mechanism, extended by a generic `fill_limits` (athena-cli lib.rs) run once over the whole command tree in `cli_command()`. The change is recorded as D190 (appended, `Amends D156`, link D156 -> D190) plus one CHANGELOG entry.",
+  "decisions": [
+    {
+      "choice": "Hook the check at the two places the decision gate already uses: `producer_loop` (once, as a send-back, next to the gate at producer.rs:498-502) and the candidate step after the gate (new block after mod.rs:2020). One pure function serves both. Both adapters pass the accepted reading. In the loop the tree is the snapshot's own git with `snapshot.base()` and `snapshot.work_tree_tree()`. At the candidate it is `self.git` with the base and candidate commits. The pinned-run guard is not copied: the check reads no build. The nested guard is kept.",
+      "reason": "This is the existing shape for a finding that must reach the producer inside its loop and still stop a job before the verifier (checks.rs:734 `unreconciled_in_snapshot` and checks.rs:697 `unreconciled_decisions`, called at producer.rs:498 and mod.rs:2013). It uses `Athena::failure`, the `recorded_checks.is_none()` and `nested.is_none()` guards, and the not-an-environment-stop closing (`StopCause::of`, disk.rs:462, gives Work for any reason without the environment prefix). The pin guard exists in `run_loop_checks` (checks.rs:450) because a pinned run cannot build; this check builds nothing. The nested guard exists because the outer job sees the combined change.",
+      "rejected": [
+        {
+          "option": "Run it only inside `run_loop_checks` (checks.rs:444)",
+          "why": "That run is advisory and is skipped for low disk, a busy slot, tool configuration and a pinned run (checks.rs:450-464). A skipped run would let stale text reach the verdict."
+        },
+        {
+          "option": "Run it only at the candidate",
+          "why": "The producer would see the list only on a retry. The request asks for the list inside the producer's own loop."
+        },
+        {
+          "option": "Add it to the verifier's gap list",
+          "why": "The verifier's judgement is model-based. That would make the rule prose, against the mechanism default."
+        }
+      ]
+    },
+    {
+      "choice": "Detection sources (answers F2). (1) Diff values: in one file, a removed and an added `const`/`static NAME: T = LIT;` with the same NAME and different single literals (one number or one string). Old value `LIT`; keywords are the lowercase parts of NAME minus a GENERIC list (max, min, limit, default, value, count, number, size, total). (2) Reading values: a sentence of the accepted reading (summary, assumptions, criteria; split at `. `, `; ` and newlines) with `from <old> to <new>` AND a named identifier in the same sentence (SCREAMING_SNAKE, or backticked without `/` or `.`). Keywords come from that identifier. (3) Reading claims: a quoted or backticked span of at least 6 words within 40 characters after `no longer`, `instead of`, `rather than`, `replaces`, `reverses` or `used to say`. (4) Reading decisions: a sentence that holds `D<nn>` and one of reverse(s/d), supersede(s/d), overturn(s), replace(s), `no longer`. It is reported only when that heading exists in the log and the entry is not marked (decision 3). (5) Diff claims: from replaced hunks only (decision 4). A value hit is a line of a searched file that holds the old value as a whole token, shares a keyword, and does not hold the new value. A claim hit is the claim's words (case, punctuation and line wraps ignored) as a contiguous run in a searched file. A line that the diff added at the same path is never reported. If there are no needles at all, the tree is not read.",
+      "reason": "The request says 'a job's reading or diff', and the accepted reading's assumption says old values come 'from removed diff lines ... and from decision-style claims in the reading'. The reading is available at both call sites (producer.rs:302; mod.rs:1961 `accepted`). Requiring a named identifier in a `from X to Y` sentence keeps this job's own criteria text ('a constant changes from 8 to 16') from becoming a needle: it has no SCREAMING_SNAKE or backticked identifier, and a bare path such as `stale_text.rs` is excluded. Reading forms (3) and (4) use markers the reader's own prose uses and name no token that is not stated.",
+      "rejected": [
+        {
+          "option": "Ignore the reading (the round 1 plan)",
+          "why": "A job whose reading reverses a rule but whose diff removes no repeating comment would find nothing. The round 1 reason, 'not available at the candidate step', was false: `check_and_verify` receives `accepted`."
+        },
+        {
+          "option": "Take every number of the reading as an old value",
+          "why": "Most numbers in a reading are criteria counts and file sizes; the check would refuse jobs that changed no limit."
+        },
+        {
+          "option": "Search the log for every decision id the reading names",
+          "why": "Most citations are 'follows D156', not a reversal. A reversal word in the same sentence is required."
+        }
+      ]
+    },
+    {
+      "choice": "'Marked' (answers F3 and F7). A decision entry (from its `## D<n> ` heading to the next `## ` heading) is marked when: (a) its text holds `amended by D<nn>` or `superseded by D<nn>`, any case (the phrase form that `athena_data::decision_links::parse_supersessions` reads, with an id of at least two digits; 'amended by hand' marks nothing); or (b) the new `docs/decision-links.toml` has a `[[link]]` with `older` = the id and `status = \"superseded\"`; or (c) it has a `[[link]]` with `older` = the id whose `newer` heading is not in the base log (this change reconciles it itself). A link whose `newer` already stood at the base and whose status is `amended` marks nothing, because that header says the older decision 'stays active' (decision-links.toml:5-6). Outside the log, a blank-line paragraph is marked when it holds the same phrase followed by a `D<nn>` id, a backticked name or a path with an extension. The status is read with `toml_edit::DocumentMut` (a dependency of athena-core, already used at admission.rs:77), because `link_pairs` (decision_links.rs:101) drops the status. A links text that does not parse marks nothing, so the check errs toward reporting. CHANGELOG.md, `records/`, `target/` and `.git/` are never searched.",
+      "reason": "The brief's exemption is 'marked amended by or superseded by'. The links list is how this repo records a supersession: of 29 `[[link]]` tables, one has status superseded and 28 amended, and only 4 'superseded by' phrases appear in the log. Counting any `older` id (round 1) would exempt D08 and D156, the two decisions that motivated this job, because D157/D160/D171 amend D08 and D187 amends D156. Rule (c) is the reconcile route the gate already teaches in its message (checks.rs:94-97: `Amends <id> in prose only` plus a link).",
+      "rejected": [
+        {
+          "option": "Any `older` id of any link is marked (round 1)",
+          "why": "It never reports a contradiction of D08 or D156, the cases this check exists for."
+        },
+        {
+          "option": "Count the bare words 'amended by' anywhere in the entry",
+          "why": "Prose such as 'the list is amended by hand' would exempt a whole entry."
+        },
+        {
+          "option": "Reuse `link_pairs` for the marks",
+          "why": "It returns pairs without status, so 'amended and still standing' cannot be told from 'superseded'."
+        }
+      ]
+    },
+    {
+      "choice": "Claims come only from lines the change replaces (answers F4). Hunks are read with `git diff -U0 --no-color --no-renames --no-ext-diff <from> <to>`, through the public `Git::run_bytes` (athena-git lib.rs:259; `added_lines` at lib.rs:642 uses the same command). A hunk with both removed and added lines is a replacement. A hunk with only removed lines (a deleted function, a deleted paragraph, a deleted file whose `+++` is `/dev/null`) yields no claim. A removed line must be 6 or more words (MIN_CLAIM_WORDS) and a comment or prose line (`//`, `///`, `//!`, `#` in toml, a non-table line of `.md`). It must not re-appear as an added line anywhere in the diff, so a moved comment is quiet. The finding text tells the producer the honest escape for a false hit in an old decision: add an entry that says `Amends D<n> in prose only` with an `amended` link (the convention in checks.rs:94-97 and D157). D190's Tradeoff says that claim hits are textual and may need that entry.",
+      "reason": "A deleted function or file is not a reversed claim, and a hard failure after one send-back would force a bogus entry. D187 rejected failing a job on a similar heuristic (decisions.md:5502-5503). Replacement hunks are what an edit of a stated behaviour looks like in a diff, and `-U0` hunks give that pairing without writing a diff algorithm.",
+      "rejected": [
+        {
+          "option": "Every removed comment or prose line is a claim (round 1)",
+          "why": "Deleting a function or file would fail any job that leaves a copy of its comment elsewhere."
+        },
+        {
+          "option": "Keep claim-only hits as send-back-only and close the job only on value hits and reading claims",
+          "why": "Replacement-only claims with a whole-line, 6-word match are narrow enough to close on. It would leave the deliverable 'fail the check' unmet for the motivating decision case."
+        },
+        {
+          "option": "A line-level LCS diff inside the module",
+          "why": "New algorithm and new tests; `git diff -U0` already gives the hunks."
+        }
+      ]
+    },
+    {
+      "choice": "Exits of the new stage, one line each. PASS (no findings): the adapter returns empty (producer.rs next to :498; new block after mod.rs:2020 falls through); the loop's all-clear test (producer.rs:545-556) gains `stale.is_empty()`; no state is left; the verifier path reads next. FAIL with a send-back left: `send_backs += 1` (producer.rs:676-677), the line `stale text left where the change makes it false: <n> place(s)` joins `problems` (:557-613), `append_stale_text` adds the section to `attempt_brief` last (:701-712); the brief is the state, read by the next producer pass, which reruns the check. FAIL at the limit: the `send_backs >= PRODUCER_SEND_BACKS` branch (:635-675) prints `producer   stale text still left after the send-back; the job ends before the verifier` and breaks with the report; the list is not added to `report_problems` (:583); the work tree keeps the text, which the candidate step reads next. FAIL at the candidate: the new block after mod.rs:2020 sets `closing.happened = self.failure(ctx, &reason)` with the reason `stale text left by the change: <list>`, keeping `changed_paths` and `verification_passed = None` as at mod.rs:2014-2018, and returns; a Failed outcome is the state; close and the records read it, and `athena retry` starts a fresh producer whose loop reruns the check. ERROR (diff, tree or blob read fails): both adapters return empty and print `producer   stale text not checked: <why>`, the policy of `settle_loop_checks` (checks.rs:432-441) that an advisory read failure never discards finished work; no state is left. HOLD: cannot happen; the check takes no slot and reads no disk gate. INTERRUPT: cannot happen inside the check (bounded git reads, no agent or process wait); the kill switch is read by the producer invocation before it and by `refuse_if_stopped` at the next stage. SKIPPED without a line: `self.nested.is_some()`, an empty change list, `recorded_checks.is_some()` (a resume at the verifier stage), no base commit in the snapshot, and no needles.",
+      "reason": "The brief asks for every exit of a new stage. Each row names the file:line that handles it, the state it leaves and the code that reads that state next.",
+      "rejected": [
+        {
+          "option": "Treat a read error as a finding",
+          "why": "A git read failure says nothing about the work; it would fail jobs for the environment."
+        }
+      ]
+    },
+    {
+      "choice": "Help strings (answers F5 and F8). A re-survey of every doc comment, `after_help` and arg help in main.rs (lines 20-620, read in full) against `pub const` limits gives these conversions, each to a `{placeholder}` in the derive text, filled by `athena_cli::fill_limits(Cli::command(), &limits())` in `cli_command()` over the whole command tree (about, long about, after_help, and each arg's help): (1) `plan` main.rs:350-355 'default 3 urgent, 10 high' <- `DEFAULT_URGENT_CAP`, `DEFAULT_HIGH_CAP` (config.rs:54,56); 'one dispatch in three' <- `IMPROVEMENT_GAP + 1` (plan.rs:466); 'three or more distinct jobs' <- `REPEAT_URGENT_JOBS` (plan.rs:471). (2) `drain` after_help main.rs:321 'at most two other items' <- `IMPROVEMENT_GAP`; :323 'three or more distinct jobs' <- `REPEAT_URGENT_JOBS`; :295 'two attempts that did not land' <- `athena_core::scope_guard::HOLD_ATTEMPTS` (scope_guard.rs:80); :307 'default 1' <- `athena_data::config::Parallel::default().max_concurrency` (pub Default, config.rs:291-297; `default_max_concurrency` is private, config.rs:286); the `{ceiling}` fill stays. (3) `check` main.rs:487 'pending for 15 minutes' <- `athena_gate::attribution::PENDING_WINDOW` (attribution.rs:52). (4) Hestia `review` main.rs:573-574 'The five highest-ranked causes ... are urgent' <- `athena_core::hestia::BACKFILL_HIGH` (hestia.rs:1494), with 'urgent' corrected to 'high' as the constant's doc (hestia.rs:1492-1493), the use at hestia.rs:1924 and the module doc at hestia.rs:44 say. (5) `audience` main.rs:147 'A rating of 2 or lower' <- `athena_core::audience::LOW_RATING` (audience.rs:37). (6) Rating '1 to 5' at main.rs:147, 336 and 400 <- `athena_data::records::RATING_RANGE` (records/work.rs:181); the two `value_parser!(u8).range(1..=5)` at main.rs:337 and 401 become one `rating_parser()` that reads the same constant, so help and parser cannot drift. Spelled numbers become digits. Not converted, each with its reason: 'every 30 seconds' (main.rs:370) is a literal `Duration::from_secs(30)` in drain.rs with no named constant; 'failed twice' (main.rs:279-281) is the private `ATTEMPTS` (drain.rs:324) and is also a quoted report reason that tests/drain.rs:1124,1170,1683 assert; 'two thirds' (main.rs:72) is `rows.len() * 2 / 3` at labeled.rs:536, no constant; 'two separate git worktrees' (main.rs:176) describes a method, not a limit; `display.rs:705` ('one dispatch in three is Athena's own') is a report line of `athena plan`, not help text, and builds on a file outside the deliverables, so it is listed in D190's Tradeoff as a follow-up.",
+      "reason": "A clap doc comment is a literal, so `format!` or `concat!` cannot take a constant there. D156's fill of `{ceiling}` (main.rs:605-623, tested by `drain_help_follows_the_ceiling_it_is_built_from`, main.rs:1511) is the existing, tested way. All values are already `pub`, so no file outside main.rs, lib.rs and the listed deliverables changes.",
+      "rejected": [
+        {
+          "option": "The `const_format` crate for `concat!`",
+          "why": "It changes Cargo.toml and Cargo.lock, which are not deliverables, and a derive doc comment cannot take it."
+        },
+        {
+          "option": "Convert only `plan`, `drain` and `check` (round 1)",
+          "why": "It missed the Hestia review (already stale: 'urgent' against `BACKFILL_HIGH`, which makes causes high), the audience low rating and the rating range, which criterion 5 also covers."
+        },
+        {
+          "option": "Make `default_max_concurrency`, `ATTEMPTS` or the 30-second wait public so they can be read",
+          "why": "It edits athena-data/config.rs and drain.rs, outside the listed files, and 'failed twice' is asserted as a report string. `Parallel::default()` already exposes the first."
+        },
+        {
+          "option": "Build the `display.rs:705` line from `IMPROVEMENT_GAP + 1` in this change",
+          "why": "It is report output, not help, and adds another file outside the brief's list; stated as a follow-up in D190."
+        }
+      ]
+    },
+    {
+      "choice": "Record as a new entry D190 (appended after D189 at decisions.md:5580, heading `## D190 · ` with Case, Decision, Alternatives, Tradeoff, Reversal cost and a Provenance bullet). The Decision says `Amends D156` for the part it extends: D156's rule that help text states a limit from the constant that enforces it, now for more strings, and its alternative (d), a send-back of a finding inside the loop (decisions.md:4297-4300), now for stale text. It also adds one `[[link]]` older = D156, newer = D190, status = amended to docs/decision-links.toml. It states only what D187 already did: `decision_gate` 'already runs in the producer loop and again at the candidate' (decisions.md:5487, producer.rs:498). It does not claim to end D156's remark that the finding reaches the producer on the next attempt (decisions.md:4301-4304) for governed paths, and it names D187's open follow-ups (decisions.md:5506-5509) as untouched. No link to D187 is added. No existing entry is edited.",
+      "reason": "A phrase `Amends D156` needs a matching link, or the gate holds the job (checks.rs:100-117 `link_problems`; `link_problem_sentence` at checks.rs:28-55). The log is append-only (mirrors.rs `decision log` AppendOnly) and `decision entries` needs the heading and a Provenance bullet (mirrors.rs:71-74). Saying the change 'ends' D156's tradeoff for the gate would itself put a false claim in the log (finding 6).",
+      "rejected": [
+        {
+          "option": "Write no phrase and add no link",
+          "why": "The change extends D156 (help from constants, finding sent back in the loop). An entry that hides that leaves the log contradicting itself, which is what this check exists to stop."
+        },
+        {
+          "option": "Also link D187",
+          "why": "This change does not finish any D187 follow-up (the advisory citation list for a passing change, the send-back intro, the briefs sentence); a link without a phrase fails `link_problems`."
+        }
+      ]
+    },
+    {
+      "choice": "The check is not a reading check and adds no reading refusal. It does not enter `refusing_check`, which `every_acceptance_check_has_a_refusing_corpus_case` reads (refusal_corpus.rs:2905). Its input forms are tested in stale_text.rs unit tests and the e2e tests. `cargo test -p athena-core --test refusal_corpus` is still run, as a regression demonstration that no reading outcome changed. Input forms and the test that covers each: a single number const; a single string const; a const with two literals (skipped); a const with no keyword after GENERIC words (skipped); `from 8 to 16` with a SCREAMING_SNAKE identifier; the same with a backticked identifier; the same with no identifier (not a needle); a quoted old claim after each marker; a quoted span under 6 words (not a claim); a cited `D<nn>` with and without a reversal word; a heading id absent from the log (ignored); a decision with each of the marking forms (a)-(c) and with a base-standing `amended` link; a claim wrapped over two lines; a deleted function and a deleted file; a moved comment; a CHANGELOG.md line; a line added by the diff.",
+      "reason": "The task template asks for the input forms of any matching rule and their corpus cases. The corpus (refusal_corpus.rs:303-2760 case builders, `reading_check_cases` at :1993) exercises reading refusals only, so no existing case id maps to these forms. Adding corpus cases for a rule that never refuses a reading would test nothing.",
+      "rejected": [
+        {
+          "option": "Add refusal-corpus cases for the stale-text forms",
+          "why": "The corpus runs `check_reading` over a stored reading; this rule runs over a diff and a tree and cannot produce a corpus outcome."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/stale_text.rs",
+      "action": "create",
+      "purpose": "The pure check: `Hunk`, `Input`, `Stale` (Display `path:line (D<id>): still says <what> (<why>): <text>`), `STALE_REASON_PREFIX`, `MIN_CLAIM_WORDS`, `MAX_LISTED`; the needle extractors (const values from hunks, replaced-hunk claims, the reading's `from X to Y` with an identifier, quoted old claims, cited decision ids); the marked-entry rule with link status read by `toml_edit`; the search and the added-line exemption; `read_diff`, `read_files` and `check` (diff, needles, then the tree only when there are needles); and the unit tests for criteria 1-3.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Declare `mod stale_text;` and add the candidate-step block after the decision gate (after line 2020) that closes the job with the stale-text reason.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Call `stale_text_in_snapshot` in `producer_loop` beside the decision gate and add its findings to the all-clear test, the problem list, the limit-reached line and the send-back brief.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "Add `Athena::stale_text_in_snapshot` and `Athena::stale_text_at_candidate`, the two adapters over `stale_text::check`; both take the accepted reading and print a skip line on a read error.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add `append_stale_text` (leading sentence plus a `Stale text (fix each; the verifier runs after this):` section, a count of the rest, unchanged text for an empty list) with a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the three end-to-end `stale_text_*` tests (send-back then fix, unfixed ends before the verifier, reading-only) using `governed_job_with`, `editing`, `commit_file` and a reader wrapper script.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `fill_limits(command, &[(name, value)])`, which replaces `{name}` in about, long about, before/after help and each arg's help over the whole command tree, with a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Turn the literal limits in the `plan`, `drain`, `check`, `audience`, `drain-restart` and Hestia `review` help into placeholders filled in `cli_command()` from the enforcing constants; add `rating_parser()`; correct 'urgent' to 'high' in the Hestia help; add the help tests of criterion 5. Not in the brief's file list; criterion 5 asks for the diff of the file where each string lives (open question).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D190 (`Amends D156`) with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance; no existing entry is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Add the `[[link]]` older D156, newer D190, status amended that the `Amends D156` phrase requires.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One `### Added` entry under `## [Unreleased]` stating what the diff does and nothing more.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Write crates/athena-core/src/run/stale_text.rs. Types: `Hunk { path, removed, added }`, `Input { files, hunks, reading, base_headings, links }`, `Stale { path, line, decision, what, why, text }`, `Needles { values, claims, decisions }`. Functions: `needles(hunks, reading)` (const pairing by NAME within one path; replaced-hunk claims; reading `from X to Y` with an identifier, quoted old claims after the markers, cited `D<nn>` with a reversal word); `search(&Needles, &Input)` (whole-token value match with the keyword gate and the new-value skip; wrap-tolerant word-run claim match with line numbers; the added-line exemption; the marked rule (a)-(c) from decision 3 with `toml_edit` link statuses; the paragraph rule outside the log); `find(&Input)` (needles then search, for tests); `STALE_REASON_PREFIX = \"stale text left by the change:\"`; `MIN_CLAIM_WORDS = 6`; `MAX_LISTED = 30`.",
+    "In the same file write the git readers: `read_diff(git, from, to)` (parse `git diff -U0 --no-color --no-renames --no-ext-diff` into hunks per path, `+++ /dev/null` marking a deleted file), `read_files(git, tree)` (`ls_tree`, extension and size filters, CHANGELOG.md, `records/`, `target/`, `.git/` left out, `blob_sizes`, `cat_blobs` in chunks of 200) and `check(git, from, to, reading) -> Result<Vec<Stale>>` (diff, needles, return empty with no tree read when there are no needles, base headings from `show_file(from, \"docs/decisions.md\")`, links text from the searched files).",
+    "Write the stale_text.rs unit tests named in the demonstrations: the criterion 1 fixture and its no-keyword and two-literal cases; the criterion 2 decision fixture with its marked variants, the older-amendment case, 'amended by hand' (no id), and the three reading-only forms with a quiet variant; the criterion 3 fixtures after update, the added-line, marked-entry and CHANGELOG cases, the deleted-function, deleted-file and moved-comment cases, and `read_files` over a temporary git repository. Every test name contains `stale_text` through the module path so `cargo test -p athena-core stale_text` runs them.",
+    "Add `append_stale_text(text, &[Stale])` to send_back.rs (one leading sentence after `## Sent back`, then a `Stale text (fix each; the verifier runs after this):` section with one bullet per finding and a count of the rest) and a unit test that an empty list returns the text unchanged.",
+    "Add `Athena::stale_text_in_snapshot(&self, accepted, snapshot) -> Vec<Stale>` and `Athena::stale_text_at_candidate(&self, ctx, accepted, base, cand) -> Option<String>` to checks.rs. Both build the reading sentences (summary, assumptions, criteria; split at `. `, `; ` and newlines), call `stale_text::check` (loop: `snapshot.git()`, `snapshot.base()`, `snapshot.work_tree_tree()`; candidate: `self.git`, base and candidate commits), and on error print `producer   stale text not checked: <why>` and return empty or None.",
+    "Edit `producer_loop`: compute `stale` next to `gate` (skip when `self.nested.is_some()` or `changes.is_empty()`), add `stale.is_empty()` to the all-clear test at producer.rs:545, push `stale text left where the change makes it false: <n> place(s)` to `problems` after `report_problems` is cloned, print `producer   stale text still left after the send-back; the job ends before the verifier` in the limit branch, and wrap the `attempt_brief` expression in `append_stale_text` last. Add `mod stale_text;` to run/mod.rs and the candidate block after mod.rs:2020 with the same guards and the `changed_paths` / `verification_passed = None` handling as mod.rs:2013-2019.",
+    "Add the three end-to-end tests to run/tests.rs: `stale_text_is_sent_back_to_the_producer_before_verification` (with the fix on send-back, which is also the criterion 3 landing test), `stale_text_left_after_the_send_back_ends_the_job_before_the_verifier`, and `stale_text_from_the_reading_alone_is_sent_back_and_fixed` (a reader wrapper script that sets `reading[\"summary\"]`, as tests.rs:1381-1385 does). Seed `src/limits.rs` and `HELP.md` with `commit_file`.",
+    "In athena-cli add `fill_limits` to lib.rs with its unit test. In main.rs replace the literals with placeholders at the strings listed in decision 6 (main.rs:72 left alone; lines 147, 295, 307, 321, 323, 336, 350-355, 400, 487, 573-574), add `rating_parser()` for lines 337 and 401, build the values in a `limits()` function from the constants, and have `cli_command()` run `fill_limits` over the whole tree after the existing drain fill. Add the criterion 5 tests.",
+    "Append D190 to docs/decisions.md (`Amends D156`; Case: the request, D156's alternative (d) and D187's statement that the gate already runs in the loop; Decision; Alternatives; Tradeoff with the textual limit, replaced-hunk-only claims, the false-hit escape, the retry-brief gap, D187's open follow-ups and display.rs:705 left literal; Reversal cost; Provenance with Read and Ran lines). Add the D156 -> D190 `[[link]]` to docs/decision-links.toml. Add the CHANGELOG entry under `## [Unreleased]` / `### Added`.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-core mirrors`, `cargo test -p athena-cli --test mirrors`, `cargo test -p athena-cli --test backtest`, `cargo test -p athena-data decision_links` and `cargo test -p xtask`. Fix any finding the new check lists on this change that lies inside the listed files; report one outside them as an open issue."
+  ],
+  "risks": [
+    {
+      "risk": "False positives: an unrelated line holds the old number, or a replaced line's words survive in a document. A hard failure at the candidate then forces a producer to write an 'Amends Dn in prose only' entry for an old decision it did not change.",
+      "mitigation": "Value hits need a shared name keyword plus the old value as a whole token, and skip lines that also hold the new value. Claims come only from replaced hunks, need 6 or more words, a comment or prose line, a whole-line word run, and must not be re-added. Reading values need a named identifier. A decision cited from the reading needs a reversal word. Output is capped at 30 findings plus a count. The finding text names the escape (`Amends D<n> in prose only` with an `amended` link, the convention of checks.rs:94-97). Tests cover a non-matching 8, a moved comment, a deleted function and a deleted file. The refusal rate is the brief's estimate, not measured."
+    },
+    {
+      "risk": "Reading every text file of the tree on each producer pass costs time and memory on a large repository.",
+      "mitigation": "The tree is read only when the diff or reading yields a needle. Only `.rs .md .toml .yml .yaml .sh` files of at most 2 MiB are read; CHANGELOG.md, `records/`, `target/` and `.git/` are skipped; blobs are read in chunks of 200 with one `cat-file --batch` (`cat_blobs`, athena-git lib.rs:988) after `blob_sizes` (:966). A failed read is a skip line, not a failure."
+    },
+    {
+      "risk": "A decision that restates the old rule in other words is missed, and the reading forms miss a rule the reader wrote in other words. A heading that moves is re-keyed by id, not line.",
+      "mitigation": "The brief puts semantic matching out of scope. The wrap-tolerant word-run match and the entry/paragraph rule are covered by tests with a wrapped sentence and with the marking forms. D190's Tradeoff says reworded reversals are not caught."
+    },
+    {
+      "risk": "The new decision entry or the CHANGELOG entry trips the ontology rule, the append-only rule or the banned-word scan.",
+      "mitigation": "The producer runs `cargo test -p athena-core mirrors`, `cargo test -p athena-cli --test mirrors` and `cargo test -p xtask` after writing D190. D190 contains no ontology term definition and is appended at the end of the file."
+    },
+    {
+      "risk": "A clap doc comment is stored as `about` or `long_about` depending on its paragraphs, and an arg's text as `help` or `long_help`, so a fill that reads the wrong getter leaves a placeholder in the help.",
+      "mitigation": "`fill_limits` fills whichever of about, long about, before/after help and each arg's help or long help exists, over every subcommand, and the criterion 5 test asserts no `{` survives in the rendered help of each converted command. clap is 4.6.7 (Cargo.lock:249-251); if `mut_subcommands` or `mut_args` is missing, use `mut_subcommand` per name. If `jiff::SignedDuration::as_mins` is missing, use `as_secs() / 60` for `PENDING_WINDOW`."
+    },
+    {
+      "risk": "A retry brief omits the stale-text finding because `retry_findings` (retry.rs:476-500) is not extended.",
+      "mitigation": "The retry's own producer loop reruns the check and supplies the list in its first send-back (shown by the loop test); stated in D190's Tradeoff."
+    },
+    {
+      "risk": "The producer's own change trips the check on this job's own diff (for example a real copy of a replaced help line in docs).",
+      "mitigation": "Only whole replaced lines of 6 or more words are needles, and this job's reading holds no `from X to Y` beside an identifier. If the send-back lists a real stale place outside the listed files, the producer reports it as an open issue and does not widen scope, since criterion 9 forbids other files."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "the producer loop's all-clear test, problem list and send-back brief",
+      "dependent": "crates/athena-core/src/run/producer.rs `producer_loop` (line 298), called at crates/athena-core/src/run/mod.rs:1907. Modes that reach it: a normal run, a resumed candidate (`resume_candidate`), a nested run (`self.nested`), a pinned run (`ctx.pin_dir`), a send-back pass, and the final pass at `PRODUCER_SEND_BACKS` (mod.rs:1682). State it reads: the work tree, `snapshot.base()`, `accepted`.",
+      "kind": "code",
+      "test": "Every existing run test (`cargo test -p athena-core run::`), plus `stale_text_is_sent_back_to_the_producer_before_verification` and `stale_text_left_after_the_send_back_ends_the_job_before_the_verifier`. A nested run and an empty change skip the check like the gate (producer.rs:498). A pinned run runs it, as the gate does.",
+      "reason": null
+    },
+    {
+      "name": "send-back brief text",
+      "dependent": "crates/athena-core/src/run/send_back.rs `send_back_text`, `send_back_text_scoped`, `append_check_failures`, `append_mirror_drift`, `append_missing_changelog` and their callers at producer.rs:685-712 and crates/athena-core/src/run_pin_tests.rs:1135,1283,1398-1431.",
+      "kind": "code",
+      "test": "`cargo test -p athena-core send_back` and the run_pin_tests send-back tests, plus a new unit test that `append_stale_text(text, &[])` equals `text`.",
+      "reason": "The new `append_stale_text` is applied last and returns its text unchanged for an empty list (as `append_mirror_drift` does at send_back.rs:228), so every pinned send-back text is byte for byte as before."
+    },
+    {
+      "name": "candidate-time failures before the verifier",
+      "dependent": "crates/athena-core/src/run/mod.rs:1958-2020 `check_and_verify`: the allowed-paths check, the decision gate and the resume guard `recorded_checks.is_none()`; the tests at tests.rs:3636-3779.",
+      "kind": "code",
+      "test": "`stale_text_left_after_the_send_back_ends_the_job_before_the_verifier` and the `governed_edit_*` tests, whose counts must stay exact. The new block sits after the gate, with the same guards and the same `failure` plus `changed_paths` / `verification_passed = None` handling (mod.rs:2014-2018); a resume at the verifier stage and a nested run skip it.",
+      "reason": null
+    },
+    {
+      "name": "closing reason prefix `stale text left by the change:`",
+      "dependent": "crates/athena-core/src/reading/retry.rs `retry_findings` (lines 476-500), which carries only the gate and scope reason prefixes into a retry brief.",
+      "kind": "code",
+      "test": null,
+      "reason": "A job closed by the new check has no verification and a third prefix, so `retry_findings` returns none for it and the retry brief omits the list. The retry's own producer loop reruns the check and sends the list in its first send-back, so nothing is lost. The file is not a deliverable and is unchanged; the gap is stated in D190's Tradeoff."
+    },
+    {
+      "name": "closing reason classification",
+      "dependent": "crates/athena-core/src/disk.rs `StopCause::of` (line 462) and `is_environment_reason`.",
+      "kind": "code",
+      "test": "The assert `!crate::disk::is_environment_reason(&done.reason)` in `stale_text_left_after_the_send_back_ends_the_job_before_the_verifier`: the reason starts with neither the environment prefix nor the producer-stopped one, so the cause is Work, as for the gate's reason.",
+      "reason": null
+    },
+    {
+      "name": "the accepted reading as a new input",
+      "dependent": "crates/athena-context/src/briefs.rs:75 `AcceptedReading` (`summary`, `assumptions`, `criteria`), read by the new code through `accepted` at producer.rs:302 and mod.rs:1961; the other readers of the struct (briefs, verification).",
+      "kind": "code",
+      "test": "The reading-only unit and end-to-end tests of criterion 2.",
+      "reason": "The new code only reads three fields and never builds or changes the struct, so no other consumer sees a difference."
+    },
+    {
+      "name": "link status as the mark of a decision",
+      "dependent": "docs/decision-links.toml header (lines 1-32) and its 29 `[[link]]` tables (28 amended, 1 superseded); `athena_data::decision_links::link_pairs` (decision_links.rs:101), which drops the status. The new code reads the status with `toml_edit` and does not change `link_pairs`.",
+      "kind": "rule",
+      "test": "`a_decision_an_older_entry_amended_still_stands_and_is_reported` and the superseded and new-newer variants in `stale_text`; `cargo test -p athena-data decision_links` stays green because that crate is untouched.",
+      "reason": null
+    },
+    {
+      "name": "docs/decisions.md append-only, entry shape and ontology terms",
+      "dependent": "crates/athena-core/src/mirrors.rs REGISTRY: `decision log` (AppendOnly), `decision entries` (DecisionEntries), `ontology` (OntologyTerms) at mirrors.rs:114-151, run through `mirror_drift_in` (producer.rs:84).",
+      "kind": "rule",
+      "test": "`cargo test -p athena-core mirrors` and `cargo test -p athena-cli --test mirrors`. D190 is appended after D189 with a `## D190 · ` heading and a Provenance bullet, and its prose defines no ontology term the registry does not cover.",
+      "reason": null
+    },
+    {
+      "name": "the `Amends D156` phrase and the D156 -> D190 link",
+      "dependent": "docs/decision-links.toml and `decision_gate` (checks.rs:67-121), `athena_data::decision_links::link_problems` (decision_links.rs:416) and `parse_supersessions` (decision_links.rs:305), `athena backtest` condition (a) in crates/athena-cli/src/backtest.rs, and crates/athena-cli/src/decisions.rs.",
+      "kind": "rule",
+      "test": "`cargo test -p athena-data decision_links`, `cargo test -p athena-core governed` and `cargo test -p athena-cli --test backtest`. The phrase and the link are added together, so no phrase lacks a link and no link lacks a phrase.",
+      "reason": null
+    },
+    {
+      "name": "governed paths",
+      "dependent": "docs/decision-links.toml [[governs]] table (lines 196-201): D08 governs crates/athena-git/src/snapshot.rs and crates/athena-core/src/run/candidate.rs.",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan edits neither governed file (it reads `Snapshot::work_tree_tree`, `base` and `git` but does not edit snapshot.rs, and adds nothing to candidate.rs), so no reconciliation is required for D08."
+    },
+    {
+      "name": "CHANGELOG.md entry",
+      "dependent": "crates/athena-core/src/admission.rs `changelog_required` (called at producer.rs:474) and the changelog default.",
+      "kind": "rule",
+      "test": "`cargo test -p athena-core changelog`; the entry goes under `## [Unreleased]` / `### Added`.",
+      "reason": null
+    },
+    {
+      "name": "text of D190, the CHANGELOG entry, comments and fixtures",
+      "dependent": "xtask/tests/policy.rs boundary scan (`boundary_words()`) and the `[personal_data]` allow-list in athena.toml.",
+      "kind": "rule",
+      "test": "`cargo test -p xtask`; the new text uses no banned word and no email-like text, and fixtures use placeholder names.",
+      "reason": null
+    },
+    {
+      "name": "help text of plan, drain, check, audience, drain-restart and hestia review",
+      "dependent": "crates/athena-cli/src/main.rs `cli_command()` (line 612) and `main` (line 640); main.rs tests at 1459, 1471, 1502, 1511, 1540 that render help; crates/athena-cli/tests/binary.rs:429-441 (`check --help`), tests/drain.rs:2500-2550 and :10085-10093 (`drain --help`, which asserts 'awaiting diagnosis', not 'two attempts'), and the `--help` runs at tests/proposals.rs:267, work_decisions.rs:185, retry.rs:1085, labeled.rs:168 and design_surface.rs:22.",
+      "kind": "code",
+      "test": "`cargo test -p athena-cli --bin athena` and `cargo test -p athena-cli --test binary`, `--test drain`.",
+      "reason": "Rendered text changes only where a spelled number becomes a digit and in the Hestia sentence ('urgent' becomes 'high'). A search of crates for the old phrases ('highest-ranked', 'or lower queues', 'at most two other', 'pending for 15', 'dispatch in three', 'default 3', 'distinct jobs', 'two attempts') finds them in main.rs, hestia.rs and other modules' docs, and no test asserts them as help. The existing tests assert other words (flags, stop labels, 'awaiting diagnosis', `--attribution`). `drain_after_help` and its tests (main.rs:1502-1537) are untouched: the new fill runs on other keys and leaves `{ceiling}`."
+    },
+    {
+      "name": "the rating threshold's accepted range",
+      "dependent": "crates/athena-cli/src/main.rs:337 and :401 `rating_threshold` (`value_parser!(u8).range(1..=5)`), `drain::DEFAULT_TARGET_RATING` (drain.rs:318) and callers of `--rating-threshold` in crates/athena-cli/tests/drain.rs.",
+      "kind": "code",
+      "test": "`rating_parser_follows_rating_range` and the existing drain tests that pass `--rating-threshold`.",
+      "reason": "The accepted range stays 1 to 5: `rating_parser()` reads `RATING_RANGE` (records/work.rs:181), whose value this plan does not change."
+    },
+    {
+      "name": "constants read by help text",
+      "dependent": "The constants the help text reads: athena-data config.rs `DEFAULT_URGENT_CAP`, `DEFAULT_HIGH_CAP` (54-56) with its test near 1420-1434, `Parallel::default()` (291-297); athena-core plan.rs `REPEAT_URGENT_JOBS`, `IMPROVEMENT_GAP` (466-471), hestia.rs `BACKFILL_HIGH` (1494), scope_guard.rs `HOLD_ATTEMPTS` (80), audience.rs `LOW_RATING` (37); athena-gate attribution.rs `PENDING_WINDOW` (52); athena-data records/work.rs `RATING_RANGE` (181).",
+      "kind": "code",
+      "test": "`cargo test -p athena-data priority_caps` and `cargo test -p athena-gate attribution` stay green because those crates are untouched.",
+      "reason": "They are read, not changed. Every one is `pub`, and `athena_core::{plan, hestia, scope_guard, audience}` are `pub mod` (lib.rs:104,124,140,156), so no edit outside the listed files is needed."
+    },
+    {
+      "name": "other copies of the limits the help now builds from constants",
+      "dependent": "crates/athena-cli/src/display.rs:705 ('one dispatch in three is Athena's own'), docs/design/*.md and docs/spec.toml (which restate '1 to 5' and the caps) and crates/athena-core/src/hestia.rs:44.",
+      "kind": "code",
+      "test": null,
+      "reason": "The values do not change in this plan, so no copy becomes false. display.rs:705 is report output and is left literal and named in D190's Tradeoff. The new check is what reports such a copy when a later change alters the value, as far as the match (digits as whole tokens, keyword shared) can see."
+    },
+    {
+      "name": "athena-cli lib.rs contents",
+      "dependent": "athena-cli lib.rs `hestia_report` (line 31, caller commands.rs:209) and `age_phrase`.",
+      "kind": "code",
+      "test": null,
+      "reason": "`fill_limits` is a new function beside them; neither is changed."
+    },
+    {
+      "name": "refusal rate of jobs whose diffs change a constant or replace a stated claim",
+      "dependent": "The job queue and every `cargo test` run on a repository that holds Athena's own source: the check refuses more jobs than before (the brief expects about 10% of newly refused readings; this is the brief's estimate, not measured here).",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The check reads only the diff, the accepted reading and the tree; it takes no host setting, and a read failure is a skip line, so the host cannot make it refuse by itself failing. The rate is the brief's estimate; D190 and the CHANGELOG state no number."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test `stale_text::tests::a_constant_raised_from_8_to_16_names_the_help_line_still_saying_8`: an in-memory `Input` whose hunk removes `pub const MAX_WIDGETS: u32 = 8;` and adds `= 16;` in `crates/core/src/limits.rs`, and whose searched file `crates/cli/src/main.rs` holds `/// Runs at most 8 widgets per job.` on a known line. `find` must return one `Stale` with that path and line, old value 8, and a Display text containing `crates/cli/src/main.rs:<line>`. Companion tests `a_changed_constant_with_no_shared_keyword_is_not_reported` and `a_constant_with_two_literals_is_skipped`.",
+      "command": "cargo test -p athena-core stale_text",
+      "observes": "The finding names the file and line of the help string. Unrelated 8s are quiet.",
+      "fails_without": "If `find` returned an empty list (the check missing or not run), the assertion that exactly one finding is returned, at `crates/cli/src/main.rs:<line>` with old value `8`, fails. A second case in the same test asserts that a line `/// Takes 8 seconds.` with no shared keyword is not reported, so a check that flagged every `8` fails too.",
+      "seam": "Production entry point `stale_text::find(&Input)`, a pure function over plain data (`files: BTreeMap<path, text>`, `hunks`, `reading`, `base_headings`, `links`). No fake or double; the fixture is the data. Added by plan step 1."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests: (1) `a_decision_that_says_the_removed_rule_and_is_not_marked_is_named_with_its_id_and_line`: a hunk replacing `/// A retry keeps the work of the failed attempt for the next producer.` with `/// A retry discards the work of the failed attempt and starts from the base.`, and a `docs/decisions.md` with `## D45 · Retries` and the old sentence wrapped over two lines. `find` returns a finding with path docs/decisions.md, decision `D45` and the first wrapped line. Variants: `(superseded by D99)` in the entry; a toml link with status superseded; a link whose `newer` heading is new in this change: each is quiet. (2) `a_decision_an_older_entry_amended_still_stands_and_is_reported`: links hold older D45, newer D60, status amended, with D60 in the base headings: D45 is still reported. (3) `amended_by_hand_without_an_id_does_not_mark_an_entry`. (4) `a_rule_changed_only_in_the_reading_is_found_without_any_removed_line`: the diff is empty or touches only README.md; reading sentences give `Raise MAX_WIDGETS from 8 to 16.` (value hit on `HELP.md`), a quoted old claim after `no longer`, and `This reverses D45.` (decision hit at the `## D45` heading line); the same with a new entry that says `Amends D45` and a new link: quiet. End-to-end `stale_text_from_the_reading_alone_is_sent_back_and_fixed` in run/tests.rs: the fake reader (script wrapper as at tests.rs:1381-1385) sets `reading[\"summary\"]` to `Raise `MAX_WIDGETS` from 8 to 16 in HELP.md.`; the producer edits only README.md; the second producer prompt carries `HELP.md:1`; after the fix the job lands.",
+      "command": "cargo test -p athena-core stale_text",
+      "observes": "An unmarked decision is named by id and line; marked entries and decisions that stand are treated as the rule says; a changed rule that exists only in the reading is found.",
+      "fails_without": "Without claim extraction and the log search, `find` returns nothing for the log and the assertion on `D45` and the line fails. If the marking rules were ignored or too loose, the quiet-variant assertions fail; if too strict, the unmarked assertions fail. The reading-only test fails if the reading is not read: its diff has no removed line.",
+      "seam": "`stale_text::find(&Input)` with the log text as one entry of `files`, the toml text in `links`, and the base headings (added by step 1). The end-to-end test drives `Athena::go` through `governed_job_with` (tests.rs:3596) with the `athena_agent::fake::Script` that exists (tests.rs:225, :1381); only the reader wrapper script is new (step 6)."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests: `both_fixtures_pass_once_the_text_is_updated_and_exempt_places_are_not_reported` re-runs the criterion 1 and 2 fixtures with the help line changed to 16 and the decision entry changed to the new rule (added lines in the diff) and asserts `find` is empty, then adds an old-value line in a marked entry and a line that the diff added, and asserts none is reported. `read_files_leaves_out_changelog_records_target_and_large_files` builds a temporary git repository (`athena_git::Git`, as `repo_with` at athena-git lib.rs:1366 does) with CHANGELOG.md, `records/x.md` and an oversize file holding the old value, and asserts they are absent from the searched map. `a_deleted_function_does_not_make_a_claim` and `a_deleted_file_does_not_make_a_claim` (removed-only hunks, duplicated comments elsewhere: quiet); `a_moved_comment_is_not_a_claim`. End-to-end `stale_text_send_back_fix_lets_the_job_reach_the_verifier` in run/tests.rs: the script sets `src/limits.rs` to 16 and, when the prompt holds `## Sent back`, also fixes HELP.md; counts (producer, verifier) are (2, 1) and the job lands.",
+      "command": "cargo test -p athena-core stale_text",
+      "observes": "Updated text passes; exempt places stay quiet; deletions are not claims; a producer that fixes the text after the send-back lands.",
+      "fails_without": "Without the exemptions, the 'passes once updated' assertions fail: the diff-added line, the marked entry and the CHANGELOG line would each be reported. Without the replacement-only rule, the deleted-function and deleted-file tests fail. If `read_files` did not skip CHANGELOG.md, the temp-repository test fails.",
+      "seam": "`stale_text::find`, `stale_text::read_files` (added by step 1) over a tempdir git repository; the end-to-end test uses `commit_file` (tests.rs:359), `editing` (tests.rs:3567) and `governed_job_with` (tests.rs:3596). All exist; no new double."
+    },
+    {
+      "criterion": 4,
+      "method": "Three tests in crates/athena-core/src/run/tests.rs. `stale_text_is_sent_back_to_the_producer_before_verification`: a repository with `src/limits.rs` (`MAX_WIDGETS: u32 = 8`) and `HELP.md` (`at most 8 widgets`); an `editing`-style script sets the constant to 16 and records prompts; asserts prompts[1] holds `## Sent back`, the heading `Stale text`, `HELP.md:1` and the old value, counts (2, 1) with the job landing once the script fixes HELP.md on the send-back, and the UI line `producer   sent back: stale text`. `stale_text_left_after_the_send_back_ends_the_job_before_the_verifier`: a script that never fixes HELP.md; asserts state Failed, reason starting `stale text left by the change:` and naming `HELP.md:1`, counts (2, 0), no `checks     ` or `verifier   ` line, the line `producer   stale text still left after the send-back; the job ends before the verifier`, and `!crate::disk::is_environment_reason(&done.reason)`. The third is the reading-only test of criterion 2. Reviewers also read `git diff -- crates/athena-core/src/run/producer.rs crates/athena-core/src/run/mod.rs crates/athena-core/src/run/checks.rs crates/athena-core/src/run/send_back.rs` for the call sites.",
+      "command": "cargo test -p athena-core stale_text",
+      "observes": "The list is in the producer's second brief; an unfixed change closes the job before the verifier.",
+      "fails_without": "If `producer_loop` did not call the check or did not append its list, the second prompt lacks the finding and the producer count is 1 (the job accepted with stale text). If the candidate block were missing, the unfixed job reaches the verifier (verifier count 1) and the `failed     stale text left by the change:` line is absent.",
+      "seam": "Production entry point `Athena::go` via `governed_job_with` over `producer_loop` (producer.rs:298) and `check_and_verify` (mod.rs:1958). Guards: `nested.is_none()`, a non-empty change list, `recorded_checks.is_none()`, a base commit. The fixture is the existing `FakeAgentDriver` script. Exists today; only the three scripts and the seeded files are new (step 6)."
+    },
+    {
+      "criterion": 5,
+      "method": "In main.rs tests, beside `drain_help_follows_the_ceiling_it_is_built_from` (main.rs:1511): `help_limits_are_the_constants_that_enforce_them` renders `cli_command()` for `plan`, `drain`, `check`, `audience`, `drain-restart` and `hestia review` (whitespace joined) and asserts each filled phrase equals the constant's value (`default {DEFAULT_URGENT_CAP} urgent, {DEFAULT_HIGH_CAP} high`, `{REPEAT_URGENT_JOBS} or more distinct jobs`, `{IMPROVEMENT_GAP} other items`, `{HOLD_ATTEMPTS} attempts`, `{PENDING_WINDOW} minutes`, `{BACKFILL_HIGH} highest-ranked causes`, `{LOW_RATING} or lower`, `{RATING_RANGE.start()} to {RATING_RANGE.end()}`) and that none holds `{`. `help_templates_carry_placeholders_not_numbers` reads the derived text from `Cli::command()` and asserts the placeholders are there and the old phrases are gone. `hestia_review_help_says_high_not_urgent`. `rating_parser_follows_rating_range` (accepts the ends of `RATING_RANGE`, refuses one beyond). In lib.rs: `fill_limits_replaces_only_named_placeholders` over several values (only the number changes; `{ceiling}` and unknown braces are left). The diff of main.rs and lib.rs shows each string with its constant.",
+      "command": "cargo test -p athena-cli limits",
+      "observes": "Each help string that restates a limit shows the constant's value and follows it.",
+      "fails_without": "With the old literals in the doc comments, the template test (the derived text must hold each placeholder and none of the old phrases) fails. With an unfilled template, the filled-help test fails on a surviving `{`. A filled help that did not follow its constant fails the loop over test values. A parser left at `1..=5` fails `rating_parser_follows_rating_range`.",
+      "seam": "`cli_command()` (main.rs:612, the function `main` runs) and `athena_cli::fill_limits` (added by step 7); the constants are the real ones; no double."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff: only appended lines in the log (a new `## D190 · ` entry with Provenance, `Amends D156`) and one `[[link]]` D156 -> D190 amended in the toml. Then run `cargo test -p athena-core mirrors`, `cargo test -p athena-cli --test mirrors`, `cargo test -p athena-cli --test backtest` and `cargo test -p athena-data decision_links`.",
+      "command": "git diff -- docs/decisions.md docs/decision-links.toml",
+      "observes": "The log stays append-only and well formed, and the link resolves.",
+      "fails_without": "Editing an old entry fails the `AppendOnly` rule (mirrors.rs `decision log`). A missing Provenance bullet fails `DecisionEntries`. An `Amends D156` phrase with no link, or a link no phrase names, fails `link_problems` and the backtest.",
+      "seam": "Real files read by the existing mirror, backtest and decision-link checks; nothing new."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the one added bullet under `## [Unreleased]` / `### Added`. It names the check and its sources (the diff's replaced lines and changed constants, and the accepted reading), the send-back in the producer loop, the close before the verifier, the help strings built from constants, D190, and the limits (textual match, 6-word claims, keyword-gated values). It states no refusal rate or other number the diff does not show. Also run `cargo test -p athena-core changelog`.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One entry, and each claim in it matches a part of the diff.",
+      "fails_without": "An entry that claims more than the diff does (a refusal rate or a measure not taken) contradicts the diff the verifier reads. A missing entry is refused by `changelog_required` (admission.rs, used at producer.rs:474)."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three recorded checks on the final tree: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. Also `cargo test -p athena-core --test refusal_corpus` (the reading corpus must be unchanged because no reading code is touched), `cargo test -p athena-cli` and `cargo test -p xtask`. I have not run them and cite no result.",
+      "command": "cargo test --locked",
+      "observes": "All pass.",
+      "fails_without": "Any existing test that the new check or the help change breaks fails the run: the run tests that drive `producer_loop` and `check_and_verify` (the `governed_edit_*` tests, tests.rs:3636-3779; `settle_loop_checks`, tests.rs:6252), the pin tests in run_pin_tests.rs, the help tests in main.rs and tests/drain.rs. The existing run tests change the README to short text and have no changed constant, no 6-word replaced line and no identifier in the reading, so they must stay unchanged.",
+      "seam": "The real test suite and the existing fake-agent harness (tests.rs:180-285)."
+    },
+    {
+      "criterion": 9,
+      "method": "`git status` and `git diff --stat` list only: run/stale_text.rs, run/mod.rs, run/producer.rs, run/checks.rs, run/send_back.rs, run/tests.rs, athena-cli lib.rs and main.rs, docs/decisions.md, docs/decision-links.toml and CHANGELOG.md. No athena.toml, defaults.toml, workflow, Cargo file, drain.rs, display.rs, hestia.rs or athena-data file changes, since every constant used is already `pub`. Without a changed constant, a replaced claim or a reading form, the check returns nothing; the unchanged existing run tests show it.",
+      "command": "git diff --stat",
+      "observes": "Scope is the deliverables plus athena-cli/src/main.rs (see the open question).",
+      "fails_without": "A change to any file outside the list would show in the stat."
+    }
+  ],
+  "open_questions": [
+    "User: Criterion 5 and criterion 9 pull apart. The help strings live in crates/athena-cli/src/main.rs, which is not in the brief's deliverable list, and criterion 9 says no other file changes. This plan edits main.rs (and nothing else beyond the list) so that criterion 5's 'diff of the file where each such string lives' can be shown. Say if you want main.rs left alone; then criterion 5 would hold only for the `fill_limits` helper in lib.rs and the help strings would stay literal."
+  ],
+  "producer_section_sha256": "09260a79621f978e1bb89be5d2e623c3a0191fe9d946e817b2123f6a35c28cdb"
+}

@@ -5203,6 +5203,57 @@ mod produce_and_verify_order_tests {
     }
 
     #[test]
+    fn a_passing_attempt_stores_the_per_criterion_check_in_its_invocation_detail() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let (done, said, athena, job) = run_checked_job(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            editing(counts.clone(), Arc::default(), Vec::new()),
+        );
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        // The first report passes the self-check: one producer attempt and no send-back.
+        let (_, producer, _, _) = counts.all();
+        assert_eq!(producer, 1, "{said:#?}");
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let producers: Vec<_> = records.jobs[job.as_str()]
+            .invocations
+            .iter()
+            .filter(|i| i.role == Role::Producer)
+            .collect();
+        assert_eq!(producers.len(), 1);
+        // The passing attempt's stored detail carries the criterion, its status and its evidence.
+        let detail = producers[0].detail.clone().unwrap_or_default();
+        assert!(detail.starts_with("self-check passed"), "{detail}");
+        let json = detail
+            .split("redacted report: ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no report in the detail: {detail}"));
+        let kept: athena_data::records::ProducerReport = serde_json::from_str(json).unwrap();
+        assert_eq!(kept.criteria_check.len(), 1, "{detail}");
+        assert_eq!(kept.criteria_check[0].criterion, CRITERION);
+        assert_eq!(kept.criteria_check[0].status, "met");
+        assert_eq!(kept.criteria_check[0].evidence, "read it");
+        // It is a copy of the candidate's stored report.
+        let candidate = records.jobs[job.as_str()]
+            .candidate
+            .clone()
+            .expect("the job has a candidate");
+        let stored = candidate
+            .producer_report
+            .expect("the candidate keeps the report");
+        assert_eq!(stored.criteria_check, kept.criteria_check);
+    }
+
+    #[test]
     fn a_check_still_failing_after_the_send_back_is_flagged_to_the_verifier() {
         let repo = repo();
         let state = tempfile::tempdir().unwrap();

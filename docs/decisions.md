@@ -5631,3 +5631,103 @@ should replace those estimates with its figures.
   `cargo test -p athena-cli --test job_plan the_second_critic_brief` and `cargo test -p athena-cli --test budgets`.
   Not measured: whether a model critic follows the two bullets, how many 5-round planning stops this prevents, or
   the added tokens per critic call.
+
+## D190 · A reading of a delay or speed-up request must carry a timeline of the real stage order and durations
+
+- **Case:** A request that names a fix (move a call earlier) and a timing figure was read, planned and built around
+  as given, because nothing required a reading of a delay or speed-up request to check the claimed figure against the
+  real stage order and durations. Jobs 20261025-110525-8hzb, 20261025-034733-c453 and 20261025-190606-eebk each began
+  that way, and introspections 20261025-110857-eqhd, 20261025-183009-xw7y and 20261025-190659-jvd7 each proposed a
+  timeline of stages and durations before the method is fixed. The three jobs' own candidates are dropped and not
+  redone.
+- **Decision:** `check_timing_claim` in `crates/athena-core/src/reading/surveys.rs` is one `step!` line in
+  `refusing_check`, after `check_records_measure`. For a code or tests reading with a behavior criterion, it fires
+  when the request (without the lines Athena's root-cause request copies from earlier records), the summary or a
+  criterion holds, in one sentence, (1) a speed, delay or cut phrase and a duration figure, (2) a speed phrase and
+  a stage noun, or (3) a cut verb, a time word and a stage noun. The reading is then refused unless a `Timeline:`
+  assumption holds a `crates/` path, two or more durations, the order of the stages, a source label and the
+  claimed figure. No reader rule or prompt text is added, because the reader's set has 2 tokens left. The refusal
+  text is the information the reader lacks: the six stages in pipeline order as `StageMinutes::named` lists them,
+  where `athena status` prints their medians, a request to say whether the request's own figure matches or to
+  label it an `unchecked estimate`, and an example whose path exists. A reading that adds or changes a reading
+  check (a criterion declares `newly refused` readings and a deliverable is under `crates/athena-core/src/reading`
+  or is the refusal corpus) is exempt, since it quotes such requests as test input; the same declaration beside a
+  pipeline file is not exempt. The corpus case `ci-wait-time-spent-reading` changes from accepted to refused by this
+  check, because `Reduce time spent waiting for CI` is a request to cut the time a stage takes; a new case accepts
+  it with a timeline.
+- **Alternatives:** A reader rule line or a prompt edit: the reader set is full and the rule-line count is pinned.
+  Reading the records inside the check: the reader has no records, and the check sees the reading and request only,
+  as its siblings do. A model call to judge the timeline: not deterministic in the replay. Only the words of the
+  three jobs: it misses `delayed`, `speeds up`, `slows`, `takes longer` and `Reduce the CI wait`, so the class is
+  only partly prevented. Counting `shorten` or `reduce` with a stage noun alone, or `throughput`: it refuses prompt
+  length and queue capacity work. Exempting any reading that declares `newly refused`: a speed-up reading could
+  skip the check by adding the declaration.
+- **Tradeoff:** This check refuses more readings; the higher refusal rate is intended: expected 4% of newly refused
+  readings. That is an estimate, not measured: 3 of about 1000 scored jobs recorded the class, about 2 of the last
+  200 commit subjects name a speed topic and neither is a timing claim, and the replay at verification measures the
+  real share. Limits: the trigger is lexical, with no reading of negation; figures written as words (`a minute`) are
+  not read, so a request with no figure and no stage noun is missed; `earlier`, `delay` and `slow` need a figure,
+  and `earlier` before a noun such as `attempt` is not a trigger; `throughput` and capacity requests are not read.
+  A timeline proves presence, not that its figures are true: an `estimate` label passes, and the planner and the
+  verifier judge the figures.
+- **Reversal cost:** Low; remove the `step!` line, `check_timing_claim` and its helpers in `surveys.rs`, the tests
+  `timing_claim_*` in `reading.rs`, `timing_claim_cases` and the 14 input forms in the refusal corpus, and set
+  `ci-wait-time-spent-reading` back to accepted.
+- **Provenance:** Read: `crates/athena-core/src/reading/surveys.rs` (`check_code_survey`, `check_records_measure`,
+  `requires_existing_code_section`), `crates/athena-core/src/reading/checks.rs` (`refusing_check`, `sentences`),
+  `crates/athena-core/src/reading/terms.rs` (`is_generated_line`), `crates/athena-core/src/reading/replay.rs`
+  (`declared_percent`), `crates/athena-core/src/status/throughput.rs` (`StageMinutes::named`),
+  `crates/athena-core/src/hestia.rs` (`slowdown_request`, `root_cause_request`) and
+  `crates/athena-core/tests/refusal_corpus.rs`. Ran: `cargo test -p athena-core timing_claim` (7 tests, 4 of which
+  fail with the `step!` line removed) and `cargo test -p athena-core --test refusal_corpus`. Counted once, with a
+  throwaway test that is not kept, over the records snapshot: the check refused 29 of the 960 accepted readings with
+  a stored request (3.0%) and 1 of the newest 50 (2%); most of the 29 are speed or slowdown requests, and a few use
+  a cut verb about text. A first version of the `earlier` rule, which excluded listed nouns, also refused two
+  readings that used `earlier` before other nouns; the rule now fires only when `earlier` ends the sentence or
+  is followed by a preposition or a conjunction. Not measured: how many requests of the class the lexical trigger misses,
+  and whether a reader's timeline figures are true.
+
+## D191 · The producer brief says how the verifier checks each criterion
+
+- **Case:** Failure class criterion-unmet-at-final-verification (43 introspections in 43 jobs, the first 20261014-172320-k3k0
+  for job 20261014-170031-2r9b, and also jobs 20261014-172342-rqgb and 20261014-174937-hrzn) ends with a job rejected on
+  a criterion its producer reported as met. Root cause: the producer brief lists each accepted criterion and asks for
+  evidence, but never says what evidence the verifier looks for in each one, and `unmet_criteria` in
+  `crates/athena-core/src/run/send_back.rs` trusts any `criteria_check` entry with status met. A sweep criterion ("every
+  mention", "no longer appears") is reported met without a repo-wide search, a rewrapped-prose criterion without a width
+  check, and a behavior criterion without a command, so the miss shows only at the final verdict. The stored check was
+  not what was missing: the final report, `criteria_check` included, is kept in `Candidate.producer_report`, and
+  `pre_verdict_block` in `crates/athena-core/src/introspect.rs` puts the producer's status and evidence for each unmet
+  criterion into the introspection event. That was added by commit 81b1374e, which is later than all 43 introspections.
+  The earlier edits of the three jobs (role prompts, reader budget, `verify.rs` and design docs) are not redone.
+- **Decision:** `producer_brief_with_evidence` in `crates/athena-context/src/briefs.rs` gains a section "How the verifier
+  checks each criterion", before the `criteria_check` section. It has one `Criterion N:` line per accepted criterion,
+  built by `verifier_check_hint`: a named file or diff line for a content criterion, a command that ran (the exact
+  command, run in a fresh snapshot, and what it printed) for a behavior one, and `left to Athena's checks` for a
+  criterion that only fmt, clippy or the full test suite can show. A criterion that holds a sweep phrase adds a
+  repo-wide search with zero remaining hits; one that holds a width phrase adds a line-width check. Phrases are matched
+  as whole words, so "wrapper" is not "wrap". `is_athena_check_criterion` moved from `send_back.rs` into `briefs.rs`
+  (body unchanged), so the hint and the send-back use one definition. The producer loop in
+  `crates/athena-core/src/run/producer.rs` also stores, for a passing attempt, `self-check passed; redacted report:
+  <json>` in the attempt's invocation detail, the shape the failing path already used; it is a copy of the candidate's
+  report and keeps each attempt's record readable alone. The hint is guidance. No send-back, refusal or hold rule is
+  added.
+- **Alternatives:** Refuse a "met" whose evidence holds no command or path: the evidence is free prose, so a lexical
+  refusal would be wrong in both directions, and the request prefers information. A line appended to each criterion
+  in the criteria_check section: it breaks the exact-copy rule. Text in `producer.md`: the criteria differ per job,
+  and the set is budgeted. A repair loop after the verifier: out of scope here. Treating the invocation-detail copy as
+  the fix: the check was already stored, so it would repeat the misreading of job 20261114-160745-8e6x.
+- **Tradeoff:** The hint informs and does not gate: a producer can still report met without the evidence, and the share
+  of failures it prevents is not measured. The phrase lists are lexical and miss a sweep criterion worded another way;
+  a wrong match only adds or omits one sentence. Each passing job's final invocation record holds one more copy of the
+  redacted report (a few KB, an estimate).
+- **Reversal cost:** Low; remove the section, `verifier_check_hint`, `mentions` and the two phrase lists from `briefs.rs`
+  (the classifier may stay), the passing-attempt assignment in `producer.rs`, and the new tests.
+- **Provenance:** Read: `crates/athena-context/src/briefs.rs` (`producer_brief_with_evidence`, `criteria_check_section`),
+  `crates/athena-core/src/run/send_back.rs` (`unmet_criteria`, `left_to_athena`),
+  `crates/athena-core/src/run/producer.rs` (the self-check exits), `crates/athena-core/src/run/candidate.rs`
+  (`build_candidate`), `crates/athena-core/src/introspect.rs` (`pre_verdict_block`, `event_of_job`) and
+  `crates/athena-data/src/records.rs` (`Candidate`, `ProducerReport`). Ran: `cargo test -p athena-context` (the tests
+  `producer_brief_says_how_the_verifier_checks_each_criterion` and `verifier_check_hint_matches_whole_phrases_only`)
+  and `cargo test -p athena-core a_passing_attempt_stores_the_per_criterion_check_in_its_invocation_detail`. Not
+  measured: how many past failures a hint would have prevented, and the size of the stored copy.

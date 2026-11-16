@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-134819-0e5f",
+  "round": 1,
+  "at": "2026-11-16T05:28:08.947015174Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/introspect.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/introspect.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/display.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/display.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The guard runs once, before a reader call that takes minutes, and cannot see an automatic retry still being read. The duplicate the request describes can still happen.",
+      "evidence": "The drain retries a failed item right after `go` returns (drain.rs:1972-1981 → `ReadOf::Retry` → `Athena::retry` at drain.rs:4635). `go_with_stages` writes the review first (run/mod.rs:431-437). The drain's retry job is committed only after its reader model call finishes (`ask` → `first_reading`, reading.rs:969). During that call there is a review record and no retry record. So `failure_review_pending` is false and `live_retry_of` finds nothing, and the hand guard passes. The hand command's own reader call takes minutes too, and the plan never re-checks before `ask` commits. Both proposals land, and that is the '2 jobs closed as a duplicate' failure named in the acceptance. The drain does keep in-flight state (`InFlight` table, drain.rs:4406, `move_row` at :923), but the plan does not consult it. Fix: Run the standing-retry check again right before the hand retry's commit. One way: add an optional pre-commit check to `first_reading`/`ask` that only the hand entry points pass, evaluated inside the `commit_records_with` callback so it re-runs under the repository lock when HEAD moves. On refusal, commit nothing (or record the read as refused) and name the retry that won. Add a demonstration: start a hand retry, commit a retry of the same job before the hand reading commits (for example from the scripted reader callback), and assert the hand retry is refused with that id and HEAD has one retry. Alternatively, explain why this window is out of scope and record it as a CHANGELOG limit.",
+      "location": "Decision 1 / Step 3 (check_hand_retry runs before `ask`); crates/athena-cli/src/drain.rs:4635-4651; crates/athena-core/src/reading.rs:1331, 969",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'Review pending' is true forever for any rejected or failed job whose review was never written, so hand retries of those jobs change behaviour.",
+      "evidence": "`introspect` returns an error, with no record and no pending-queue file, when an early step fails: `head`, `GitRecords::load`, `read_records`, `JobConfig::at`, `redactor`, `introspection_spec`, or the scratch dir. `settle` (introspect.rs:1524-1535) only prints a line. Jobs that ended before reviews existed also have no record. All of these count as pending for good. Criterion 3 ('works as before') is shown only on a fresh job that has a recorded review. Fix: Narrow 'pending' to cases where a review is really outstanding. For example: a pending-queue file exists for the job's event key (`introspect_pending_dir`), or the only reviews failed on the kill switch, or the outcome is newer than a short bound. Or keep the literal rule and add a test showing the refusal text for an old job with no review.",
+      "location": "Decision 3 / Step 1 (failure_review_pending); crates/athena-core/src/introspect.rs:1610-1628",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The forced-override intervention departs from the rule that every intervention is introspected, and the plan does not name the commit trailers.",
+      "evidence": "manage.rs:399 says 'Every intervention is introspected at once', and `correct` does this at reading.rs:1463-1466. The plan skips it on purpose but records no design decision. The gate invariant (athena-gate/src/invariant.rs:782-797, 860-868) needs an `Athena-Intervention` trailer on a commit that adds an intervention, at least before the trailer cutover. The plan only says 'a message(...) as correct does'. Fix: State that the commit carries `Athena-Job` and `Athena-Intervention` trailers, as `correct` does at reading.rs:1453-1456. Record the 'no introspection for an Observed override' choice in the CHANGELOG entry, or call `introspect_intervention` as `correct` does.",
+      "location": "Decision 4 / Step 2 (record_override)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 1 demonstration builds the existing retry by hand, not through the automatic path the request is about.",
+      "evidence": "The request is about a hand retry duplicating 'the retry Athena already has queued or running'. Athena's own retries come from `Athena::retry` through the drain (drain.rs:4635). The demonstration makes the first retry with `retry_by_hand`. Fix: Add a case where the first retry is made with the unchanged `athena.retry(&job, ...)`, as the drain does, then show `retry_by_hand` refused with that id and HEAD unchanged.",
+      "location": "Demonstrations, criterion 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The README command table for `athena retry` is not updated for `--force` or the new refusal.",
+      "evidence": "README.md:81 documents `athena retry <job> [--yes]` and what it does. The plan changes only main.rs help text and CHANGELOG.md. Fix: Add `[--force]` and one sentence on the refusal to the README row (and to the `ask` row if it lists options).",
+      "location": "Files list; README.md:81",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Verdict: revise, because of one major finding. Most of the plan is sound and its claims check out against the snapshot. `Athena::retry` is also the drain's automatic path (drain.rs:4635), so the plan keeps it unchanged and adds hand-only entry points that share one guard in reading.rs. That respects the 'do not change automatic retry' rule. I checked the cited code and it matches: `retries_by_job` keeps only the newest retry and counts ended ones (retry.rs:246-268); `event_of_job` treats only Rejected and Failed outcomes as review events (introspect.rs:1546-1550); the kill-switch requeue is as described; `OverrodeDecision` and `Observed` exist; and the JobLine/JobTrace constructor list is complete. `accept-proposal` and `approve-work` are rightly excluded, since their requests are not 'try again on' retries. The demonstrations use real production entry points and fixtures that exist. The major finding is a design gap: the guard runs only before a reader call that takes minutes, and it reads committed records only. A drain's automatic retry that is still being read, after the review is recorded but before its proposal is committed, is invisible to it, and the hand reading is never re-checked before it commits. So the duplicate the request names can still occur. Re-checking under the commit lock in the hand path, with a test for that race, would fix it. Minor findings: 'review pending' is permanent for failed jobs whose review was never written; the override intervention's trailers and its skipped introspection are not stated; the criterion 1 test should also cover a first retry made by the automatic path; and the README retry row needs `--force`."
+}

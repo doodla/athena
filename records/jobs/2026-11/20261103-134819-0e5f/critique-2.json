@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-134819-0e5f",
+  "round": 2,
+  "at": "2026-11-16T05:41:39.403142051Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/introspect.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/introspect.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/display.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/display.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "README.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, README.md",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "For up to `reader_timeout_s` (86400 s in the live config), the age rule tells the user 'the failure review is pending' for jobs whose review will never run.",
+      "evidence": "`introspect_job` has one production caller, run/mod.rs:436, and it runs only for `GoResult::Finished`. When `introspect` fails at one of its early `?` steps (introspect.rs:1611-1628), `settle` only prints a line (introspect.rs:1524-1535), and no record or pending file is written. Rule (d) still counts such a job as pending for a whole day, and the refusal text says the review is pending, which is not true. The plan names the one-day bound as a risk but keeps the definite wording. Fix: When only rule (d) applies (no record, no deferred file), word the refusal as 'the failure review of job <id> may still be running (outcome N min ago; up to <limit>)'. Name `--force` as the way out, as the plan already does. Keep the definite 'pending' text for the kill-switch and deferred-file cases. Add one assertion on that wording to `a_hand_retry_is_refused_while_the_failure_review_is_pending`.",
+      "location": "Decision 3 / Step 2 (failure_review_pending, rule d); crates/athena-core/src/run/mod.rs:431-437; crates/athena-core/src/introspect.rs:1524-1535, 1610-1628",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`--force` over a blocker that appears only at commit time records no intervention, even though the user did ask for a deliberate second retry.",
+      "evidence": "The commit message, and so the `Athena-Intervention` trailer, is fixed before `commit_records_with` runs (commits.rs:137-143). For that reason the plan writes no intervention when the blocker first appears inside `files_at`. The request says `--force` 'allows a deliberate second retry and records an intervention'. In this exit a duplicate retry lands with no intervention. The plan documents this, but it is avoidable. Fix: When `--force` is set, have `files_at` return Err with a distinct marker when it first finds a blocker at commit time. The hand path can then plan the override and run `commit_hand` once more with the trailer added, reusing the read it already made. Or keep the current choice and add a test that pins the exit: forced, blocker appears at commit, no intervention, and the stdout line says so.",
+      "location": "Decision 8 exit (e) / Decision 5",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The race test's competitor is a Queued `queue(..)` job, but the drain's real retry commits a Proposed job through `ask`.",
+      "evidence": "drain.rs:4635 calls `Athena::retry`, which calls `ask` and commits a reading (Proposed). The Race Ui calls `athena.queue`, which commits only a request (Queued). `live_retry_of` treats both as standing, so the test still shows the commit-time re-check, but it does not show the shape the request names. Fix: Add a second race case if it is cheap. A Ui cannot easily run a nested reader call, so an alternative is to commit a pre-built request plus reading for the competitor in the callback. Or leave the test as it is and say in its comment that Proposed is covered by the unit tests of `live_retry_of`.",
+      "location": "Demonstration for criterion 1 (race test)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 1 had one major finding: the guard ran only before the reader call, so it could not see an automatic retry that committed during the read. This plan resolves it. The guard now runs a second time inside `commit_records_with`. I read that function at crates/athena-core/src/commits.rs:246-276: it takes the repository lock at :261, calls the files closure again on every attempt at :264, and returns the closure's Err before `build_commit_in`, so a refusal commits nothing. The race demonstration has a real trigger point: reading.rs:679 prints the 'reads the request' line before the reader runs, so the test can commit a competing retry at that moment. The round-1 minor findings are also answered. Introspection now has a time bound, the intervention is committed in the same commit as the retry with both trailers and is then introspected, there is a case where the first retry comes from the unchanged `athena.retry`, and the README row is updated. I checked these claims against the code and they hold: `retry_follow_up` and `retries_by_job` (reading/retry.rs:246-293), Declined being a separate JobState and not a Closed outcome, the private `KILL_SWITCH_TEXT` and `event_key` (introspect.rs:820-837), that `introspect_job` is called only from `go_with_stages` (run/mod.rs:436), the `JobLine` literals (only display.rs:2679 and :2770; drain.rs has its own struct), the callers of `commands::ask` and `commands::retry`, the Intervention fields (athena-data records.rs:1066), and the gate's trailer rule (invariant.rs:23, :799-800). The automatic path keeps its code because the wrappers call the inner functions with no guard. What remains is minor: the time-bounded 'pending' rule can tell the user a review is pending when none will ever run, and a forced retry whose blocker appears only at commit time records no intervention. The plan already lists both as risks and CHANGELOG limits."
+}

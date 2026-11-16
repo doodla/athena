@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-211248-rgdn",
+  "round": 1,
+  "at": "2026-11-16T12:05:21.486411879Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/common/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/common/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan-time half of the request is dropped: a plan that touches cap fields is never checked before dispatch.",
+      "evidence": "The request says \"when a reading or plan touches [budget] or agent cap fields ... run the admission check ... before dispatch\". The accepted reading repeats \"a reading or plan\". The plan covers readings only and leaves plans to the candidate-time check at admission.rs:929-958, which is the failure the request describes. Its reason is that planning.rs is not a deliverable and plan_findings has no config. But the same plan already edits two non-deliverables (run/tests.rs and athena-cli/tests/common/mod.rs). The config is also in reach at the single call site: planning.rs:366 binds `let jc = ctx.jc;` and the plan_findings call is at planning.rs:500. Fix: Reuse `proposed_caps` and `check_cap_budget` on the plan's text (approach, files, steps). Add it as a config-taking finding in admission.rs, for example `plan_cap_findings(plan, &jc.config)`, called next to plan_findings at planning.rs:500. A refusal becomes a major Athena finding that sends the plan back to the planner. Add a test in admission.rs and a criterion-1-style demonstration for the plan path. If the planner still wants to leave plans out, record that as a scope cut against the accepted reading, not only as an open question.",
+      "location": "Decisions 1 (Rejected: Check in plan_findings) and Open questions 2; crates/athena-core/src/run/planning.rs:366,500",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The verifier can only run tests of the pinning helpers. Whether the full suite passes with job_usd raised rests on a single producer run.",
+      "evidence": "The `fixture_ignores_the_live_job_usd` tests show that each helper rewrites job_usd. They would not catch a test outside those helpers that still asserts the live value. The only proof for the whole suite is step 9: the producer sets athena.toml to 60.00, runs the suite and reverts. The verifier does not write files, so it cannot repeat this (cap-change/src/lib.rs:172-180 lists no write programs for the verifier). Fix: Have the producer report the exact command and the cargo test summary from the 60.00 run. Also state in the demonstration that the in-repo tests prove only the helpers. Optionally add a scan test over the four named files that fails when a test compares a value read from the unpinned live config with a dollar literal.",
+      "location": "Demonstrations, criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Soundness: a reading that describes test fixtures with over-budget values can be refused twice, which fails the job.",
+      "evidence": "The parser reads `key = N` from the summary, assumptions and criteria, and the last mention wins. The plan's own criterion-1 fixture text, `athena.toml sets producer_usd = 20.00`, is the same wording a reading would use to describe an over-budget refusal test. When such a reading lists athena.toml as a Modify deliverable, it is refused. read_for (reading.rs:541-577) allows only one corrected reread, and a second refusal is the job's failure. Fix: Read a value only from a sentence that names athena.toml and is not about a test, fixture or example. Make the refusal text say how to restate (for example, mark example values as examples). Add a companion test in which a reading that describes a test of over-budget caps is accepted.",
+      "location": "Approach (1) / Decision 3, the free-text parser",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`athena check-reading` and the reading replay will not see the new rule, and the dependents list does not mention them.",
+      "evidence": "check_reading_text runs only check_reading_acceptance (replay.rs:55), and replay uses it to hold a candidate whose refusal share exceeds REPLAY_HOLD_PERCENT (replay.rs:13). check_cap_budget runs outside that chain, so neither `athena check-reading` nor replay can measure the declared 1%. The plan notes the replay limit only in CHANGELOG wording. Fix: Add check_reading_text, the `athena check-reading` command and replay as dependents. Explain why it is acceptable that they omit a config-dependent rule (check_reading_size at reading.rs:822-831 is the precedent), and say in the doc comment and the CHANGELOG that the 1% share cannot be replayed.",
+      "location": "Dependents (reading-acceptance chain entry); crates/athena-core/src/reading/replay.rs:54-65",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The overlay ignores `[job_plan] enabled`, which budget_required uses to decide whether planning rounds count.",
+      "evidence": "budget_required counts rounds only when `job_plan.enabled` is true (config.rs:937-940). A reading that turns planning off and raises a cap is judged as if planning still runs, so it can be refused falsely. A reading that turns planning on is judged as if it stays off, so it can be under-checked. Fix: Overlay `enabled = true|false` when the text ties it to [job_plan], or state this limit in the doc comment and add a test for it.",
+      "location": "Step 2, the overlay keys",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is well grounded in the snapshot. read_once calls refusing_check at reading.rs:732. Config::check_budget returns BudgetBelowReserve carrying `required` (config.rs:948-957). The scan test at run/tests.rs:11839/11965 forbids calling budget_required from core production code, so taking the figure from the check_budget error is correct. check_reading_size (reading.rs:822-831) is a real precedent for a config-dependent refusal outside the chain. The test pins cover every live job_usd assertion found by grep: config.rs:1006/1024/1112, admission.rs:2019, run_pin_tests.rs:974/1001/1032, drain.rs:5449, and the run/tests.rs and CLI helpers. One major gap: the request and the accepted reading both say \"a reading or plan\", but the plan checks only readings. It leaves plans to the candidate-time check, which is the failure the request describes. Its reason (planning.rs is not a deliverable) is inconsistent, since it edits two other non-deliverables, and the config is in reach at planning.rs:366/500. The minor findings: the full-suite test with job_usd raised rests on a single producer run; the text parser can falsely refuse readings that describe over-budget test fixtures; check-reading and replay do not see the new rule; and the overlay ignores `[job_plan] enabled`. Verdict: revise."
+}
