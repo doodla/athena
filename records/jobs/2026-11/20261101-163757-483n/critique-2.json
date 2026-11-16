@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-163757-483n",
+  "round": 2,
+  "at": "2026-11-16T04:51:43.390039444Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-agent/src/lib.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-agent/src/lib.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/wiring.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/wiring.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/close.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/close.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The probe's process is set up differently from the agent's: no working directory, no isolation, no stop check",
+      "evidence": "`invoke_once` sets `.current_dir(&spec.workdir)`, calls `isolate(&mut cmd)` and registers the child's process group with `self.registry` (claude.rs:560-571). It also checks `registry.stopped()` first (:544). The plan's probe sets only `env_clear().envs(env)`, stderr null and stdout piped. It names no working directory, so the probe runs in Athena's own cwd and may read project-level Claude settings from there. It is also not isolated and not registered, so a drain stop does not kill it (it is bounded only by the 10 s wait). Fix: Before spawning, return Valid if `registry.stopped()`. Call `isolate(&mut cmd)`. Set `current_dir` to a fixed neutral directory, for example the job directory or the snapshot parent. State this in Step 2 so the probe's process setup matches the agent's apart from the arguments.",
+      "location": "Step 2 (login_probe); crates/athena-agent/src/claude.rs:556-571",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "One login hold ends the drain at once, stricter than the failed-twice rule for other environment stops, and this is not documented",
+      "evidence": "For other environment causes, Stop::Environment is set only after the same cause fails twice (drain.rs:2729-2734, which the plan cites). The plan sets it on a single login hold. A single false `loggedIn:false` (the plan's first risk) therefore ends the whole drain. The plan's reason, that it stops the interrupted pass from retrying the same job, is sound, but D190 does not say that this hold is stricter than the existing failed-twice rule. Fix: State in D190 and in the Stop::meaning sentence that a login hold stops the drain at once, unlike the failed-twice rule, and why.",
+      "location": "Decision 7 / Step 8 (held arm sets Stop::Environment on the first login hold)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The path from the dispatch-gate error to the drain's downcast is not shown end to end",
+      "evidence": "The drain classifies a held run with `error.downcast_ref::<...>()` on the error that `go` returns. The plan returns `Err(hold.into())` from `dispatch`, but does not say whether any caller between `dispatch` and `Steps::run` wraps that error with `.context(...)` or rebuilds it as a message. A rebuilt message would lose the type and the hold would be counted as an ordinary error. Test (a) checks the downcast at `go`, but the drain test uses a `Steps` stub, so the full path from `dispatch` to the drain is never exercised. Fix: In test (a), downcast the error returned by `Athena::go` itself, which the plan already does, and note that `Steps::run` gets that same error unchanged. Alternatively, add a CLI-level drain test that runs a real login hold.",
+      "location": "Step 6(a) dispatch gate; anyhow downcast in drain.rs:4726",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "This is round 2. The one major finding from round 1 (finding 4: the check ran with a fixed environment that could differ from the agent's) is resolved. `login_env` now calls `athena_agent::env::build` with the job's `jc.config.agents`, the capability env and the side, the same way `agent_spec` builds the agent's environment (reading.rs:438-449, read). I read env::build (env.rs:65-112): the only input the plan sets differently is `snapshot`, and that changes only GIT_CEILING_DIRECTORIES, as the plan says. The hardcoded variable list and the `include_str!` of Athena's own config are gone. A unit test covers a variable named only in the job's config, and test (d) checks the environment at each gate. The round-1 minor findings are also answered. Decision 8, D190 and open question 2 state what 'agent stage' means. The expiry half is labelled unverified and probably inactive. LoginHold's Display starts with its text, and `short ||` stays (drain.rs:4726, read). The stub's queue is shared and an empty queue answers Valid. I checked the code the plan relies on. `commit_hold` and `hold_for_disk` are in close.rs:177-241. The verifier-side disk hold removes `verify_dir` and then holds (mod.rs:2172-2175). The replay push comes before `verification_stage` (mod.rs:2264-2271). The resume mark is written at :2254. A retry consumes the old job's mark, not the new one (`consumed_resume = Some(old_job)`, mod.rs:815). The held arm in the drain falls back to the low-disk label (drain.rs:1745-1762). All match the plan's description. Each behavior demonstration names a real seam (`Athena::go` through `athena_with`/`counting`, with the pub `driver` field replaced). Each is checked by removing the gate call, and the stub holds no gate logic. What remains is minor: the probe subprocess is set up differently from the agent's own subprocess, and a few small details are left unstated. Athena's three findings (files outside the deliverable list) are justified in decision 1 and are not repeated here."
+}

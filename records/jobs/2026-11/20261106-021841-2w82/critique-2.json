@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-021841-2w82",
+  "round": 2,
+  "at": "2026-11-16T13:09:51.567837625Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/main.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/main.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The value-hit gate does not keep out unrelated lines when the constant is a small number with common name words. Most of Athena's real limits are like that, so a routine constant change would fail at the candidate with dozens of hits.",
+      "evidence": "The real constants are small: PRODUCER_SEND_BACKS-style values of 1 and 2 (IMPROVEMENT_GAP=2 at plan.rs:466, HOLD_ATTEMPTS=2 at scope_guard.rs:80, LOW_RATING=2 at audience.rs:37, REPEAT_URGENT_JOBS=3 at plan.rs:471). Their keywords after the GENERIC list are common words: 'repeat', 'urgent', 'jobs', 'producer', 'send', 'backs', 'attempts'. I measured with Grep over the snapshot, excluding CHANGELOG.md. 349 lines in 90 files hold a whole-token `3` and the word job/jobs on the same line: 24 in docs/decisions.md, plus run/tests.rs, drain.rs, display.rs and many design docs. 135 lines in 38 files hold `1` and `producer` (53 in run/tests.rs, 12 in docs/decisions.md). The plan's matcher is a little stricter: it requires the exact keyword and skips lines that hold the new value. Even so, raising REPEAT_URGENT_JOBS from 3 to 4 would report hundreds of places, capped at 30. Each hit in an old decision then needs an 'Amends Dn in prose only' entry plus a link. The plan's tests use only `8` with the rare word 'widgets', so they cannot show this. Fix: Tighten the value match before it can close a job. Options: require the number and the keyword within a few words of each other in the same sentence; search only prose and help text (doc comments, `after_help`/arg help strings and .md prose), not code literals or test assertions; or require the line to name the constant or one of its exact multi-word phrases. Otherwise keep value hits as send-back findings and close the job only on hits that pass the stricter rule. Add a test that uses a real-shaped constant (for example REPEAT_URGENT_JOBS from 3 to 4) over a fixture with unrelated '3 jobs' lines and assert they stay quiet. State the remaining false-positive mode in D190's Tradeoff.",
+      "location": "Decision 2 (1) and the value-hit rule ('holds the old value as a whole token, shares a keyword, and does not hold the new value'); Risks: False positives",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Two reading forms are loose enough to fail jobs on wording that states no reversal: the `from X to Y` form does not limit X to a literal, and the decision form fires on any sentence that pairs a D-id with 'replace(s)' or 'no longer'.",
+      "evidence": "Form (2) needs only `from <old> to <new>` and an identifier in the same sentence. It never says that <old> must be a number or a quoted string. A reading sentence such as 'moves `records` from main to athena/records' or 'diff `Snapshot` from the base to the candidate' would make 'main' or 'the' a needle, gated only by a keyword. Form (4) reports a decision at its heading line for any sentence holding `D<nn>` and one of replace(s) or 'no longer', anywhere in the sentence. 'D156's placeholder replaces the literal' is a citation, not a reversal, yet it would hard-fail the job at the candidate unless the producer writes an 'Amends D156' entry and link. That is the bogus-entry failure that round 1's F4 and D187 (decisions.md:5502-5503) rejected. Decision 2's own Rejected list says 'Most citations are follows D156, not a reversal', but the forms it keeps are only a little narrower. Fix: In form (2), require <old> and <new> to be numbers or quoted strings, and take <old> as that literal only. In form (4), require the reversal verb to take the id as its object ('reverses D45', 'supersedes D45', 'overturns D45', 'D45 no longer holds'), and drop the bare 'replace(s)' trigger. Alternatively, make decision hits that come only from the reading send-back-only and advisory, so they never close the job. Add quiet tests for 'D156's placeholder replaces the literal' and for a from/to sentence whose ends are words.",
+      "location": "Decision 2 (2) and (4): reading values `from <old> to <new>` and reading decisions with a reversal word",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The parser does not read 'amended by'. It reads 'superseded by', 'supersedes' and 'amends', so the stated reason for rule (a) is wrong for half of it.",
+      "evidence": "decision_links.rs:255-257 lists the phrases (\"superseded by\", SupersededBy), …, (\"amends\", Amends). There is no 'amended by' kind. The log can also never gain such a phrase inside an old entry in this repo, because editing existing entries is out of scope and the log is append-only. Fix: Keep the 'amended by D<nn>' match if the request needs it, but drop the claim that the parser reads it. Say that 'superseded by D<nn>' written inside an older entry is the form the parser and `link_problems` already pair with a link.",
+      "location": "Decision 3 (a): 'the phrase form that athena_data::decision_links::parse_supersessions reads'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "This risk cannot happen in this job. The producer loop that runs this job is the installed base build, which has no stale-text check.",
+      "evidence": "The check is added by this change. producer_loop (producer.rs:298) in the running Athena calls only the gate, mirror drift, changelog and loop checks. The candidate's code is not used to check the candidate. Fix: Drop the risk, or reword it as a check that the producer runs the new `stale_text::find` by hand over its own diff (for example the replaced main.rs doc lines) before reporting.",
+      "location": "Risks: 'The producer's own change trips the check on this job's own diff'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Each producer pass would build the work-tree tree twice, once in `change_list` and once for the new diff.",
+      "evidence": "snapshot.rs:200-217: `change_list` already calls `work_tree_tree()`, which runs `git add -A` and `write-tree` in a temporary index. Fix: Compute the tree once in producer_loop and pass it to both, or accept the cost and say so in the risk on read time.",
+      "location": "Decision 1 / Step 5: loop adapter uses `snapshot.work_tree_tree()`",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 2. The round-1 majors are resolved. F2: the accepted reading is now a source and is passed at both call sites (producer.rs:302, mod.rs:1961). F3: a decision counts as marked only by a phrase with an id, a superseded link, or a link whose newer entry this change adds. F4: claims come only from replaced -U0 hunks. F5: the Hestia review help is converted to BACKFILL_HIGH (hestia.rs:1494) and 'urgent' is corrected to 'high', which matches hestia.rs:1492-1493 and 1924. The minors were answered. I checked these in the snapshot: the hook points (producer.rs:498-556 and 635-712, mod.rs:2007-2020), the Snapshot and Git readers (snapshot.rs:122-218; lib.rs:259, 516, 539, 966, 988), every constant the help will read (all pub, values as stated), the 29 link statuses and the cli_command and help tests (main.rs:612-623, 1459-1555). The approach still has two soundness faults on changed parts (Decision 2), and both lead to a hard failure at the candidate. (1) The value-hit gate is too weak for real constants. It needs only the old number as a whole token plus a shared name word anywhere on the line, and most of Athena's limits are 1 to 5 with common name words. (2) The reading forms are loose. The `from <old> to <new>` form does not restrict the old token to a literal. The decision form reports any D-id that shares a sentence with 'replace(s)' or 'no longer'. Both force the bogus amendment entries that round 1's F4 objected to. One smaller claim about the parser's phrase set is also wrong. Verdict: revise."
+}
