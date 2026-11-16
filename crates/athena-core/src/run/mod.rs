@@ -69,6 +69,7 @@ mod planning;
 mod producer;
 mod records_criteria;
 mod send_back;
+mod stale_text;
 mod verification;
 
 use candidate::Admitted;
@@ -90,7 +91,7 @@ pub use records_criteria::argv_seam::{
 };
 pub(crate) use send_back::{
     CheckFailure, append_check_failures, append_mirror_drift, append_missing_changelog,
-    left_to_athena, send_back_text, send_back_text_full, send_back_text_scoped,
+    append_stale_text, left_to_athena, send_back_text, send_back_text_full, send_back_text_scoped,
     send_back_text_with_replay, unmet_criteria,
 };
 
@@ -2017,6 +2018,26 @@ impl Athena {
                 closing.happened.verification_passed = None;
                 return Ok(closing);
             }
+        }
+
+        // Text that still says what the change made false is found here too, before the pull request, the checks
+        // and the verifier cost anything. The producer loop has already sent the list back once; text still left,
+        // or a candidate that never went through the loop, ends the job here with each place named. The same
+        // guards as the decision gate: a resume at the verifier stage passed this on its first run, and a nested
+        // run is judged by the outer job.
+        if recorded_checks.is_none()
+            && self.nested.is_none()
+            && closing
+                .candidate
+                .as_ref()
+                .is_some_and(|cand| !cand.changes.is_empty())
+            && let Some(reason) = self.stale_text_at_candidate(ctx, accepted, &p, &c)
+        {
+            let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
+            closing.happened = self.failure(ctx, &reason);
+            closing.happened.changed_paths = changed_paths;
+            closing.happened.verification_passed = None;
+            return Ok(closing);
         }
 
         // A retry of a stale job whose candidate conflicted with the branch tip started its producer from git's

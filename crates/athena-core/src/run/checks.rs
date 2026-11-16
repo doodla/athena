@@ -795,6 +795,101 @@ impl Athena {
         ))
     }
 
+    /// The stale-text check ([`stale_text::check`]) on the change from `from` to `to`, two commits or trees of
+    /// `git`, with the sentences of the accepted reading. The advisory places are printed as `stale text  note:`
+    /// lines and never close a job. A read that fails is a line and no finding, like the loop's other advisory
+    /// reads: a git failure says nothing about the work, so it never discards finished work.
+    fn stale_text_report(
+        &self,
+        ctx: &RunContext<'_>,
+        git: &athena_git::Git,
+        from: &str,
+        to: &str,
+        accepted: &AcceptedReading,
+    ) -> Vec<stale_text::Stale> {
+        let criteria: Vec<String> = accepted.criteria.iter().map(|(t, _)| t.clone()).collect();
+        let reading =
+            stale_text::reading_sentences(&accepted.summary, &accepted.assumptions, &criteria);
+        match stale_text::check(git, from, to, &reading) {
+            Ok(report) => {
+                for place in report.advisory.iter().take(5) {
+                    ctx.ui.line(&format!("stale text  note: {place}"));
+                }
+                report.firm
+            }
+            Err(why) => {
+                ctx.ui
+                    .line(&format!("producer   stale text not checked: {why}"));
+                Vec::new()
+            }
+        }
+    }
+
+    /// The places of the producer's work tree that still say what the change made false, found before a
+    /// candidate commit exists: the snapshot's base against its work tree ([`stale_text::check`]). The producer
+    /// loop sends them back once. A place in a file outside the job's `allowed` paths is left out: the producer
+    /// may not edit it, so a send-back would waste a run; the candidate step still names it and ends the job.
+    pub(super) fn stale_text_in_snapshot(
+        &self,
+        ctx: &RunContext<'_>,
+        accepted: &AcceptedReading,
+        snapshot: &Snapshot,
+        allowed: Option<&[String]>,
+    ) -> Vec<stale_text::Stale> {
+        let Some(base) = snapshot.base() else {
+            return Vec::new();
+        };
+        let tree = match snapshot.work_tree_tree() {
+            Ok(tree) => tree,
+            Err(why) => {
+                ctx.ui
+                    .line(&format!("producer   stale text not checked: {why}"));
+                return Vec::new();
+            }
+        };
+        let mut found = self.stale_text_report(ctx, &snapshot.git(), base, &tree, accepted);
+        if let Some(allowed) = allowed {
+            found.retain(|s| {
+                outside_allowed_paths(allowed, std::slice::from_ref(&s.path)).is_empty()
+            });
+        }
+        found
+    }
+
+    /// The closing reason of a candidate that still has text saying what the change made false, `None` when it
+    /// has none: the change from `base` to `candidate` in the job's repository. It runs before the pull request,
+    /// the checks and the verifier, so stale text is found at the producer's step and not at the final verdict.
+    pub(super) fn stale_text_at_candidate(
+        &self,
+        ctx: &RunContext<'_>,
+        accepted: &AcceptedReading,
+        base: &str,
+        candidate: &str,
+    ) -> Option<String> {
+        let found = self.stale_text_report(ctx, &self.git, base, candidate, accepted);
+        if found.is_empty() {
+            return None;
+        }
+        let listed: Vec<String> = found
+            .iter()
+            .take(stale_text::MAX_LISTED)
+            .map(|s| s.to_string())
+            .collect();
+        let rest = found.len().saturating_sub(stale_text::MAX_LISTED);
+        Some(format!(
+            "{} {}{} Update each place to match the change. A place that is not stale, in an old decision, is \
+             left standing by an entry in {DECISION_LOG} that says `Amends <id> in prose only`, with an \
+             `amended` [[link]] in {DECISION_LINKS}.",
+            stale_text::STALE_REASON_PREFIX,
+            listed.join("; "),
+            if rest > 0 {
+                format!("; and {rest} more.")
+            } else {
+                ".".to_string()
+            },
+        ))
+    }
+
     /// The `.md` files under `docs/` at `commit`, as (path, text), without `docs/decisions.md`. Empty when the
     /// tree cannot be read.
     fn docs_at(&self, commit: &str) -> Vec<(String, String)> {

@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-013524-85wt",
+  "round": 2,
+  "at": "2026-11-16T06:28:04.109830239Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "A new ItemEnd variant can be mapped onto an existing ItemEndKind in `ItemEnd::kind()`. The build then compiles, the run-time test passes, and the new state has no list entry or test of its own.",
+      "evidence": "Decision 1 says a new `ItemEnd` variant 'breaks the build at `kind()`'. The developer can fix that build error with `ItemEnd::NewState => ItemEndKind::Held`, and then neither `after()` nor the tests/drain.rs match changes. The request asks for a test that fails when a new state is added without being handled in the list. Fix: Add a doc comment on `ItemEnd::kind()` saying that each variant maps to its own kind. In the unit test, check that `sample` gives a distinct `ItemEnd` shape per kind (the plan already checks for repeated kinds), and say in D190 that the compile break at `kind()` is the guard and the 1:1 mapping is a reviewed convention.",
+      "location": "Decision 1 / Decision 5 (exhaustiveness)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In the Paused and Awaiting tests, the plan does not say that the re-plan after a's wave holds a back and could print a second pass-over line. One-per-item printing is what prevents this.",
+      "evidence": "run_serial calls `d.prepare` and then `d.pass_over_paused()` after each wave (drain.rs:3207-3212). By then `paused_now`/`held_now` hold a, so a lands in `pause_held`. `pass_over_paused` skips items in `tried` (2456), and `pass_over` prints once per id (`passed_over` set, 1542-1549). So the 'exactly one line' assertion holds, but only because of these two guards. Fix: Add one sentence to the criterion 3 demonstration naming these guards (`tried` filter at 2456 and `passed_over` at 1543), so a reader knows why the one-line assertion holds.",
+      "location": "Step 7 / criterion 3 demonstration (re-planning after a's wave)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The new branch must come after the existing `run` log push, or the Stamped run count and the log assertions for Held will be off by one.",
+      "evidence": "`Stub::run` logs `run {job}` first (tests/drain.rs:220), and `assert_batch_continues` compares the line's run stamp with the number of `run a` log entries. Fix: Say that the `held_runs` branch sits next to the `needs_accepting` branch (241-249), after the log push.",
+      "location": "Step 5 (Stub `held_runs` branch in `run`)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 2 fixes all four round-1 findings, and I found nothing blocking or major, so the verdict is accept. I checked this by reading drain.rs and tests/drain.rs in the snapshot.\n\n**Round-1 fixes**\n- **Finding 1 (major), Paused and Awaiting tests:** fixed. Both states are now driven through `attempts`, not the planning-time hold. `pause_on_retry` pushes the pause when `a-retry` runs (tests/drain.rs:234-240), so the second failure reaches `paused_reason` at drain.rs:2042-2043. The new `hold_on_retry`/`held_now` knob does the same for `held_reason` at 2050-2051. `held_reason` asks `steps.held` for the item's job (2059-2065), and the hold check at 1969 finds nothing before the retry, so the `finish` arm at 2769-2771 is really reached.\n- **Finding 2, Idle mapping:** fixed. In the new usage-limit test, the first failed run calls `stop_for_usage_limit` (1779). The next `run_job` then returns Ended (1622-1623), giving Idle (1984) and the line 'run ended first: another job ended the run' (2752). This matches the log `read a, run a` that the existing test at 1259 asserts.\n- **Finding 3, summary wording:** answered. The plan no longer claims the existing tests forbid a summary list.\n- **Finding 4, plan entries and budget:** fixed. Complete plan entries skip the planning read (2269). I recomputed the budget arithmetic from `run_job` and `rate`: a's two reads spend 0.2, b's read, run and rating bring the total to 1.0, and c needs 1.2 more. So 1.4 ≤ X < 2.2, and the plan's 2.0 fits. The job-limit count also holds: `started` goes up once per `run_job` (1631).\n\n**Other checks**\n- **Remaining states:** Skipped reaches `ItemEnd::Skipped` through the Unread path (1692-1702, 1994-2000), Held through `run.held` (1745-1770), Waiting through `Landing::Waiting` (1919-1924), and NeedsAccepting through 1733-1743.\n- **Existing tests the plan maps to:** the Stop mapping (1382) does reach `ItemEnd::Stop` for b, because `take_until_done` checks `st.stop` and not `steps.stop_requested`. The Landed mapping (1520) asserts a landing.\n- **Unit test:** `tests::Stub` rates 3 (drain.rs:5028-5034), and `st.landed` is empty there, so `finish(Landed)` sets no stop.\n- **Dependents:** `ItemEnd` is read only in drain.rs, and the dependents list covers the stop readers. `Stop` already derives Copy and Eq (1045), as `AfterItem` needs.\n- **History:** the flagged-twice job has already landed (HISTORY.txt: db721f7). That does not change the plan.\n\n**Remaining remarks (minor or nit)**\n- The run-time check cannot catch a new `ItemEnd` variant that is mapped onto an existing kind.\n- The rule that a pass-over is printed once per item, so a re-planned wave cannot add a second line, is not stated.\n- The literal 'held:' prefix is not tied to the stub's `budget short` wording."
+}

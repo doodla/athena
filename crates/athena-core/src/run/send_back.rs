@@ -9,6 +9,8 @@ use athena_context::outputs::{CriterionCheckOutput, CriterionStatusOutput, Produ
 use crate::introspect::criterion_key;
 use crate::mirrors::Drift;
 
+use super::stale_text::{MAX_LISTED, Stale};
+
 /// The accepted criteria the report does not show as met: marked unmet, or missing from `criteria_check`.
 /// A criterion matches an entry by its text with numbering, kind tag, case, spacing and trailing
 /// punctuation ignored (see [`criterion_key`]); any other difference in words is a different criterion.
@@ -243,6 +245,51 @@ pub(crate) fn append_mirror_drift(text: String, drift: &[Drift]) -> String {
     for d in drift {
         text.push_str(&format!("- {d}\n"));
     }
+    text
+}
+
+/// The leading sentence of a send-back that lists text still saying what the change made false.
+const STALE_TEXT_SENTENCE: &str = "Athena searched the repository for text that still says what your change made false, and found \
+     some; this is a reason for this send-back whether or not criteria are listed. ";
+
+/// `text`, a send-back brief, with the places that still say what the change made false
+/// ([`super::stale_text`]). With none the text is returned unchanged. Otherwise one leading sentence goes in
+/// front of the intro, because the intro speaks of criteria, and a section after the lists names each place, the
+/// old value or claim it states and why it is old.
+///
+/// Root cause of the failure class: a change to a value or a stated rule left the old text in a decision record
+/// or a help string, and only the final verdict read the repository for it, so each case needed a follow-up
+/// job. The list is given here, inside the producer's own loop, so the producer fixes the text before
+/// verification.
+pub(crate) fn append_stale_text(text: String, stale: &[Stale]) -> String {
+    if stale.is_empty() {
+        return text;
+    }
+    const HEADING: &str = "## Sent back\n\n";
+    let mut text = match text.rfind(HEADING) {
+        Some(at) => {
+            let end = at + HEADING.len();
+            format!("{}{STALE_TEXT_SENTENCE}{}", &text[..end], &text[end..])
+        }
+        None => text,
+    };
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("\nStale text (fix each; the verifier runs after this):\n\n");
+    for place in stale.iter().take(MAX_LISTED) {
+        text.push_str(&format!("- {place}\n"));
+    }
+    if stale.len() > MAX_LISTED {
+        text.push_str(&format!("- and {} more\n", stale.len() - MAX_LISTED));
+    }
+    text.push_str(
+        "\nEdit each place so it states what your change now does. Text in a file you may not change is \
+         not listed; if it is stale, say so in your report. A place that is not stale, in an older \
+         decision, stays as it is when a new entry in docs/decisions.md says `Amends <id> in prose only` \
+         and docs/decision-links.toml has an `amended` link for it. If any place is still listed \
+         afterwards, the job ends before the verifier runs.\n",
+    );
     text
 }
 
@@ -482,6 +529,50 @@ mod mirror_drift_tests {
             out.ends_with("- docs/decisions.md is append-only\n"),
             "{out}"
         );
+    }
+}
+
+#[cfg(test)]
+mod stale_text_tests {
+    use super::*;
+
+    fn place(path: &str, line: usize) -> Stale {
+        Stale {
+            path: path.into(),
+            line,
+            decision: None,
+            what: "8".into(),
+            why: "`MAX_WIDGETS` changed from 8 to 16".into(),
+            text: "Runs at most 8 widgets.".into(),
+        }
+    }
+
+    #[test]
+    fn no_stale_text_leaves_the_text_unchanged() {
+        let text = send_back_text("brief", &["c".to_string()], &[]);
+        assert_eq!(append_stale_text(text.clone(), &[]), text);
+    }
+
+    #[test]
+    fn stale_text_adds_a_leading_sentence_and_a_section_naming_each_place() {
+        let text = send_back_text("brief", &[], &[]);
+        let out = append_stale_text(text, &[place("HELP.md", 1), place("docs/a.md", 7)]);
+        let sent = out.split("## Sent back\n\n").nth(1).unwrap();
+        assert!(sent.starts_with(STALE_TEXT_SENTENCE), "{out}");
+        assert!(
+            out.contains("Stale text (fix each; the verifier runs after this):\n\n- HELP.md:1")
+        );
+        assert!(out.contains("- docs/a.md:7: still says 8"), "{out}");
+        assert!(out.contains("the job ends before the verifier runs"));
+    }
+
+    #[test]
+    fn a_long_list_is_cut_and_counted() {
+        let many: Vec<Stale> = (1..=MAX_LISTED + 4).map(|n| place("a.md", n)).collect();
+        let out = append_stale_text(send_back_text("brief", &[], &[]), &many);
+        assert!(out.contains(&format!("- a.md:{MAX_LISTED}:")));
+        assert!(!out.contains(&format!("- a.md:{}:", MAX_LISTED + 1)));
+        assert!(out.contains("- and 4 more\n"));
     }
 }
 

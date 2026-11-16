@@ -1,0 +1,164 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261104-103644-f9zg",
+  "n": 1,
+  "at": "2026-11-16T06:52:58.377345077Z",
+  "invocation_seq": 1,
+  "base_commit": "77fcf824178851bf583272e278d6546436ba7ed1",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Report per-role spend, time, rounds and cap stops over last 30 jobs",
+  "summary": "Add a read-only `athena` report command that, from existing typed job and invocation records, prints per role (reader, producer, verifier, planner, critic) the median and p90 of USD and seconds over the last 30 finished jobs, with the configured cap and the count and share of runs each cap stopped. Fixture-based tests cover a planner budget stop and a producer deadline stop. Audience: the owner, who tunes caps by hand and needs to see which cap ended each job. No cap value in athena.toml changes.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Unit tests with fixture records plus cargo test, clippy and fmt criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check computed numbers from fixtures, not the existence of the code."
+    },
+    {
+      "id": "small",
+      "how": "One report command reusing existing records and status aggregation."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and changelog entry written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-data/src/records.rs (Job.caps: Caps with job_usd, reader/producer/verifier_usd and timeouts; Invocation with role, caps: InvocationCaps{max_budget_usd,timeout_s}, cost, wall_time, outcome: InvocationOutcome Killed (budget) / TimedOut (deadline), detail; OutcomeState::TimedOut), crates/athena-cli/src/main.rs (clap Command enum dispatching to commands::*, e.g. Status, Audit), crates/athena-core/src/status.rs and status/planning.rs (existing planning-round aggregation to reuse). The new records need no new file type, so the records validation allow-list (AnyRecord, check_record_file and the round-trip test) is unchanged unless a field is added to an existing record; any added field must be Option with serde(default, skip_serializing_if) so old records still parse under deny_unknown_fields.",
+    "Existing code: extend crates/athena-core/src/status/ aggregation helpers and the athena-cli command table; derive the cap that ended a run from Invocation.outcome plus Invocation.caps and the planner's round limit (athena.toml [plan] max_rounds = 5) instead of inventing a new record family.",
+    "Field meaning: Invocation.outcome Killed is documented as 'Terminated by a budget, the kill switch, or the death of its parent' and TimedOut as 'its own deadline passed; the detail names the deadline' (crates/athena-data/src/records.rs:137-140). Killed is therefore only a budget stop when detail names the budget; the report must classify by detail and not count kill-switch or parent-death kills as cap stops. Config: live athena.toml max_rounds = 5.",
+    "Consumers: none found for a new config key; athena.toml is not a deliverable and no cap value changes there (the 'Files: athena.toml' line is read as the file whose caps are being observed, not edited).",
+    "Planning rounds are taken from the existing planner/critic records of a job; roles that do not run for a job (for example planner on non-hard jobs) are omitted from that job's sample, not counted as zero.",
+    "'Last 30 jobs' means the 30 most recent jobs with a terminal outcome by dispatch time; fewer jobs print what exists, and zero jobs print an explicit 'no finished jobs' message, not an empty success.",
+    "Fixture records are built by copying the shape of real job, invocation and outcome records already used as fixtures in crates/athena-core tests, and not written from scratch."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test`: new tests feed fixture records (shaped from real job records) with a planner budget stop and a producer deadline stop. They assert exact median and p90 USD and seconds per role, and exact stop counts and shares per cap (for example 1 of N runs = the computed percent). The tests fail if cap-stop classification is removed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo run -- <report command> --help` (the new subcommand name, as added to the Command enum in crates/athena-cli/src/main.rs). It lists the command and shows it takes no write flags. The report test also asserts the records directory is byte-identical before and after a run.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The report output has one row per role (reader, producer, verifier, planner, critic) showing runs, median and p90 USD, median and p90 seconds, the configured cap (USD, seconds, rounds), and for each cap the count and percent of runs it stopped. Show it in a test's expected-output string.",
+      "kind": "content"
+    },
+    {
+      "text": "A Killed invocation whose detail is not a budget stop (kill switch, parent death) is not counted as a cap stop; a test covers this case.",
+      "kind": "content"
+    },
+    {
+      "text": "The window is the last 30 finished jobs; a test with more than 30 fixture jobs shows older ones excluded, and a test with zero jobs shows the explicit no-finished-jobs message.",
+      "kind": "content"
+    },
+    {
+      "text": "Any field added to an existing record type is optional with serde default so existing records still parse; the existing records round-trip tests in crates/athena-data pass unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "`git diff` shows athena.toml unchanged; no cap value is edited anywhere in the change.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry for the report command, and docs name the command (README.md or the docs page that lists commands).",
+      "kind": "content"
+    },
+    {
+      "text": "Athena's recorded `cargo fmt --check`, `cargo clippy` and `cargo test` results on the final tree pass, and all pre-existing tests still pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/status/caps.rs",
+      "action": "create",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-cli/src/commands.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.4
+    }
+  ],
+  "out_of_scope": [
+    "Changing any cap value in athena.toml",
+    "Changing how caps are enforced or how runs are stopped",
+    "Backfilling or rewriting existing records",
+    "Writing to records/ or any other state from the report command"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.2,
+        "p90": 6.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2700.0,
+        "p90": 5600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.684297520661157,
+      "p_user_intervenes": 0.06044444444444444,
+      "cost_usd": {
+        "p10": 0.5539561510829174,
+        "p50": 1.5350815319454534,
+        "p90": 6.439481603055482
+      },
+      "wall_time_s": {
+        "p10": 607.8917087625641,
+        "p50": 2198.6818760249994,
+        "p90": 4523.914409046081
+      }
+    }
+  },
+  "departures": "Larger than the typical job: it needs a new command, aggregation logic, and fixtures for several roles and cap kinds. Cost and time are raised and pass probability lowered."
+}

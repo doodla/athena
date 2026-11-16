@@ -13,6 +13,56 @@ pub mod wiring;
 
 use athena_core::hestia::Sweep;
 
+/// `command` and every subcommand under it with each `{name}` of the help text replaced by its value from
+/// `values`: the about and long about, the before and after help, and the help and long help of each argument.
+/// A placeholder with no value in `values` stays as it is. A limit that help text states comes from the
+/// constant that enforces it, never from a number typed into the text, so a change to the constant cannot
+/// leave the help stale (decision D156, extended by D190).
+pub fn fill_limits(command: clap::Command, values: &[(&str, String)]) -> clap::Command {
+    let fill = |text: String| -> Option<String> {
+        let filled = values.iter().fold(text.clone(), |text, (name, value)| {
+            text.replace(&format!("{{{name}}}"), value)
+        });
+        (filled != text).then_some(filled)
+    };
+    let mut command = command;
+    if let Some(text) = command.get_about().and_then(|t| fill(t.to_string())) {
+        command = command.about(text);
+    }
+    if let Some(text) = command.get_long_about().and_then(|t| fill(t.to_string())) {
+        command = command.long_about(text);
+    }
+    if let Some(text) = command.get_before_help().and_then(|t| fill(t.to_string())) {
+        command = command.before_help(text);
+    }
+    if let Some(text) = command.get_after_help().and_then(|t| fill(t.to_string())) {
+        command = command.after_help(text);
+    }
+    if let Some(text) = command
+        .get_before_long_help()
+        .and_then(|t| fill(t.to_string()))
+    {
+        command = command.before_long_help(text);
+    }
+    if let Some(text) = command
+        .get_after_long_help()
+        .and_then(|t| fill(t.to_string()))
+    {
+        command = command.after_long_help(text);
+    }
+    command
+        .mut_args(|mut arg| {
+            if let Some(text) = arg.get_help().and_then(|t| fill(t.to_string())) {
+                arg = arg.help(text);
+            }
+            if let Some(text) = arg.get_long_help().and_then(|t| fill(t.to_string())) {
+                arg = arg.long_help(text);
+            }
+            arg
+        })
+        .mut_subcommands(|sub| fill_limits(sub, values))
+}
+
 /// An age in whole seconds as a short phrase: `new`, `45s`, `20m`, `3h`, `2d`.
 fn age_phrase(seconds: u64) -> String {
     match seconds {
@@ -65,6 +115,79 @@ pub fn hestia_report(sweep: Option<&Sweep>) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod fill_limits_tests {
+    use super::*;
+    use clap::{Arg, Command};
+
+    fn command() -> Command {
+        Command::new("top")
+            .about("Runs at most {widgets} widgets.")
+            .long_about(
+                "Runs at most {widgets} widgets.\n\nThe {unknown} stays; so does {ceiling}.",
+            )
+            .before_help("Before {widgets}.")
+            .after_help("After {widgets} and {gap}.")
+            .arg(Arg::new("n").long("n").help("From {low} to {high}."))
+            .arg(Arg::new("m").long("m").long_help("Long {low}."))
+            .subcommand(
+                Command::new("sub")
+                    .about("Below {gap}.")
+                    .arg(Arg::new("x").long("x").help("Deep {widgets}.")),
+            )
+    }
+
+    #[test]
+    fn fill_limits_replaces_only_named_placeholders_limits() {
+        for widgets in [8, 16, 64] {
+            let values = [
+                ("widgets", widgets.to_string()),
+                ("gap", "2".to_string()),
+                ("low", "1".to_string()),
+                ("high", "5".to_string()),
+            ];
+            let mut filled = fill_limits(command(), &values);
+            let top = filled.render_long_help().to_string();
+            assert!(
+                top.contains(&format!("Runs at most {widgets} widgets.")),
+                "{top}"
+            );
+            assert!(top.contains(&format!("Before {widgets}.")), "{top}");
+            assert!(top.contains(&format!("After {widgets} and 2.")), "{top}");
+            assert!(top.contains("From 1 to 5."), "{top}");
+            assert!(top.contains("Long 1."), "{top}");
+            // A placeholder with no value is left, as the drain's `{ceiling}` is for its own fill.
+            assert!(
+                top.contains("The {unknown} stays; so does {ceiling}."),
+                "{top}"
+            );
+            assert!(
+                !top.contains("{widgets}") && !top.contains("{gap}"),
+                "{top}"
+            );
+            let sub = filled
+                .find_subcommand_mut("sub")
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            assert!(sub.contains("Below 2."), "{sub}");
+            assert!(sub.contains(&format!("Deep {widgets}.")), "{sub}");
+        }
+    }
+
+    #[test]
+    fn fill_limits_leaves_text_without_a_placeholder_as_it_is() {
+        let plain = Command::new("top")
+            .about("No limit here.")
+            .arg(Arg::new("n").long("n").help("Nothing to fill."));
+        let before = plain.clone().render_long_help().to_string();
+        let after = fill_limits(plain, &[("widgets", "8".to_string())])
+            .render_long_help()
+            .to_string();
+        assert_eq!(before, after);
+    }
 }
 
 #[cfg(test)]
