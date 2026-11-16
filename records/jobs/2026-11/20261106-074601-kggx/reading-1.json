@@ -1,0 +1,179 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-074601-kggx",
+  "n": 1,
+  "at": "2026-11-16T15:21:30.90780389Z",
+  "invocation_seq": 1,
+  "base_commit": "9706572e68b6a4cf5ce3038e0019ccb4660cd0f9",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Hold job starts when free disk can't cover all running builds",
+  "summary": "Add a start-time disk check in the shared dispatch path (drain, retry, `athena go`). It sums the expected build size of every running producer plus the new job (recent builds, default 12 GB each) and holds the start as `LowDisk`, not a failure, if free minus that total would fall below the configured floor. The message and `athena status` show the numbers. Audience: the operator who reads held messages and status, and the verifier running cargo tests.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Added tests for hold, proceed and not-a-failure; fmt, clippy and test criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Behavior criteria name the cargo test runs and the held/proceed/no-failure outcomes."
+    },
+    {
+      "id": "strangers",
+      "how": "Messages and docs show the numbers in plain language."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced in code in the shared dispatch path."
+    },
+    {
+      "id": "small",
+      "how": "One focused change that extends the existing gate."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/disk.rs (LowDisk, write_hold/read_any_hold, dispatch_disk_gate, Figures, in_flight_limit, start_decision, start_hold, FREE_BYTES_ENV test hook), crates/athena-core/src/run/mod.rs around lines 1087-1105 (dispatch calls dispatch_disk_gate, then start_hold, writes the hold marker and returns LowDisk before anything is committed), crates/athena-core/src/status.rs (JobLine.hold is filled from disk::read_any_hold at ~line 1141) and crates/athena-cli/src/drain.rs (a LowDisk error ends the item as held, not failed, with no attempt used; ~lines 1746-1760, 4727). The single entry point is Athena::dispatch, so drain, retry and `athena go` all reach it. No new record file under crates/ is planned; if the producer adds a record type it must be covered by check_record_file/AnyRecord round-trip.",
+    "Existing code: extend crates/athena-core/src/disk.rs (start_hold, start_decision, LowDisk, Figures) and the status line in crates/athena-core/src/status.rs rather than adding a second gate. The current start_hold applies only when [drain.pipeline] max_in_flight > 1 and uses T and S from build measurements; the new check must apply to every start with at least one running producer, regardless of max_in_flight.",
+    "Field meaning: the floor is `[disk] min_free_gb` (Config::min_free_gb, DEFAULT_MIN_FREE_GB 10, documented in disk.rs as the minimum free GB enforced at dispatch). It fits as the floor the request names, so no new config key is added. The 12 GB default is a new constant. 'Recent builds' is read as the sizes of recent job build directories or the latest build measurement (target_bytes + source_bytes); the producer picks the one already available in the records and states it.",
+    "Running producers are the jobs StateDir::other_jobs_in_flight reports (job lock held, with a worktree or build directory). It is a gate, not a lock, as the existing docs note.",
+    "The request file path records/failure-classes/2026-10/20261026-140304-afw9.json is not in the working copy (records are absent by design); it is context only and is not changed.",
+    "A hold reuses the existing LowDisk path: write_hold marker, 'held' ui line, Err(LowDisk) from go. The message and status line carry free GB, running count, expected total GB and the floor. Status text uses the existing JobLine.hold field.",
+    "Tests use disk.rs unit tests (or crates/athena-core/src/run/tests.rs) with a fake free amount (ATHENA_FREE_BYTES or a pure function taking free bytes), to avoid a real disk read.",
+    "Environment: none (no CI, push or PR reach needed)."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A unit test in crates/athena-core/src/disk.rs (or run/tests.rs) shows that with 26 GB free, a 10 GB floor and two running builds of the 12 GB default, a third start is held: 26 - 36 is below the floor. Run `cargo test -p athena-core` and name the test in the output.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows a start with enough room proceeds (the check returns no hold), for example 60 GB free with two running builds and a 10 GB floor. It fails if the check always holds. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows a held start is not recorded as a failure: the job stays queued, `go` returns LowDisk, no failure/outcome record is written and no attempt is used. It would fail if the hold were closed as failed. Run `cargo test` on the drain or core tests that drive dispatch.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The check sits in the shared dispatch path (crates/athena-core/src/run/mod.rs, beside dispatch_disk_gate and start_hold), so drain, retry and hand `athena go` all pass through it. A Grep shows one call site in dispatch and none added only in the drain.",
+      "kind": "content"
+    },
+    {
+      "text": "The expected size per job is taken from recent builds (the latest build measurement or recent job build-directory sizes), with a named constant of 12 GB as the default when none exists. A diff line shows the constant and the sum over the running producers plus the new job.",
+      "kind": "content"
+    },
+    {
+      "text": "The hold message (LowDisk text and the `held` ui line) and the `athena status` line show the numbers: free disk, number of running builds, expected total, and the floor. A test asserts the rendered text in crates/athena-core/src/status.rs or disk.rs.",
+      "kind": "content"
+    },
+    {
+      "text": "No unrelated behavior changes: the existing disk gates (dispatch_disk_gate, the in-flight bound, producer/checks/verifier gates) keep their behavior and existing tests still pass. This is checked by `cargo test`.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy` and `cargo test` all pass on the final tree (a recorded Athena check on the same tree counts).",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md records the change, and the module docs of crates/athena-core/src/disk.rs describe the new check. If the design ladder of decisions needs it, a new appended docs/decisions.md entry with a Provenance bullet is added, with no edit to existing entries.",
+      "kind": "content"
+    },
+    {
+      "text": "The new rule makes the dispatch gate refuse more starts when several jobs run; the higher hold rate is intended. Expected 5% of newly refused starts. Because jobs that run side by side can fill the disk, a start with too little room now asks to wait.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Changing the existing per-stage disk gates (producer, checks, verifier) or the build-folder slot.",
+    "Editing anything under records/, including the named failure-class record.",
+    "Changing athena.toml or defaults.toml values (the floor stays `[disk] min_free_gb`)."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.6,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2300.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6848184818481848,
+      "p_user_intervenes": 0.06035502958579881,
+      "cost_usd": {
+        "p10": 0.5540027130382851,
+        "p50": 1.5343634,
+        "p90": 6.4379939552509375
+      },
+      "wall_time_s": {
+        "p10": 608.2157598541473,
+        "p50": 2201.517659428602,
+        "p90": 4519.923568490709
+      }
+    }
+  },
+  "departures": "Slightly higher cost and time than the reference: the change touches the dispatch gate, status rendering and several test sites.",
+  "hard_reason": "It adds a rule that can hold work from starting and touches the dispatch path shared by drain, retry and hand commands.",
+  "producer_effort": "high"
+}

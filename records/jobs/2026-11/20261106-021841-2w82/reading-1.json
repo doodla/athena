@@ -1,0 +1,183 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-021841-2w82",
+  "n": 1,
+  "at": "2026-11-16T12:46:30.814644824Z",
+  "invocation_seq": 2,
+  "base_commit": "9ee2a7d5ed19a69c4936b3d96086db4e9b588940",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add stale-text check that fails when old values or claims remain",
+  "summary": "Add a pre-verdict check in the run pipeline: when the diff changes a constant, limit or stated rule, search code, CLI help and docs (including docs/decisions.md) for the old value or claim and fail naming each stale place, except text in the diff, marked 'amended by'/'superseded by', or in CHANGELOG.md. The producer loop gets the list as a send-back so it fixes text before verification; help strings that restate a limit are built from the enforcing constant. Audience: Athena maintainers and producers.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Criteria require cargo test, clippy and fmt pass with new tests."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the two fixture tests and show failures naming lines."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced by a check in the run pipeline, not prose."
+    },
+    {
+      "id": "strangers",
+      "how": "Decision entry and CHANGELOG written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: stop jobs that change a value or rule from leaving old text (decision records, help strings) contradicting it, so no follow-up job is needed. Audience: Athena maintainers and producers.",
+    "Code survey: read crates/athena-core/src/run/producer.rs (producer_loop at line 298, send-back loop with PRODUCER_SEND_BACKS), crates/athena-core/src/run/checks.rs (decision_gate, run_loop_checks, loop_check_failures), crates/athena-cli/src/decisions.rs (log guard, ConfirmedLinks, link status from docs/decision-links.toml), crates/athena-data/src/decision_links.rs. The new check hooks beside the existing loop checks, so the producer sees it in-loop and the same function runs before verdict. No record or data file is added under crates/, so check_record_file/AnyRecord are not touched.",
+    "Existing code: reuse crates/athena-core/src/run/checks.rs loop-check plumbing, crates/athena-core/src/run/send_back.rs, and crates/athena-cli/src/decisions.rs / docs/decision-links.toml for 'amended by'/'superseded by' status; a criterion extends the send-back path.",
+    "Field meaning: no existing field, argument or key is reused for a new purpose.",
+    "Term: 'marked amended by / superseded by' means the decision entry text contains that phrase or docs/decision-links.toml confirms the link.",
+    "Detection is heuristic: old values come from removed diff lines (numeric/string literals in constants) and from decision-style claims in the reading; the producer chooses the exact module name stale_text.rs, listed here as a created file.",
+    "The check refuses more jobs than before; the higher refusal rate is intended: expected 10% of newly refused readings.",
+    "Existing paths not in the snapshot: none are assumed; docs/decisions.md and docs/decision-links.toml exist. Help-string constants are located by the producer by search.",
+    "Environment: none; no CI workflow, push, PR or history read."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-core/src/run/stale_text.rs builds a diff where a constant changes from 8 to 16 while a CLI help string still says 8; the check fails and its finding names that file and line. Verified with `cargo test -p athena-core stale_text`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test uses a decision log text where a decision states the reverse of a changed rule and has no 'amended by' or 'superseded by' mark; the check fails and names that decision's id and line. Run with `cargo test -p athena-core stale_text`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test shows both fixtures pass once the help text and decision text are updated, and that matches in the diff, in a marked entry, or in CHANGELOG.md are not reported. Run with `cargo test -p athena-core stale_text`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "crates/athena-core/src/run/producer.rs (producer_loop) feeds the check's list into the producer's send-back before the candidate reaches verification, and the check runs before the final verdict; a diff in those files shows the call.",
+      "kind": "content"
+    },
+    {
+      "text": "Each CLI help string that restates a limit is built from the constant enforcing it (format! or concat from the constant), shown in the diff of the file where each such constant and string live; no literal copy of the limit remains in help text.",
+      "kind": "content"
+    },
+    {
+      "text": "The change is recorded in a new appended entry in docs/decisions.md with a Provenance bullet; no existing entry is edited. docs/decision-links.toml is changed only if the new entry amends or supersedes an earlier one.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md gains one entry stating only what the diff does (the check, the send-back, help strings built from constants), with no other claims.",
+      "kind": "content"
+    },
+    {
+      "text": "Existing tests still pass and the build is clean: `cargo fmt --check`, `cargo clippy` and `cargo test` (Athena's recorded checks on the final tree count).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Scope limit: apart from the deliverables and CHANGELOG.md, no other files change and no existing behavior changes.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/stale_text.rs",
+      "action": "create",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/src/lib.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Editing or annotating existing entries of docs/decisions.md",
+    "Changing athena.toml, defaults.toml or CI workflows",
+    "Semantic (non-textual) detection of contradictions beyond the old value or claim search"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 1.0,
+        "p50": 2.6,
+        "p90": 7.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2800.0,
+        "p90": 6000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.684297520661157,
+      "p_user_intervenes": 0.06044444444444444,
+      "cost_usd": {
+        "p10": 0.5539561510829174,
+        "p50": 1.5350815319454534,
+        "p90": 6.439481603055482
+      },
+      "wall_time_s": {
+        "p10": 607.8917087625641,
+        "p50": 2198.6818760249994,
+        "p90": 4523.914409046081
+      }
+    }
+  },
+  "departures": "Hard pipeline change touching the producer loop plus new module, tests and docs; cost and time above reference medians.",
+  "urgent_reason": "It cuts follow-up jobs and rejected attempts caused by stale text only caught at the final verdict.",
+  "hard_reason": "It adds a check that can fail a job and changes the run pipeline (the producer loop's send-back and the pre-verdict gate).",
+  "producer_effort": "high"
+}

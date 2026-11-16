@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-211248-rgdn",
+  "round": 2,
+  "at": "2026-11-16T12:15:44.507127314Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/planning.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/planning.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/common/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/common/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/tests/refusal_corpus.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/tests/refusal_corpus.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Soundness: the reader is required to quote the live athena.toml value of every reused config key, and the parser reads that quote as a proposal. This causes false refusals, and a second refusal fails the job; it also misses real over-budget proposals.",
+      "evidence": "reader.rs:303 is a standing reading rule: \"Reused field, CLI argument, record key or config key needs `Field meaning:` assumption: quote documented meaning ..., config: live athena.toml value\". This job's own reading has \"config: live athena.toml line 47 job_usd = 50.00\". That sentence names athena.toml, has none of the excluded words and has the `key = N` form, so the parser reads job_usd = 50.00. Assumptions come after the summary and the last mention wins. So a summary that says 'raise producer_usd to 20.00 and job_usd to 60.00 in athena.toml' ends with job_usd 50.00, required $57.00, and is refused. The reread must keep the same `Field meaning:` assumption, so it is refused a second time, which is the job's failure (read_for, reading.rs:541-577). The reverse also happens: a quoted live 'producer_usd = 10.00' cancels a proposed raise, and the over-budget reading passes. The plan's risk entry about false refusals names only old or hypothetical figures and offers no defense against this mandated pattern. None of the corpus cases in Step 11 has it. Fix: Do not treat a statement of the current value as a proposal. (a) Skip assumptions that start with `Field meaning:`. (b) Ignore a mention whose value equals the base config's current value, so a restatement never overrides a different proposal. (c) Optionally, treat sentences that say 'live', 'current', 'currently' or 'existing' as quotes. Add a reading test and a `cap_side` corpus case taken from this job's real reading shape: a summary that raises producer_usd and job_usd, plus a `Field meaning:` assumption quoting 'live athena.toml line 47 job_usd = 50.00'. Expect it accepted. Add the reverse case: a quoted live producer_usd = 10.00 after a raise to 60.00 is still refused.",
+      "location": "Decision 3 / Step 2 (parser `proposed_caps`, last mention wins, texts read in the order summary, assumptions, criteria); crates/athena-context/src/briefs/reader.rs:303",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Part of the plan-path test's 'fails without the behavior' claim is wrong. A plan listing athena.toml when the reading does not already draws a Major finding, so it is revised before the critic even without `plan_cap_findings`.",
+      "evidence": "plan_findings raises `Severity::Major` when a plan lists a governance file that the reading does not list and name in a criterion (admission.rs:294-304). The plan's own risk says the test reading does not list athena.toml. Without the new check the plan therefore still goes back to the planner and the critic still sees only the revised plan. Only the assertion that the cap figure appears in the second planner brief separates the two cases. Fix: In this test, make the reading list athena.toml as a Modify deliverable and name it in a criterion, so the cap finding is the only Major finding. Then the test can also assert that the first plan's findings are exactly the cap finding. Otherwise, correct the 'fails without' text to rest on the figure in the brief alone.",
+      "location": "Demonstration for criterion 1(d) and Step 9 (run/tests.rs `plan_cap_budget_refuses_a_plan_over_job_usd_before_the_critic`); crates/athena-core/src/admission.rs:294-304",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Skipping every sentence with a word starting 'test' drops common criterion wording that states a cap proposal, so the check fails open more often than the plan says.",
+      "evidence": "Cap-change criteria usually tie the change to the suite, for example 'After athena.toml raises producer_usd to 20.00, cargo test passes'. That sentence is skipped, so the proposal is never read and only the candidate-time check at admission.rs:929-958 catches it. That is today's late failure, the one the request is about. Words like 'fixture', 'example' and 'hypothetical' carry the example meaning; 'test' alone does not. Fix: Skip a sentence only when it describes a test or fixture copy, for example when it names 'fixture', 'example', 'hypothetical' or 'mock', or says 'a test sets'. Keep sentences that merely mention running the test suite, and add an accepted/refused pair of cases for this wording.",
+      "location": "Decision 3, list of excluded words (`test`)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 1's major finding 3 is resolved: the plan now checks plans before dispatch. `plan_cap_findings` is called at run/planning.rs:500, where `jc` (bound at 366) and `ctx.reading` are in reach, and a Major finding there sends the plan back to the planner before any critic call (planning.rs:512-529). I confirmed by reading the code: `Config::check_budget` returns `BudgetBelowReserve { job_usd, required, short }` (config.rs:948-959). The cap check can sit in `build_reading` next to `check_reading_size` (reading.rs:777, 822-831, 940). The budget scan (run/tests.rs:11950-11969) flags only additions over cap fields and calls of the Config sum methods, so plain field assignments plus `check_budget` pass it. The plan's dollar figures check out: $47.00 for the pinned config with 5 rounds of 3+3, $57.00 with producer_usd 20, and $67.00 in run_pin_tests.rs, whose `config()` drops `[job_plan]`. One new soundness defect in the changed parser (Decision 3) stops the plan working. The reader brief requires every reading that reuses a config key to quote its live athena.toml value in a `Field meaning:` assumption (athena-context/src/briefs/reader.rs:303). With last-mention-wins over summary, then assumptions, then criteria, that quote overrides the proposal. A reading that raises a cap and job_usd together is refused twice, which fails the job, and a quoted live cap cancels a raise, so an over-budget reading passes. Smaller issues: the plan-path test's claim of what fails without the check ignores the governance-listing Major finding that the same plan triggers, and the excluded word `test` makes the parser skip common criterion sentences."
+}

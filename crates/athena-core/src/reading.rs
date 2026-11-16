@@ -8721,6 +8721,415 @@ mod tests {
         assert!(acceptance_doc.contains("[`check_records_measure`]"));
     }
 
+    /// The request of job 20261025-110525-8hzb in the shape the class takes: a named fix and a figure.
+    const MOVE_CALL_EARLIER: &str = "Move the call earlier in the run to save about 12 minutes";
+
+    /// A `Timeline:` assumption with the five parts, for `MOVE_CALL_EARLIER`.
+    const MOVE_CALL_TIMELINE: &str = "Timeline: crates/athena-core/src/run/mod.rs runs reading 3 min \
+         (recorded), then planning 9 min (recorded), then checks 6 min (estimate); the claimed 12 minute \
+         delay sits in checks";
+
+    /// A code reading with the survey whose summary is `summary`.
+    fn timing_reading(summary: &str) -> Reading {
+        let mut reading = code_reading(&[SURVEY], &[MODIFY_READING]);
+        reading.summary = summary.into();
+        reading
+    }
+
+    #[test]
+    fn timing_claim_has_one_step_line() {
+        let source = reading_source();
+        let body = source
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        let steps: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("step!(check_"))
+            .collect();
+        let line = "step!(check_timing_claim(reading, request));";
+        assert_eq!(steps.iter().filter(|l| **l == line).count(), 1, "{steps:?}");
+        let measure = steps
+            .iter()
+            .position(|l| *l == "step!(check_records_measure(reading));")
+            .unwrap();
+        assert_eq!(steps[measure + 1], line);
+        assert!(
+            source.contains(
+                "pub fn check_timing_claim(reading: &Reading, request: &str) -> Result<()>"
+            )
+        );
+        let acceptance_doc = source
+            .split("pub fn check_reading_acceptance(")
+            .next()
+            .unwrap();
+        assert!(acceptance_doc.contains("[`check_timing_claim`]"));
+        // The error names the missing assumption, the stage order, where the medians are and an example.
+        let error = check_timing_claim(&timing_reading(MOVE_CALL_EARLIER), MOVE_CALL_EARLIER)
+            .unwrap_err()
+            .to_string();
+        for needle in [
+            "was refused",
+            "`Timeline:`",
+            "for example",
+            "athena status",
+            "reading, planning, producer, checks, verifier, landing and rebuild",
+            "unchecked estimate",
+        ] {
+            assert!(error.contains(needle), "{needle}: {error}");
+        }
+    }
+
+    #[test]
+    fn timing_claim_without_timeline_is_refused_and_with_timeline_accepted() {
+        // The request of job 20261025-110525-8hzb: move a call earlier to save about 12 minutes.
+        let mut reading = timing_reading(MOVE_CALL_EARLIER);
+        assert_eq!(
+            refuser_for(&reading, MOVE_CALL_EARLIER),
+            Some("check_timing_claim")
+        );
+        let error = check_timing_claim(&reading, MOVE_CALL_EARLIER)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("has no `Timeline:` assumption"), "{error}");
+        assert!(error.contains("\"earlier\""), "{error}");
+        // The gate gives the same text, and so does the stored-reading seam.
+        let gate = check_reading_acceptance(&reading, MOVE_CALL_EARLIER, None, &[], None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(gate, error);
+        match check_reading_text(&reading, MOVE_CALL_EARLIER) {
+            ReadingCheck::Refuse(reason) => assert!(reason.contains("`Timeline:`"), "{reason}"),
+            ReadingCheck::Accept => panic!("a stored speed-claim reading with no timeline"),
+        }
+        // The same reading with a timeline that holds the five parts is accepted.
+        reading.assumptions.push(MOVE_CALL_TIMELINE.into());
+        assert_eq!(refuser_for(&reading, MOVE_CALL_EARLIER), None);
+        check_reading_acceptance(&reading, MOVE_CALL_EARLIER, None, &[], None).unwrap();
+        assert_eq!(
+            check_reading_text(&reading, MOVE_CALL_EARLIER),
+            ReadingCheck::Accept
+        );
+        // The label is matched after trimming, in any case.
+        let mut spelled = timing_reading(MOVE_CALL_EARLIER);
+        spelled.assumptions.push(format!(
+            "  TIMELINE:{}",
+            &MOVE_CALL_TIMELINE["Timeline:".len()..]
+        ));
+        assert_eq!(refuser_for(&spelled, MOVE_CALL_EARLIER), None);
+        // The claim may sit in the request alone: a summary that drops the figure does not hide it.
+        let quiet = timing_reading("Change the run order");
+        assert_eq!(
+            refuser_for(&quiet, MOVE_CALL_EARLIER),
+            Some("check_timing_claim")
+        );
+    }
+
+    #[test]
+    fn timing_claim_class_shapes_are_refused() {
+        let growth = crate::hestia::StageGrowth {
+            stage: "producer",
+            previous_minutes: 25.0,
+            minutes: 45.0,
+        };
+        let steward = crate::hestia::slowdown_request(25.0, 60.0, &[growth]).unwrap();
+        let shapes = [
+            // The three jobs of the class.
+            MOVE_CALL_EARLIER,
+            "Speed up the test suite",
+            "Speed up the tests by running them in parallel",
+            // Other shapes of the same claim.
+            "The checks are delayed by 12 minutes",
+            "This speeds up the tests",
+            "The producer step slowed the run; it took 40 minutes",
+            "Reduce the CI wait from 10 minutes",
+            "Reduce time spent waiting for CI",
+            "Cut the build time",
+            "The verifier is slower than the checks",
+            "Make the planning stage faster",
+            "The build now takes longer",
+            "Save 90s per run",
+            "Shave 500ms off the check",
+            "Land sooner, within 2 hours",
+            "Shorten the CI wait to 5 mins",
+            // Spellings: hyphen, case, glued unit, decimal.
+            "Make a speed-up of 90s",
+            "Speed Up the CI",
+            "SPEED_UP the tests",
+            "A 1.5 h delay in the pipeline",
+            "A 12-minute delay",
+            &steward,
+        ];
+        // The claim in the request alone, and in the summary alone.
+        let neutral = timing_reading("Change the run order");
+        for text in shapes {
+            assert_eq!(
+                refuser_for(&neutral, text),
+                Some("check_timing_claim"),
+                "request: {text}"
+            );
+            assert!(
+                check_timing_claim(&timing_reading(text), "change the run order").is_err(),
+                "summary: {text}"
+            );
+        }
+        // A claim in a criterion alone triggers too.
+        let mut in_criterion = timing_reading("Change the run order");
+        add_behavior(
+            &mut in_criterion,
+            "Run `cargo test`: the checks finish 3 minutes sooner",
+        );
+        assert_eq!(
+            refuser_for(&in_criterion, "change the run order"),
+            Some("check_timing_claim")
+        );
+    }
+
+    #[test]
+    fn timing_claim_leaves_other_readings_alone() {
+        let mut cases: Vec<(&str, Reading, String)> = Vec::new();
+        let plain = "change the reading rules".to_string();
+        cases.push((
+            "default reading",
+            code_reading(&[SURVEY], &[MODIFY_READING]),
+            plain.clone(),
+        ));
+        for (label, text) in [
+            (
+                "word inside another word",
+                "The delayer runs for 12 minutes",
+            ),
+            (
+                "shorten text with a stage noun",
+                "Shorten the reader prompt so the budget tests pass",
+            ),
+            ("throughput", "Raise the throughput of the drain queue"),
+            (
+                "earlier attempt with a figure",
+                "The earlier attempt ran 40 minutes and the earlier job failed",
+            ),
+            (
+                "earlier before other nouns",
+                "The earlier token case (10 ms) was rejected; the earlier text stays for 2 hours",
+            ),
+            ("figure without a claim", "Allow a timeout of 30 seconds"),
+            ("stage noun without a claim", "Add a test for the check"),
+            ("not a unit", "Add 3 checks to the producer"),
+            ("number inside a word", "Hash with sha256 s"),
+        ] {
+            cases.push((label, timing_reading(text), text.to_string()));
+        }
+        let mut docs = timing_reading(MOVE_CALL_EARLIER);
+        docs.class_of_work = "docs".into();
+        cases.push(("docs class", docs, MOVE_CALL_EARLIER.into()));
+        let mut asking = timing_reading(MOVE_CALL_EARLIER);
+        asking.question = Some("which call?".into());
+        cases.push(("question", asking, MOVE_CALL_EARLIER.into()));
+        let mut declined = timing_reading(MOVE_CALL_EARLIER);
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        cases.push(("decline", declined, MOVE_CALL_EARLIER.into()));
+        let mut content = timing_reading(MOVE_CALL_EARLIER);
+        content.acceptance_criteria = vec![Criterion {
+            text: "The doc names the delay".into(),
+            kind: CriterionKind::Content,
+        }];
+        cases.push(("content criteria only", content, MOVE_CALL_EARLIER.into()));
+        // A root-cause request whose copied lines quote the words: only the lines Athena copied hold them.
+        let generated = [
+            "Priority: high",
+            "",
+            "Fix the root cause of a repeated failure: a rule is never run on real inputs",
+            "",
+            "The same cause has produced failures in more than one job. Find the cause where it originates.",
+            "",
+            "Failure class: speed-up requests that were 12 minutes faster",
+            "Cause: a speed-up of the tests was planned without the stage durations",
+            "Seen 2 time(s) in 2 jobs. The introspections that record it:",
+            "Introspection 20261025-110857-eqhd (job 20261025-110525-8hzb); prevention it proposed: make the checks faster, saving 12 minutes",
+            "",
+            "Acceptance:",
+            "- The root cause is named in the change description",
+        ]
+        .join("\n");
+        cases.push((
+            "root-cause lines quoting the words",
+            code_reading(&[SURVEY], &[MODIFY_READING]),
+            generated,
+        ));
+        for (label, reading, request) in &cases {
+            check_timing_claim(reading, request).unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_ne!(
+                refuser_for(reading, request),
+                Some("check_timing_claim"),
+                "{label}"
+            );
+        }
+        // A hand-written line that only starts like a generated one still counts.
+        let handwritten = "Cause: the checks must be faster by 12 minutes";
+        assert!(check_timing_claim(&timing_reading("x"), handwritten).is_err());
+    }
+
+    #[test]
+    fn timing_claim_refusal_rule_readings_are_exempt_but_pipeline_changes_are_not() {
+        let declaration = "The change refuses more readings: expected 4% of newly refused readings, for requests \
+             such as `Move the call earlier to save about 12 minutes`";
+        let reading_check = [
+            "crates/athena-core/src/reading/surveys.rs",
+            "crates/athena-core/tests/refusal_corpus.rs",
+        ];
+        for path in reading_check {
+            let mut rule = code_reading(&[SURVEY], &[(path, DeliverableAction::Modify)]);
+            rule.summary = "Refuse a speed-up request that has no timeline".into();
+            add_behavior(&mut rule, declaration);
+            check_timing_claim(&rule, MOVE_CALL_EARLIER).unwrap_or_else(|e| panic!("{path}: {e}"));
+        }
+        // The same declaration beside a pipeline file is not exempt.
+        let mut pipeline = code_reading(
+            &[SURVEY],
+            &[("crates/athena-core/src/gh.rs", DeliverableAction::Modify)],
+        );
+        pipeline.summary = MOVE_CALL_EARLIER.into();
+        add_behavior(&mut pipeline, declaration);
+        assert_eq!(
+            refuser_for(&pipeline, MOVE_CALL_EARLIER),
+            Some("check_timing_claim")
+        );
+        // A deleted reading-check file does not exempt it either.
+        let mut deleted = code_reading(
+            &[SURVEY],
+            &[(
+                "crates/athena-core/src/reading/surveys.rs",
+                DeliverableAction::Delete,
+            )],
+        );
+        deleted.summary = MOVE_CALL_EARLIER.into();
+        add_behavior(&mut deleted, declaration);
+        assert!(check_timing_claim(&deleted, MOVE_CALL_EARLIER).is_err());
+        // A reading-check file with no declaration is not exempt.
+        let mut undeclared = code_reading(&[SURVEY], &[MODIFY_READING]);
+        undeclared.summary = MOVE_CALL_EARLIER.into();
+        assert!(check_timing_claim(&undeclared, MOVE_CALL_EARLIER).is_err());
+    }
+
+    #[test]
+    fn timing_claim_names_each_missing_timeline_part() {
+        // Each part of the timeline removed in turn: the error names it, and the other four are not named.
+        let base = MOVE_CALL_TIMELINE;
+        let cases = [
+            (
+                base.replace("crates/athena-core/src/run/mod.rs", "the run module"),
+                "a crates/ path",
+            ),
+            (
+                base.replace("9 min", "some minutes")
+                    .replace("6 min", "a while")
+                    .replace("12 minute", "long"),
+                "two or more durations",
+            ),
+            (
+                base.replace(", then", ",")
+                    .replace("(estimate); the", "(estimate), the"),
+                "the order of the stages",
+            ),
+            (
+                base.replace("(recorded)", "").replace("(estimate)", ""),
+                "where the durations come from",
+            ),
+            (
+                base.replace("the claimed", "the stated"),
+                "the claimed figure",
+            ),
+        ];
+        let parts = [
+            "a crates/ path",
+            "two or more durations",
+            "the order of the stages",
+            "where the durations come from",
+            "the claimed figure",
+        ];
+        for (timeline, missing) in cases {
+            let mut reading = timing_reading(MOVE_CALL_EARLIER);
+            reading.assumptions.push(timeline.clone());
+            let error = check_timing_claim(&reading, MOVE_CALL_EARLIER)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("has a `Timeline:` assumption that lacks"),
+                "{timeline}: {error}"
+            );
+            let lacks = error
+                .split("that lacks ")
+                .nth(1)
+                .and_then(|rest| rest.split("; the claimed figure was not checked").next())
+                .unwrap();
+            assert!(lacks.contains(missing), "{missing}: {lacks}");
+            for other in parts.iter().filter(|p| **p != missing) {
+                assert!(
+                    !lacks.contains(other),
+                    "{other} named for {missing}: {lacks}"
+                );
+            }
+        }
+        // A timeline with a path and nothing else names the other four.
+        let mut bare = timing_reading(MOVE_CALL_EARLIER);
+        bare.assumptions
+            .push("Timeline: crates/athena-core/src/run/mod.rs".into());
+        let error = check_timing_claim(&bare, MOVE_CALL_EARLIER)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("lacks a crates/ path"), "{error}");
+        assert!(error.contains("two or more durations"), "{error}");
+        // The best of several timelines is judged, and one that is complete is enough.
+        let mut several = timing_reading(MOVE_CALL_EARLIER);
+        several.assumptions.push("Timeline: unknown".into());
+        several.assumptions.push(MOVE_CALL_TIMELINE.into());
+        check_timing_claim(&several, MOVE_CALL_EARLIER).unwrap();
+        // The order markers: an arrow also counts.
+        let arrows = MOVE_CALL_TIMELINE
+            .replace(", then", " ->")
+            .replace("(estimate); the", "(estimate) => the");
+        let mut arrow = timing_reading(MOVE_CALL_EARLIER);
+        arrow.assumptions.push(arrows);
+        check_timing_claim(&arrow, MOVE_CALL_EARLIER).unwrap();
+    }
+
+    #[test]
+    fn timing_claim_example_satisfies_the_check_and_names_real_files() {
+        let refused = timing_reading(MOVE_CALL_EARLIER);
+        let error = check_timing_claim(&refused, MOVE_CALL_EARLIER)
+            .unwrap_err()
+            .to_string();
+        let example = error
+            .split("for example: \"")
+            .nth(1)
+            .and_then(|rest| rest.split("\". ").next())
+            .unwrap();
+        assert_eq!(example, TIMELINE_EXAMPLE);
+        // It passes the whole gate as an assumption.
+        let mut with_example = refused.clone();
+        with_example.assumptions.push(example.into());
+        assert_eq!(
+            refuser_for(&with_example, MOVE_CALL_EARLIER),
+            None,
+            "{example}"
+        );
+        // Every crates/ path in it is a file of the repository.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files: BTreeSet<String> = BTreeSet::new();
+        for sentence in sentences(example) {
+            for token in path_tokens(sentence) {
+                assert!(root.join(&token).is_file(), "{token} is not a file");
+                files.insert(token);
+            }
+        }
+        assert!(!files.is_empty());
+        let only_example = code_reading(&[example], &[MODIFY_READING]);
+        check_reading_references(&only_example, Some(&files)).unwrap();
+    }
+
     /// A change reading as the gate sees it in production: `CHANGELOG.md` is always a deliverable.
     fn limited(deliverables: &[&str], criterion: &str) -> Reading {
         let mut paths = deliverables.to_vec();

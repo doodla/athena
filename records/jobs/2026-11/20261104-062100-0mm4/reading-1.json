@@ -1,0 +1,142 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261104-062100-0mm4",
+  "n": 1,
+  "at": "2026-11-16T06:32:15.801429521Z",
+  "invocation_seq": 1,
+  "base_commit": "b7fd19f6c5f26d6e40efde956b9fe22e268072cc",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add --queue to approve-work and retry so they return at once",
+  "summary": "Add a `--queue` flag to `athena approve-work` and `athena retry`. The command records the job and leaves it queued for `athena drain`, prints the job id and the follow-up commands, and returns without running any stage. Both commands' help names the command time-limit risk and the option. The audience is operators who run these commands under a caller's time limit.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Added tests for the queue-only path and the drain pickup; fmt, clippy and test are required."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the job's state and that no stage ran, not that the flag exists."
+    },
+    {
+      "id": "small",
+      "how": "One focused change: a single flag on two commands, reusing existing queue and drain code."
+    },
+    {
+      "id": "strangers",
+      "how": "The help text is written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/main.rs (Command::Retry at line 52, Command::ApproveWork at line 130, show_proposal at line 1014, run dispatch at lines 1057-1079, go_and_report), crates/athena-cli/src/commands.rs (ask --later calls athena.queue and prints display::queued; retry calls athena.retry then show_proposal), crates/athena-core/src/steward.rs (queued_work takes jobs in JobState::Queued or Proposed, so the drain already runs both), crates/athena-core/src/store.rs (JobState). No record or data file is added, so no records validation change is needed (no AnyRecord or check_record_file work).",
+    "Existing code: the change reuses crates/athena-cli/src/main.rs show_proposal and the drain's queued_work in crates/athena-core/src/steward.rs, plus display::queued in crates/athena-cli/src/display.rs. The new flag extends the `--later` behavior of `ask`.",
+    "Assumption: `--queue` still builds the reading as today (the reading step runs, as `ask --later` is the no-model path but approve-work and retry need a proposal). It then stops before the run (go_and_report), so the job stays Proposed, which the drain treats as queued, and nothing is marked interrupted. The flag conflicts with --yes. The output names the job id plus `athena drain` and `athena status` to follow progress.",
+    "Field meaning: no existing field is reused; `queue` is a new clap flag on Retry and ApproveWork. The producer may name it `--later` for consistency with `ask --later` (doc at main.rs:40, 'Only record the request, to be read and run later'); the criteria then apply to that name.",
+    "Environment: none; no CI, push or records-branch access is needed. athena.toml, defaults.toml and workflows are unchanged because the flag needs no config. Consumers: none found.",
+    "Detaching a background process is out of scope; the queue-only path is the chosen option."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli (run with `cargo test`) drives the queue-only path of retry or approve-work against a test repository. It asserts the command returns before any stage runs (no dispatch or stage record is written) and that the job's state is Queued or Proposed, not Interrupted. It fails if the flag falls through to go_and_report.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test run with `cargo test` shows that after a job is left by the queue-only path, steward::queued_work lists it, and a drain run on it dispatches and runs it. The test fails if the job is not listed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In crates/athena-cli/src/main.rs the doc comments of Command::Retry and Command::ApproveWork each state that a caller's command time limit can kill the foreground run mid-job and leave it interrupted, and name the non-blocking option (--queue) and `athena drain`. The `--queue` flag has its own doc comment, and the command's output prints the job id and how to follow progress (`athena status`, `athena drain`).",
+      "kind": "content"
+    },
+    {
+      "text": "`--queue` conflicts with `--yes` through clap (conflicts_with), and the `--json` output for the queued path includes the job id and state. The diff shows no behavior change when the flag is absent.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo test`, `cargo clippy` and `cargo fmt --check` pass on the final tree, with the existing tests unchanged. This can be shown by the check records Athena made on that tree.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md records the change; no file other than the deliverables and CHANGELOG.md changes.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/src/commands.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Running the job detached as a tracked background process",
+    "Changing how `athena drain` or `athena go` run jobs",
+    "Changes to athena.toml, defaults.toml or workflows",
+    "Recovering the two already-interrupted interventions"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 5.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2100.0,
+        "p90": 4400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.684297520661157,
+      "p_user_intervenes": 0.06044444444444444,
+      "cost_usd": {
+        "p10": 0.5539561510829174,
+        "p50": 1.5350815319454534,
+        "p90": 6.439481603055482
+      },
+      "wall_time_s": {
+        "p10": 607.8917087625641,
+        "p50": 2198.6818760249994,
+        "p90": 4523.914409046081
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass odds than the reference. The CLI test must build a repository fixture and the flag semantics (queue after reading) are ambiguous.",
+  "urgent_reason": "Stops time-limit kills that left jobs interrupted, which cuts failed attempts and redo retries."
+}
