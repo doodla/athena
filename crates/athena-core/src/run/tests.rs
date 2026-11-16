@@ -1488,6 +1488,177 @@ mod produce_and_verify_order_tests {
         }
     }
 
+    /// The Rust files the caller-list tests commit: `core.rs` declares `land_job` (called from `a.rs`, from
+    /// inside the macro in `b.rs`, from a test file and from its own test module), a helper used only inside
+    /// the file, one with no caller, and a production function after a mid-file test module. `text.rs` holds
+    /// the name only in a string and a comment; `broken.rs` does not parse.
+    fn commit_caller_fixture(repo: &tempfile::TempDir) {
+        for (path, text) in [
+            (
+                "crates/x/src/core.rs",
+                "pub fn land_job() {}\npub fn unused_helper() {}\nfn used_here() {}\npub fn run_all() {\n    used_here();\n}\n\
+                 #[cfg(test)]\nmod seam {\n    fn seam_only() {}\n}\npub fn after_the_seam() {}\n\
+                 #[cfg(test)]\nmod tests {\n    #[test]\n    fn calls() {\n        super::land_job();\n    }\n}\n",
+            ),
+            (
+                "crates/x/src/a.rs",
+                "pub fn a() {\n    crate::core::land_job();\n}\n",
+            ),
+            (
+                "crates/x/src/b.rs",
+                "pub fn b() {\n    let x = 1;\n    assert_eq!(land_job(), x);\n}\n",
+            ),
+            (
+                "crates/x/tests/it.rs",
+                "#[test] fn it() { x::core::land_job(); }\n",
+            ),
+            (
+                "crates/x/src/text.rs",
+                "// land_job(\npub fn t() {\n    let s = \"land_job(\";\n}\n",
+            ),
+            ("crates/x/src/other.rs", "pub fn lonely() {}\n"),
+            ("crates/x/src/broken.rs", "fn broken( {\n"),
+        ] {
+            commit_file(repo, path, text);
+        }
+    }
+
+    /// The callers shown for the deliverables are computed from the base commit: a function with callers in
+    /// two other files lists both by file and line, a deliverable with none says so, a function after a
+    /// mid-file test module is listed, strings and comments are not calls, and a file that does not parse is
+    /// named. Without `deliverable_facts` no deliverable has a list.
+    #[test]
+    fn deliverable_callers_lists_both_callers_and_shows_a_deliverable_with_none() {
+        let repo = repo();
+        commit_caller_fixture(&repo);
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let paths: Vec<String> = [
+            "crates/x/src/core.rs",
+            "crates/x/src/other.rs",
+            "README.md",
+            "crates/x/src/gone.rs",
+        ]
+        .map(String::from)
+        .to_vec();
+        let facts = athena.deliverable_facts("HEAD", &paths).unwrap();
+        let core = facts[0].callers.as_ref().expect("a list for core.rs");
+        assert!(core.deliverable_parsed);
+        let land = core
+            .functions
+            .iter()
+            .find(|f| f.function == "land_job")
+            .expect("land_job is listed");
+        assert_eq!((land.elsewhere, land.same_file, land.line), (3, 1, 1));
+        let sites: Vec<(&str, u32, bool)> = land
+            .sites
+            .iter()
+            .map(|s| (s.path.as_str(), s.line, s.test))
+            .collect();
+        assert_eq!(
+            sites,
+            [
+                ("crates/x/src/a.rs", 2, false),
+                ("crates/x/src/b.rs", 3, false),
+                ("crates/x/tests/it.rs", 1, true),
+            ]
+        );
+        let unused = core
+            .functions
+            .iter()
+            .find(|f| f.function == "unused_helper")
+            .expect("a function with no caller is listed");
+        assert_eq!((unused.elsewhere, unused.same_file), (0, 0));
+        let used_here = core
+            .functions
+            .iter()
+            .find(|f| f.function == "used_here")
+            .unwrap();
+        assert_eq!((used_here.elsewhere, used_here.same_file), (0, 1));
+        let listed: Vec<&str> = core.functions.iter().map(|f| f.function.as_str()).collect();
+        assert!(listed.contains(&"after_the_seam"), "{listed:?}");
+        assert!(!listed.contains(&"seam_only"), "{listed:?}");
+        assert!(!listed.contains(&"calls"), "{listed:?}");
+        assert_eq!(core.unparsed, ["crates/x/src/broken.rs"]);
+
+        let other = facts[1].callers.as_ref().expect("a list for other.rs");
+        assert_eq!(other.functions.len(), 1);
+        assert_eq!(other.functions[0].function, "lonely");
+        assert_eq!(
+            (other.functions[0].elsewhere, other.functions[0].same_file),
+            (0, 0)
+        );
+        assert!(facts[2].exists && facts[2].callers.is_none(), "README.md");
+        assert!(
+            !facts[3].exists && facts[3].callers.is_none(),
+            "a missing path"
+        );
+    }
+
+    /// The real planner call carries the callers: the first prompt names both call sites and says a
+    /// deliverable has no callers. The job then stops in planning when the planner times out.
+    #[test]
+    fn deliverable_callers_reach_the_planner_prompt() {
+        let repo = repo_with_planning(1);
+        commit_caller_fixture(&repo);
+        commit_file(
+            &repo,
+            "crates/x/src/quiet.rs",
+            "pub fn quiet_one() {}\npub fn quiet_two() {}\n",
+        );
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let inner = planning_script(vec![good_plan()], vec![], calls.clone());
+        let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            match spec.role {
+                Role::Reader => {
+                    if let Some(reading) = turn.structured.as_mut() {
+                        reading["deliverables"][0]["path"] = json!("crates/x/src/core.rs");
+                        reading["deliverables"][0]["action"] = json!("modify");
+                        reading["deliverables"].as_array_mut().unwrap().push(json!({
+                            "path": "crates/x/src/quiet.rs",
+                            "action": "modify",
+                            "p": 0.5
+                        }));
+                    }
+                }
+                Role::Planner => {
+                    turn.outcome = InvocationOutcome::TimedOut;
+                    turn.structured = None;
+                    turn.detail = Some("stopped by the test".into());
+                }
+                _ => {}
+            }
+            turn
+        });
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let (_, finished) = finished_job(&athena);
+        let calls = calls.lock().unwrap().clone();
+        let prompts = prompts_of(&calls, Role::Planner);
+        let first = prompts.first().expect("a planner call");
+        assert!(first.contains("crates/x/src/a.rs:2"), "{first}");
+        assert!(first.contains("crates/x/src/b.rs:3"), "{first}");
+        assert!(first.contains("crates/x/tests/it.rs:1 (test)"), "{first}");
+        assert!(
+            first.contains("No callers found: `quiet_one` (line 1), `quiet_two` (line 2)"),
+            "{first}"
+        );
+        assert!(
+            finished
+                .reason
+                .starts_with(athena_data::records::PLANNING_STOPPED_PREFIX),
+            "{}",
+            finished.reason
+        );
+    }
+
     /// The test repository with planning on for every job and these `[models] planner_revision_*` keys
     /// (a `None` leaves the key out).
     fn repo_with_revision_keys(

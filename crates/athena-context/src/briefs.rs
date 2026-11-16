@@ -23,8 +23,8 @@ pub use boundary::{
 };
 pub use plan::{producer_prompt_with_plan, render_plan_section};
 pub use planner::{
-    CriticInputs, DeliverableFact, EarlierRound, PlanRevision, PlannerInputs, critic_brief,
-    planner_brief,
+    CallSite, CallerList, CriticInputs, DeliverableFact, EarlierRound, FunctionCallers,
+    PlanRevision, PlannerInputs, critic_brief, planner_brief,
 };
 pub use reader::{
     CHANGELOG_DEFAULT_PHRASE, CHANGELOG_PATH, CODE_SURVEY_GUIDE, CRITERIA_RULES_HEADING,
@@ -1852,6 +1852,173 @@ mod tests {
     }
 
     #[test]
+    fn the_planner_brief_requires_an_exit_table_once_in_both_rounds() {
+        use super::planner::EXITS_RULE;
+        assert!(!EXITS_RULE.contains('\n'));
+        assert!(!EXITS_RULE.contains("## Report"));
+        let revision = PlanRevision {
+            previous: plan(1),
+            findings: vec![finding(Severity::Major, FindingSource::Critic, "F")],
+            resumed_from: None,
+        };
+        for inputs in [planner_inputs(None), planner_inputs(Some(revision))] {
+            let brief = planner_brief(&inputs);
+            let report = brief.split("## Report").nth(1).expect("report section");
+            assert_eq!(report.matches(EXITS_RULE).count(), 1, "{report}");
+            for needle in [
+                "success",
+                "fail",
+                "error",
+                "hold",
+                "interrupt",
+                "file:line",
+                "stage",
+                "core flow",
+            ] {
+                assert!(EXITS_RULE.contains(needle), "missing wording: {needle}");
+            }
+        }
+    }
+
+    /// A deliverable with a callers list, pushed after the two the helper builds.
+    fn with_callers(list: CallerList) -> PlannerInputs {
+        let mut inputs = planner_inputs(None);
+        inputs.deliverable_facts.push(DeliverableFact {
+            path: "crates/a/src/x.rs".into(),
+            exists: true,
+            bytes: Some(99),
+            callers: Some(list),
+        });
+        inputs
+    }
+
+    fn site(path: &str, line: u32, test: bool) -> CallSite {
+        CallSite {
+            path: path.into(),
+            line,
+            test,
+        }
+    }
+
+    fn function(name: &str, line: u32, elsewhere: usize, same_file: usize) -> FunctionCallers {
+        FunctionCallers {
+            function: name.into(),
+            line,
+            elsewhere,
+            same_file,
+            sites: Vec::new(),
+        }
+    }
+
+    /// The text between the Deliverables heading and the next heading.
+    fn deliverables_text(brief: &str) -> &str {
+        let from = brief
+            .find("## Deliverables in the base snapshot")
+            .expect("deliverables heading");
+        let rest = &brief[from + 3..];
+        &rest[..rest.find("\n## ").expect("next heading")]
+    }
+
+    #[test]
+    fn a_planner_brief_lists_the_callers_of_each_deliverable() {
+        let mut land = function("land_job", 12, 5, 1);
+        land.sites = vec![
+            site("crates/b/src/y.rs", 20, false),
+            site("crates/c/src/z.rs", 7, false),
+            site("crates/d/src/w.rs", 3, false),
+            site("crates/b/tests/it.rs", 9, true),
+        ];
+        let list = CallerList {
+            deliverable_parsed: true,
+            functions: vec![
+                land,
+                function("helper", 30, 0, 2),
+                function("lonely", 40, 0, 0),
+            ],
+            unparsed: Vec::new(),
+        };
+        let brief = planner_brief(&with_callers(list));
+        let section = deliverables_text(&brief);
+        for needle in [
+            "crates/b/src/y.rs:20",
+            "crates/c/src/z.rs:7",
+            "crates/d/src/w.rs:3",
+            "crates/b/tests/it.rs:9 (test)",
+            "(+1 more)",
+            "`land_job` (line 12)",
+            "Called only inside this file: `helper` (2 sites)",
+            "No callers found: `lonely` (line 40)",
+            "textual search",
+            "starting list",
+            "Grep",
+        ] {
+            assert!(section.contains(needle), "missing {needle}: {section}");
+        }
+        assert!(
+            !brief.split("## Report").nth(1).unwrap().contains("y.rs:20"),
+            "the call sites are not in the Report"
+        );
+        // A deliverable with no callers computed has no callers line, and the other lines are unchanged.
+        assert_eq!(section.matches("textual search").count(), 1);
+        assert!(
+            section.contains("- CHANGELOG.md: does not exist\n- athena.toml: exists, 1234 bytes\n")
+        );
+        assert!(section.contains("- crates/a/src/x.rs: exists, 99 bytes\n"));
+    }
+
+    #[test]
+    fn the_callers_lines_are_capped_and_the_other_cases_are_labelled() {
+        let functions: Vec<FunctionCallers> = (0..35)
+            .map(|i| function(&format!("with_{i:02}"), i, 1, 0))
+            .chain((0..35).map(|i| function(&format!("inside_{i:02}"), i, 0, 1)))
+            .chain((0..35).map(|i| function(&format!("none_{i:02}"), i, 0, 0)))
+            .collect();
+        let list = CallerList {
+            deliverable_parsed: true,
+            functions,
+            unparsed: (0..8).map(|i| format!("crates/u/src/f{i}.rs")).collect(),
+        };
+        let brief = planner_brief(&with_callers(list));
+        let section = deliverables_text(&brief);
+        let line_with = |prefix: &str| {
+            section
+                .lines()
+                .find(|l| l.trim_start().starts_with(prefix))
+                .unwrap_or_else(|| panic!("no line {prefix}: {section}"))
+        };
+        assert_eq!(section.matches("- `with_").count(), 30);
+        assert!(section.contains("(+5 more functions with callers elsewhere)"));
+        let inside = line_with("Called only inside this file");
+        assert_eq!(inside.matches("`inside_").count(), 30, "{inside}");
+        assert!(inside.ends_with("(+5 more)"), "{inside}");
+        let none = line_with("No callers found");
+        assert_eq!(none.matches("`none_").count(), 30, "{none}");
+        assert!(none.ends_with("(+5 more)"), "{none}");
+        let unparsed = line_with("Not searched, they did not parse");
+        assert!(unparsed.contains("crates/u/src/f4.rs"));
+        assert!(!unparsed.contains("crates/u/src/f5.rs"));
+        assert!(unparsed.ends_with("(+3 more)"), "{unparsed}");
+
+        let unparsed_deliverable = CallerList {
+            deliverable_parsed: false,
+            functions: Vec::new(),
+            unparsed: Vec::new(),
+        };
+        let brief = planner_brief(&with_callers(unparsed_deliverable));
+        let section = deliverables_text(&brief);
+        assert!(section.contains("did not parse, so its functions are not listed"));
+        assert!(!section.contains("Not searched"));
+
+        let empty = CallerList {
+            deliverable_parsed: true,
+            functions: Vec::new(),
+            unparsed: Vec::new(),
+        };
+        let brief = planner_brief(&with_callers(empty));
+        assert!(deliverables_text(&brief).contains("declares no functions outside test code"));
+    }
+
+    #[test]
     fn planner_brief_has_no_deadline_or_pacing_text() {
         for revised in [false, true] {
             let revision = PlanRevision {
@@ -2781,11 +2948,13 @@ mod tests {
                     path: "CHANGELOG.md".into(),
                     exists: false,
                     bytes: None,
+                    callers: None,
                 },
                 DeliverableFact {
                     path: "athena.toml".into(),
                     exists: true,
                     bytes: Some(1234),
+                    callers: None,
                 },
             ],
             revision,
@@ -4169,13 +4338,16 @@ mod tests {
                     + super::planner::FIELD_MEANING_RULE.len()
                     + 2
                     + super::planner::CODE_CLAIMS_RULE.len()
+                    + 2
+                    + super::planner::EXITS_RULE.len()
                     + 2,
-            "{} > {} + {} + 4 + {} + 2 + {} + 2",
+            "{} > {} + {} + 4 + {} + 2 + {} + 2 + {} + 2",
             report.len(),
             PLANNER_REPORT_BASE_BYTES,
             REAL_RECORDS_RULE.len(),
             super::planner::FIELD_MEANING_RULE.len(),
-            super::planner::CODE_CLAIMS_RULE.len()
+            super::planner::CODE_CLAIMS_RULE.len(),
+            super::planner::EXITS_RULE.len()
         );
     }
 

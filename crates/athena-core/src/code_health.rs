@@ -72,14 +72,18 @@ fn end_line_of(span: proc_macro2::Span) -> u32 {
     span.end().line as u32
 }
 
-fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
+/// Whether the attributes mark an item as `#[cfg(test)]`. The one definition of test code, shared with the
+/// caller scan in `run/planning.rs`.
+pub(crate) fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.path().is_ident("cfg")
             && matches!(a.parse_args::<syn::Meta>(), Ok(syn::Meta::Path(p)) if p.is_ident("test"))
     })
 }
 
-fn is_test_fn(attrs: &[syn::Attribute]) -> bool {
+/// Whether the attributes mark a function as test code (`#[test]` or `#[cfg(test)]`). Shared with the caller
+/// scan in `run/planning.rs`.
+pub(crate) fn is_test_fn(attrs: &[syn::Attribute]) -> bool {
     is_cfg_test(attrs) || attrs.iter().any(|a| a.path().is_ident("test"))
 }
 
