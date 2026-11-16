@@ -958,6 +958,30 @@ fn clip(text: &str, cap: usize) -> String {
     format!("{cut}...")
 }
 
+/// Lower-case fragments of the CI runner's post-job lines, which say nothing about why a check failed.
+const CLEANUP_MARKERS: [&str; 2] = ["post job cleanup", "node.js 20 actions are deprecated"];
+
+/// What to show of a failed check's output tail: the text before the runner's post-job cleanup lines,
+/// and from that text the cargo `failures:` section (its panic lines) when there is one, else its end.
+fn failure_excerpt(output_tail: &str) -> String {
+    let lines: Vec<&str> = output_tail.lines().collect();
+    let end = lines
+        .iter()
+        .position(|l| {
+            let l = l.to_lowercase();
+            CLEANUP_MARKERS.iter().any(|m| l.contains(m))
+        })
+        .unwrap_or(lines.len());
+    let body = &lines[..end];
+    if end < lines.len() && body.iter().all(|l| l.trim().is_empty()) {
+        return "(no output before the runner's cleanup lines)".to_string();
+    }
+    match body.iter().position(|l| l.trim() == "failures:") {
+        Some(start) => clip(&body[start..].join("\n"), TAIL_CAP),
+        None => clip_tail(&body.join("\n"), TAIL_CAP),
+    }
+}
+
 /// The last `cap` characters of `text`, marked when the start was cut.
 fn clip_tail(text: &str, cap: usize) -> String {
     let text = text.trim();
@@ -1112,10 +1136,27 @@ fn failure_details(v: &Verification, report: Option<&ProducerReport>) -> String 
             checks.len()
         ));
         for c in checks.iter().take(DETAIL_CAP) {
+            let failed = if c.failed_tests.is_empty() {
+                String::new()
+            } else {
+                let names: Vec<String> = c
+                    .failed_tests
+                    .iter()
+                    .take(DETAIL_CAP)
+                    .map(|t| clip(t, TEXT_CAP))
+                    .collect();
+                let rest = c.failed_tests.len().saturating_sub(DETAIL_CAP);
+                let more = if rest > 0 {
+                    format!(" (+{rest} more)")
+                } else {
+                    String::new()
+                };
+                format!("failed tests: {}{more}; ", names.join(", "))
+            };
             out.push_str(&format!(
-                "- {}: {}\n",
+                "- {}: {failed}{}\n",
                 clip(&c.name, TEXT_CAP),
-                clip_tail(&c.output_tail, TAIL_CAP)
+                failure_excerpt(&c.output_tail)
             ));
         }
         out.push_str(&more(checks.len()));
@@ -3050,6 +3091,43 @@ mod tests {
         assert!(!what.contains(&"x".repeat(TEXT_CAP + 1)), "{what}");
         assert!(what.contains("yEND"), "{what}");
         assert!(!what.contains(&"y".repeat(TAIL_CAP + 1)), "{what}");
+    }
+
+    #[test]
+    fn a_failed_check_names_its_failed_tests_and_panic_without_cleanup_lines() {
+        let tail = "test result: FAILED. 1 passed; 1 failed\n\nfailures:\n\n---- widget::breaks stdout ----\n\
+thread 'widget::breaks' panicked at src/widget.rs:7:9:\nassertion failed: left == right\n\n\
+failures:\n    widget::breaks\n\nPost job cleanup.\n[command]/usr/bin/git version\n\
+##[warning]Node.js 20 actions are deprecated.";
+        let mut failing = check("test", false, tail);
+        failing.failed_tests = vec!["widget::breaks".into(), "widget::other".into()];
+        let what = what_of(Some(verification(
+            Vec::new(),
+            Vec::new(),
+            vec![failing],
+            Verdict::Fail,
+        )));
+        assert!(what.contains("widget::breaks"), "{what}");
+        assert!(what.contains("widget::other"), "{what}");
+        assert!(what.contains("panicked at src/widget.rs:7:9"), "{what}");
+        assert!(what.contains("assertion failed: left == right"), "{what}");
+        assert!(!what.contains("Post job cleanup"), "{what}");
+        assert!(!what.contains("Node.js 20"), "{what}");
+        assert!(!what.contains("/usr/bin/git"), "{what}");
+    }
+
+    #[test]
+    fn a_failed_check_without_failed_tests_still_shows_its_clipped_tail() {
+        let tail = format!("{}plain end", "z".repeat(TAIL_CAP * 2));
+        let what = what_of(Some(verification(
+            Vec::new(),
+            Vec::new(),
+            vec![check("build", false, &tail)],
+            Verdict::Fail,
+        )));
+        assert!(what.contains("plain end"), "{what}");
+        assert!(!what.contains("failed tests:"), "{what}");
+        assert!(!what.contains(&"z".repeat(TAIL_CAP + 1)), "{what}");
     }
 
     #[test]
