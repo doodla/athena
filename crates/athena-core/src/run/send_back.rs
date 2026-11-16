@@ -2,7 +2,8 @@
 //! recorded checks, and the brief for the one send-back (structure pass, R2).
 
 use athena_context::briefs::{
-    AcceptedReading, LEFT_TO_ATHENA, ReplayView, replay_send_back_section,
+    AcceptedReading, LEFT_TO_ATHENA, ReplayView, is_athena_check_criterion,
+    replay_send_back_section,
 };
 use athena_context::outputs::{CriterionCheckOutput, CriterionStatusOutput, ProducerOutput};
 
@@ -59,33 +60,6 @@ fn marked_left(check: &CriterionCheckOutput) -> bool {
         .trim()
         .to_lowercase()
         .starts_with(&LEFT_TO_ATHENA.to_lowercase())
-}
-
-/// Whether a criterion's text is one only Athena's recorded checks (fmt, clippy, the full test suite)
-/// can show: it names `cargo fmt`, `cargo clippy` or `cargo test`, and no targeted-test scope such as
-/// `-p`, `--package`, `--test`, `--lib`, `--bin`, `--doc`, `--bench` or `--example`.
-fn is_athena_check_criterion(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    if !["cargo fmt", "cargo clippy", "cargo test"]
-        .iter()
-        .any(|k| lower.contains(k))
-    {
-        return false;
-    }
-    const SCOPES: [&str; 8] = [
-        "-p",
-        "--package",
-        "--test",
-        "--lib",
-        "--bin",
-        "--doc",
-        "--bench",
-        "--example",
-    ];
-    !lower
-        .split_whitespace()
-        .map(|t| t.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
-        .any(|t| SCOPES.contains(&t))
 }
 
 /// The brief for the producer's one send-back: the original brief, then the criteria the report did not

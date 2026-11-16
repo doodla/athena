@@ -1,0 +1,311 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261116-020756-zx0r",
+  "round": 2,
+  "at": "2026-11-16T21:46:11.864838338Z",
+  "invocation_seq": 4,
+  "approach": "Revision of round 1, answering the three findings. (F1) The critic is right: `Candidate.producer_report` (crates/athena-data/src/records.rs:863) already stores the final redacted report, `criteria_check` included. It is set in `build_candidate` (run/candidate.rs:73-84) and read by `pre_verdict_block` (introspect.rs:1024-1056, called from `failure_details` at 1109 and `event_of_job` at 1605-1611). It was added by commit 81b1374e of 2026-11-15 (HISTORY.txt:53). All 43 listed introspections are dated before it (the latest is 20261103). So the stored-event gap is already closed, and the only cause left is the brief: the producer is shown criteria and not how each is verified, and `unmet_criteria` trusts any entry with status met (send_back.rs:27-30). The plan names that single root cause. The per-attempt copy in the invocation `detail` is shipped because the accepted reading lists it as criterion 4, but it is described as a self-contained copy of the candidate's report, not new information. Changes: (1) crates/athena-context/src/briefs.rs: a new section \"How the verifier checks each criterion\" in `producer_brief_with_evidence`, between `checkable_evidence_section` (line 743) and `criteria_check_section` (line 744). It has one line per criterion, keyed by its number, built by a pure `verifier_check_hint(text, kind)`. A criterion that only Athena's recorded checks can show gets the `left to Athena's checks` hint, from `is_athena_check_criterion`. Other Content criteria get a named file or diff line. Other Behavior criteria get a command that ran. A sweep criterion adds a repo-wide search with zero remaining hits. A rewrapped-prose criterion adds a line-width check. (F2) `is_athena_check_criterion` moves from send_back.rs:64-89 into briefs.rs beside `LEFT_TO_ATHENA` (line 843) as a `pub fn`, and send_back.rs imports it. athena-core already depends on athena-context. This gives the brief one classifier, and the hint can no longer contradict the criteria_check section (briefs.rs:857-861) for fmt, clippy and full-suite criteria. (F3) The matchers compare whole words and phrases after lowercasing and turning punctuation and hyphens into spaces, so 'wrapper' gets no width hint. (2) crates/athena-core/src/run/producer.rs: at the all-clear exit (`break Some(report)`, line 555), set the attempt's invocation `detail` to `self-check passed; redacted report: <json>`, the shape the failing path writes at lines 616-630. (3) D191 in docs/decisions.md and a CHANGELOG.md entry name the root cause (the brief gap) and cite candidate.producer_report and 81b1374e. producer.md and budgets.rs stay unedited: the information is in the brief, which is outside the budgeted sets (system facts, 'Prompt sets and budgets'), and any byte change to producer.md would move the `budget producer: 1043 of 1200` line in docs/system-facts.md, which is not a deliverable. No refusal or hold rule is added, so no refused-reading share applies.",
+  "decisions": [
+    {
+      "choice": "Name the brief gap as the one root cause. Present the passing-attempt `detail` as a per-attempt copy of the candidate's report, not as new information.",
+      "reason": "Finding 1 holds. Read: `Candidate.producer_report` (records.rs:863) holds the redacted report with `criteria_check` (records.rs:821). `build_candidate` sets it (candidate.rs:83). `candidate_stage` keeps it even for an empty change (candidate.rs:172-180). `pre_verdict_block` (introspect.rs:1024-1056) puts the producer's status and evidence for each unmet criterion into the introspection event (introspect.rs:1605-1611), and its tests are at introspect.rs:2881-3010. The CHANGELOG entry at CHANGELOG.md:28 says the earlier job 20261114-160745-8e6x misread 'stored event' as the invocation detail. D191 and the CHANGELOG entry therefore say: the stored check is not what was missing, and the producer never learned what the verifier looks for. The `detail` copy keeps each attempt's invocation record self-contained, so a reader of one attempt need not join to the candidate record. The copy is the same size as the candidate's report and is identical to it for the final attempt. The accepted reading lists it as criterion 4 and as the deliverable producer.rs, so it ships.",
+      "rejected": [
+        {
+          "option": "Drop the detail copy because the candidate record already holds the report",
+          "why": "Criterion 4 and the expected deliverable producer.rs are in the accepted reading. Dropping it would leave a criterion with no demonstration. The cost is one extra copy of a bounded report, and the failing path already stores the same shape."
+        },
+        {
+          "option": "Describe the detail copy as the fix that makes the pre-verdict check visible",
+          "why": "False: the check is already stored and shown (81b1374e). It would repeat the misreading of job 20261114-160745-8e6x."
+        },
+        {
+          "option": "Store only the criteria_check array in the passing detail",
+          "why": "The failing path's detail is `...; redacted report: <ProducerReport json>`, parsed at run_pin_tests.rs:1799-1800. A different shape for the passing attempt would need a second parser."
+        }
+      ]
+    },
+    {
+      "choice": "Put the hint in its own section keyed by criterion number, before `## criteria_check: copy the line`. Do not echo the criterion text.",
+      "reason": "Tests read the criteria_check section as ending in the bare criterion lines (briefs.rs:1653-1664) and assert its wording (1721-1735). A separate section leaves them unchanged. The exact-copy rule (briefs.rs:851-856) stays clean. The brief already tells the producer what the verifier sees (VERIFIER_VISIBILITY, 904-910) and that evidence must be checkable (831-839), but never says which evidence each criterion needs. A criterion list empty (reading.rs:3601 fixture) renders no section, so that test's brief is unchanged.",
+      "rejected": [
+        {
+          "option": "Append the hint to each bare criterion line",
+          "why": "It breaks 'copy the line character for character' and the test at briefs.rs:1658-1663."
+        },
+        {
+          "option": "Put the hint in producer.md",
+          "why": "The set is budgeted (1043 of 1200), the hint depends on the job's criteria, and a byte change moves the budget line in docs/system-facts.md, which is not a deliverable."
+        },
+        {
+          "option": "Make the send-back refuse a 'met' whose evidence holds no command or path",
+          "why": "The request prefers information to a refusal rule, and the evidence text is free prose, so a lexical refusal would be wrong in both directions. The send-back loop stays as it is."
+        }
+      ]
+    },
+    {
+      "choice": "Move `is_athena_check_criterion` into briefs.rs as a `pub fn` and call it from both the hint and send_back.rs. A criterion it matches gets the hint 'Athena's recorded checks show it: begin the evidence with `left to Athena's checks`'.",
+      "reason": "Answers finding 2. criteria_check_section (briefs.rs:857-861) tells the producer to leave fmt, clippy and full-test criteria to Athena. A generic 'cite the command that ran' hint on the same criterion would give two conflicting instructions. The criteria of this very job (criterion 5) are of that kind. `is_athena_check_criterion` is a pure string function (send_back.rs:67-89). athena-core depends on athena-context (system facts, crate reach), and send_back.rs already imports from `athena_context::briefs` (line 4), so the move is possible. After it, `unmet_criteria` (line 26) and `left_to_athena` (line 45) use the same definition as the hint. The send_back.rs test `only_unscoped_cargo_checks_count_as_athena_check_criteria` (lines 725-731) still passes through the import.",
+      "rejected": [
+        {
+          "option": "Keep the function in send_back.rs and re-implement a second classifier in briefs.rs",
+          "why": "Two definitions would drift."
+        },
+        {
+          "option": "Say athena-context cannot reach send_back.rs (round 1 reason)",
+          "why": "True of reaching, but the function can move down, and that is the better placement."
+        }
+      ]
+    },
+    {
+      "choice": "Hint matchers compare whole words and phrases. Lowercase the text, turn every non-alphanumeric character into a space, join the words with single spaces, and test ` {phrase} ` as a substring. Sweep phrases: every mention, every occurrence, every place, every reference, all mentions, all occurrences, all references, no longer appear, no longer appears, no longer used, no longer mentioned, no remaining, zero remaining, no stale, nowhere. Width phrases: line width, line length, rewrap, rewrapped, rewrapping, re wrap, re wrapped, wrapped prose, wrapped lines, wrap width. The plain word 'wrap' is not a phrase.",
+      "reason": "Answers finding 3. A substring 'wrap' fires on 'wrapper', which the repository uses (producer.rs:382 'cargo wrapper'). With whole-phrase matching a hyphen ('line-width') and mixed case still match. A wrong match only adds or omits one hint sentence and refuses nothing. Input forms: each sweep phrase, each width phrase, mixed case, hyphenated, trailing punctuation, near-miss 'wrapper', Athena-check criterion, plain content, plain behavior, empty criterion list. The refusal corpus (crates/athena-core/tests/refusal_corpus.rs) holds no case for these forms (a search for 'every mention', 'no longer appear', 'line width', 'rewrap' and 'sweep' found none), and the matcher is not a reading check and refuses no reading, so no case is added. Each form has a unit test in briefs.rs.",
+      "rejected": [
+        {
+          "option": "Add the phrases to the reading checks (reading/checks.rs)",
+          "why": "That would make them refusal rules and require a refused-reading share and corpus cases. The goal is to inform the producer."
+        },
+        {
+          "option": "Substring match on 'wrap'",
+          "why": "Fires on 'wrapper' (finding 3)."
+        }
+      ]
+    },
+    {
+      "choice": "Exit table for the producer loop (producer.rs `producer_loop`, lines 298-720). Only the all-clear exit changes.",
+      "reason": "- All clear, `break Some(report)` at 555: CHANGED. The attempt's `closing.new_invocations.last_mut()` gets `detail = self-check passed; redacted report: <json>`. The next reader is `Reported` (line 714), then `candidate_stage` (candidate.rs:151), which stores the same report in `Candidate.producer_report`, and the closing code, which commits the invocation record.\n- Send-back limit reached, `break Some(report)` at 674: unchanged. The detail is `self-check failed` (621); `report_gaps` and `report_kept_in` go to the verifier.\n- Send back (676-713): unchanged. The detail is `self-check failed` and the next attempt starts from the send-back brief.\n- Timed out (407-418): unchanged. The detail is the deadline text, read by `keep_unfinished_work`.\n- Invocation not Success (419-439): unchanged. `producer_stop_reason` reads the detail; an expired login keeps the work via `keep_unfinished_work`; a usage limit is closed as an environment stop.\n- Could not run (394-398): unchanged. No record is pushed; `self.failure`.\n- Build-slot wait held (444-447): unchanged. Returns Err, the job is held.\n- No valid report (448-457): unchanged. `self.failure`.\n- Format step stopped (461-464) and records run unreachable (536-539): unchanged. `self.failure`.\n- Interrupt: the closing code writes `interrupted_record` (invocation.rs:269). The new detail is set after the invocation returned and was pushed (line 406), so an interrupt is unaffected. The only fallible call is `serde_json::to_string(&report)?`, as at line 624; the report is a plain struct, so it cannot fail.\n- The real driver sets no detail on Success (claude.rs:257, `(!ok).then(...)`), so the assignment overwrites nothing; the failing path overwrites in the same way.",
+      "rejected": [
+        {
+          "option": "Also write a detail at the send-back-limit exit",
+          "why": "It already carries `self-check failed` with the report."
+        }
+      ]
+    },
+    {
+      "choice": "Callers and modes that reach the changed code. `producer_loop` has one caller, run/mod.rs:1907. It runs for a first run, a seeded retry, a resumed job and a nested run (`self.nested`), and the changed branch reads no state other than `report` and `closing`. Under `[parallel] max_concurrency`, each job has its own `closing`, so the change shares nothing between jobs.",
+      "reason": "`producer_brief_with_evidence` has one production caller (run/mod.rs:1198) and one test caller of `producer_brief` (reading.rs:3629). The send-back text appends to the brief (send_back.rs `send_back_text`), so a longer brief is carried along unchanged. The retry modes (`retry_from`, `retry_findings`) feed other sections of the brief, and the new section reads only `inputs.reading.criteria`.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `pub fn is_athena_check_criterion` (moved) next to `LEFT_TO_ATHENA`, `SWEEP_PHRASES` and `WIDTH_PHRASES`, a whole-phrase `mentions` helper, a pure `verifier_check_hint(text, kind)` and `verifier_checks_section`, and call the section in `producer_brief_with_evidence` after `checkable_evidence_section`. All of it goes before the test module (line 1538). Add the unit tests `producer_brief_says_how_the_verifier_checks_each_criterion` and `verifier_check_hint_matches_whole_phrases_only`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Remove the local `is_athena_check_criterion` (lines 64-89) and import it from `athena_context::briefs`. `unmet_criteria`, `left_to_athena` and the existing test keep working. Not in the expected deliverables: no criterion limits changed files (`limits_changed_files` matches none of the six), so no allowed-paths check applies.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "At the all-clear exit (line 555), set the attempt's invocation `detail` to `self-check passed; redacted report: <json>` before `break Some(report)`, with a comment that says the copy keeps each attempt's record self-contained and duplicates the candidate's report.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the test `a_passing_attempt_stores_the_per_criterion_check_in_its_invocation_detail` next to line 5148.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D191 after D190: the root cause (the brief gap, with the stored check already present), the decision, alternatives, tradeoff, reversal cost and a Provenance bullet.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an [Unreleased] 'Changed' entry naming the root cause, the fix in `producer_brief_with_evidence`, the moved classifier, the per-attempt copy and its tests.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read briefs.rs lines 676-753 and 831-867, the tests at 1605-1736 and 2092-2113, and send_back.rs lines 1-90 and 720-732.",
+    "In briefs.rs, move `is_athena_check_criterion` (the body and `SCOPES` list of send_back.rs:64-89) beside `LEFT_TO_ATHENA` (line 843) as a `pub fn` with the same doc comment. In send_back.rs add it to the `use athena_context::briefs::{...}` import (lines 4-6) and delete the local function. Leave its test at send_back.rs:725-731 as it is.",
+    "In briefs.rs, above the test module, add: `SWEEP_PHRASES` and `WIDTH_PHRASES` (lists in decision 4); `fn mentions(text: &str, phrases: &[&str]) -> bool`, which lowercases the text, turns every non-alphanumeric character into a space, joins the words with single spaces, and tests ` {phrase} ` as a substring; `fn verifier_check_hint(text: &str, kind: CriterionKind) -> String`; and `fn verifier_checks_section(out: &mut String, reading: &AcceptedReading)`. The hint is: for `is_athena_check_criterion(text)`, \"Athena's recorded checks show it (fmt, clippy, the full test suite): begin the evidence with \\\"{LEFT_TO_ATHENA}\\\"; the verifier judges it from the recorded checks.\"; otherwise for Content \"a named file or diff line: cite the path, and the diff line, that shows it.\" and for Behavior \"a command that ran: cite the exact command the verifier can run in a fresh snapshot, and what it printed.\" A sweep phrase adds \" Also a repo-wide search with zero remaining hits: Grep the whole repository for the old wording, cite the pattern and show the empty result.\" A width phrase adds \" Also a line-width check: search each changed file for a line wider than its limit, for example with `grep -nE '.{N,}' <file>` where N is one more than the limit, and cite the empty result.\" Keep the wording free of '0.8', 'p10', 'cost' and '0.97', of the link phrases of decision_links.rs, and of the literal test-module attribute (the production text before the first test module is scanned, see lines 785-787). The section is `## How the verifier checks each criterion`, a short intro (the verifier sees only the diff and the commands it runs; check each criterion yourself this way before you report and give that evidence in its criteria_check entry; this is guidance, nothing here refuses or holds your work), then one `Criterion N: <hint>` line per criterion, N being its number under `## Acceptance criteria`. It writes nothing when the reading has no criteria.",
+    "In `producer_brief_with_evidence`, call `verifier_checks_section(&mut out, &inputs.reading)` after `checkable_evidence_section()` (line 743) and before `criteria_check_section` (line 744). Add the two unit tests of demonstration 3 after `producer_briefs_list_every_criterion_to_copy_and_ask_for_one_entry_each` (line 1640).",
+    "In producer.rs, replace the bare `break Some(report);` at line 555 with a block: take `closing.new_invocations.last_mut().expect(\"the attempt's invocation was just recorded\")`, set `detail = Some(format!(\"self-check passed; redacted report: {}\", serde_json::to_string(&report)?))`, with a comment that the passing attempt now keeps the criteria check it passed with, as a copy of the candidate's report, so each attempt's record is self-contained; then `break Some(report)`. Do not touch the failing path (616-630), the send-back-limit exit (674), the `problems` list or the send-back text.",
+    "Add `a_passing_attempt_stores_the_per_criterion_check_in_its_invocation_detail` to run/tests.rs next to line 5148, as in demonstration 4.",
+    "Append D191 to docs/decisions.md after D190, headed `## D191 · The producer brief says how the verifier checks each criterion`, with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance bullets. The Case names the failure class and the jobs 20261014-170031-2r9b, 20261014-172342-rqgb and 20261014-174937-hrzn, says their earlier edits are not redone, and says the stored check was already kept and shown (candidate.producer_report, `pre_verdict_block`, 81b1374e, which is later than all 43 introspections). The Decision names `producer_brief_with_evidence`, the moved classifier and the passing-attempt copy. The Tradeoff states that the hint informs and does not gate, and that the share of failures it prevents is not measured. The Provenance lists the files read, the tests run and what was not measured. Do not write 'amends', 'supersedes' or 'superseded by'. Add the CHANGELOG.md [Unreleased] 'Changed' entry.",
+    "Run `cargo test -p athena-context`, `cargo test -p athena-core`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-cli --test budgets`, then `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`. In the report list crates/athena-context/prompts/producer.md and crates/athena-cli/tests/budgets.rs in `unchanged_planned_files`, with the reason that the hint is in the brief, outside the budgeted sets."
+  ],
+  "risks": [
+    {
+      "risk": "A phrase list that over-matches adds a needless hint sentence, or one that under-matches misses a sweep criterion.",
+      "mitigation": "Whole-phrase matching (finding 3). The matchers only add hint sentences and refuse nothing. The unit test `verifier_check_hint_matches_whole_phrases_only` covers a near miss ('wrapper'), mixed case, a hyphen and a plain criterion."
+    },
+    {
+      "risk": "The producer still reports 'met' without evidence, because the hint is information and not a gate.",
+      "mitigation": "The change tells the producer what the verifier looks for, per criterion, before it reports. It does not stop a wrong 'met'. A verifier-side repair loop and any refusal rule are out of scope in the request. The D191 Tradeoff states the limit. The share of failures the hint prevents is not measured."
+    },
+    {
+      "risk": "The passing-attempt `detail` duplicates the candidate's report in every job's final invocation record and grows the records branch.",
+      "mitigation": "The detail holds the already redacted report (producer.rs:512), the same size as the failing path stores at 621-625 and as the candidate record holds. A few KB per job is an estimate, not measured. The copy is described as a copy in D191 and the CHANGELOG."
+    },
+    {
+      "risk": "The longer producer brief breaks a test that reads the brief.",
+      "mitigation": "The section is separate, keyed by number, and does not echo criterion text. The tests that read the criteria_check section end at its bare criterion lines and are not changed. The forecast words are avoided. Run `cargo test -p athena-context`, `cargo test -p athena-core` and `cargo test -p athena-cli`."
+    },
+    {
+      "risk": "Moving `is_athena_check_criterion` changes a file outside the expected deliverables, and a mistake would change which criteria are sent back.",
+      "mitigation": "The body and scope list move unchanged, the send_back.rs test of the classifier stays and runs through the import, and the new briefs.rs test asserts the Athena-check hint. No criterion limits changed files, so no allowed-paths check applies."
+    },
+    {
+      "risk": "The expected deliverables producer.md and budgets.rs are left unchanged and flagged as gaps.",
+      "mitigation": "The producer lists both in `unchanged_planned_files` with the reason (the hint is in the brief, outside the budgeted sets; editing producer.md would move the system-facts budget line). The unchanged-files check accepts a stated reason (producer.rs:484, briefs.rs:872-879). Demonstration 6 shows the diff stat for them is empty."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Candidate.producer_report and the introspection pre-verdict block",
+      "dependent": "crates/athena-core/src/run/candidate.rs:64-83 (`build_candidate`), crates/athena-core/src/introspect.rs:1024-1056 (`pre_verdict_block`), :1109 (`failure_details`), :1605-1611 (`event_of_job`), crates/athena-data/src/records.rs:863",
+      "kind": "code",
+      "test": "cargo test -p athena-core introspect (tests at introspect.rs:2881-3010) and cargo test -p athena-cli --test introspection. The loop hands out the same `report` as before, and the new detail is a copy, so the candidate record and the event text are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "producer brief section order and the criteria_check section",
+      "dependent": "crates/athena-context/src/briefs.rs tests `producer_briefs_list_every_criterion_to_copy_and_ask_for_one_entry_each` (1640), `producer_brief_tells_how_to_leave_a_criterion_to_athenas_checks` (1708), `producer_brief_requires_checkable_evidence_in_the_snapshot` (2092, 2111) and `planner_briefs_have_no_criteria_check_section` (2060)",
+      "kind": "code",
+      "test": "cargo test -p athena-context. The new section is separate and ends before the criteria_check heading, which still ends in the bare criterion lines. The planner brief does not use `criteria_check_section` or the new section.",
+      "reason": null
+    },
+    {
+      "name": "forecast words in the producer brief ('0.97', '0.8', 'p10', 'cost')",
+      "dependent": "crates/athena-context/src/briefs.rs:1610-1637 `producer_briefs_carry_no_predictions`; tests.rs:1155-1158 (no '## Time budget' or 'seconds of wall-clock' in the stored brief)",
+      "kind": "rule",
+      "test": "cargo test -p athena-context producer_briefs_carry_no_predictions and cargo test -p athena-core the_producer_runs_under_the_configured_deadline_and_its_brief_does_not_state_it. The hint wording avoids those substrings and the new test asserts it.",
+      "reason": null
+    },
+    {
+      "name": "the rendered producer brief and its readers",
+      "dependent": "crates/athena-core/src/run/mod.rs:1198 (`producer_brief_with_evidence`), :1295 (stored as brief-producer.md), crates/athena-gate/src/jobs.rs:490 (brief hash check, computed from the stored text), crates/athena-core/src/reading.rs:3629 (test of `producer_brief` with no criteria), crates/athena-agent/src/fake.rs:329 and :343 (the fake producer reads only the '## Acceptance criteria' and '## Expected deliverables' sections)",
+      "kind": "code",
+      "test": null,
+      "reason": "They take the brief as text. The hash is of the stored text, and the new section comes after both sections the fake reads and has no `N. ` numbered lines. The reading.rs:3629 brief has no criteria, so no section is written. Tests: cargo test -p athena-core and cargo test -p athena-cli."
+    },
+    {
+      "name": "`is_athena_check_criterion` moves from run/send_back.rs to athena_context::briefs",
+      "dependent": "crates/athena-core/src/run/send_back.rs:26 (`unmet_criteria`), :45 (`left_to_athena`), test at :725-731; docs/design/structure-pass.md:65 (a historical table that names the function)",
+      "kind": "code",
+      "test": "cargo test -p athena-core send_back and cargo test -p athena-core a_first_report_omitting_a_criterion_is_sent_back_once_naming_its_exact_text. The body and its scope list are copied unchanged, so the classification is identical. The structure-pass.md row is a past layout record that no test reads (a search of the rs and toml files found only comments naming it), so it is left as is.",
+      "reason": null
+    },
+    {
+      "name": "send-back rule that trusts a criteria_check status of met",
+      "dependent": "crates/athena-core/src/run/send_back.rs:19-34 (`unmet_criteria`), :38 (`left_to_athena`), :55-62 (`marked_left`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Unchanged by design: no refusal or hold rule is added and the criteria_check field is reused as is. Its documented meaning, 'the producer's own check of its work against one accepted criterion' (records.rs:803-810), is what the hint asks the producer to fill in with evidence of the stated kind."
+    },
+    {
+      "name": "Invocation.detail of the producer attempt",
+      "dependent": "crates/athena-core/src/run/producer.rs:408 and :420 (read `record.detail` only for a timed-out or non-Success outcome), crates/athena-core/src/run_pin_tests.rs:1792-1805, crates/athena-core/src/run/tests.rs:5198, :5256, :6034 (read the failing detail), crates/athena-cli/tests/lifecycle.rs:1267 and :3044 (read non-success details)",
+      "kind": "code",
+      "test": null,
+      "reason": "The producer reads run only for a non-Success outcome and the new detail is set after a Success outcome and a valid report. The failing format `self-check failed: ...; redacted report: <json>` is unchanged. A search of `.detail` readers found no code that reads a passing producer's detail."
+    },
+    {
+      "name": "Invocation.detail of the other roles",
+      "dependent": "crates/athena-core/src/pin.rs:479, auditor.rs:403, audience.rs:291, steward.rs:1309, hestia.rs:2892, run/planning.rs:463 and :667",
+      "kind": "code",
+      "test": null,
+      "reason": "They read the detail of their own invocations, recorded through `invoke_and_record` (invocation.rs:231), not the producer loop's. The change touches only `closing.new_invocations.last_mut()` of the producer stage."
+    },
+    {
+      "name": "the invocation record schema and record size",
+      "dependent": "crates/athena-data/src/records.rs:768 (`Invocation.detail: Option<String>`), the records round-trip tests, `check_record_file`, athena.toml:187 `[records] max_file_bytes = 1048576`",
+      "kind": "code",
+      "test": null,
+      "reason": "No field or record type is added; the optional string already holds a report on the failing path. The passing detail has the size of one redacted report (a few KB, an estimate; not measured), far under the 1 MiB limit, which `admit` applies to candidate files (admission.rs:866)."
+    },
+    {
+      "name": "the producer prompt-set budget and system-facts budget lines",
+      "dependent": "crates/athena-cli/tests/budgets.rs (`every_role_set_is_within_its_budget`, `system_facts_budgets_match_computed`), docs/system-facts.md budget lines",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets. No prompt file or budget changes, and the brief is outside the budgeted sets, so the computed sizes and the facts lines are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "decision log entry rules, decision links and the decision gate",
+      "dependent": "crates/athena-core/src/mirrors.rs:72 and :354-396 (`decision_log_problems`, run by `mirror_drift_in`), crates/athena-data/src/decision_links.rs:255-257 (phrases 'superseded by', 'supersedes', 'amends'), crates/athena-core/src/run/checks.rs:67-100 (`decision_gate`), docs/decision-links.toml:197-201 (the only governed paths: snapshot.rs and run/candidate.rs)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core mirrors. D191 is appended after D190 with a well-formed heading and a Provenance bullet, and uses none of the three link phrases. The changed code files (briefs.rs, producer.rs, send_back.rs) are not governed, so the gate raises nothing and no [[link]] is needed.",
+      "reason": null
+    },
+    {
+      "name": "changelog default for a change reading",
+      "dependent": "crates/athena-core/src/admission.rs `changelog_required`, called at producer.rs:474",
+      "kind": "rule",
+      "test": null,
+      "reason": "CHANGELOG.md is a deliverable and is changed, so the check is met."
+    },
+    {
+      "name": "code-health size thresholds for briefs.rs",
+      "dependent": "crates/athena-core/src/code_health.rs:36-42 (`MAX_FILE_LINES` 2000, `BUSY_FILE_LINES` 1500), :20-21",
+      "kind": "rule",
+      "test": null,
+      "reason": "briefs.rs has about 1537 production lines (its test module starts at line 1538); the change adds roughly 110, staying under 2000. The check only queues a structural pass and never changes a job's result."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff. docs/decisions.md ends with an appended `## D191 · ...` entry after D190 (line 5635). Its Case names the root cause: the producer brief shows criteria and not how the verifier checks each, so a 'met' with no matching evidence passes the send-back (send_back.rs:27-30) and the miss surfaces at final verification. The Case cites `Candidate.producer_report`, `pre_verdict_block` and commit 81b1374e, and says the stored check was not the gap. The Decision names `producer_brief_with_evidence` in crates/athena-context/src/briefs.rs. The entry has Alternatives, Tradeoff, Reversal cost and a Provenance bullet, and avoids the phrases the decision-link scan reads (decision_links.rs:255-257). CHANGELOG.md [Unreleased] 'Changed' has an entry with the same cause and fix. The mirrors unit tests (mirrors.rs:72, 354-396) judge the heading and Provenance bullet when the verifier runs `cargo test -p athena-core mirrors`.",
+      "command": "git diff -- docs/decisions.md CHANGELOG.md",
+      "observes": "The diff holds the D191 entry and the CHANGELOG entry, both naming the brief gap and crates/athena-context/src/briefs.rs, and neither claims the stored check was missing.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Entry point: `producer_brief`, through `producer_brief_with_evidence`. The test renders the brief for a reading with six criteria (sweep, behavior with a command, rewrapped prose, plain content, fmt and clippy, and a 'wrapper' near-miss) and reads the new section. It asserts: a content criterion has 'named file or diff line'; a behavior criterion has 'a command that ran'; the sweep criterion adds 'repo-wide search' and 'zero remaining hits'; the rewrapped-prose criterion adds 'line-width check'; the fmt and clippy criterion gets the `left to Athena's checks` hint and not 'a command that ran'; the 'wrapper' criterion gets no width hint; the section sits before `## criteria_check: copy the line`. Then read the diff of producer.rs: `unmet_criteria`, the `problems` list (producer.rs:557-613) and the send-back text gain no entry, and no `Err`, `Flow::Stop` or hold path is added. The reading checks and refusal corpus are not touched; run `cargo test -p athena-core --test refusal_corpus` to see it pass unchanged (no case maps to these forms, none is added).",
+      "command": "cargo test -p athena-context producer_brief_says_how_the_verifier_checks_each_criterion",
+      "observes": "One line per criterion with the stated hints, and a diff with no new refusal, send-back or hold condition.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "New unit test `producer_brief_says_how_the_verifier_checks_each_criterion` in the briefs.rs test module, next to `producer_briefs_list_every_criterion_to_copy_and_ask_for_one_entry_each` (line 1640). It builds `AcceptedReading::new(&reading(), &defaults(), |_| false)`, sets the public `criteria` field (briefs.rs:80) to the six criteria, and calls `producer_brief(&ProducerInputs {..})` as the neighbouring tests do. It takes the text from the heading `## How the verifier checks each criterion` to the next `\\n## `, and finds each `Criterion N: ` line. It asserts the hints named in criterion 2, that the section does not repeat any criterion's text, that the heading is before `## criteria_check: copy the line` and after `## Make your evidence checkable`, and that the brief holds none of '0.97', '0.8', 'p10' or 'cost'. A second test, `verifier_check_hint_matches_whole_phrases_only`, calls `verifier_check_hint` directly: 'Every Mention of X is updated' (mixed case) gets the sweep hint; 'line-width' gets the width hint; 'the cargo wrapper is installed' gets neither; 'nowhere else' gets the sweep hint.",
+      "command": "cargo test -p athena-context producer_brief_says_how_the_verifier_checks_each_criterion",
+      "observes": "Both tests pass with the change.",
+      "fails_without": "On the base tree the brief has no such section, so `split_once` on the heading panics and the test fails. Removing only the sweep branch fails the 'repo-wide search' assertion. Removing only the behavior branch fails 'a command that ran'. Removing the `is_athena_check_criterion` branch makes the fmt criterion get 'a command that ran' and fails the assertion. Replacing the whole-phrase match with a substring match 'wrap' fails the 'wrapper' case.",
+      "seam": "Production entry point `producer_brief` (briefs.rs:676) into `producer_brief_with_evidence`, with the new `verifier_checks_section`. Fixtures are the `reading()` and `defaults()` helpers of the briefs.rs test module (defaults at line 1605), which exist. The criteria are set through the public `AcceptedReading.criteria` field, so there is no double. The hint logic runs in production code; plan steps 1-3 add it."
+    },
+    {
+      "criterion": 4,
+      "method": "New test in crates/athena-core/src/run/tests.rs, next to `a_failing_check_is_sent_back_before_the_verifier_and_the_fix_reaches_it` (line 5148). It runs a whole job through `athena.go` with `run_checked_job` (line 5128) on `repo()`, with the check `PASSES` (line 103) and the script `editing(counts, prompts, Vec::new())` (line 3567). The base script's producer (tests.rs:250-262) reports the one criterion met with evidence 'read it' and edits README.md, so the first attempt passes with no send-back. The test loads `Records::load(&athena.git, &athena.head().unwrap())`, as at lines 5191-5198, and takes the producer invocations of the job. It asserts there is exactly one, and that `counts.all()` gives producer 1. It asserts its `detail` starts with 'self-check passed' and contains 'redacted report: '. It parses the JSON after that text into `athena_data::records::ProducerReport` (as run_pin_tests.rs:1799-1800 does) and asserts one `criteria_check` entry for the job's criterion (`CRITERION`, tests.rs:88), with status 'met' and evidence 'read it'. Finally it asserts that this `criteria_check` equals the job's `candidate.producer_report.criteria_check`, the per-attempt copy of the stored report.",
+      "command": "cargo test -p athena-core a_passing_attempt_stores_the_per_criterion_check_in_its_invocation_detail",
+      "observes": "The stored detail of a passing producer attempt carries the criterion, its status and its evidence, and matches the candidate's report.",
+      "fails_without": "On the base tree the passing attempt's `detail` is None, since it is set only on the failing path (producer.rs:621). `unwrap_or_default()` gives an empty string and the 'self-check passed' assertion fails.",
+      "seam": "Production entry point `Athena::go` into `producer_loop` (producer.rs:298). The fake is the `FakeAgentDriver` script given to `athena_with` (tests.rs:192-221); the script, `run_checked_job`, `editing`, `PASSES` and `Records::load` all exist. The fake only supplies the producer's report and edit; the code that writes the detail is the production loop, so no test double holds the logic under test. Plan step 5 adds the production change."
+    },
+    {
+      "criterion": 5,
+      "method": "Athena's recorded fmt, clippy and test checks are the evidence. The verifier may run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` itself. The new tests are in the workspace run. Moving `is_athena_check_criterion` leaves the send_back.rs tests (`only_unscoped_cargo_checks_count_as_athena_check_criteria` and the `left_to_athena` tests) in the run, so a mistake in the move shows there.",
+      "command": "cargo test --locked",
+      "observes": "All three commands exit 0.",
+      "fails_without": "Not applicable: the recorded checks decide this criterion.",
+      "seam": "No new seam: the three checks are Athena's configured checks, as listed in the brief."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the budgets test (`every_role_set_is_within_its_budget`, `system_facts_budgets_match_computed`). Then `git diff --stat -- crates/athena-context/prompts crates/athena-cli/tests/budgets.rs docs/system-facts.md` is empty. No prompt file, no budget and no budget line changes, so the producer set stays at 1043 of 1200 and no budget is raised. producer.md and budgets.rs are expected deliverables the plan leaves unchanged. The producer lists both in `unchanged_planned_files` with the reason: the hint is in the brief, which sits outside the budgeted sets.",
+      "command": "cargo test -p athena-cli --test budgets",
+      "observes": "The budgets tests pass and the diff stat for those files is empty.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "1d3b5da6f3488214bbb5ddc90a2319a4f03f276d87637be01fd19645bb9ddf03"
+}
