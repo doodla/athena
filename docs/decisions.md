@@ -5631,3 +5631,72 @@ should replace those estimates with its figures.
   `cargo test -p athena-cli --test job_plan the_second_critic_brief` and `cargo test -p athena-cli --test budgets`.
   Not measured: whether a model critic follows the two bullets, how many 5-round planning stops this prevents, or
   the added tokens per critic call.
+
+## D190 · A change that makes old text false is checked, before the verifier, for text that still says the old thing
+
+- **Case:** A change to a value or a stated rule left the old text in a decision record or a help string, and only
+  the final verdict read the repository for it, so each case needed a follow-up job. The request asked for a check
+  that searches the code, the help strings and the docs, `docs/decisions.md` included, for the old value or claim,
+  names each place, and gives the producer the list inside its own loop. D156 had already ruled that help text
+  states a limit from the constant that enforces it and had named, as its alternative (d), a finding sent back to
+  the producer inside the loop; D187 made `decision_gate` run in the producer loop and again at the candidate.
+- **Decision:** Extends D156 and changes none of it, so no link is added. Root cause: a text that restates a value or a rule is not tied to the code that
+  holds it, and no step before the final verdict read the repository for the old text. `stale_text::check`
+  (`crates/athena-core/src/run/stale_text.rs`) reads the diff of the change and the accepted reading for old text
+  from five sources: a `const` or `static` of the diff whose single number or string literal changed; a sentence
+  of the reading with `from A to B` (numbers or quoted strings) that names an identifier; a quoted span of six or
+  more words after a marker such as `no longer` in the reading; a decision id that the reading names as the object
+  of a reversal verb; and a comment or prose line that a replaced hunk removed and the diff does not add back.
+  It searches the `.rs`, `.md`, `.toml`, `.yml`, `.yaml` and `.sh` files of the tree the change leaves, at most
+  2 MiB each, and names each place by path and line, with the decision id for a place in the log. A value matches
+  only in prose (a stretch of words with no code characters), within four words of a word of the constant's name,
+  and a single digit needs two name words within two lines; a value that matches more than six places is printed
+  as `stale text  note:` lines and never closes a job. A place is not reported when the diff added the line, when
+  its decision entry or paragraph is marked with the words amended by or superseded by and a decision id (outside
+  the log also a backticked name or a path), when `docs/decision-links.toml` links the older decision as
+  superseded or to an entry the change adds, or when it is in `CHANGELOG.md`, `records/`, `target/` or `.git/`. A
+  link whose newer entry already stood at the base and whose status is `amended` marks nothing, because that
+  decision stays active. `producer_loop` calls `Athena::stale_text_in_snapshot` next to `decision_gate` on every
+  pass and adds the list to the one existing send-back (`append_stale_text`); a place in a file outside the job's
+  allowed paths is not sent back, since the producer may not edit it. `check_and_verify` calls
+  `Athena::stale_text_at_candidate` after the decision gate, before the pull request, the checks and the verifier,
+  and a job that still has stale text ends there with each place named, as a failure of the work and not an
+  environment stop. `athena_cli::fill_limits` (`crates/athena-cli/src/lib.rs`) replaces a `{name}` placeholder in
+  the help text of a command and its subcommands with a value the caller gives, the generic form of D156's
+  `{ceiling}` fill. This change does not yet call it: the help text that restates a limit lives in
+  `crates/athena-cli/src/main.rs`, outside the files the job may change, so each such string is still literal.
+- **Alternatives:** Run the check only inside `run_loop_checks`: that run is advisory and is skipped for low disk, a
+  busy slot, tool configuration and a pinned run, so a skipped run would let stale text reach the verdict. Run it
+  only at the candidate: the producer would see the list only on a retry. Add it to the verifier's gap list: that
+  is a model's judgement, so the rule would be prose. Take every number of the reading as an old value: most are
+  criteria counts and file sizes. Take any removed comment as a claim: deleting a function would fail any job that
+  leaves a copy of its comment elsewhere. Match the old value on any line that shares a word with the constant's
+  name: `3 jobs` stands on hundreds of unrelated lines. Count any `older` id of a link as marked: it would exempt
+  D08 and D156, the decisions that motivated this, because later entries amend them. Build help text with
+  `format!` or `concat!`: a doc comment is a literal that cannot take a constant, and a crate for it changes the
+  manifest; a placeholder filled from the constant is the existing way.
+- **Tradeoff:** The match is textual. A restatement in other words, a number spelled out, a reversal the reading
+  words differently from the forms above, and a restatement that names one of two name words beside a single digit
+  are not found. Claims come from replaced hunks only, so a deleted rule leaves no claim. The remaining false
+  positive is a single-digit value, a name of one word and fewer than seven prose matches, such as a constant
+  `MAX_JOBS` raised from 3 to 4 with a few unrelated `3 jobs` sentences; a false hit in an old decision is cleared
+  by a new entry that records the decision as checked and left standing, in the `in prose only` form the gate
+  already teaches, with an `amended` link. The check refuses jobs that were accepted before; how many is not
+  measured. A stale place in a file outside a job's allowed paths ends the job at the candidate and a follow-up job
+  with a wider scope fixes it. The retry brief does not carry the list; the retry's own producer loop reruns the
+  check and sends it in the first send-back. The loop builds the work tree twice per pass (one more `git add` and
+  `write-tree` in a temporary index), because avoiding it means editing `crates/athena-git/src/snapshot.rs`, which
+  D08 governs. The help strings of `crates/athena-cli/src/main.rs` that restate a limit (the plan caps, the
+  repeat threshold, the hold attempts, the pending window, the Hestia backfill count, the low audience rating and
+  the rating range) stay literal in this change and need a follow-up job that may edit that file and calls
+  `fill_limits`; until then the check names such a copy when a later change moves the value. D187's open
+  follow-ups are untouched.
+- **Reversal cost:** Low; remove `stale_text.rs`, `append_stale_text`, the two adapters in `checks.rs` and their
+  two calls, `fill_limits`, and the tests.
+- **Provenance:** Read: `crates/athena-core/src/run/producer.rs` (`producer_loop`), `crates/athena-core/src/run/checks.rs`
+  (`decision_gate`, `unreconciled_in_snapshot`), `crates/athena-core/src/run/mod.rs` (`check_and_verify`),
+  `crates/athena-core/src/run/send_back.rs`, `crates/athena-data/src/decision_links.rs`,
+  `docs/decision-links.toml` and `crates/athena-cli/src/main.rs` (`cli_command`, `drain_after_help`). Ran: `cargo test -p athena-core stale_text`,
+  `cargo test -p athena-cli limits`, `cargo test -p athena-core mirrors`, `cargo test -p athena-cli --test mirrors`
+  and `cargo test -p athena-cli --test backtest`. Not measured: how many past jobs the check would have refused,
+  or how often a hit is a false one.

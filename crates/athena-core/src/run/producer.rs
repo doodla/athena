@@ -500,6 +500,19 @@ impl Athena {
             } else {
                 None
             };
+            // Text that still says what the change made false (an old value in a help string, a decision that
+            // states the reverse of a changed rule): the list goes back to the producer here, inside its own loop,
+            // so it fixes the text before verification. A nested run is judged by the outer job.
+            let stale = if self.nested.is_none() && !changes.is_empty() {
+                self.stale_text_in_snapshot(
+                    ctx,
+                    accepted,
+                    &snapshot,
+                    scope.map(|(allowed, _)| allowed),
+                )
+            } else {
+                Vec::new()
+            };
             // Hand-kept files the producer's change can leave disagreeing with their source (shard timings, the
             // decision log, the CI cache key, the ontology), and prompt files and new decision entries whose
             // structure the change broke. Empty in a nested run and outside Athena's source.
@@ -546,6 +559,7 @@ impl Athena {
                 && unchanged.is_empty()
                 && held.is_none()
                 && gate.is_none()
+                && stale.is_empty()
                 && outside.is_empty()
                 && !changelog_missing
                 && mirror_drift.is_empty()
@@ -583,6 +597,14 @@ impl Athena {
             let report_problems = problems.clone();
             if gate.is_some() {
                 problems.push("decisions not reconciled".to_string());
+            }
+            // Like the gate's finding, stale text is not part of what the verifier is told the report lacked: the
+            // job ends before the verifier when it remains.
+            if !stale.is_empty() {
+                problems.push(format!(
+                    "stale text left where the change makes it false: {} place(s)",
+                    stale.len()
+                ));
             }
             // Like the gate's finding, hand-kept files that disagree with their source are not part of what the
             // verifier is told the report lacked: the configured test check fails on them at verification.
@@ -649,6 +671,12 @@ impl Athena {
                         "producer   decisions still not reconciled after the send-back; the job ends at the decision gate",
                     );
                 }
+                if !stale.is_empty() {
+                    // The candidate step closes the job with each place named.
+                    ctx.ui.line(
+                        "producer   stale text still left after the send-back; the job ends before the verifier",
+                    );
+                }
                 if !mirror_drift.is_empty() {
                     ctx.ui.line(&format!(
                         "producer   hand-kept files still disagree with their source after the send-back: {}",
@@ -698,17 +726,20 @@ impl Athena {
                 }
                 (None, None, None) => send_back_text(brief, &unmet, &unchanged),
             };
-            attempt_brief = append_records_problems(
-                append_check_failures(
-                    append_missing_changelog(
-                        append_mirror_drift(next_brief, &mirror_drift),
-                        changelog_missing,
+            attempt_brief = append_stale_text(
+                append_records_problems(
+                    append_check_failures(
+                        append_missing_changelog(
+                            append_mirror_drift(next_brief, &mirror_drift),
+                            changelog_missing,
+                        ),
+                        &check_failures,
                     ),
-                    &check_failures,
+                    &records_runs,
+                    &crate::snapshot::evidence_dir(&self.state, &id),
+                    id.as_str(),
                 ),
-                &records_runs,
-                &crate::snapshot::evidence_dir(&self.state, &id),
-                id.as_str(),
+                &stale,
             );
         };
         Ok(Flow::Go(Reported {

@@ -3778,6 +3778,204 @@ mod produce_and_verify_order_tests {
         );
     }
 
+    // -- text that still says what the change made false (`stale_text`) --------------------------------------------
+
+    const LIMITS_RS_OLD: &str = "pub const MAX_WIDGETS: u32 = 8;\n";
+    const LIMITS_RS_NEW: &str = "pub const MAX_WIDGETS: u32 = 16;\n";
+    const HELP_OLD: &str = "At most 8 widgets run.\n";
+    const HELP_NEW: &str = "At most 16 widgets run.\n";
+
+    /// A repository with the limit and the help text that restates it.
+    fn limit_repo() -> tempfile::TempDir {
+        let repo = repo();
+        commit_file(&repo, "src/limits.rs", LIMITS_RS_OLD);
+        commit_file(&repo, "HELP.md", HELP_OLD);
+        repo
+    }
+
+    /// `script`, except that the reader's summary is `summary`.
+    fn reading_summary(
+        script: athena_agent::fake::Script,
+        summary: &'static str,
+    ) -> athena_agent::fake::Script {
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = script(spec);
+            if spec.role == Role::Reader
+                && let Some(reading) = turn.structured.as_mut()
+            {
+                reading["summary"] = summary.into();
+            }
+            turn
+        })
+    }
+
+    /// The editing script, except that the producer also adds `fix` when its prompt carries a send-back.
+    fn fixing_stale_text_on_send_back(
+        inner: athena_agent::fake::Script,
+        fix: Vec<(String, Option<String>)>,
+    ) -> athena_agent::fake::Script {
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            if spec.role == Role::Producer && spec.user_prompt.contains("## Sent back") {
+                turn.edits.extend(fix.clone());
+            }
+            turn
+        })
+    }
+
+    fn raise_limit() -> Vec<(String, Option<String>)> {
+        vec![("src/limits.rs".into(), Some(LIMITS_RS_NEW.into()))]
+    }
+
+    fn fix_help() -> Vec<(String, Option<String>)> {
+        vec![("HELP.md".into(), Some(HELP_NEW.into()))]
+    }
+
+    #[test]
+    fn stale_text_is_sent_back_to_the_producer_before_verification() {
+        let repo = limit_repo();
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let script = fixing_stale_text_on_send_back(
+            editing(counts.clone(), prompts.clone(), raise_limit()),
+            fix_help(),
+        );
+        let (done, said) = governed_job_with(&repo, script);
+        // The producer fixed the help text on the send-back, so the job reaches the verifier and lands.
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (2, 1), "{said:#?}");
+        let prompts = prompts.lock().unwrap().clone();
+        assert!(!prompts[0].contains("## Sent back"), "{}", prompts[0]);
+        // The send-back carries the list: the heading, the place and the old value.
+        let (_, sent_back) = prompts[1].split_once("## Sent back").expect("a send-back");
+        for text in [
+            "Stale text (fix each; the verifier runs after this):",
+            "- HELP.md:1: still says 8",
+            "`MAX_WIDGETS` changed from 8 to 16 in src/limits.rs",
+            "At most 8 widgets run.",
+        ] {
+            assert!(sent_back.contains(text), "omits {text}: {sent_back}");
+        }
+        assert!(
+            said.iter().any(|l| l
+                == "producer   sent back: stale text left where the change makes it false: 1 place(s)"),
+            "{said:#?}"
+        );
+        assert!(
+            said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+    }
+
+    #[test]
+    fn stale_text_left_after_the_send_back_ends_the_job_before_the_verifier() {
+        let repo = limit_repo();
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (done, said) = governed_job_with(
+            &repo,
+            editing(counts.clone(), prompts.clone(), raise_limit()),
+        );
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            done.reason
+                .starts_with(crate::run::stale_text::STALE_REASON_PREFIX),
+            "{}",
+            done.reason
+        );
+        assert!(done.reason.contains("HELP.md:1"), "{}", done.reason);
+        assert!(!crate::disk::is_environment_reason(&done.reason));
+        // One send-back and no verifier.
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (2, 0), "{said:#?}");
+        assert_eq!(prompts.lock().unwrap().len(), 2);
+        assert!(
+            said.iter().any(|l| l
+                == "producer   stale text still left after the send-back; the job ends before the verifier"),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.starts_with("verifier   ")),
+            "{said:#?}"
+        );
+    }
+
+    #[test]
+    fn stale_text_from_the_reading_alone_is_sent_back_and_fixed() {
+        // The diff touches only the README and holds no constant: the reading says the limit changes.
+        let repo = limit_repo();
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let script = reading_summary(
+            fixing_stale_text_on_send_back(
+                editing(counts.clone(), prompts.clone(), Vec::new()),
+                fix_help(),
+            ),
+            "Raise `MAX_WIDGETS` from 8 to 16 in HELP.md.",
+        );
+        let (done, said) = governed_job_with(&repo, script);
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (2, 1), "{said:#?}");
+        let prompts = prompts.lock().unwrap().clone();
+        assert!(
+            prompts[1].contains("- HELP.md:1: still says 8"),
+            "{}",
+            prompts[1]
+        );
+        assert!(
+            prompts[1].contains("the reading changes it from 8 to 16"),
+            "{}",
+            prompts[1]
+        );
+    }
+
+    #[test]
+    fn stale_text_outside_the_allowed_paths_is_not_sent_back_and_ends_the_job() {
+        // The reading limits the job to README.md and CHANGELOG.md, so the producer may not edit HELP.md.
+        let repo = limit_repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let script = reading_summary(
+            scoped(counts.clone(), prompts.clone(), 0, |_| Vec::new()),
+            "Raise `MAX_WIDGETS` from 8 to 16 in README.md.",
+        );
+        let (_athena, done, said) = run_job(&repo, &state, script);
+        assert_eq!(
+            done.state,
+            OutcomeState::Failed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        assert!(
+            done.reason
+                .starts_with(crate::run::stale_text::STALE_REASON_PREFIX),
+            "{}",
+            done.reason
+        );
+        assert!(done.reason.contains("HELP.md:1"), "{}", done.reason);
+        // The place is not sent back, since the producer may not change it, and no verifier ran.
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (1, 0), "{said:#?}");
+        assert_eq!(prompts.lock().unwrap().len(), 1);
+    }
+
     // -- hand-kept files that disagree with their source (`crate::mirrors`) -------------------------------------
 
     const TIMINGS_A: &str = "demo --test a 1.00\n";
