@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-013524-85wt",
+  "round": 1,
+  "at": "2026-11-16T06:17:15.874149016Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The Paused and Awaiting tests take the planning-time hold path, not ItemEnd::Paused or ItemEnd::Awaiting, so criterion 5 goes unshown for those two states.",
+      "evidence": "`Drain::prepare` asks `steps.paused(&ids)` and `steps.held(&ids)` for the whole queue before any dispatch (drain.rs:2238-2251), skips those items (2258), and stores them in `pause_held` (2325, 2416). `pass_over_paused` then prints their one line (2451-2458, called at 3146 and 3212). An item configured with `paused: [(\"a\", ..)]` or `held: [(\"a\", ..)]` from the start is never dispatched: the existing paused test asserts the log is only `[\"read b\", \"run b\", \"land b\", \"rate\"]` (tests/drain.rs:796-802). `ItemEnd::Paused`/`Awaiting` and the `finish` arm at 2769-2771 are never reached. If the producer mutated that arm (or a split Paused or Awaiting arm) to `set_stop`, the planned paused and awaiting tests would still pass. The exhaustiveness test would also name tests that do not drive those kinds. Fix: Drive Paused through attempts with the existing `pause_on_retry` knob (tests/drain.rs:97-99, 234-240; already used at 916 and 967): outcomes Rejected, Rejected, Landed, giving ItemEnd::Paused at drain.rs:2043. For Awaiting, add a stub knob (for example `hold_on_retry`) that makes `Steps::held` return a's hold only after `a-retry` has run, giving ItemEnd::Awaiting at 2051. Keep a planning-time variant only as an extra test if wanted. Map Paused and Awaiting in the exhaustiveness test to the attempts-path tests. State in criterion 5's demonstration that mutating the Paused/Flagged/Awaiting arm fails each of the three tests.",
+      "location": "Plan Demonstrations, criteria 3 and 5 (Paused and Awaiting tests); Decision 4 mapping; Step 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The Idle mapping names a test that does not produce ItemEnd::Idle.",
+      "evidence": "c's 'run ended first, job limit' line in that test (tests/drain.rs:6665-6670) comes from the pass-over of unreached items at drain.rs:2497/2503, not from the Idle arm, whose text is 'run ended first: another job ended the run' (2752). In serial runs Idle arises when an item's own first job hits a usage limit (`stop_for_usage_limit`, 1779). The retry's `run_job` then returns `Ended` (1622-1623), so `attempts` returns Idle (1984). Fix: Map Idle to `a_usage_limit_reply_stops_the_drain_at_once_with_its_reset_time` (tests/drain.rs:1227), after checking that it prints 'another job ended the run', or add a small test that does.",
+      "location": "Decision 4 and Step 5: Idle mapped to `passed_over_item_is_logged_once_with_its_reason`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The reason given for not putting passed-over items in the end summary is overstated.",
+      "evidence": "tests/drain.rs:814 counts only summary lines containing both 'line a is paused' and 'lift'. Lines 1062-1063 forbid only 'repeated failure' and 'failed twice' for a flagged item. A summary list such as 'a: paused' or 'a: flagged: <short reason>' would break neither. The request says the drain 'records each skipped item's state and reason in its summary'. The accepted reading allows the existing pass-over line, so this is not a misread. Fix: Keep the reading's choice, but say in D190 and the CHANGELOG that the state and reason are on the live 'passed over' line, not in `display::drain`'s summary. Drop the claim that a summary list would necessarily break those tests.",
+      "location": "Decision 3 (summary unchanged)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new tests need complete plan entries, or the planning read turns an unreadable item into a refusal rather than Skipped.",
+      "evidence": "`prepare` reads underspecified items at planning (drain.rs:2265-2289). A read with an error there becomes a forced refusal, 'the request could not be read' (2299-2305), not `RunStep::Unread` or `ItemEnd::Skipped`. Planning reads also add to the budget (2292), which shifts the budget arithmetic for criterion 4. Fix: Have each new test set `plan: vec![planned(\"a\", ..), planned(\"b\", ..), (planned(\"c\", ..))]`, as the existing pass-over tests do (tests/drain.rs:792-795). Write the budget value from the arithmetic: a's two reads and b's read, run and rating spend 1.0, so the budget X must satisfy 1.5 ≤ X < 2.2. Then confirm it by running the test.",
+      "location": "Step 4 and criterion 4 (new Stub tests: unread, held_runs, waiting_to_merge)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's code evidence against the snapshot and it holds. `attempts` (drain.rs:1958-2053) returns the eight self-stopping ends without setting a stop. `finish` (2684-2780) sets a stop only in the Budget, JobLimit and Stop arms (2741/2745/2749) and through the existing StopCause environment check (2729-2734). `take_until_done` (2783-2799) ends only on `stopped()`. So adding the list, the exhaustiveness checks and per-state tests without changing behavior fits the accepted reading. The ItemEndKind macro, `after()` and the change to `finish` are a reasonable way to keep one list. However, two of the eight per-state tests never reach the code they claim to cover. A stub `paused` or `held` entry present from the start makes `prepare` hold the item at planning (drain.rs:2238-2260, 2325-2416), and `pass_over_paused` prints its line (2451-2458). The item is never dispatched, so `ItemEnd::Paused` and `ItemEnd::Awaiting` never reach `finish`. Criterion 5's mutation would not make those two tests fail, and the exhaustiveness test would map Paused and Awaiting to tests that never produce them. The Idle mapping is also wrong. The rest is sound, with minor gaps in test setup and in the reason given for leaving the summary alone. Verdict: revise."
+}

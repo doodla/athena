@@ -1,0 +1,331 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261104-211248-rgdn",
+  "round": 1,
+  "at": "2026-11-16T12:02:24.299543926Z",
+  "invocation_seq": 2,
+  "approach": "Add a reading-time cap check in reading.rs, and pin the budget values inside each test helper so tests stop reading the live job_usd. (1) New `check_cap_budget(reading, config)` in reading.rs. It applies to a reading that has a capability, no question, and `athena.toml` listed as a Modify deliverable. It scans the reading's summary, assumptions and criteria for proposed values of `reader_usd`, `producer_usd`, `verifier_usd`, `job_usd`, `planner_usd`, `critic_usd` and `max_rounds`. Accepted forms are `key = N`, `key: N`, `key to N`, `key at N` and `key from A to N`, with an optional `$` and backticks; the last mention wins. It overlays those values on a clone of the base `Config` by plain assignment, then calls `Config::check_budget()`, and on `ConfigError::BudgetBelowReserve` refuses with the `required` figure from that error as `$N.NN`. It never calls `budget_required` or sums caps itself, because `no_second_sum_of_stage_caps_in_core` (run/tests.rs:12005, CONFIG_SUMS at 11839) forbids both in core production code. A new `accept_with_budget(...)` runs `refusing_check` and then `check_cap_budget`. `read_once` (reading.rs:732) calls it, so a refusal takes the existing path: `ReadError::Refused`, then `read_for` rereads once with the refusal text (reading.rs:541-577). The refusal rule name is `check_cap_budget`, stored in `ReadingRefusal` and counted by status.rs:227. (2) Tests: config.rs, reading.rs, admission.rs and run_pin_tests.rs get a pinned-budget helper over the live `athena.toml` text. It rewrites the `reader_usd`, `producer_usd`, `verifier_usd` and `job_usd` lines, plus `[job_plan]` `planner_usd`, `critic_usd` and `max_rounds` where a test sums them, to fixed values. The job_usd-dependent assertions then use that fixture, and each file gets a test that rewrites the live job_usd line to 60.00 and shows the fixture is unchanged. Full-suite independence (criterion 3) also needs two shared test seams outside the four named files: `repo_with_config_and_models` in run/tests.rs:309 and `test_config()` in athena-cli/tests/common/mod.rs:37. Both feed tests that assert dollar figures around 50.00 (run/tests.rs:2540-2547, 10546, 10578; athena-cli/tests/drain.rs:5449). Pinning them there is the one-line fix. The producer proves it by running `cargo test --locked` with athena.toml job_usd temporarily set to 60.00, fixing any further test by pinning in its helper, then reverting athena.toml, so athena.toml has no net change. The existing candidate-time admission check (admission.rs:929-958) keeps its behavior; only its test stops depending on the live value. CHANGELOG.md records the change and the intended refusal rate, and docs/decisions.md gets an appended D190.",
+  "decisions": [
+    {
+      "choice": "Put the new check in reading.rs as `check_cap_budget`, called from `read_once` through `accept_with_budget` right after `refusing_check`. Do not add it as a `step!` in `refusing_check`.",
+      "reason": "`refusing_check` and `check_reading_acceptance` (reading/checks.rs:492-551) take no `Config`. A step there needs a config parameter on both. That means edits to checks.rs, reading/replay.rs:55, refusal_corpus.rs (run() at 2770 and the wrapper test at 2801), and about 100 `check_reading_acceptance(..)` call sites in reading.rs tests. checks.rs and refusal_corpus.rs are not deliverables. `build_reading` already holds config-dependent refusals outside the chain (`check_reading_size`, reading.rs:822-831), and the refusal reaches the same correction retry. It is enforced in code, not in prose. Consequence: criterion 1 names `check_reading_acceptance`, but the tested entry point is `accept_with_budget`; this is raised as a User question.",
+      "rejected": [
+        {
+          "option": "Add `config: Option<&Config>` to `refusing_check` and `check_reading_acceptance`",
+          "why": "Touches non-deliverable files and about 100 call sites. The corpus guard `every_acceptance_check_has_a_refusing_corpus_case` (refusal_corpus.rs:2905) would also demand a new corpus case in a file outside scope."
+        },
+        {
+          "option": "Check in plan_findings (admission.rs:177) as well",
+          "why": "`plan_findings` has no config and its caller is planning.rs:500, outside the deliverables. The existing candidate-time admission check still catches a plan whose caps overshoot, after production. This is recorded as a risk."
+        },
+        {
+          "option": "Compare the sum in a new function that re-adds the caps",
+          "why": "The scan test no_second_sum_of_stage_caps_in_core fails on it, and criterion 5 forbids re-deriving the sum."
+        }
+      ]
+    },
+    {
+      "choice": "Take `required` from `ConfigError::BudgetBelowReserve { job_usd, required, short }` (config.rs:605, 948-957) returned by `Config::check_budget`.",
+      "reason": "Production core may call neither `budget_required` nor any other CONFIG_SUMS method outside `budget_reserve` (run/tests.rs:11839, 11965). `check_budget` is not in that list, and its error already carries the figure that `budget_required` computes. Tests may call `budget_required` directly to compute the expected value independently.",
+      "rejected": [
+        {
+          "option": "Call `budget_reserve(&config, ReserveStage::Admission)`",
+          "why": "Valid and allowed, but it gives no short figure and no tolerance rule; `check_budget` is the same function admission uses at admission.rs:937."
+        }
+      ]
+    },
+    {
+      "choice": "Read proposed values from the reading's own text (summary, assumptions, acceptance criteria). When no value is recovered, or `athena.toml` is not a Modify deliverable, the check does nothing. When the reading proposes `job_usd`, that value is used as the job budget; otherwise the base `job_usd`.",
+      "reason": "A Reading has no structured field for proposed config values (records.rs:444-482), so text is the only source. Failing open on unrecoverable values keeps the check from refusing readings it cannot judge, as the reading assumption says. Overlaying only what is stated on the base config means a reading that quotes an existing value changes nothing.",
+      "rejected": [
+        {
+          "option": "Add a structured `proposed_caps` field to the reading schema",
+          "why": "Changes the reader schema, the Reading record and the reader prompt budget (docs/system-facts.md budgets are at 1998 of 2000 for the reader). Far beyond the request."
+        }
+      ]
+    },
+    {
+      "choice": "Pin each test's budget values inside its own helper, as a fixture over the live text: `pin_budget` in config.rs tests, `fixture_config` in reading.rs tests, a pin in `config()` in run_pin_tests.rs, and a derived value in the admission test. Keep one real-config test per place that asserts `check_budget().is_ok()` on the live file and no value.",
+      "reason": "This keeps tests that need the other live sections (models, checks, classes) while removing dependence on job_usd and the caps summed in the assertions. A config-only raise of job_usd then touches no test. The one live-file test is the guard that catches an athena.toml whose caps exceed its own job_usd.",
+      "rejected": [
+        {
+          "option": "Hand-write a full fixture TOML per file",
+          "why": "Config::parse needs many sections, so each file would copy about 100 lines that drift from the schema."
+        },
+        {
+          "option": "Keep REPO_CONFIG and raise the test constants when job_usd changes",
+          "why": "That is the failure this job removes."
+        }
+      ]
+    },
+    {
+      "choice": "athena.toml gets no net change: the producer sets job_usd to 60.00 only to run the full suite and reverts it.",
+      "reason": "Changing a cap is out of scope. Listing the file in `files` would imply a change, and a governance file must be a deliverable only when changed.",
+      "rejected": [
+        {
+          "option": "Raise job_usd permanently",
+          "why": "Out of scope in the brief."
+        }
+      ]
+    },
+    {
+      "choice": "Exits of the changed stage `read_once` (one line per exit). Success: reading accepted, reading.rs:739 returns `Ok(reading)` and 754-758 record `refusal: None`; the caller reads it in `ask` and queued reads. Refused by the new check: `Err((\"check_cap_budget\", text))` at 740, then 760-771 store a redacted `ReadingRefusal` and return `ReadError::Refused`; `read_for` (541-577) reads again once with the text, and a second refusal is the returned failure text that `ask` reports as reader_error. Reader failed or timed out: unchanged, returned at 695-710 before the check runs. Error: `ls_tree` failure at 726-731 still propagates with `?`, unchanged. Hold and interrupt: cannot happen inside this stage; budget holds are decided before the reader by `check_budget` at 598, and the kill switch acts in `invoke_and_record`.",
+      "reason": "The brief asks for a table of exits for a changed stage; the new check adds only one more refusal path through the existing Err arm.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `proposed_caps`, `check_cap_budget` and `accept_with_budget`; call the last from `read_once` in place of the bare `refusing_check` call at line 732; add the reading-time tests; make `shipped_config()` a pinned fixture and add `fixture_ignores_the_live_job_usd` and `the_shipped_config_covers_its_own_caps`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Test only: `a_job_usd_below_the_stage_caps_is_a_configuration_violation` (2018) sets job_usd by line from the parsed config's required figure instead of replacing the literal `job_usd = 50.00`. No production edit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Pin the budget lines in `config()` (line 80) so the `job_usd = 50.00` replaces at 974, 1001 and 1032 act on a fixture; add the `reader_proposing_caps` tweak and the wired refusal test; add `fixture_ignores_the_live_job_usd`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Tests only: add `pin_budget` over `REPO_CONFIG`; move the job_usd-dependent tests (985-1158) onto it; keep a live-file `check_budget().is_ok()` test; add `fixture_ignores_the_live_job_usd`. No production edit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Pin reader_usd, producer_usd, verifier_usd and job_usd in `repo_with_config_and_models` (309-327) so the many dollar-threshold tests do not follow the live job_usd. Needed for criterion 3 though not named in the request.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "purpose": "Pin the same four budget lines in `test_config()` (37) so drain.rs:5449 and the other tests built on it do not follow the live job_usd. Needed for criterion 3.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry: the check, its root cause, the refusal-rate estimate, the pinned test helpers.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D190 with Case, Decision, Alternatives, Tradeoff and a Provenance bullet; edit no existing entry.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `Config`'s `Budget`, `JobPlan` and `ConfigError::BudgetBelowReserve` definitions (config.rs ~400-460 and ~605-660) to confirm the public field names and the `Copy` of `job_plan`, then write the new code against them.",
+    "In reading.rs add, near `check_reading_size` (382): `CapKey` (the seven keys), `proposed_caps(texts)` (keys, forms `=`, `:`, `to`, `at`, `from A to N`, optional `$` and backticks, boundary check against a preceding identifier character, last mention wins), `check_cap_budget(reading, config) -> Result<()>` (skip unless capability is set, no question, and athena.toml is a Modify deliverable; overlay by plain assignment, `max_rounds`, `planner_usd` and `critic_usd` only when `job_plan` is Some; call `check_budget()`; on `BudgetBelowReserve` bail with the `required` as `${:.2}`, the job_usd used, the short amount, the proposed values it read, and the repair), and `accept_with_budget(reading, request, attempt, referenced, repo_files, config) -> Option<(&'static str, anyhow::Error)>` that returns `refusing_check(..)` first, then `(\"check_cap_budget\", e)`. Add no `+` over cap fields and no call of `budget_required`, `run_usd`, `planning_usd` or `critic_usd`. Put the root cause, the 1% declared sentence in the repository's form, and the limits (fails open, text only) in the doc comment.",
+    "In `read_once` replace the `refusing_check(...)` call at reading.rs:732 with `accept_with_budget(..., &jc.config)`; keep the `Err((rule, format!(\"{e:#}\")))` mapping unchanged.",
+    "In config.rs tests add `pin_budget(text)` (a line scan that rewrites the four `[budget]` keys and the three `[job_plan]` keys to the fixture 2.00, 10.00, 5.00, 50.00 and 3.00, 3.00, 5) and a `fixture()` returning `pin_budget(REPO_CONFIG)`. Switch `the_repository_budget_covers_two_reading_and_two_planning_rounds`, `the_repository_budget_caps_cover_their_sum`, `planning_and_run_caps_move_by_exactly_the_cap`, `with_job_usd`, `job_usd_below_the_reserve_is_refused_by_the_budget_check` and `rounds_count_only_when_planning_is_enabled` to `fixture()`. Add `the_live_config_covers_its_own_caps` (live `check_budget().is_ok()`, no value) and `fixture_ignores_the_live_job_usd`. Leave the non-budget tests on `REPO_CONFIG`.",
+    "In reading.rs tests: make `shipped_config()` (1635) return a config built from the live text through a local pin (assign the four budget fields and the three job_plan fields) and rename its uses only where the name misleads. Add `the_shipped_config_covers_its_own_caps` and `fixture_ignores_the_live_job_usd`, and the unit tests of criteria 1 and 2 (names containing `cap_budget`), built with `governed_reading`, covering the forms listed in criterion 2.",
+    "In admission.rs tests rewrite `a_job_usd_below_the_stage_caps_is_a_configuration_violation` (2018): parse BASE_CONFIG, set job_usd by a line scan to `required - 1.00` using `budget_required()` (test code), and assert the violation detail names `[budget] job_usd` and `${required:.2}`. Keep the other assertions.",
+    "In run_pin_tests.rs add a `pin_budget` step inside `config()` (line 80) that rewrites the `reader_usd`, `producer_usd`, `verifier_usd` and `job_usd` lines to the fixture before the existing filtering, keeping the later replaces of 974-977, 1001 and 1032 unchanged; add `reader_proposing_caps` (a Tweak like `reader_refused_then`) and a test that asks, expects reading attempt 1 refused by rule `check_cap_budget` with `$67.00`, and attempt 2 accepted; add `fixture_ignores_the_live_job_usd`.",
+    "In run/tests.rs `repo_with_config_and_models` (309) and athena-cli/tests/common/mod.rs `test_config()` (37) pin the four budget lines to the fixture values (reader 2.00, producer 10.00, verifier 5.00, job_usd 50.00), after the existing filtering, with a comment saying why.",
+    "Prove criterion 3: set athena.toml `job_usd = 60.00`, run `cargo test --locked`, fix any further failure by pinning in that test's helper, and revert athena.toml to 50.00 so `git diff -- athena.toml` is empty. Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-cli --test backtest` and `cargo test -p athena-core no_second_sum_of_stage_caps_in_core`.",
+    "Append the CHANGELOG.md Unreleased entry (root cause, the check and its forms and limits, `This check refuses more readings; the higher refusal rate is intended, expected 1% of newly refused readings (an estimate, not measured)`, the pinned helpers and the two extra test files) and append D190 to docs/decisions.md with a Provenance bullet; edit no existing entry."
+  ],
+  "risks": [
+    {
+      "risk": "The text parser misses a form in which a reader writes a proposed value (for example prose like `raise the producer cap to twelve dollars`), so a reading over budget is accepted.",
+      "mitigation": "The check fails open and the existing candidate admission check still refuses after production (admission.rs:929-958), which is today's behavior. The parser handles the six forms in criterion 2 and tests each. Not measured: how often readers use another form."
+    },
+    {
+      "risk": "False refusal: a reading quotes an old or hypothetical value, such as `was producer_usd = 80.00`, and the overlay pushes the sum over job_usd.",
+      "mitigation": "The last mention of a key wins, and the refusal text prints the exact values it read, so the reader's one correction reread can restate. The check applies only to a Modify deliverable athena.toml, and the expected share is about 1% (an estimate, not measured)."
+    },
+    {
+      "risk": "A reading that proposes caps and the base job_usd is raised by a later job in the same plan or drain (jobs landing in order) is judged against the base config of its own commit.",
+      "mitigation": "Every job reads its configuration from its own base commit (athena.toml header comment, lines 3-5), so judging against the job's base is the same rule admission uses."
+    },
+    {
+      "risk": "Pinning the budget in shared test helpers could hide a real mismatch between the live athena.toml and its own caps.",
+      "mitigation": "Keep `the_shipped_config_covers_its_own_caps` in reading.rs and the config.rs live-file test asserting `check_budget().is_ok()` on the live text, so the real file is still checked and its value is not asserted."
+    },
+    {
+      "risk": "Other tests outside the files read in this plan fail on a job_usd raise (I could not audit all 60+ live athena.toml readers).",
+      "mitigation": "Step 9 runs the full suite with job_usd 60.00 and fixes any failure by pinning in the helper that test uses; the verifier-runnable `fixture_ignores_the_live_job_usd` tests cover the pinned helpers."
+    },
+    {
+      "risk": "The wired test in run_pin_tests.rs uses the study capability, and an athena.toml deliverable may be refused first by another rule (governance coverage, repo-path or scope checks), hiding the new rule.",
+      "mitigation": "The test's criterion text names athena.toml, as `check_governance_coverage` requires, and asserts the first refusal's rule is `check_cap_budget`; the producer adjusts the fake reading until it is the one that refuses, and that is visible in the test."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "reading acceptance gate in read_once: one more refusal rule",
+      "dependent": "crates/athena-core/src/reading.rs `Athena::read_once` (line 583) and `read_for` (524), reached from `ask` (947), queued reads (`read_queued` 1170, `read_unread` 1185, run/mod.rs:464 and 483), `retry` (1274), `correct` (1336) and the `go` re-read",
+      "kind": "code",
+      "test": "cargo test -p athena-core cap_budget",
+      "reason": "The new refusal applies only when the reading has a capability, no question and `athena.toml` as a Modify deliverable, and the proposed values push the sum over job_usd. Every other reading takes the same path as before. A refusal goes through the existing Err arm (reading.rs:740, 760-771) and the one correction reread (541-577). The wired test in run_pin_tests.rs covers it end to end, and the existing `a_refused_reading_is_read_again_at_once..._second_is_recorded` (run_pin_tests.rs:1948) and `a_second_refusal_is_the_failure...` (2044) cover the retry mechanics unchanged."
+    },
+    {
+      "name": "the reading-acceptance chain and its corpus",
+      "dependent": "crates/athena-core/src/reading/checks.rs `refusing_check` (520) and `check_reading_acceptance` (492), crates/athena-core/src/reading/replay.rs:55, crates/athena-core/tests/refusal_corpus.rs (`run` 2770, `the_wrapper_agrees_with_refusing_check_on_every_case` 2801, `every_acceptance_check_has_a_refusing_corpus_case` 2905, `no_check_bypasses_refusing_check` 3210)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "Neither function nor its steps are edited: the new check runs after `refusing_check` in `accept_with_budget`, outside the chain, so no corpus case is required and the corpus guards do not see it. `no_check_bypasses_refusing_check` reads only the body of `check_reading_acceptance`, which is unchanged. No input form is added to the chain; the new input forms (`key = N`, `key: N`, `key to N`, `key at N`, `key from A to N`, `$` and backticks, suffix of another identifier, no athena.toml, question reading) are covered by the reading.rs unit tests named in criterion 2, not by corpus ids. The corpus case ids were not used because refusal_corpus.rs is outside the deliverables."
+    },
+    {
+      "name": "Config::check_budget and budget_required",
+      "dependent": "crates/athena-data/src/config.rs `Config::check_budget` (948) and `budget_required` (936); callers admission.rs:937, run/verification.rs:221, reading.rs:133 (`budget_reserve`)",
+      "kind": "code",
+      "test": "cargo test -p athena-data config::tests",
+      "reason": "Production code in config.rs is not edited. The new check calls `check_budget` on an overlaid clone and uses `ConfigError::BudgetBelowReserve`'s fields as they are, so the admission check (admission.rs:929-958) and the reserve (reading.rs:128-150) behave as before. Their tests (config.rs `job_usd_below_the_reserve_is_refused_by_the_budget_check`, `planning_and_run_caps_move_by_exactly_the_cap`, reading.rs `every_stage_counts_only_what_is_still_to_run...`) keep their assertions and run on the pinned fixture."
+    },
+    {
+      "name": "one sum of stage caps in core",
+      "dependent": "crates/athena-core/src/run/tests.rs `budget_scan_tests::no_second_sum_of_stage_caps_in_core` (12005; CONFIG_SUMS 11839, CAP_FIELDS 11831)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core no_second_sum_of_stage_caps_in_core",
+      "reason": "The new production code assigns cap fields but never adds them and never calls a CONFIG_SUMS method; it reads `required` from the `check_budget` error. The scan skips test code, so tests may call `budget_required`."
+    },
+    {
+      "name": "the stored refusal rule name `check_cap_budget`",
+      "dependent": "crates/athena-core/src/status.rs:175-245 (refusal counts keyed by rule name string)",
+      "kind": "code",
+      "test": "cargo test -p athena-core status",
+      "reason": "status.rs groups refusals by `refusal.rule` as a free string (227-244), so a new name gets its own row with no table to update. The doc comment at status.rs:175 lists names as examples; it is not a closed list. records.rs:725 `OTHER_READING_RULE` is only the fallback for unnamed errors."
+    },
+    {
+      "name": "live athena.toml job_usd and caps read by the run tests",
+      "dependent": "crates/athena-core/src/run/tests.rs (preflight_dispatch 10543, preflight_planner_round 10574, round_one_critic_check_follows_the_shared_reserve 2534, dispatch_holds_a_job_that_cannot_afford_every_planning_round 2606, hard_mode_repo 10724) and `repo_with_config_and_models` (309)",
+      "kind": "code",
+      "test": "cargo test -p athena-core preflight_",
+      "reason": "These tests assert dollar thresholds that assume job_usd 50.00 and the shipped caps, read live at run/tests.rs:312. A raise of job_usd alone would fail them. Pinning the four budget lines in `repo_with_config_and_models` keeps every one of them as is; `set_job_usd` (371) rewrites the line by prefix, so it still works."
+    },
+    {
+      "name": "live athena.toml job_usd read by the CLI tests",
+      "dependent": "crates/athena-cli/tests/common/mod.rs `test_config()` (37) and `with_job_usd` (102); crates/athena-cli/tests/drain.rs:5449 (`caps.run == 50.0`), 3801, 3823, 3868, 4116, 4163; lifecycle.rs:1010, 1704; job_plan.rs:86, 148",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain the_default_plan_budget_affords_a_read_where_drain_would_need_a_read_and_a_run",
+      "reason": "`test_config()` builds from the live file (common/mod.rs:42). drain.rs:5449 asserts the live job_usd; the other tests set their own value through `with_job_usd`, which replaces the line by prefix and so is independent of the live value. Pinning the budget lines in `test_config()` keeps all of them valid; introspection.rs:377 and 1351 compare a fixture file with `test_config()` itself, so they follow the pin."
+    },
+    {
+      "name": "job_usd read at run time",
+      "dependent": "crates/athena-cli/src/drain.rs:4491 (`run: jc.config.budget.job_usd`) and crates/athena-core/src/run/mod.rs:1267",
+      "kind": "code",
+      "test": null,
+      "reason": "Production reads of job_usd are untouched; the plan only changes tests and adds the reading-time check, which reads a clone and writes nothing back."
+    },
+    {
+      "name": "decision log reconciliation",
+      "dependent": "docs/decisions.md (D156 governs code a decision names; the decision gate in run/checks.rs and `docs/decision-links.toml`)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test backtest",
+      "reason": "The change appends D190 only and edits no existing entry, so no `[[link]]` in docs/decision-links.toml needs a new phrase, and the log's ids do not move (D187 keys links on ids). The gate runs `link_problems` when decisions.md changes; the producer runs `cargo test -p athena-cli --test backtest` and `cargo test -p athena-core governed` to confirm."
+    },
+    {
+      "name": "CHANGELOG entry text checked by the corpus",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `*_refusal_is_declared_intended` tests (2946-3207) and `include_str!(\"../../../CHANGELOG.md\")`",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "Those tests search the changelog for fixed phrases of other checks; adding an entry removes none. The new entry avoids rewording any existing item."
+    },
+    {
+      "name": "reading.rs tests that parse the live athena.toml",
+      "dependent": "crates/athena-core/src/reading.rs tests `shipped_budget_covers_the_reserve` (1658), `every_stage_counts_only_what_is_still_to_run...` (1685), `required_budget_follows_the_configured_caps` (1733), `the_reader_input_roles_come_from_the_config_job_plan_enabled_value` (1640), `build_sized` (1791)",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading::tests::shipped",
+      "reason": "`shipped_config()` (1635) becomes the pinned fixture, so their figures (47.00, 16.00, 18.00) hold whatever the live caps or job_usd say. `build_sized` keeps the live config because it only varies timeouts. A new test `the_shipped_config_covers_its_own_caps` asserts `check_budget().is_ok()` on the live file with no value, so the cap/job_usd consistency of the real file stays guarded."
+    },
+    {
+      "name": "other readers of the live athena.toml",
+      "dependent": "crates/athena-data/tests/repo_config.rs and crates/athena-core/tests/model_roster.rs, xtask/src/main.rs:184",
+      "kind": "code",
+      "test": "cargo test -p athena-data --test repo_config",
+      "reason": "They parse the file for schema and model roster only and assert no dollar value (grep of job_usd shows none in these files), so a job_usd raise does not affect them. No edits."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in reading.rs plus a wired test in run_pin_tests.rs. In reading.rs, `fixture_config()` is the live athena.toml with its budget pinned (reader 2, planner 3, critic 3, 5 rounds, producer 10, verifier 5, job_usd 50). The test builds `governed_reading(&[\"athena.toml\", \"CHANGELOG.md\"], &[\"athena.toml sets producer_usd = 20.00\", ...], &[])`, calls `accept_with_budget(reading, request, None, &[], None, &fixture_config())`, and expects `Some((\"check_cap_budget\", error))`. The expected figure is computed in the test by assigning producer_usd = 20.0 on a clone of the fixture and calling `Config::budget_required()` (57.00); it asserts the message contains `$57.00`, `job_usd`, and a hint to raise job_usd. The wired test in run_pin_tests.rs uses a `reader_proposing_caps` tweak (same shape as `reader_refused_then`, run_pin_tests.rs:1931) that sets the first reading's deliverables to athena.toml and its first criterion to `athena.toml sets producer_usd = 60.00`. The second reading is clean. `athena.ask` runs the real `read_once`, `read_for` and `reading_attempts` (2018).",
+      "command": "cargo test -p athena-core cap_budget",
+      "observes": "The unit test sees refusal rule `check_cap_budget` with `$57.00` equal to the independently computed `budget_required`. The wired test sees reading attempt 1 refused with rule `check_cap_budget` and text naming `$67.00` (reader 2 + producer 60 + verifier 5; `config()` has no [job_plan]), then attempt 2 accepted, with the reader run twice.",
+      "fails_without": "Without `check_cap_budget` wired into `read_once`, the reading is accepted: the unit test gets `None`, and the wired test finds attempt 1 accepted with no refusal and the reader run once.",
+      "seam": "Production entry points: `accept_with_budget` (new, added in step 2) and `Athena::ask` -> `read_for` -> `read_once` (exists, reading.rs:524-583). Fixtures: `fixture_config()` is a reading.rs test helper added in step 5, passed as the `config` argument. The wired test injects the `reader_proposing_caps` Tweak through `athena_with(..)` (exists, run_pin_tests.rs:154), added in step 7, against `config(true)` (exists, line 80). The refusal logic stays in production code; the doubles only supply the reading text and the config."
+    },
+    {
+      "criterion": 2,
+      "method": "Companion tests in reading.rs. (a) Proposed caps within budget, such as `producer_usd = 12.00` with the fixture needing 49.00 <= 50.00, are accepted: `accept_with_budget` returns `None`. (b) A reading that proposes both `producer_usd = 20.00` and `job_usd = 60.00` is accepted (57 <= 60), and one proposing `job_usd = 40.00` is refused naming $47.00. (c) A reading that lowers a cap is accepted. (d) A reading without `athena.toml` as a deliverable but with cap-like text (a `src/x.rs` deliverable saying `producer_usd = 99`) is accepted. (e) `athena.toml` listed with text naming no cap field is accepted. (f) Forms `key: N`, `key to $N`, `key from A to N` and backticked keys are each recovered. (g) A key as the suffix of another identifier (`my_producer_usd = 99`) is not read. (h) A reading with `question` set or no capability is skipped. Existing reading tests are untouched.",
+      "command": "cargo test -p athena-core cap_budget",
+      "observes": "Accept cases give `None`; refuse cases give `check_cap_budget` with the exact required figure; every other check's outcome for these readings is the same as before (`refusing_check` is unchanged).",
+      "fails_without": "If the check refused every athena.toml reading, or ignored the proposed job_usd, cases (a), (b) and (c) would be refused. If it ignored `deliverables`, case (d) would be refused.",
+      "seam": "`accept_with_budget` and `fixture_config()`, as in criterion 1 (step 2 adds the function, step 5 the fixture). Readings come from the existing `governed_reading` helper (reading.rs:4647), which exists."
+    },
+    {
+      "criterion": 3,
+      "method": "Two demonstrations. In-repo and verifier-runnable: `fixture_ignores_the_live_job_usd` tests in config.rs, reading.rs and run_pin_tests.rs rewrite the live athena.toml text's job_usd line to 60.00 (and, in a second pass, to 1.00), pass it through the file's own fixture helper, and assert the pinned values are unchanged; `cargo test -p athena-core fixture_ignores_the_live_job_usd` and `cargo test -p athena-data fixture_ignores_the_live_job_usd` run them. The producer also runs the real thing once: set athena.toml `job_usd = 60.00`, run `cargo test --locked`, record the result, then revert athena.toml. The producer fixes any extra failure by pinning in the helper that test uses.",
+      "command": "cargo test --locked",
+      "observes": "All `fixture_ignores_the_live_job_usd` tests pass. The producer's full run with 60.00 passes in full, including run/tests.rs preflight_* and round_one_critic_check_follows_the_shared_reserve, and athena-cli drain `the_default_plan_budget_affords_a_read_where_drain_would_need_a_read_and_a_run`.",
+      "fails_without": "Before the change, rewriting the live job_usd to 60.00 fails config.rs `the_repository_budget_caps_cover_their_sum` (`assert_eq!(.., 50.0)` at line 1025), `with_job_usd`'s `assert_ne!` at 1113, admission.rs:2020, run_pin_tests.rs:1001-1032 and run/tests.rs `preflight_dispatch`. Without the pin in a helper, its `fixture_ignores_the_live_job_usd` test fails.",
+      "seam": "The pinned-budget helpers: `pin_budget` in config.rs tests (step 4), `fixture_config` in reading.rs tests (step 5), `config()` in run_pin_tests.rs (step 7), and the shared seams `repo_with_config_and_models` (run/tests.rs:309) and `test_config()` (athena-cli/tests/common/mod.rs:37), both modified in step 8. Each takes the live text as a parameter so the test can feed it a changed job_usd; steps 4, 5 and 7 add those parameters."
+    },
+    {
+      "criterion": 4,
+      "method": "`git diff` over the four files: config.rs, admission.rs, run_pin_tests.rs, reading.rs. Each remaining `include_str!(\"../../../athena.toml\")` is either passed through the pinned-budget helper or used by a test that asserts no job_usd value. Every `\"job_usd = 50.00\"` replace in the changed tests acts on the fixture text, whose line the helper wrote. admission.rs:2019-2020 no longer names a literal value.",
+      "command": "git diff",
+      "observes": "The diff shows `job_usd = 50.00` left only inside the fixture constant or helper in each file. The admission test derives its threshold from the parsed config's `budget_required()`, and `assert_eq!(b.job_usd, 50.0)` and the `(2.0, 10.0, 5.0, 50.0)` tuple are read from the fixture.",
+      "fails_without": null,
+      "seam": "None (a content criterion). It is backed by the `fixture_ignores_the_live_job_usd` tests of criterion 3."
+    },
+    {
+      "criterion": 5,
+      "method": "The scan test parses every core source file with syn, skipping test code. It fails on a `+` over a cap field and on a call of `planning_usd`, `run_usd`, `critic_usd` or `budget_required` outside `budget_reserve`. `git diff` on config.rs shows no production edit there and none in the admission check at admission.rs:929-958.",
+      "command": "cargo test -p athena-core no_second_sum_of_stage_caps_in_core",
+      "observes": "The scan passes with `check_cap_budget` present, so it calls only `Config::check_budget`. admission.rs production code is unchanged, confirmed by `git diff`. `cargo test -p athena-core a_job_usd_below_the_stage_caps_is_a_configuration_violation` passes with the same message text as before.",
+      "fails_without": "A second sum of caps, or a direct `budget_required()` call in the new code, would make the scan test report the line.",
+      "seam": "Exists: `budget_scan_tests::no_second_sum_of_stage_caps_in_core` (run/tests.rs:12005)."
+    },
+    {
+      "criterion": 6,
+      "method": "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` on the final tree. Also `cargo test -p athena-core --test refusal_corpus` shows the unchanged chain still gives the same outcomes, since `refusing_check` and its corpus are not edited.",
+      "command": "cargo test --locked",
+      "observes": "All three pass. The refusal corpus passes unchanged.",
+      "fails_without": "A formatting, lint or test regression would fail the matching check.",
+      "seam": "Exists: Athena's configured checks (athena.toml `capabilities.change.checks`)."
+    },
+    {
+      "criterion": 7,
+      "method": "`git diff -- CHANGELOG.md docs/decisions.md`. CHANGELOG.md gets an Unreleased entry naming `check_cap_budget`, `accept_with_budget`, the root cause (Raising caps in athena.toml failed twice: cap sum over job_usd refused only at admission after the producer finished, and tests pinned job_usd from the live config), the reading-rule behavior change, the pinned test helpers and the files touched. docs/decisions.md gets one appended entry, D190, with Case, Decision, Alternatives, Tradeoff and a Provenance bullet; no existing entry is edited. `cargo test -p athena-core --test refusal_corpus` and `cargo test -p athena-cli --test backtest` still pass (D156 and D187 gates read decisions.md).",
+      "command": "git diff",
+      "observes": "The diff adds only lines to both files. CHANGELOG states the reading rule change and the 1% estimate.",
+      "fails_without": null,
+      "seam": "None (a content criterion)."
+    },
+    {
+      "criterion": 8,
+      "method": "The doc comment of `check_cap_budget`, the CHANGELOG entry and D190 each hold one sentence in the repository's existing form: `This check refuses more readings; the higher refusal rate is intended, expected 1% of newly refused readings (an estimate, not measured)`, with the cause (the two failed jobs' failure class). `git diff` shows it in all three. The 1% is an estimate and says so. The check is outside `refusing_check`, so `replay_declaration` does not replay it; the CHANGELOG states that limit.",
+      "command": "git diff",
+      "observes": "The sentence is present in the three places.",
+      "fails_without": null,
+      "seam": "None (a content criterion)."
+    }
+  ],
+  "open_questions": [
+    "User: criterion 1 says check_reading_acceptance refuses the reading, but that function (reading/checks.rs:492) has no Config and its file and refusal_corpus.rs are not deliverables. The plan puts the check in reading.rs as accept_with_budget, called from read_once right after refusing_check, and tests that entry point. Accept this placement, or add reading/checks.rs and refusal_corpus.rs as deliverables so the check becomes a step! in refusing_check?",
+    "User: the request also says a plan that touches caps is checked. plan_findings (admission.rs:177) has no config and its caller (run/planning.rs:500) is not a deliverable, so this plan covers readings only; a plan whose caps overshoot is still refused at candidate admission (admission.rs:929-958). Accept this scope, or add planning.rs as a deliverable?",
+    "User: the plan edits run/tests.rs and athena-cli/tests/common/mod.rs, which are outside the four named test files, because those tests assert figures around the live job_usd 50.00 and criterion 3 needs the full suite to pass after a job_usd raise. Accept those two edits?"
+  ],
+  "producer_section_sha256": "d3a26d8dd427c4a27fd8230e9147e527059db261e769542a3cbf6143ee37372f"
+}
