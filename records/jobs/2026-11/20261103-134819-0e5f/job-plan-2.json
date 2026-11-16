@@ -1,0 +1,406 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261103-134819-0e5f",
+  "round": 2,
+  "at": "2026-11-16T05:39:25.315214802Z",
+  "invocation_seq": 5,
+  "approach": "Keep `Athena::retry`, `ask`, `queue` and `first_reading` behaving exactly as now, because the automatic drain calls `retry` (crates/athena-cli/src/drain.rs:4635). Each becomes a thin wrapper over a private inner function that takes an optional hand guard (None = today's code path, with the same `commit_records` call). Three new public entry points, `retry_by_hand(job, force, ui)`, `ask_by_hand(text, force, ui)` and `queue_by_hand(text, force)`, build one shared `HandGuard` in crates/athena-core/src/reading.rs and call the same inner functions.\n\nThe guard blocks in three cases, tested in this order for each job it covers (the named job, plus the job `retry_target` resolves to, reading.rs:1304):\n1. An interrupted job that was already retried. This is the refusal `retry` has had since reading.rs:1288. Only `retry_by_hand` counts it, so `--force` can pass it.\n2. A retry linked to the job that is Queued, Proposed, Blocked or Dispatched. A new `live_retry_of` scans `job_history` for it.\n3. Athena's failure review of the job is pending, via a new `failure_review_pending` in introspect.rs. It is true only when a review is really outstanding: a deferred queue file exists, only kill-switch failures are recorded, or the outcome is younger than the review's own time limit (`reader_timeout_s`, introspect.rs:1965). An old job whose review will never be written is not pending, so it retries as before.\n\nThe guard runs twice. The first run is before any model call and returns the cheap refusal. The second is inside the `commit_records_with` closure (commits.rs:246-276). That closure runs under the repository lock and runs again whenever the branch moved. It re-reads the records at the head being committed. This closes the window in which the drain's retry, or another hand retry, commits while this hand reader is still running.\n\nWith `--force` the guard lets the retry through. The `Intervention` (category OverrodeDecision, source Observed, job = the retried job) goes in the same commit as the new request, reading and invocation. The trailers are `Athena-Job` and `Athena-Intervention`, as in `correct` (reading.rs:1453-1456). After the commit, `introspect_intervention` runs, as `correct` does (reading.rs:1464).\n\n`--force` is added to `Command::Retry` and `Command::Ask`. `athena status` gets a new `failure_note` field on `JobLine` only (not `JobTrace`). It reads 'failure review pending', or 'retry <id> queued', 'retry <id> running' or 'retry <id> interrupted'. README.md and CHANGELOG.md are updated.",
+  "decisions": [
+    {
+      "choice": "Hand-only entry points over shared inner functions; the automatic path keeps its current code. One private `HandGuard` (force, covered jobs, interrupted flag, review limit, planned override) with `settle_hand` for the first check and `commit_hand` for the guarded commit. `first_reading` stays as a wrapper over `first_reading_with(.., guard)`. That function needs `#[allow(clippy::too_many_arguments)]`, as `read_for` has at reading.rs:523, because it grows to 8 parameters.",
+      "reason": "Athena::retry is also the automatic path: drain.rs:4635 (`ReadOf::Retry`) calls it, drain.rs:1972-1981 chooses it after a failed attempt, and steward.rs:450 (`interrupted_work`) reads `retried_job`. About 70 tests call `retry` and `ask` directly, and `a_rejected_job_can_be_retried_twice` (tests/retry.rs:1282) calls `retry` twice in a row. A guard inside `retry` would change automatic behavior and break them. `read_queued` (reading.rs:1170) and `read_unread` (:1185) call `first_reading` and keep working. Hand commands that queue a retry, re-ask or follow-up are `athena retry`, `athena ask` and `athena ask --later` with 'try again on <job>' text (RETRY_PREFIX is built at reading.rs:1319; users type the same text). `accept-proposal` (proposals.rs:643) and `approve-work` ask for new work. `correct` (reading.rs:1336) accepts only Proposed or Declined jobs. Criterion 6 is met: `hand_blocker`, `settle_hand` and `commit_hand` each have one definition in reading.rs, and all three entry points call them.",
+      "rejected": [
+        {
+          "option": "Put the guard inside `Athena::retry` with a `force` parameter",
+          "why": "It changes the drain's retry and breaks about 70 callers."
+        },
+        {
+          "option": "Copy the check into each command in commands.rs",
+          "why": "Criterion 6 needs one shared path in reading.rs."
+        }
+      ]
+    },
+    {
+      "choice": "A retry stands (queued or running) when its state is Queued, Proposed, Blocked or Dispatched. The newest such retry is found by scanning `job_history(records)` for `retry_of == job`. Dispatched counts whether or not a process is alive; the refusal text uses `retry_follow_up(records, id, self.running(id))`.",
+      "reason": "`retry_follow_up` (reading/retry.rs:272-293) already maps Queued, Proposed and Blocked to 'run athena go', Dispatched-running to 'wait' and Dispatched-not-running to 'interrupted too'. `retries_by_job` (retry.rs:246-268) keeps only the newest retry and counts Failed and Landed retries, so a newer failed retry would hide an older queued one. A retry that ended Failed, was Dropped, Declined, Abandoned, Stale or Closed does not stand, so retrying again stays allowed (existing test `a_dropped_retry_does_not_block_a_new_retry`, tests/retry.rs:1217). `job_history` reads the request form through `retried_job` and `retry_reference` (retry.rs:560-580), so the guard accepts exactly the forms `ask` accepts.",
+      "rejected": [
+        {
+          "option": "Reuse `retries_by_job`",
+          "why": "It counts ended retries and keeps only the newest."
+        }
+      ]
+    },
+    {
+      "choice": "`failure_review_pending` is a pure function in introspect.rs: `(records, job, now, limit_s, deferred: &dyn Fn(&JobId) -> bool) -> bool`. An `Athena` method supplies `now = crate::now()`, `limit_s = reader_timeout_s` from `JobConfig::at(head)`, and `deferred` = the file `<introspect_pending_dir>/job-<id>.json` exists. It returns false unless the job's state is Closed(Rejected or Failed), the same set as `event_of_job` (introspect.rs:1546-1550). Then: (a) a Rejection or Failure introspection of the job that is Recorded, or Failed for a reason other than the kill switch, means settled, so false. (b) Otherwise, a record that failed on KILL_SWITCH_TEXT (introspect.rs:820) means pending. (c) A deferred queue file means pending. (d) `now - outcome.at < limit_s` seconds means the review may still be running, so pending. (e) Anything else is false.",
+      "reason": "This answers finding 4. The literal rule, 'no review record', would make every old rejected or failed job whose review was never written need `--force` for ever. That breaks 'works as before' (criterion 3). Such jobs are common: jobs from before reviews existed, and jobs where `introspect` returned an error before writing a record (head, load, read_records, JobConfig, redactor and scratch-dir errors at introspect.rs:1610-1628 are only printed by `settle`, :1524-1535). Nothing in the code will ever write those reviews. A review can still be running only for as long as its model call may last, and that call is bounded by `reader_timeout_s` (introspect.rs:1965; live athena.toml:50 sets 86400). So a review is 'still pending' only while one of three things is true. First, the review is deferred by the kill switch (introspect.rs:1389-1405); `athena start` runs it. Second, only kill-switch failures exist; `requeue_kill_switch_failures` (:1436-1492) requeues them. Third, the outcome is younger than that bound. A failed review for another reason is final (introspect.rs:1495-1496). This also covers the short window between the outcome commit and the review commit (run/mod.rs:431-437) that a pure records check would miss. The rule lives next to `KILL_SWITCH_TEXT`, which is a private const, and `event_key`, so those are not copied. For old jobs, after `reader_timeout_s` the refusal stops and `athena retry` works without `--force`; the text names `--force` and `athena start` as the ways out while it applies.",
+      "rejected": [
+        {
+          "option": "Records-only rule: no review record means pending, for ever",
+          "why": "Old jobs and jobs whose review errored early would need `--force` for ever, and criterion 3 'works as before' fails for them."
+        },
+        {
+          "option": "Only the pending-queue file means pending",
+          "why": "It misses the minutes between the outcome commit and the review commit."
+        },
+        {
+          "option": "Add a new registry entry while the review runs",
+          "why": "It changes the automatic path (go_with_stages, run/mod.rs:431-437), which must not change."
+        }
+      ]
+    },
+    {
+      "choice": "The guard re-checks inside the commit. `first_reading_with` and `queue_inner` call `commit_hand`, which calls `commit_records_with(&|head| guard.files_at(self, head, &files), &message)`. `files_at` loads `Records::load(&self.git, head)` and runs `hand_blocker` again. Without `--force` and with a blocker it returns Err, which `commit_records_in` propagates at commits.rs:264 before `build_commit_in`, so nothing is committed. The Err names the retry that won.",
+      "reason": "This answers finding 3. The drain retries a failed item right after `go` (drain.rs:1972-1981, `run_job` :1645 `self.steps.read(from)`, `Athena::retry` at :4635). `go_with_stages` writes the review first (run/mod.rs:431-437). The retry job is committed only after the reader finishes (reading.rs:1216-1253), which takes minutes. During that read there is a review record and no retry record, so a first check alone passes a hand retry and both proposals land: the 'closed as a duplicate, 2 jobs' failure. The closure runs under `lock_repository` (commits.rs:261) and runs again whenever the branch moved (:262-268), so the check and the commit are atomic against any other Athena process. If the hand retry commits first, the drain's `retry` (unchanged by this job) can still add a copy; that is a stated limit in CHANGELOG.md, since the automatic path must not change. The refused read's model spend is not recorded, as for any failed commit (the gate refusal at commits.rs:203-213 has the same effect). The Err says the reading was discarded.",
+      "rejected": [
+        {
+          "option": "Check only before the reader runs",
+          "why": "It cannot see a retry committed while the reader runs."
+        },
+        {
+          "option": "Commit the refused read as a Queued job so the cost is recorded",
+          "why": "It would create another 'try again on' job that the drain would read: another duplicate."
+        },
+        {
+          "option": "Change the drain to mark the failed job in flight",
+          "why": "It changes automatic retry behavior, which is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "The forced override is written atomically with the retry. `settle_hand` builds the `Intervention` when `--force` meets a blocker: new id (checked with `has_record_id`), category OverrodeDecision, source Observed, job = the retried job, class_of_work = `job.class()` or 'unknown' (as `event_of_job`, introspect.rs:1555), `what` naming the retry and its state or the pending review, `why` = the user chose a second retry over Athena's own. `commit_hand` adds that file to the same commit as the request, invocation and reading, with trailers `Athena-Job: <new job>` and `Athena-Intervention: <id>` (the gate needs the trailer for a commit that adds an intervention, athena-gate/src/invariant.rs:23 and :799-800; `correct` does the same at reading.rs:1453-1456). After the commit it calls `introspect_intervention(&id, ui)`, as `correct` does at reading.rs:1464, because 'every intervention is introspected at once' (manage.rs:399). That call never fails the command. `--force` with nothing blocking at the first check writes no intervention.",
+      "reason": "This answers finding 5 and removes the old plan's gap between the retry commit and the intervention commit: one commit holds both, so no interrupt can leave a forced retry without its intervention. `InterventionSource::Observed` is 'Captured by Athena itself' (athena-data records.rs:231-233), and `correct` records a user's act the same way. `User` would list it as open work in `athena status` (status.rs:552-556) and the score reads only User interventions. A failed job's closing score is not touched: `expected_score` counts only interventions with `at <= score time` (athena-gate/src/jobs.rs:122-130), and only `athena intervene` writes re-scores (manage.rs:365-375). No signal or rule reads OverrodeDecision (only athena-data records.rs:152-178 and docs mention it), and no new record kind is added, so no athena-data change is needed.",
+      "rejected": [
+        {
+          "option": "Commit the intervention in a second commit after the retry",
+          "why": "An interrupt between the two leaves a forced retry with no intervention; the plan had to state that as a limit."
+        },
+        {
+          "option": "Skip introspection of the forced override",
+          "why": "manage.rs:399 and `correct` introspect every intervention; skipping needs a recorded exception."
+        },
+        {
+          "option": "Source `User` through `Athena::intervene`",
+          "why": "It would show as open work in status and would re-score the closed job."
+        },
+        {
+          "option": "A new intervention kind",
+          "why": "It needs an athena-data allow-list change for no gain."
+        }
+      ]
+    },
+    {
+      "choice": "Status adds `failure_note: Option<String>` (skip when None) to `JobLine` only; `JobTrace` is not changed. A private `Athena::failure_note(records, job, limit_s)` applies to jobs Closed(Rejected, Failed, TimedOut or Stale). It gives 'retry <id> queued' (Queued, Proposed or Blocked), 'retry <id> running' (Dispatched with a registry entry) or 'retry <id> interrupted' (Dispatched without one), from `live_retry_of`. Otherwise it gives 'failure review pending' when `failure_review_pending` holds. A pure helper `failure_note_text(live, pending)` takes those inputs, so it is unit-tested without a repository. `scan_jobs` (status.rs:1115) fills it in. `plan_suffix` (display.rs:1060-1083) shows it as ` · <note>`.",
+      "reason": "The brief says no existing field is reused. `JobLine.retried_as` is documented (status.rs:100-103) as 'The id of the retry that stands for this job, for an interrupted job that was already retried'. It feeds the interrupted next-line text (status.rs:1166-1177), and widening it would change that text. Only `status` (the `recent` list) is asked for, so the trace is left alone, which also leaves the JobTrace fixture at display.rs:2105 untouched. `athena status` reads the worktree records (status.rs:1194-1195), while hand commands read HEAD; they are the same commit in normal use.",
+      "rejected": [
+        {
+          "option": "Reuse `retried_as`",
+          "why": "It would change its documented meaning and the interrupted next-line text."
+        },
+        {
+          "option": "Also add the note to JobTrace",
+          "why": "Not asked for; it widens the diff and the display."
+        }
+      ]
+    },
+    {
+      "choice": "Files outside the brief's expected list, answering findings 1, 2 and 7: crates/athena-core/src/introspect.rs, crates/athena-cli/src/display.rs and README.md are added. crates/athena-core/src/steward.rs and crates/athena-data/src/records/core.rs, listed by the brief, are not edited.",
+      "reason": "introspect.rs: the pending rule must read the private const `KILL_SWITCH_TEXT` (introspect.rs:820) and `event_key` (:824), the single definition of which events are reviewed. Copying them into reading.rs, already 396510 bytes, would duplicate a string that must match. Only one function and one small method are added there. display.rs: the new `JobLine` field has to be shown, and two tests build `JobLine` by literal (display.rs:2679 and :2770) and would not compile without it. The brief says no existing field is reused, so a new field is required. README.md: the command table at README.md:80-81 documents `athena ask` and `athena retry <job> [--yes]`, so it gains `--force` and one sentence on the refusal. Tests that read README.md look only for unrelated needles (main.rs:1637-1656, xtask/tests/site_page.rs:213-214). steward.rs stays untouched: the brief's Out of scope says automatic retry (drain, steward) does not change, and steward.rs:450 only reads `retried_job`. `Intervention` is defined at athena-data/src/records.rs:1066, not in records/core.rs (which holds decision records), and no new kind is needed.",
+      "rejected": [
+        {
+          "option": "Reuse an existing JobLine field so display.rs stays untouched",
+          "why": "Every candidate field has another documented meaning."
+        }
+      ]
+    },
+    {
+      "choice": "Exit table for the new and changed stages. (a) Refused at the first check, no `--force`: `settle_hand` in reading.rs returns Err before any model call and before `refuse_if_stopped` is reached in `ask`. No commit and no job. The message names the standing retry's id, its state and the `retry_follow_up` text, or says 'the failure review of job <id> is pending', and in every case 'Nothing was queued'; it offers `--force`. The CLI prints the error and exits non-zero. The next reader of state is `athena status`, which shows `failure_note`. (b) `--force` over a blocker at the first check: the override is planned, the retry is read as usual, and the intervention is committed with it (see the override decision). Records afterwards: a new job and one intervention in one commit; `status::intervention_counts` (status.rs:989) counts it. (c) No blocker, with or without `--force`: the unchanged path runs and writes no intervention. (d) Refused at commit time without `--force` (a retry landed during the read): the `files_at` Err leaves HEAD as the other process left it, with no new job. The reader's spend is not recorded, and the message says the reading was discarded. (e) `--force` and a blocker that appears only at commit time: the retry is committed with no intervention, because no blocker was seen when the user decided; this is stated in CHANGELOG.md. (f) An error loading records, config or the guard's inputs is returned with `?` before anything is committed. (g) Line pause (reading.rs:1280), kill switch / hold (`refuse_if_stopped`, reading.rs:948) and the budget preflight (reading.rs:1315) keep their order and text; the guard sits after the pause check and before `ask`. (h) Interrupt before the commit leaves nothing. Interrupt after the commit leaves the retry and its intervention together, and only the post-commit introspection can be missing, which never blocks (as for `correct`). (i) The commit fails (gate refusal at commits.rs:203-213, or the branch moving 3 times, commits.rs:275): Err, no job and no intervention. (j) Automatic callers: the guard is None, so `commit_records` is called exactly as before.",
+      "reason": "The brief requires that the exits of a changed flow be listed. Each exit above names the file:line that handles it, the state it leaves and the reader of that state.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `live_retry_of`, `Blocker`, `HandGuard`, `hand_blocker`, `settle_hand` (first check, override planning) and `commit_hand` (re-check inside `commit_records_with`, intervention in the same commit, trailers, `introspect_intervention` afterwards). Add public `retry_by_hand`, `ask_by_hand` and `queue_by_hand`. Turn `retry`, `ask`, `queue` and `first_reading` into thin wrappers over `retry_inner`, `ask_inner`, `queue_inner` and `first_reading_with` that take an optional guard. The existing interrupted-job refusal stays for the non-hand path. Update the doc comment of `retry`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Add the pure `failure_review_pending(records, job, now, limit_s, deferred)` and an `Athena` method that supplies the clock, `reader_timeout_s` and the pending-queue file check. Add unit tests `failure_review_pending_*`. (Not in the brief's list; it needs the private `KILL_SWITCH_TEXT` and `event_key`.)",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Add `--force` to `Command::Ask` and `Command::Retry` with help text, pass it in `run`, update the `retry` help text, and add clap tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/commands.rs",
+      "action": "modify",
+      "purpose": "`ask` and `retry` take `force` and call `ask_by_hand`, `queue_by_hand` and `retry_by_hand`; print one line naming the intervention when an override was recorded.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add `JobLine.failure_note`, `failure_note_text`, an `Athena::failure_note` method, the fill-in in `scan_jobs`, `job_line` default None, and unit tests `failure_note_*`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Show the note in `plan_suffix`; add `failure_note: None` to the two JobLine test literals (:2679, :2770). (Not in the brief's list; needed to show the new field and to compile the tests.)",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "purpose": "New tests for the acceptance cases (queued, drain race, pending, old job, no-block baseline, forced second retry with intervention, status note, shared guard and input forms, help flags, binary refusal). Add an `athena_bin(&fx)` helper copied from introspection.rs:292. Comment `a_rejected_job_can_be_retried_twice` as the automatic path.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "Add `[--force]` and one sentence on the refusal to the `athena ask` and `athena retry` rows of the command table (README.md:80-81).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet under '## [Unreleased]' / '### Changed': the failure, the guard and its first and commit-time checks, the pending rule and its time bound, `--force` with the intervention in the same commit and its introspection, the status note, what is unchanged (drain, steward), the limits, and the tests.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read-only first: re-read reading.rs:947-1004 (`ask`, `queue`), :1199-1262 (`first_reading`), :1274-1333 (`retry`), commits.rs:246-276, introspect.rs:820-837 and :1538-1579, reading/retry.rs:195-293, status.rs:1115-1155. Edit in the order below so the tree builds at each step.",
+    "Step 1, introspect.rs: add `pub fn failure_review_pending(records: &Records, job: &JobRecords, now: Timestamp, limit_s: u64, deferred: &dyn Fn(&JobId) -> bool) -> bool` beside `KILL_SWITCH_TEXT`, with the rule order (state, settled, kill-switch record, deferred file, age under `limit_s`, else false). Compute age as `now.as_second() - outcome.at.as_second()`. Add `impl Athena { pub fn failure_review_pending(&self, records, job, limit_s) -> bool }`, which builds the `deferred` closure from `self.state.introspect_pending_dir().join(format!(\"job-{id}.json\")).exists()` (use `event_key` for the name) and passes `crate::now()`. Add a small `fn review_limit_s(&self, head: &str) -> u64` (`JobConfig::at(&self.git, head)` then `config.budget.reader_timeout_s`, 0 when the config cannot be read). Add unit tests `failure_review_pending_*` with `blank_record()` (introspect.rs:2227).",
+    "Step 2, reading.rs (guard): add `pub(crate) fn live_retry_of(records, job: &str) -> Option<(String, JobState)>` (scan `job_history`, keep Queued, Proposed, Blocked or Dispatched, newest first). Add `enum Blocker { Interrupted, Standing, ReviewPending }` with the refusal and override texts, `struct HandGuard { force, jobs, interrupted_job: Option<JobId>, limit_s, planned: Option<Intervention> }`, `Athena::hand_blocker(&self, g, records)` (order: interrupted, then per job standing, then pending), and `Athena::settle_hand(&self, g: &mut HandGuard, records)`. Without force and with a blocker, `settle_hand` bails with the text ending 'Nothing was queued'. With force and a blocker, it builds the Intervention (unique id via `has_record_id`, OverrodeDecision, Observed, class from `job.class()` or 'unknown'). Add `Athena::commit_hand(&self, g, files, subject, body, job)`: `commit_records_with(&|head| g.files_at(self, head, &files), &message(.., trailers))`. `files_at` loads `Records::load(&self.git, head)`; if no override was planned and not forced it runs `hand_blocker` and bails when something blocks; if an override was planned it appends `NewFile::record(&AnyRecord::Intervention(..))`. The trailers are `Athena-Job` and, with an override, `Athena-Intervention`.",
+    "Step 3, reading.rs (entry points): rename the body of `first_reading` to `first_reading_with(.., guard: Option<&HandGuard>)` with `#[allow(clippy::too_many_arguments)]`. With None it calls `self.commit_records(..)` exactly as now; with Some it calls `commit_hand`. `first_reading` calls it with None. Split `ask` into `ask_inner(text, ui, guard)` (ask = None). Split `queue` into `queue_inner(text, guard)` (queue = None; the Some branch commits through `commit_hand`). Split `retry` into `retry_inner(job_ref, hand: Option<bool>, ui) -> Result<(Proposal, bool, Option<RecordId>)>`. For the hand case, after the pause check and `registry().reap()`, compute `retry_target` once, build the guard for `[id, target]`, run `settle_hand`, and skip the old interrupted block (the guard covers it, with the same message). For None keep that block as is. Pass the guard to `ask_inner`, then run `introspect_intervention` when an override was committed. Add `pub fn retry_by_hand(&self, job_ref, force, ui) -> Result<(Proposal, bool, Option<RecordId>)>`. Add `pub fn ask_by_hand(&self, text, force, ui) -> Result<(Proposal, Option<RecordId>)>` and `pub fn queue_by_hand(&self, text, force) -> Result<(JobId, String, Option<RecordId>)>`: load records at head, `retried_job(&records, text)`; for non-retry text call plain `ask` or `queue`; otherwise build the guard for that job, `settle_hand`, then the inner function. Update the doc comments.",
+    "Step 4, status.rs and display.rs: add `failure_note: Option<String>` (skip when None, with a doc comment) to `JobLine`; set None in `job_line`. Add the pure `failure_note_text(live: Option<(String, JobState, bool)>, pending: bool) -> Option<String>` and `Athena::failure_note(&self, records, job, limit_s)`. Fill it in `scan_jobs` for Closed(Rejected, Failed, TimedOut, Stale) jobs, computing `limit_s` once with `review_limit_s`. In display.rs add the note to `plan_suffix` and `failure_note: None` to the two JobLine literals (:2679, :2770). Add status.rs unit tests `failure_note_*`.",
+    "Step 5, main.rs and commands.rs: add `#[arg(long)] force: bool` with help text to `Command::Ask` and `Command::Retry`; update the dispatch (main.rs:1051-1057) and the `retry` help text; `commands::ask(request, yes, later, json, force)` and `commands::retry(job, yes, json, force)` call the hand methods and print one line when an intervention id is returned. Add clap tests for `retry <job> --force` and `ask --later --force`.",
+    "Step 6, tests in crates/athena-cli/tests/retry.rs: add `athena_bin`, a `Race` Ui, and the tests named in the demonstrations: `a_hand_retry_is_refused_while_a_retry_is_queued`, `a_hand_retry_is_refused_when_a_retry_lands_during_the_read`, `a_hand_retry_is_refused_while_the_failure_review_is_pending`, `a_job_whose_review_will_never_be_written_is_not_pending`, `a_hand_retry_with_no_standing_retry_and_no_pending_review_works_as_before`, `a_forced_hand_retry_queues_a_second_retry_and_records_an_intervention`, `status_shows_failure_review_pending_and_the_queued_retry`, `hand_commands_share_one_guard`, `retry_and_ask_help_name_force` (extend the option loop at :1085-1091). Comment `a_rejected_job_can_be_retried_twice`.",
+    "Step 7, README.md and CHANGELOG.md: add `[--force]` and one sentence on the refusal to the README rows at README.md:80-81. Add one bullet under '## [Unreleased]' / '### Changed' covering the failure, the first and commit-time guard, the pending rule and its bound, `--force` with the intervention in the same commit and its introspection, the status note, what is unchanged, the limits and the test commands. Keep the existing needles the main.rs tests look for.",
+    "Step 8: run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any `JobLine` literal that misses the new field. Do not edit anything under records/, drain.rs or steward.rs."
+  ],
+  "risks": [
+    {
+      "risk": "The refactor of `retry`, `ask`, `queue` and `first_reading` into wrappers changes the automatic path by mistake.",
+      "mitigation": "The wrappers pass None, and the None branch is the old statement (`self.commit_records(..)`). Public signatures are unchanged. The full suite runs, including about 70 retry and ask callers, the drain tests and the run tests."
+    },
+    {
+      "risk": "The pending rule's time bound is a heuristic: a review whose process died stays 'pending' until `reader_timeout_s` (86400 s in the live config) has passed since the outcome, so `athena retry` needs `--force` for up to a day.",
+      "mitigation": "The refusal text names `--force` and `athena start` as the ways out. The bound is the longest the review's model call may run (introspect.rs:1965), so no running review is missed. CHANGELOG.md states it. After the bound, the job retries as before."
+    },
+    {
+      "risk": "A refused read at commit time loses the reader's spend (no invocation record).",
+      "mitigation": "This is the same as any commit failure today (gate refusal, commits.rs:203-213). The Err says the reading was discarded. The first check runs before any model call, so the loss happens only in the rare race. Stated in CHANGELOG.md."
+    },
+    {
+      "risk": "A hand retry that commits before the drain's retry does not stop the drain's copy, since the automatic path must not change.",
+      "mitigation": "A stated limit in CHANGELOG.md. The hand retry sees the drain's retry whenever it commits first, which is the common order because the drain starts right after `go`."
+    },
+    {
+      "risk": "`--force` with a blocker that appears only at commit time goes through with no intervention.",
+      "mitigation": "A documented exit (e) in the exit table and in CHANGELOG.md. The trailer has to be fixed before the commit, and the user chose the override without seeing that blocker."
+    },
+    {
+      "risk": "The binary test needs `open(true)` to work in the fixture without a real model.",
+      "mitigation": "The refusal comes before any model call, and tests/introspection.rs:285-307 runs `athena audit` and `athena status` in the same way. If `open` needs something the fixture lacks, the producer replaces the binary case with the method-level case plus the clap parse test and says so in its report."
+    },
+    {
+      "risk": "Status (worktree records) and a hand command (HEAD) disagree for a moment.",
+      "mitigation": "They are the same commit in normal use. The note is informational; the guard reads HEAD under the commit lock."
+    },
+    {
+      "risk": "The brief lists steward.rs and athena-data records/core.rs as expected deliverables, which this plan does not edit, and adds introspect.rs, display.rs and README.md, which it does not list.",
+      "mitigation": "The reasons are in the scope decision: steward.rs is the automatic path, the Intervention record needs no change, and the added files carry the pending rule, the display of the new field and the command docs. The verifier checks the diff against the criteria."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Athena::retry behavior (automatic path)",
+      "dependent": "crates/athena-cli/src/drain.rs:4635 (`ReadOf::Retry` calls `Athena::retry`), drain.rs:1972-1981 (when the drain retries), crates/athena-core/src/steward.rs:450 (`interrupted_work` reads `retried_job`)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain (tests/drain.rs:2952 and :3212 call retry through the drain); cargo test -p athena-cli --test retry (a_rejected_job_can_be_retried_twice at :1282, a_dropped_retry_does_not_block_a_new_retry at :1217)",
+      "reason": "Unchanged: `retry` becomes a wrapper over `retry_inner(None)`, with the same checks in the same order. The new guard exists only in the new hand entry points. drain.rs and steward.rs are not edited."
+    },
+    {
+      "name": "Athena::retry and Athena::ask signatures and behavior",
+      "dependent": "About 70 test callers of `athena.retry` and `athena.ask(\"try again on ..\")`: crates/athena-core/src/run/tests.rs, scope_guard.rs:1938-2512, run_pin_tests.rs:1914, crates/athena-cli/tests/lifecycle.rs, job_plan.rs:1122, tests/retry.rs",
+      "kind": "code",
+      "test": "cargo test --locked",
+      "reason": "Signatures and results are kept, so none of these tests needs a change."
+    },
+    {
+      "name": "Athena::first_reading (the read-and-commit step)",
+      "dependent": "`first_reading` callers: reading.rs:969 (`ask`), :1179 (`read_queued`, used by run/mod.rs:464), :1194 (`read_unread`, run/mod.rs:483), and proposals.rs:643 (accept-proposal calls `ask`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core run::tests; cargo test -p athena-cli --test proposals; cargo test -p athena-cli --test drain",
+      "reason": "`first_reading` stays and calls `first_reading_with(.., None)`. With no guard the commit is still `self.commit_records(&files, &message(..))` (reading.rs:1250), so these callers behave as before."
+    },
+    {
+      "name": "Athena::queue behavior",
+      "dependent": "`Athena::queue` callers: crates/athena-cli/src/commands.rs:9, crates/athena-cli/src/drain.rs:3106, :3207, :3463 and about 140 more, mostly tests",
+      "kind": "code",
+      "test": "cargo test --locked (crates/athena-cli/tests/lifecycle.rs:3948 uses queue and checks nothing is read)",
+      "reason": "`queue` becomes a wrapper over `queue_inner(text, None)`. The commit is unchanged when no guard is given."
+    },
+    {
+      "name": "commit_records_with closure (called with the head, may return Err)",
+      "dependent": "crates/athena-core/src/commits.rs:131-153 and :246-276 (`commit_records_with` and `commit_records_in`), used by every record commit",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test retry a_hand_retry_is_refused_when_a_retry_lands_during_the_read",
+      "reason": "Not edited. The hand guard only passes a closure that can return Err. `commit_records_in` already propagates it at :264 before `build_commit_in`, and takes the repository lock at :261, so a refusal commits nothing."
+    },
+    {
+      "name": "The `athena ask` and `athena retry` command lines (new `--force` flag)",
+      "dependent": "crates/athena-cli/src/commands.rs:6 (`ask`) and :25 (`retry`); crates/athena-cli/src/main.rs:33-59 (Command definitions), :1051-1057 (dispatch); help tests at main.rs:1471 and tests/retry.rs:1085-1091",
+      "kind": "code",
+      "test": "cargo test -p athena-cli retry_help; cargo test -p athena-cli --test retry retry_and_ask_help_name_force",
+      "reason": "Both gain `--force`; `--yes`, `--later` and `--json` are unchanged. The help tests check only the options they name, and the new tests add `--force`."
+    },
+    {
+      "name": "status::JobLine new field `failure_note`",
+      "dependent": "crates/athena-cli/src/display.rs:1060-1083 (`plan_suffix`, used at :1333 and :1391); the JobLine literals in display.rs tests at :2679 and :2770; crates/athena-cli/src/drain.rs:1153 and tests/drain.rs:2241 (their own `drain::JobLine`)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli display; cargo test -p athena-core failure_note; cargo test -p athena-cli --test job_plan; cargo test -p athena-cli --test lifecycle",
+      "reason": "`plan_suffix` shows the note; the two test literals get `failure_note: None`. `drain::JobLine` is a different struct and does not read `athena_core::status::JobLine`. The field has `skip_serializing_if = Option::is_none`, so JSON readers (tests/job_plan.rs:1565-1567 reads `recent` as JSON, for a landed job only) see no change unless a note exists. Tests that read `status.recent` (tests/lifecycle.rs:3601, :3952, :3994; status.rs:1990) check state, cost or emptiness only, not the rendered suffix."
+    },
+    {
+      "name": "JobLine.retried_as meaning",
+      "dependent": "crates/athena-core/src/status.rs:1136-1180 (interrupted `retried_as` and next lines); crates/athena-cli/tests/retry.rs:1138-1214",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test retry status_shows_retried_as_and_no_retry_hint and status_names_the_follow_up_of_a_rejected_retry (existing, unchanged)",
+      "reason": "Not changed or widened. `failure_note` is separate and set only for Closed Rejected, Failed, TimedOut and Stale jobs, never for interrupted ones."
+    },
+    {
+      "name": "A new Intervention record (OverrodeDecision, Observed) tied to the retried job, committed with the retry",
+      "dependent": "crates/athena-core/src/status.rs:552-556 (`open_interventions`, filters source == User), :989 (intervention counts), crates/athena-core/src/scoring.rs:165 (`interventions_for` at a job's closing score), crates/athena-gate/src/jobs.rs:104 and :122-130 (`expected_score` counts only interventions made at or before the score), crates/athena-gate/src/invariant.rs:23 and :799-800 (an added intervention needs the `Athena-Intervention` trailer), crates/athena-core/src/manage.rs:365-375 (re-score only in `athena intervene`), crates/athena-core/src/introspect.rs:1581-1605 (`event_of_intervention`)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test retry a_forced_hand_retry_queues_a_second_retry_and_records_an_intervention (reads the record back, checks the commit's files and trailers, and the status count)",
+      "reason": "`open_interventions` and the score read User interventions only. The retried job's closing score was made earlier, so `expected_score` ignores the later record. No re-score is written, so no re-score rule applies. The commit carries the trailer, which the gate requires. The record has non-empty `what` and `why`, as athena-data validation needs. No rule or signal reads OverrodeDecision (grep: only records.rs:152-178, defaults-loop.md:32 and athena-v0.md:366). `introspect_intervention` takes the same path as the one `correct` uses (reading.rs:1464)."
+    },
+    {
+      "name": "Meaning of 'failure review pending'",
+      "dependent": "crates/athena-core/src/introspect.rs:1436-1492 (`requeue_kill_switch_failures`), :1495-1496 (a failed review is final), :1389-1405 (`defer` writes `job-<id>.json`), :1546-1550 (`event_of_job`), crates/athena-core/src/run/mod.rs:431-437 (review after `go`), crates/athena-core/src/reading/retry.rs:91-103 (`retry_introspection` seeds a retry only from a Recorded review)",
+      "kind": "code",
+      "test": "cargo test -p athena-core failure_review_pending; cargo test -p athena-cli --test retry a_hand_retry_is_refused_while_the_failure_review_is_pending",
+      "reason": "`failure_review_pending` only reads records, the pending-queue file and the clock; it writes nothing. A job in any state other than Closed(Rejected or Failed) is never pending, so TimedOut, Stale and interrupted jobs, which `retry` accepts, are never blocked by it. The Failed-but-final review is settled, as `requeue_kill_switch_failures` treats it."
+    },
+    {
+      "name": "Reading-gate refusal rules and the refusal corpus",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs:2845-2859 (`reading_source()` reads reading.rs and reading/retry.rs; `acceptance_check_names` at :2875 looks for `step!(check_`), cases `retry-complaint-reading-names-the-job` (:1956) and `retry-complaint-reading-omits-the-job` (:1974)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "The guard is a hand-command precondition, not a reading check. No `step!(check_` is added, reading/retry.rs is not edited and `retried_job` and `retry_reference` are reused unchanged. The corpus tests the reading gate, which this change does not touch. The guard's own input forms (full id, unique suffix, any letter case, trailing punctuation, `--later`, non-retry text, bare 'try again on') are tested in `hand_commands_share_one_guard`."
+    },
+    {
+      "name": "README.md and CHANGELOG.md text",
+      "dependent": "README.md:80-81 (command table), tests that read README.md: crates/athena-cli/src/main.rs:1637-1656 (stopping-a-drain needles) and xtask/tests/site_page.rs:213-214; CHANGELOG.md Unreleased needles at main.rs:1625-1636",
+      "kind": "code",
+      "test": "cargo test -p athena-cli (the main.rs tests); cargo test -p xtask --test site_page",
+      "reason": "Only added text: `[--force]` and one refusal sentence in the `ask` and `retry` rows, and one new CHANGELOG bullet. The needles those tests search for are untouched."
+    },
+    {
+      "name": "Prompt token budgets",
+      "dependent": "docs/system-facts.md prompt budgets (`system_facts_budgets_match_computed`, crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test budgets",
+      "reason": "No prompt, brief or context file is edited, so the computed sizes do not move."
+    },
+    {
+      "name": "Governance files and CI checks",
+      "dependent": "athena.toml, defaults.toml, workflows, .github/workflows/ci.yml (host settings: squash merge, CI runs fmt, clippy, test)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "None is a deliverable or changes. CI runs the same three commands as the checks. The `reader_timeout_s` the pending rule reads is the live value (athena.toml:50, 86400); it is read, never edited."
+    },
+    {
+      "name": "Concurrent automatic retry of the same job",
+      "dependent": "Hand `ask` of a retry of a job another Athena process is running or reading: reading.rs:1288-1289 (`self.running`), reading/retry.rs:35-37 (`earlier_attempt_with`), and the drain's in-flight read (drain.rs:1645, :4635)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test retry a_hand_retry_is_refused_when_a_retry_lands_during_the_read",
+      "reason": "The first check sees a retry already committed. The commit-time re-check sees one committed while this reader ran. A retry the drain commits after the hand retry is not stopped, because that would change automatic behavior; this is stated as a limit in CHANGELOG.md."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two tests in crates/athena-cli/tests/retry.rs. `a_hand_retry_is_refused_while_a_retry_is_queued`: (A) make the failed job with `reject(&model, &athena, \"remove the readme\", None, true)` (retry.rs:115). Make the first retry with the unchanged `athena.retry(&job, &Lines::default())`, as the drain does (drain.rs:4635), then record `fx.head()` and the job count (`Records::load(&fx.git, &fx.head()).request_jobs().len()`). Call `athena.retry_by_hand(&job, false, &Lines::default())` and assert Err. The error must contain the first retry's id, its state and 'Nothing was queued'. HEAD, the record set and the job count must be identical. (B) Repeat with the first retry made by `retry_by_hand` itself. (C) The same job through `ask_by_hand(\"try again on <job>\", false, ..)` and `queue_by_hand(.., false)`: both refused naming the same id. (D) A Dispatched retry made with the `interrupted()` helper (retry.rs:493): refused and the message uses the follow-up text. (E) The real binary, `Command::new(env!(\"CARGO_BIN_EXE_athena\"))` with ATHENA_STATE_DIR (an `athena_bin(&fx)` helper copied from tests/introspection.rs:292): `athena retry <job>` exits non-zero, stderr has the retry id, HEAD is unchanged. The refusal comes before any model call, so no script is needed. `a_hand_retry_is_refused_when_a_retry_lands_during_the_read` covers the drain race: a test `Ui` (the trait at crates/athena-core/src/lib.rs:181) whose `line` method, on the line containing 'reads the request' (reading.rs:679, printed just before the reader runs), calls `athena.queue(\"try again on <job>\")` once. That commits a retry job like the record the drain's `retry` commits. Then `retry_by_hand(&job, false, &race_ui)` must return Err naming that id, HEAD must be the competitor's commit, and exactly one job must have request 'try again on <job>'.",
+      "command": "cargo test -p athena-cli --test retry a_hand_retry_is_refused",
+      "observes": "The refusal names the existing retry id. HEAD, the records and the job count are identical before and after. The binary exits non-zero with the id on stderr. In the race test, the hand retry that was already reading is refused at commit with the winner's id, and the repository holds one retry.",
+      "fails_without": "Without the guard the second `retry_by_hand` queues a third job and returns Ok, so `unwrap_err`, the HEAD check and the job-count check fail. Without naming the id, `error.contains(first_retry_id)` fails. Without the commit-time re-check, the race test's hand retry commits a second 'try again on' job and returns Ok.",
+      "seam": "Production entry points: `Athena::retry_by_hand`, `ask_by_hand`, `queue_by_hand` (added in steps 2-3) and the `athena retry` binary (step 5). Fixtures `Fixture`, `Scenario`, `Model`, `reject` and `interrupted` exist in retry.rs and tests/common/mod.rs, and the scripted fake agent is injected through `fx.athena(model.script(scenario.script()))` (retry.rs:103-110). The test `Ui` (`Race`) is a new struct in retry.rs; it holds `&Athena` and calls the unchanged public `queue`. It contains no guard logic. `athena_bin` is copied from introspection.rs:292 (step 6)."
+    },
+    {
+      "criterion": 2,
+      "method": "Run `reject(&model, &athena, \"remove the readme\", None, true)`, then drop the review commit the way `interrupted()` drops commits (`fx.git.run([\"reset\",\"-q\",\"--hard\",\"HEAD~1\"])`, retry.rs:499-505) until `Records::load` shows no introspection with `job == the job` while the job is still Closed(Rejected). The outcome is seconds old, inside `reader_timeout_s` (86400 in the live athena.toml, which the fixture embeds, common/mod.rs:42), so the review is pending. Call `retry_by_hand(&job, false, ..)` and assert Err containing 'failure review' and 'pending' and 'Nothing was queued', with HEAD and the job count unchanged. Variant 2: create `<introspect_pending_dir>/job-<id>.json` (deferred by the kill switch): still refused. Variant 3: put a Failed review that does not mention the kill switch back (the unscripted `reject(.., false)` already produces one): hand retry succeeds. Then run the review for variant 1 (`model.say_with(..)` plus `athena.introspect_job(&job, &Lines::default())`) and assert the hand retry now succeeds and is seeded. Unit tests `failure_review_pending_*` in crates/athena-core/src/introspect.rs tests (the record helper `blank_record()` at introspect.rs:2227) cover the pure function with an injected `now`: a Recorded review gives false; a review Failed on the kill switch gives true; a review Failed for another reason gives false; no review with an outcome older than `limit_s` gives false; the same inside it gives true; Closed(TimedOut or Stale) gives false.",
+      "command": "cargo test -p athena-cli --test retry a_hand_retry_is_refused_while_the_failure_review_is_pending",
+      "observes": "The hand retry is refused with a message that says the review is pending, and nothing is queued. After the review exists, the retry is allowed.",
+      "fails_without": "Without the pending check the retry succeeds and queues a job, so assert-Err fails. Without the 'pending' wording the `contains` assertions fail. A rule that ignored the time bound would fail `a_job_whose_review_will_never_be_written_is_not_pending` (criterion 3).",
+      "seam": "Production entry points: `Athena::retry_by_hand` and `failure_review_pending` (steps 1-2). The state is built by the real `go` flow, with `fx.git` used to drop the review commit, which retry.rs:499-505 already does. The pure function takes `now`, `limit_s` and the `deferred` closure as parameters, so the unit tests need no clock."
+    },
+    {
+      "criterion": 3,
+      "method": "New tests in tests/retry.rs, plus the whole existing file. `a_hand_retry_with_no_standing_retry_and_no_pending_review_works_as_before`: on two identical fixtures with a rejected job whose review is Recorded, `athena.retry(&job)` and `athena.retry_by_hand(&job, false)` both return Ok with the same `seeded` flag, a reading present, request text 'try again on <job>', and no new intervention. Further cases, each Ok: a retry that was closed with `athena.close(..)`, one that ended Failed, and a Declined one do not block (the model is a_dropped_retry_does_not_block_a_new_retry, retry.rs:1217). `a_job_whose_review_will_never_be_written_is_not_pending` uses `Fixture::with_config(&test_config().replace(\"reader_timeout_s = 86400\", \"reader_timeout_s = 1\"))` (`test_config` is pub, common/mod.rs:37; the fake driver does not enforce timeouts), drops the review commit, sleeps 2 seconds, and shows `retry_by_hand(&job, false)` returns Ok with no intervention. `--force` with nothing blocking returns Ok and writes no intervention. The existing tests run unchanged, including `a_rejected_job_can_be_retried_twice` (retry.rs:1282), which gets a comment that it exercises the automatic path.",
+      "command": "cargo test -p athena-cli --test retry",
+      "observes": "The hand retry is queued exactly as `retry` queues it. A job whose review will never be written is not refused. All existing retry.rs tests pass.",
+      "fails_without": "A guard that refuses too widely (any failed job, any retry including ended ones, or pending for ever) fails the Ok assertions. A `--force` that always wrote an intervention fails the 'no intervention' assertion.",
+      "seam": "Production entry points: `retry_by_hand` and the unchanged `retry`. Fixtures exist in retry.rs and common/mod.rs. The 1-second timeout config is injected through `Fixture::with_config`, which exists."
+    },
+    {
+      "criterion": 4,
+      "method": "After a first retry R1 is Proposed, call `retry_by_hand(&job, true, ..)` and assert Ok with a second job R2 != R1. Load `Records::load(&fx.git, &fx.head())`. Both retries are Proposed and R2's request is 'try again on <job>'. Exactly one new `Intervention` exists, with category OverrodeDecision, source Observed, job == the failed job, and `what` naming R1. `fx.git.run([\"show\",\"--stat\",<proposal.commit>])` lists the request, reading and intervention files in one commit, and the commit message has `Athena-Intervention: <id>` and `Athena-Job: R2`. An introspection record with `intervention == id` exists (introspect_intervention ran, with no scripted reply, so it is recorded as failed, as in `reject(.., correction)` at retry.rs:124-127). `athena.status().interventions_by_category` rose by one. Repeat for the pending-review case (force past variant 1 of criterion 2: the intervention names the pending review), for `ask_by_hand(.., true)` and `queue_by_hand(.., true)`, and for `--force` with nothing blocking (no intervention). `retry_and_ask_help_name_force` extends the option loop at retry.rs:1088 so `athena retry --help` and `athena ask --help` list `--force`, and main.rs gets clap tests (`Cli::try_parse_from`) like the one at main.rs:1471.",
+      "command": "cargo test -p athena-cli --test retry a_forced_hand_retry_queues_a_second_retry_and_records_an_intervention",
+      "observes": "A second retry job exists and one intervention is committed in the same commit as the retry. Help lists `--force` for both commands.",
+      "fails_without": "Without `--force` handling the second call is refused, so the Ok assertion fails. Without the intervention in the commit, the `records.interventions` assertion fails. Without the trailer, the commit-message assertion fails and the gate refuses Athena's own commit (athena-gate/src/invariant.rs:799-800).",
+      "seam": "Production entry point: `retry_by_hand(job, true, ui)` (step 3) and the clap flag (step 5). The intervention is read back with `Records::load` and `fx.git` (both exist)."
+    },
+    {
+      "criterion": 5,
+      "method": "Unit tests in crates/athena-core/src/status.rs tests (in-memory `Records` helpers `waste_records` and `retry` at status.rs:3688-3692, `introspection` at :1487): `failure_note_text` gives 'failure review pending' for a pending job, 'retry <id> queued' for a Queued, Proposed or Blocked retry, 'retry <id> running' or 'retry <id> interrupted' for a Dispatched one, and None for an ended retry or a Recorded review. `live_retry_of` returns the newest standing retry and ignores Failed, Landed and Dropped ones. Whole-path test `status_shows_failure_review_pending_and_the_queued_retry` in retry.rs (run with `cargo test -p athena-cli --test retry status_shows_failure_review`): after the real `reject` flow with the review dropped, `athena.status()` has the job in `recent` with `failure_note == Some(\"failure review pending\")`. The text from `athena_cli::display::status(&view)` (as used at tests/job_plan.rs:1554) and the stdout of `athena status` contain it. After `athena.retry(&job)` the note is 'retry <id> queued' with the new id. After `athena.close(<retry>)` the note is gone.",
+      "command": "cargo test -p athena-core failure_note",
+      "observes": "`failure_note` is 'failure review pending' for the pending job and 'retry <id> queued' for the job with a queued retry. The rendered status line ends with the note. Landed and old jobs show no note.",
+      "fails_without": "Without the field, `failure_note` is absent, so every assertion fails. Without live-retry detection, the queued-retry case shows nothing. Without the pending rule, the pending case shows nothing.",
+      "seam": "Production entry points: `Athena::status` (status.rs:1189), `scan_jobs` (:1115), `failure_note_text` and `live_retry_of` (steps 2 and 4). In-memory fixtures exist in status.rs tests; the git fixture exists in retry.rs."
+    },
+    {
+      "criterion": 6,
+      "method": "The diff shows `force` added to `Command::Retry` and `Command::Ask` in main.rs, passed through `commands::retry` and `commands::ask`. Grep of crates/ shows one definition each of `hand_blocker`, `settle_hand` and `commit_hand` in reading.rs, called by `retry_by_hand`, `ask_by_hand` and `queue_by_hand`. Test `hand_commands_share_one_guard` shows the three entry points refuse the same job with the same blocker sentence and leave HEAD unchanged. It also runs the input forms the guard must read (all through `retry_reference`, retry.rs:560-580, and `Records::resolve`): `try again on <full id>`; `TRY AGAIN ON <unique suffix>.` (case-insensitive, trailing punctuation trimmed); `try again on <id>, please`; and `ask --later` with the same text. Each is refused when a retry stands. Text that is not a retry, 'add a greeting', is not guarded, and `--force` on it writes no intervention. Bare 'try again on' keeps its existing error ('say which job to try again on'). Clap tests in main.rs parse `retry <job> --force` and `ask --later --force \"try again on x\"`. Regression: `cargo test -p athena-core --test refusal_corpus`. The guard is a command precondition, not a reading check: it adds no `step!(check_` (so `acceptance_check_names`, refusal_corpus.rs:2875, and `every_acceptance_check_has_a_refusing_corpus_case`, :2905, are unaffected), and the corpus cases `retry-complaint-reading-names-the-job` (refusal_corpus.rs:1956) and `retry-complaint-reading-omits-the-job` (:1974) test the reading gate, which this change does not touch. The input forms are covered by the new test, so no corpus case is added.",
+      "command": "cargo test -p athena-cli --test retry hand_commands_share_one_guard",
+      "observes": "One definition and three callers of the guard; two flags added; every retry form is refused, and non-retry text is not.",
+      "fails_without": "A guard missing from `ask --later`, a `--force` flag missing from Ask or Retry, or a form that `retry_reference` reads but the guard does not, fails the parse or refusal assertions.",
+      "seam": "Production entry points: the clap parser (`Cli::try_parse_from`, already used by the main.rs tests near main.rs:1459-1490) and the three `Athena` hand methods. All fixtures exist."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff. crates/athena-cli/src/drain.rs and crates/athena-core/src/steward.rs are absent from it. The diff to `Athena::retry`, `ask`, `queue` and `first_reading` only turns each into a thin wrapper over an inner function with no guard, and the guard-less commit is still `self.commit_records(..)`. CHANGELOG.md has a new bullet under '## [Unreleased]' / '### Changed' (CHANGELOG.md:8-10). It names the failure (a hand retry duplicating a queued or running one, closed as a duplicate), the guard, `--force` and the intervention, the status note, what is unchanged (drain, steward), and the limits: a drain retry that commits after a hand retry is not stopped, and a forced retry whose blocker appears only at commit time records no intervention. It also states the pending rule's time bound and that the reader's spend on a refused read is not recorded. The existing needles that main.rs:1625-1636 looks for in CHANGELOG Unreleased remain. Regression runs for the automatic path: `cargo test -p athena-cli --test drain` (drain.rs:2952 and :3212 call `Athena::retry` through the drain), `cargo test -p athena-core run::tests`, and `cargo test -p athena-cli --test lifecycle`.",
+      "command": "git diff --stat",
+      "observes": "The stat shows no change to drain.rs or steward.rs. CHANGELOG.md is updated. The drain and run tests pass.",
+      "fails_without": "A diff touching drain.rs or steward.rs, or changing what `Athena::retry` does without a guard, would show in the stat. The drain and run tests would fail if automatic retry changed.",
+      "seam": "Not a behavior criterion; the evidence is the diff and the existing drain, lifecycle and run tests, which call `Athena::retry` and `ask` without a guard."
+    },
+    {
+      "criterion": 8,
+      "method": "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` on the final tree. Also `cargo test -p athena-cli --test retry`, `cargo test -p athena-core failure_note`, `cargo test -p athena-core failure_review_pending` and `cargo test -p athena-cli --test budgets`. The budgets test is unaffected because no prompt, brief or context file changes. Clippy watch points: `#[allow(clippy::too_many_arguments)]` on `first_reading_with`, and every new struct field used.",
+      "command": "cargo test --locked",
+      "observes": "All three checks pass.",
+      "fails_without": "A new field missing from the `JobLine` literals in display.rs tests (:2679, :2770) breaks the build. Unformatted code or a clippy warning fails the checks.",
+      "seam": "No new seam; cargo drives the checks."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "2ee9aa3058785bca803318b48da9225f32300c1b9021a77aa0f8f077e4432885"
+}
