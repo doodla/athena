@@ -166,16 +166,32 @@ fn retry_busy<T>(op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
 }
 
 fn found(program: &str, arg: &str) -> Option<String> {
+    run_first_line(program, arg).ok()
+}
+
+/// Runs `program arg` and returns the first line of its output. The error says which step failed: the spawn
+/// (with the io error, after the busy retries) or the exit status and what the program wrote to stderr.
+fn run_first_line(program: &str, arg: &str) -> std::result::Result<String, String> {
     let mut cmd = Command::new(program);
-    cmd.arg(arg).stderr(Stdio::null());
-    let out = retry_busy(|| cmd.output()).ok()?;
-    out.status.success().then(|| {
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_string()
-    })
+    cmd.arg(arg);
+    let out = retry_busy(|| cmd.output()).map_err(|e| {
+        format!(
+            "could not run {program} {arg}: {e} (os error {:?})",
+            e.raw_os_error()
+        )
+    })?;
+    if !out.status.success() {
+        return Err(format!(
+            "{program} {arg} exited with {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string())
 }
 
 fn setup(flags: &Flags) -> Result<()> {
@@ -724,9 +740,9 @@ fn is_version(text: &str) -> bool {
 /// other byte as it was. Returns the old and new versions. An empty or unreadable version, or a file with no
 /// `claude_version` line, is an error and the file is not written.
 fn repin_at(file: &Path, bin: &Path) -> Result<(String, String)> {
-    let reported = found(&bin.to_string_lossy(), "--version").with_context(|| {
-        format!(
-            "`{} --version` failed; is Claude Code installed?",
+    let reported = run_first_line(&bin.to_string_lossy(), "--version").map_err(|why| {
+        anyhow!(
+            "`{} --version` failed; is Claude Code installed? ({why})",
             bin.display()
         )
     })?;
@@ -935,6 +951,26 @@ mod tests {
         let status = retry_busy(|| Command::new(&path).status()).unwrap();
         releaser.join().unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn a_failed_version_run_names_the_io_error_or_the_exit_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let why = run_first_line(&missing.to_string_lossy(), "--version").unwrap_err();
+        assert!(why.contains("could not run"), "{why}");
+        assert!(why.contains("os error Some(2)"), "{why}");
+
+        let failing = dir.path().join("failing");
+        athena_testkit::write_executable(&failing, "#!/bin/sh\necho broken >&2\nexit 3\n");
+        let why = run_first_line(&failing.to_string_lossy(), "--version").unwrap_err();
+        assert!(why.contains("exit status: 3"), "{why}");
+        assert!(why.contains("broken"), "{why}");
+
+        let file = dir.path().join("athena.toml");
+        std::fs::write(&file, "claude_version = \"1.0.0\"\n").unwrap();
+        let err = repin_at(&file, &failing).unwrap_err().to_string();
+        assert!(err.contains("exit status: 3"), "{err}");
     }
 
     const TOML: &str =
