@@ -1,0 +1,568 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261115-202532-6mng",
+  "round": 5,
+  "at": "2026-11-16T00:37:24.157700794Z",
+  "invocation_seq": 10,
+  "approach": "Root cause, worded identically in new decision D189 and the CHANGELOG entry: criteria are checked independently only after the producer ends, so an unmet criterion found by the verifier cannot trigger a repair. `produce_and_verify` (run/mod.rs:1871-1950) runs one producer loop, one candidate, one set of checks and one verifier, and a fail verdict closes the job Rejected. Only the producer's own report is ever sent back (`unmet_criteria`, run/send_back.rs:19, used at producer.rs:465). What is missing is the independent verdict reaching the producer while a round is left to use it. Fix, in the run pipeline, bounded, no refusal rule (0% of past accepted readings newly refused): (a) move one round (snapshot, producer loop, candidate, `Built`, resume mark, `check_and_verify`) into `produce_round`; (b) after round one a pure `verify::repair_view(&Verification) -> Option<RepairView>` reads the stored verdict and is Some only when the verifier judged, the verdict is Fail and a repairable unmet criterion or blocker/major finding is left; (c) while fewer than the new `VERIFIER_REPAIRS` (=1, beside `PRODUCER_SEND_BACKS`, mod.rs:1681) repairs have run, not nested, and `preflight(Run)` and the disk gate pass, run round two from a snapshot seeded with the first candidate, whose brief is built by `send_back_text_repaired`, the new last link of the existing send-back chain; (d) the round-two verdict is final; a round two that stops with no verdict restores round one's candidate, Verification, happened state and files and closes Rejected exactly as it would have without the repair. Answers to the round-4 findings. Findings 1 and 2 (minor, files outside the deliverables): kept, each justified below (decision 7): `finding_text` needs one token of visibility (retry.rs:446 is `pub(super)`, so `crate::reading::finding_text` is not nameable from verify.rs without it) and the drain test at drain.rs:5204-5253 counts producer entries and necessarily changes when a failing verdict repairs; both are under the request's `Files: crates/`. Finding 3 (major): the scope guard is now a listed dependent and has a decision (decision 6): a repaired attempt is one attempt for T1 and T4 and its two-round spend and wall time count in full toward T3 and T5 (`attempt_of` sums every non-reader invocation, scope_guard.rs:698-706); thresholds are not retuned (scope_guard.rs:32); a repaired attempt that lands is `done`, so T3 and T5 give None; the scope_guard.rs test rig pops one verdict per Verifier call (scope_guard.rs:1353, 1512) and is changed in a stated way, with two new pins. Finding 4 (minor): the forecast and calibration readers are named in dependents (`score_records`, `scoring::history`, `reference_forecast`, `class_forecasts`) and D189 and the CHANGELOG say a repaired job's actual cost and time include both rounds and `verification_passes` resolves on the final verdict; forecasts themselves are unchanged. Finding 5 (minor): D189 says a repaired job that passes keeps the first verdict only as text in the first verifier invocation's `detail`, and names a typed first-round record as possible follow-up. Finding 6 (minor): the nested-run guards in run/mod.rs are `self.nested.is_none()` at lines 1980, 2006 and 2028 (the grep for `is_some()` finds the other two uses, at 1800 and 2534); the plan cites those and adds the same guard to the repair loop.",
+  "decisions": [
+    {
+      "choice": "Repair loop wraps one round in `produce_and_verify`; the trigger is the pure `verify::repair_view` over the stored `Verification`, not a new field carried out of `verification_stage`. Round two reuses the whole round: snapshot seeded with the first candidate, producer loop, candidate stage, checks, replay, verifier.",
+      "reason": "Everything the trigger needs is already stored: `agent_verdict` is Some exactly when the verifier returned output (verify.rs:639-645), a timeout or incomplete verifier leaves it None, and `Finding.source` and `CriterionResult.evidence` carry what is needed to spot Athena's own findings (verify.rs:292-299, 541-555, 600-604, 629-633). Reusing the round keeps admission, the decision gate, the checks, the replay and the pull-request replace identical for the second candidate. A `closing.verification` that is Some after round two means a verdict was reached, because round one's is taken out before round two and the early stops in `check_and_verify` (mod.rs:1979-2056) and the `candidate_stage` stops return with it None. Existing code already treats a misread and an unmet or unseen Behavior criterion as not retryable from the tree (`qualifies_for_tree_retry`, retry.rs:347-359), so the exclusions match what the repo already means by 'a producer pass cannot fix it'.",
+      "rejected": [
+        {
+          "option": "Set a typed `Closing.repair` inside `verification_stage`",
+          "why": "Adds plumbing and a second copy of what the stored Verification already holds; the pure function is tested with the real `judge`."
+        },
+        {
+          "option": "Re-run only the verifier with a producer pass inside `verification_stage`",
+          "why": "It has no producer snapshot, grant or prompt and would skip candidate, admission and checks for the repaired tree."
+        },
+        {
+          "option": "Raise PRODUCER_SEND_BACKS and send back on the producer's own report",
+          "why": "That is the self-report direction the dropped jobs took; the failing signal is the independent verdict, which exists only after verification."
+        },
+        {
+          "option": "Edit role prompts to tell the producer to check each criterion",
+          "why": "Out of scope: those prompt, budget and wrapping edits were dropped with jobs 20261014-170031-2r9b, -172342-rqgb and -174937-hrzn."
+        }
+      ]
+    },
+    {
+      "choice": "New `const VERIFIER_REPAIRS: u32 = 1` beside `PRODUCER_SEND_BACKS`, enforced by a counter. No repair for a nested run (`self.nested.is_some()`, the same guard as the `self.nested.is_none()` checks at mod.rs:1980, 2006, 2028), a resumed candidate, a failed `preflight(Run)` or low disk (one `repair     skipped: ...` line for the last two). Before round two starts the job's resume mark is removed (`remove_resume`, state.rs:315).",
+      "reason": "The bound is in code and named (criterion 5). `PRODUCER_SEND_BACKS` is documented as the shared pre-verifier send-back (mod.rs:1677-1681) and D182 keeps it at 1, so it is not reused. `preflight(Run)` (reading.rs:502-515; reserve = producer + verifier caps) means no repair starts that the job budget cannot pay; the live athena.toml has producer 10.00, verifier 5.00 and job 50.00 (lines 45-47), so a normal job can pay. `resume_candidate` (mod.rs:843-844) calls `check_and_verify` directly and never reaches the loop. Round one writes a resume mark for the first candidate (mod.rs:1948) and `settle_resume_marks` keeps a mark only for a Failed environment stop (mod.rs:886); without removal a round-two hold or stop would let `athena retry` resume the already-rejected first candidate with no repair. Removing it first means a hold before round two's candidate is admitted leaves no mark (the documented pre-producer hold, close.rs:170-176), and once round two's candidate is admitted `produce_round` writes a mark that points at round two's candidate.",
+      "rejected": [
+        {
+          "option": "Reuse PRODUCER_SEND_BACKS = 2",
+          "why": "It would give the producer's own report two send-backs and change every send-back test and D182."
+        },
+        {
+          "option": "Unbounded repair until the verifier passes",
+          "why": "Unbounded cost; the reading says one round."
+        },
+        {
+          "option": "Hold the job for low disk before round two",
+          "why": "A hold before a producer means no candidate yet (close.rs:170-176), so the first verdict would be thrown away; skipping keeps the first verdict."
+        },
+        {
+          "option": "Leave round one's resume mark in place",
+          "why": "A retry would resume the first, already rejected candidate with no repair."
+        }
+      ]
+    },
+    {
+      "choice": "Store the repair as ordinary records, with no new record type or field. Keep a `FirstRound { candidate, verification, happened, files }` clone while round two runs, and restore all four when round two returns Ok with no Verification (state Rejected, `verification_passed` Some(false), round two's kept-work directory removed). A hold (Err) is left to `commit_hold`. A repaired job that passes keeps the first verdict only as text in the first verifier invocation's `detail` (every unmet criterion and blocking finding, no count cap, each clipped to 240 chars, plus 'sent back to the producer for one repair pass'); D189 says so and names a typed first-round record (a second Verification path or a typed Invocation field) as possible follow-up work.",
+      "reason": "`candidate_stage` sets `closing.candidate` to round two's candidate on its paths (candidate.rs:178, 220, 227) and each stop replaces `closing.happened` through `self.failure` (state Failed, mod.rs:2581-2591); `keep_unfinished_work` adds a progress note (mod.rs:1008) and may move the work tree (mod.rs:988-998). Without the restore a repaired job whose second producer fails would close Failed with no Verification, and `tree_retry_seed` returns None without one (retry.rs:410-412). `closing.files` is written before close only at mod.rs:1008, mod.rs:2264-2268 (replay record) and verification.rs:201 (`brief-verifier.md`), so restoring the cloned `files` removes the stale note and puts round one's replay and verifier brief back. Round two's invocations stay in `new_invocations`. With the restore the job ends where it ended before this change: Rejected with the first candidate and verifier findings. A deadline, expired login, usage limit, check timeout or any producer, admission, gate or scope stop in round two is classed as the first verdict standing, not an environment stop, and uses no attempt the first verdict had not used (Rejected is never resumable: `resumable_stop`, disk.rs:537-543; `keeps_unfinished_work`, disk.rs:549-557). `Closing::put_file` (remove same-path files, then push) is used for the replay record and `brief-verifier.md` so a round that reaches a verdict replaces round one's. The stored first verdict survives only as the detail text because the Verification path is per job (records.rs:934) and a second one needs an athena-data record or allow-list change, which this job does not make. When round two reaches a verdict, a fail has reason `the final verdict is fail: {second reasons}. {note}`; a restored first round has `the final verdict is fail: {first reasons}. {note}; the repair pass stopped before a verdict: {round two's stop reason}`. The prefix `the final verdict is fail:` stays first (close.rs:53); the note is redacted. The introspector builds `what` from `outcome.reason` plus `failure_details(verification)` and does not read `Invocation.detail` (introspect.rs:1538-1572), so the reason carries all first-round items.",
+      "rejected": [
+        {
+          "option": "Take round one's Verification out and leave it out when round two stops",
+          "why": "The job would close Failed with no Verification and a retry would lose the first candidate and the verifier's blocking findings."
+        },
+        {
+          "option": "Restore only candidate, verification and happened state",
+          "why": "Leaves round two's progress note, kept-work directory and, after put_file, round two's replay and verifier brief beside round one's Verification."
+        },
+        {
+          "option": "Keep an environment stop in round two as an environment stop and resume from round two's kept work",
+          "why": "The first verdict would be lost and the job would hold a candidate with no Verification; a Rejected close equals today's outcome and the retry then seeds from the first candidate and findings."
+        },
+        {
+          "option": "Keep both Verification records",
+          "why": "The path is per job (records.rs:934); a second would overwrite it or need a new path and an allow-list change in athena-data."
+        },
+        {
+          "option": "Add a typed `repair` field to Invocation or Verification",
+          "why": "It changes athena-data record shapes and every stored-record reader for information the detail and reason text already carry; named as follow-up."
+        },
+        {
+          "option": "Push the repair note into `Verification.reasons`",
+          "why": "It would put a reason on a passing verification and change what the landing gate and `verified()` see."
+        },
+        {
+          "option": "Cap the note at 3 items",
+          "why": "A first round with four or more items would again leave an unmet criterion out of the stored event, the failure class being fixed."
+        }
+      ]
+    },
+    {
+      "choice": "The repair brief extends the existing builder chain: `send_back_text_scoped` becomes a wrapper over a new last link `send_back_text_repaired(.., repair: Option<&RepairView>)`, and the same `Option<&RepairView>` is passed into `producer_loop`, which uses it for its first attempt brief and its own send-backs (the four-arm match at producer.rs:684-700 becomes one call). With None the text is byte-identical. With Some, one `## Sent back` heading holds the repair intro (it replaces the 'Your previous report...' paragraph) then the lists. The first sentence of the intro is a pub const `REPAIR_LEAD` in briefs.rs, so tests and the scope-guard rig can tell a repair prompt apart from any other.",
+      "reason": "The shared intro is false for a repair: 'your previous report did not show every criterion met', 'This is the only send-back' and 'A run that leaves no change fails' (send_back.rs:162-173); a seeded run that adds nothing is the candidate, not an idle producer (candidate.rs:168-181). The base snapshot text says 'a snapshot of the base commit's files' (briefs.rs:710-714) while the seeded one is the base plus the candidate's files laid over it, uncommitted (snapshot.rs:97-101). The intro states four facts: the directory is a fresh snapshot already holding the first candidate (`git diff` against its base shows it); the independent verifier, not the producer's report, found the items; a run that adds nothing keeps the first candidate and it is verified again unchanged; the verdict after this round is final. `producer_loop` builds its own send-back from the `brief` it is given (producer.rs:684-700), so a round-two brief that was already a repair text would hold two `## Sent back` headings; passing the view in keeps one heading, and items from the producer's own report in this round are listed under the existing headings after the repair intro (`append_mirror_drift`, send_back.rs:227-247, still finds one heading). The findings block is shared with `must_address_block` (briefs.rs:616-629) and each finding is formatted by `finding_text` (retry.rs:446), so a finding reads the same in a retry and in a repair; texts pass through `ctx.redactor` as `tree_retry_seed` does (retry.rs:424).",
+      "rejected": [
+        {
+          "option": "A separate `repair_brief` function",
+          "why": "A parallel builder, contrary to criterion 5."
+        },
+        {
+          "option": "Only prepend one sentence to the shared intro",
+          "why": "The rest of that intro would stay false."
+        },
+        {
+          "option": "Build round two's brief as a repair text and let `producer_loop` nest its own send-back under it",
+          "why": "Two `## Sent back` headings and contradicting sentences."
+        },
+        {
+          "option": "A new formatter for findings in briefs.rs",
+          "why": "It would describe the same finding differently from the retry brief."
+        }
+      ]
+    },
+    {
+      "choice": "Trigger and exclusions in `repair_view`: a judged Fail verdict with an unmet criterion or a blocker or major finding, minus (i) a criterion whose evidence is the not-assessed text and its Athena 'Criterion N was not assessed' finding; (ii) the Athena request-misread finding; (iii) only when `agent_verdict` is Pass, the Athena D43 findings ('Behavior criterion N is unmet: ... must cite commands that ran (D43)') and the criteria they name. With `agent_verdict` Fail the D43 items stay in. Recognisers are shared consts in verify.rs (`NOT_ASSESSED_EVIDENCE`, `MISREAD_SUMMARY`, `NOT_ASSESSED_SUFFIX`, `D43_PREFIX`, `D43_SUFFIX`); `judge` uses the first two for its non-`format!` literals (verify.rs:544, 631) and keeps both `format!` literals (552, 602) where they are.",
+      "reason": "`judge` fails the verdict on exactly these items (verify.rs:646-664). Not-assessed (549-555) and misread (627-634) describe what the verifier did or read, and nothing a producer pass changes decides them. The D43 flip sets `met = false` where the verifier's cited commands were not seen running or it cited none (585-605), and the stored record loses the verifier's own `met`. When the verifier's verdict is Pass every unmet or blocking D43 item is Athena's flip, so a producer pass cannot fix it. When it is Fail the verifier itself found a fault, often in that same criterion, so the repair runs. Known cost: a Fail whose only serious items are D43 flips spends one round the producer may not be able to change; bounded to one round, not measured, named in D189 and the CHANGELOG. A failing check repairs only through the verifier: `judge` adds a Minor finding for a failing check (verify.rs:448-473) and the check blocks a pass at verify.rs:663, so a verdict that marks the check criterion unmet, or adds a blocker or major finding, repairs; a failing check the verifier did not flag triggers none. Athena's own blockers and majors a producer can fix (held replay, a requirement row marked Covered) stay in. Keeping the `format!` literals inside `judge` leaves `drift_haystack` (verify.rs:3881-3920, which reads only `//!` header lines and `format!(` literals between `\\npub fn judge(` and the next `\\n}\\n`) and its tests (3923-3945) unchanged.",
+      "rejected": [
+        {
+          "option": "Trigger on every blocker or major finding",
+          "why": "Repairs a misread or an unassessed criterion at full cost with no way to change the outcome."
+        },
+        {
+          "option": "Trigger on a failed check as well",
+          "why": "The producer already had one send-back with the check's output tail before the verifier; the verifier's unmet check criterion already triggers a repair."
+        },
+        {
+          "option": "Exclude all D43 items",
+          "why": "Misses a criterion the verifier itself judged unmet that cites no command; `agent_verdict` Fail is a stored signal that narrows the gap."
+        },
+        {
+          "option": "Move the D43 and not-assessed `format!` strings into functions outside `judge`",
+          "why": "`rule_sources_appear_in_the_header_or_judge_format_strings` (verify.rs:3923-3937) needs 'must cite commands that ran (D43)' inside a `format!` literal in `judge`."
+        },
+        {
+          "option": "Exclude check criteria (`is_athena_check_criterion`) from the trigger",
+          "why": "A failing fmt, clippy or test check is a producer-fixable cause and the most common unmet criterion in the 43 introspections."
+        }
+      ]
+    },
+    {
+      "choice": "Scope guard and forecast readers: a repaired job is one attempt; its two-round spend and wall time count in full toward T3 and T5, and no signal, threshold, forecast or measure code changes. D189 and the CHANGELOG say so. Tests: the scope_guard.rs test rig reads one queue entry per job (a failing entry is repeated by the verifier in the repair round, unless a `repair_passes` switch is set), and two new pins show the repaired spend and the repaired landing.",
+      "reason": "`attempt_of` takes `cost_dollars` from `totals.cost_execution` (scope_guard.rs:698-702), which sums every non-reader invocation (scoring.rs:116-119), and `agent_minutes` from `wall_time_execution` (scope_guard.rs:703-706), which is the run clock from dispatch to the final verdict (verification.rs:457; mod.rs:2586), so both rounds are in the figure whichever way T3 reads it; discounting the repair would need tagging invocations and a measure change, and every threshold is already marked an estimate to be tuned (scope_guard.rs:32). Intended effect: a rejected repaired attempt, which really spent about twice a single round, reaches T3 flag (1.0 x p90) or pause (1.5 x p90, scope_guard.rs:423-428) after fewer attempts than before; a near-complete rejection still gets its one targeted retry (`near_complete`, :300; `targeted_retry`, :314), and an attempt that lands after the repair is `done`, so T3 and T5 return None (:419, :471). T1 and T4 are unchanged: a job is one attempt (T1, :329) and T4 reads the first unmet criterion of the final Verification (:685-689). `progress_of` and `gaps_only` (:721-780) read the stored final Verification: round two's when it reached a verdict, round one's after a restore. For forecasts: `score_records` resolves `verification_passes` on the final verdict (athena-score lib.rs:447-448), `cost_usd` on the sum of every non-reader invocation (453-457, 485-487) and `wall_time_s` on the dispatch-to-verdict time (490), and `scoring::history` (scoring.rs:14-50) feeds those actuals to `reference_forecast` (lib.rs:140-170); so a repaired job's actuals include both rounds and its `verification_passes` is true when round two passes. The reader forecast itself is whatever the reader writes and is left unchanged.",
+      "rejected": [
+        {
+          "option": "Discount or exclude repair-round spend in T3 and T5",
+          "why": "Needs a way to tag repair invocations in athena-data records and a change to a measure; the spend is real and the thresholds are estimates to be tuned."
+        },
+        {
+          "option": "Leave the scope guard and its rig out of the plan",
+          "why": "Its rig pops one verdict per Verifier call (scope_guard.rs:1512), so with a repair the verdict sequence across jobs shifts and the T4 and T3 tests fail (the second job would pass); they must change."
+        },
+        {
+          "option": "Retune T3 or T5 thresholds for repaired jobs",
+          "why": "No measured repaired-job spend exists yet; a change would be a guess. Named as follow-up once data exists."
+        }
+      ]
+    },
+    {
+      "choice": "Keep two edits outside the listed deliverables, each the smallest possible, plus the scope_guard.rs tests of decision 6: `finding_text` from `pub(super)` to `pub(crate)` in reading/retry.rs:446, and the drain.rs test at 5204-5253 updated for the repair.",
+      "reason": "Finding 1: `finding_text` is the one formatter of a finding in the retry brief; the glob `pub use retry::*;` at reading.rs:70 carries an item no wider than its own visibility, so verify.rs cannot name it today. One token lets `repair_view` write a finding exactly as the retry brief does. Finding 2: the drain test counts producer stage entries across a `phased` script keyed on reader count (drain.rs:5081-5094) with `rejecting_verdict()` (5061-5078) failing criterion 1; with the repair the first job enters the producer stage twice, so `producers.len() == 2` and `producers[1]` (the retry's) are wrong. `cargo test --locked` is recorded check 6, so the test must change; the request's Files is `crates/` and the accepted criteria carry no files limit, so the allowed-paths stop (mod.rs:1979-1998) cannot fire.",
+      "rejected": [
+        {
+          "option": "A second copy of the finding formatter in verify.rs",
+          "why": "It drifts from the retry brief; the pin `repair_send_back_formats_findings_as_the_retry_brief_does` would have to guard a copy."
+        },
+        {
+          "option": "Make the drain scenario skip the repair",
+          "why": "Needs a refusal exception or a config knob for tests; the bound is a code constant by design."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Add `VERIFIER_REPAIRS` under `PRODUCER_SEND_BACKS` (1681), `Closing::put_file` and a `FirstRound` clone (candidate, verification, happened, files) with its restore. Split `produce_and_verify` into `produce_round` plus the one-repair loop (guards incl. `self.nested`, first-verifier detail, `repair` UI lines, resume-mark removal, kept-work removal and restore on a round with no verdict, reason note). Route the replay record through `put_file`. Re-export `send_back_text_repaired`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "`producer_snapshot(ctx, seed: Option<&str>)`: a Some seed takes precedence over `ctx.seed_commit` and selects `SnapshotRepo::BaseThenTree`. `producer_loop` takes `repair: Option<&RepairView>`: first attempt brief and its own send-backs go through `send_back_text_repaired`. Module docs name the post-verdict repair round.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Push `brief-verifier.md` through `closing.put_file` (line 201) so a second round replaces it. No verdict logic changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add `send_back_text_repaired(.., repair: Option<&RepairView>)` as the last link of the chain; `send_back_text_scoped` becomes a wrapper passing None. With Some, the repair intro replaces the self-report paragraph and the repair section follows the lists, under one heading.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add consts `NOT_ASSESSED_EVIDENCE` and `MISREAD_SUMMARY` (used by `judge` at 544 and 631, same text) and `NOT_ASSESSED_SUFFIX`, `D43_PREFIX`, `D43_SUFFIX` (recognisers only; both `format!` literals stay in `judge`). Add `repair_view(&Verification) -> Option<RepairView>` (using `finding_blocks` and `crate::reading::finding_text`) and `repair_note` (no item cap, each item clipped to 240 chars), placed outside the `judge` slice that `drift_haystack` reads. Unit tests from the real `judge`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `RepairView`, `REPAIR_LEAD` and `repair_send_back_section`, sharing a findings-block helper with `must_address_block` (retry output unchanged). Add one sentence to `checks_before_verifier_section` that the verifier's verdict can send the work back once. Tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add `scripted_verdicts` (n-th verifier verdict, introspector intercept, second-call producer override for an invalid report, a deadline and an expired login, resume-mark read) and the `repair_*` tests for criteria 2, 3 and 4, the budget-skip test, the direct restore test and the repaired-landing test. Fix existing tests that assumed one round for a failing verdict.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add the four `repair_send_back_*` pins beside the send-back pins (1135-1431). Fix any pin that assumed one verdict round.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D189 after D188 (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance, `Amends D182 in prose only`). No existing entry is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Add `[[link]] older = \"D182\" newer = \"D189\" status = \"amended\"`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an `[Unreleased]` entry naming the root cause in the same words as D189, the fix, the one-round bound, the limits, the unmeasured costs, the scope-guard and forecast effects, the tests, and that jobs 20261014-170031-2r9b, -172342-rqgb and -174937-hrzn are dropped.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading/retry.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 1): one token, `finding_text` from `pub(super)` to `pub(crate)` (446), so `repair_view` formats a finding exactly as the retry brief does. `pub use retry::*;` at reading.rs:70 then carries it to `crate::reading::finding_text`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 2): update `in_flight_row_moves_from_verifier_back_to_producer_when_the_rejected_job_is_retried` (5204-5253), which counts producer entries across a `phased` script (5081-5094); the repair inside the first job adds one producer entry. Also any other drain test `cargo test -p athena-cli` shows failing.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 3), tests module only, no non-test code: make the rig's verdict queue one entry per job (a failing entry is repeated in the repair round unless `plan.repair_passes`), change the cost-0.8 tests to 0.4, and add `a_rejected_attempt_after_a_repair_counts_both_rounds_toward_t3` and `a_repaired_attempt_that_passes_is_accepted_and_no_signal_fires`.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read run/mod.rs `produce_and_verify` (1871-1950), `check_and_verify` (1957-2090), `Closing` (132-148, 294-309), `RunContext::spent` and `next_seq` (1587-1598), the replay record push (2264-2268), `write_resume_mark`/`settle_resume_marks` (849-889), `keep_unfinished_work` (959-1028); verification.rs 195-210. Add `const VERIFIER_REPAIRS: u32 = 1;` with a doc comment directly under `PRODUCER_SEND_BACKS` (mod.rs:1681), saying it is counted apart from `PRODUCER_SEND_BACKS` and `SCOPE_SEND_BACKS`.",
+    "verify.rs, before `judge`: add `NOT_ASSESSED_EVIDENCE` and `MISREAD_SUMMARY` and use them at 544 and 631 with the same text (both are non-`format!` literals). Do not edit the `format!` literals at 552 and 602 or any `//!` line. After `judge`: add `NOT_ASSESSED_SUFFIX`, `D43_PREFIX`, `D43_SUFFIX`, a private recogniser for each Athena finding (source Athena, matching prefix/suffix, with the criterion number parsed for D43), `pub fn repair_view(v: &Verification) -> Option<RepairView>` and `pub fn repair_note(first: &RepairView, first_candidate: &str, first_verifier: u32, repair_producer: u32, second_verifier: Option<u32>) -> String` (no item cap, each item clipped to 240 chars). `repair_view`: None unless `agent_verdict` is Some and `final_verdict` is Fail; unmet = criteria with `!met` whose evidence is not `NOT_ASSESSED_EVIDENCE`, minus (only when `agent_verdict` is Pass) the criteria a D43 finding names; blocking = `finding_blocks` findings minus not-assessed and misread Athena findings, minus (only when `agent_verdict` is Pass) D43 findings; unmet text `{criterion}: {evidence}`, findings via `crate::reading::finding_text`; Some only if either list is non-empty. Unit tests `repair_view_*` with the real `judge` for every case listed under criterion 3, plus `repair_recognisers_match_what_judge_writes`. Run `cargo test --locked -p athena-core verify` to see the drift tests still pass.",
+    "reading/retry.rs: change `pub(super) fn finding_text` to `pub(crate) fn finding_text` (446, one token); confirm `crate::reading::finding_text` resolves through `pub use retry::*;` (reading.rs:70).",
+    "briefs.rs: add `pub struct RepairView { pub unmet: Vec<String>, pub blocking: Vec<String> }`, `pub const REPAIR_LEAD: &str` (the first sentence of the repair intro, found in no other brief) and `pub fn repair_send_back_section(&RepairView) -> String`. Refactor `must_address_block` to call a shared `findings_block(out, lead, findings)` with its own lead sentence unchanged (retry output byte-identical). Add one sentence to `checks_before_verifier_section` that the verifier's verdict can send the work back once, with the unmet criteria and findings (it must not contain `REPAIR_LEAD`). Tests for the section and the sentence.",
+    "send_back.rs: add `send_back_text_repaired(brief, unmet, unchanged, replay, gate, scope, repair: Option<&RepairView>)` as the last link; `send_back_text_scoped` calls it with None. With Some, the repair intro (four statements: fresh snapshot already holding the first candidate with `git diff` against base; found by the verifier, not the producer's report; a run that adds nothing keeps the first candidate and it is verified again unchanged; the verdict after this round is final, and items from the producer's own report in this round are listed below under their usual headings) replaces the 'Your previous report' paragraph, and the repair section follows the lists, all under one `## Sent back` heading. Re-export it in mod.rs:93's `pub(crate) use`.",
+    "mod.rs: add `Closing::put_file(&mut self, file: NewFile)` (remove same-path files, then push). Use it for the replay record (mod.rs:2266). verification.rs: use it for `brief-verifier.md` (line 201).",
+    "producer.rs: `producer_snapshot(&self, ctx, seed: Option<&str>)`: a Some seed takes precedence over `ctx.seed_commit` and selects `SnapshotRepo::BaseThenTree`. `producer_loop(.., repair: Option<&RepairView>)`: `attempt_brief` starts as `send_back_text_repaired(brief, &[], &[], None, None, None, repair)` when repair is Some, and the four-arm match at 684-700 becomes one `send_back_text_repaired(brief, &unmet, &unchanged, replay, gate.as_deref(), scope_arg, repair)` call. Update the module docs.",
+    "mod.rs: extract `produce_round(&self, ctx, brief, accepted, closing, seed: Option<&str>, repair: Option<&RepairView>) -> Result<Closing>` from `produce_and_verify` lines 1892-1949 (job worktree guard, `producer_snapshot`, `producer_loop` with the `SlotWait` handling, `candidate_stage`, `remove_tree(&work)`, `Built`, `write_resume_mark`, `check_and_verify`). `produce_and_verify` keeps `baseline_stage` and the first disk gate, runs round one, then `let mut repairs = 0; loop { let Some(view) = closing.verification.as_ref().and_then(repair_view) else { break }; if repairs >= VERIFIER_REPAIRS || self.nested.is_some() { break } ... }`. In the loop: `preflight(&jc, ctx.spent(&closing), ReserveStage::Run)` and `disk_gate` failures print one `repair     skipped: ...` line and break. Otherwise: set the first verifier invocation's `detail` (found by `verification.verifier_invocation` in `closing.new_invocations`, redacted with `ctx.redactor`) to every unmet criterion and blocking finding plus 'sent back to the producer for one repair pass'; print the `repair     ...` line; build `FirstRound { candidate, verification, happened, files }` (a clone of `closing.files`) and clear `closing.verification`, `closing.verified` and `closing.candidate`; `self.state.remove_resume(&id)`; record `repair_seq = ctx.next_seq(&closing)`; redact the view's texts; run `produce_round` with the first candidate's commit as seed and `Some(&view)`; `repairs += 1`. After the round, if `closing.verification` is None: restore through a `FirstRound::restore(self, &mut Closing)` method (candidate, verification, files, happened clone), set state Rejected, `verification_passed` Some(false), the first changed paths, wall time now, reason `the final verdict is fail: {first reasons}. {note}; the repair pass stopped before a verdict: {round two's stop reason}`, call `self.state.remove_kept_work(&id)`, and print a `repair     ...` line. If it is Some and the verdict is Fail, set `happened.reason` to `the final verdict is fail: {second reasons}. {note}`. A Pass adds no reason. An error from `produce_round` is returned unchanged to `go` (a hold).",
+    "run/tests.rs: add `scripted_verdicts(counts, prompts, verdicts)` built on `counting` and `editing`: the n-th Verifier call gets verdicts[n] (the last repeated), other roles go to `base_script`, the introspection call (system prompt starts `You write one introspection`) is captured and gets an error turn, an optional second-Producer-call override (invalid report, `InvocationOutcome::TimedOut` with an edit, or an error turn with `expired_login()` as in `producer_ending`, tests.rs:7424-7449) and the resume-mark read. Add the tests: `repair_sends_unmet_criterion_back_and_second_verdict_lands` (criterion 2); `repair_is_bounded_*` cases A to D (criterion 3); `repair_events_*` (a), (b), (c1 to c3), `repair_events_first_round_restore_puts_back_files`, `repair_events_landing_passes_gate_and_is_not_first_pass` (landing gate, first-pass 0, throughput, stored score with both rounds' cost and `verification_passes` Some(true)); and `repair_is_skipped_when_the_budget_cannot_pay_for_it` (`set_job_usd(&repo, \"17.00\")`). Every new core test name contains `repair`.",
+    "scope_guard.rs tests module only: in `rig_build`, give `Plan` a `repeat` slot, a `last` slot and a `repair_passes` flag (the Rig keeps the `Arc<Plan>`). The Producer arm sets `repeat = last` when `spec.user_prompt` contains `athena_context::briefs::REPAIR_LEAD`; the Verifier arm takes `repeat` if set (the failing entry again, or a pass when `repair_passes`) and otherwise pops the queue and stores it in `last`. Change the cost-0.8 rig calls (2078, 2117, 2139, 2148, 2170, 2182, 2584) to 0.4 so a rejected repaired attempt still costs 1.6. Add `a_rejected_attempt_after_a_repair_counts_both_rounds_toward_t3` (`rig(1.0, 0.8, &[Some(0)])`: two producer and two verifier invocations stored, one attempt, `cost_dollars` and the pause mark's `numbers.spend_usd` about 3.2, T3 pause, T1 and T4 None) and `a_repaired_attempt_that_passes_is_accepted_and_no_signal_fires` (`repair_passes` set: Landed, `Verdict::Accepted`, no pause or flag mark though spend 3.2 is over 1.5 x p90).",
+    "run_pin_tests.rs: add `repair_send_back_none_equals_send_back_text_scoped`, `repair_send_back_section_says_what_the_new_situation_is` (the four statements, each criterion's exact text, each finding), `repair_send_back_in_round_two_has_one_heading_and_both_lists` and `repair_send_back_formats_findings_as_the_retry_brief_does` next to the pins at 1135-1431.",
+    "Run `cargo test --locked -p athena-core`, then `cargo test --locked` over the workspace. Fix each existing test that assumed one round for a failing verifier (core run tests, drain.rs:5204 and any other the run shows), changing counts or giving the fake verifier a second-call answer, never weakening what the test shows. drain.rs: the first job now enters the producer stage twice, so the retry's entry is `producers[2]` and `producers.len() == 3`; keep the other assertions.",
+    "docs/decisions.md: append D189 after D188 (Case: the 43-job class criterion-unmet-at-final-verification; Decision; Alternatives; Tradeoff with the 6-producer / 4-verifier worst case labelled an estimate; Reversal cost; Provenance listing files and functions read, the root cause and tests run; `Amends D182 in prose only`). State the failing-check meaning, the D43 rule (repair only when the verifier's verdict is Fail, with its unmeasured extra-round cost), the resume-mark removal, the restore of candidate, verification, state and files on a round with no verdict, that a deadline, expired login or other stop in round two is classed as the first verdict (Rejected), that a repaired job that passes keeps the first verdict only as text in the first verifier invocation's detail (a typed first-round record is possible follow-up), the scope-guard choice (one attempt; both rounds' spend and minutes count in full toward T3 and T5; thresholds not retuned; T1 and T4 unchanged) and that a repaired job's actual cost and time in the forecast scores include both rounds while `verification_passes` resolves on the final verdict and forecasts are unchanged. Add the `[[link]]` D182 -> D189 `amended` to docs/decision-links.toml. Do not edit any earlier entry.",
+    "CHANGELOG.md: add an `[Unreleased]` entry (Changed or Fixed) naming the root cause in the same words as D189, the fix and files, the one-round bound, the limits (resumed candidates, nested runs, budget and disk skip, failing-check meaning, D43 rule, round-two stop classing, first verdict kept only as detail text, cost estimate, check minutes of a repaired job, build slot held one round longer, scope-guard and forecast effects) and the test commands. Note that jobs 20261014-170031-2r9b, -172342-rqgb and -174937-hrzn are dropped.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, plus `cargo test --locked -p athena-core scope_guard`, `cargo test --locked -p athena-core mirrors`, `cargo test --locked -p athena-core rule_sources_appear_in_the_header_or_judge_format_strings` and `cargo test --locked -p athena-cli --test backtest`, and fix findings."
+  ],
+  "risks": [
+    {
+      "risk": "Many existing tests (run/tests.rs, scope_guard.rs, athena-cli) use a fixed failing verdict and assume one producer and one verifier run, so the blast radius is larger than the 11 listed deliverables.",
+      "mitigation": "Step 11 runs the whole workspace suite right after the core change, so the real list is found by `cargo test --locked`. Each assertion that counted one round gets new counts, costs or a script answer for the second call. The scope_guard rig rule and the drain test are planned by name; lifecycle.rs:641-731 and introspection.rs:421-471 should pass because the retry brief reads only the final Verification and `what` still holds the final verification's items. Athena flags files outside the listed deliverables as minor and the plan accepts that."
+    },
+    {
+      "risk": "Cost: a repaired job pays for a second producer pass, checks (with their timeouts) and verifier, and holds the build-folder slot one round longer. With D43 items repairable on a verifier Fail, some repairs may be rounds the producer cannot change.",
+      "mitigation": "The bound is a named constant, tested at exactly one repair. `preflight(Run)` skips a repair the job budget cannot pay for. D189 and the CHANGELOG give the worst case from the code (up to 3 producer runs per round, so 6; up to 4 verifier runs), labelled an estimate; the extra wall time, cost per repaired job and the share of D43-only repairs are not measured."
+    },
+    {
+      "risk": "The scope guard flags or pauses a line sooner, because a rejected repaired attempt's two-round spend and minutes count toward T3 and T5; the reference forecast learns higher cost and time from repaired jobs.",
+      "mitigation": "Intended and stated in D189 and the CHANGELOG (decision 6). Thresholds are estimates to be tuned (scope_guard.rs:32) and are not retuned without repaired-job data; a repaired attempt that lands gives T3 and T5 None; a near-complete rejection keeps its targeted retry. Two scope pins and the landing-score assertions show the figures; forecasts themselves are untouched."
+    },
+    {
+      "risk": "A round-two stop before a verdict loses round one's verdict, candidate or files, or leaves round two's progress note, kept-work directory or resume mark.",
+      "mitigation": "Round one's candidate, Verification, happened state and files are cloned before round two and restored when round two returns Ok with no Verification; round two's kept-work directory is removed; the mark was removed before round two and `settle_resume_marks` removes any later one for a Rejected job. The three stop cases and the direct restore test cover it. A hold (error return) keeps the existing hold behaviour."
+    },
+    {
+      "risk": "Recognising Athena's own findings by text can drift if `judge`'s wording changes.",
+      "mitigation": "The not-assessed evidence and misread summary are shared consts used by `judge`; the two `format!` findings are matched by prefix and suffix consts and `repair_recognisers_match_what_judge_writes` runs the real `judge` for each, so a wording change fails a test instead of silently starting or stopping repairs."
+    },
+    {
+      "risk": "The same failure class can still occur on a resumed-candidate path, a nested run, or a job whose budget or disk cannot pay for round two. A repaired job that passes keeps the first verdict only as text in a verifier invocation's detail.",
+      "mitigation": "Not repaired and said so in D189 and the CHANGELOG; the budget and disk skips print a `repair     skipped:` line so the stored event shows the repair was considered. Extending to resumed candidates needs a producer snapshot and worktree guard in the resume path, a separate change. A typed first-round record is named as follow-up."
+    },
+    {
+      "risk": "The verifier's findings may be wrong, so a repair can churn the work.",
+      "mitigation": "The repair only gives information; the verdict is still computed by `judge`, unchanged. The always-fail bound test shows a stubborn verifier ends after one extra round. Misread-only, unassessed-only and (when the verifier passed) D43-only verdicts spend no round."
+    },
+    {
+      "risk": "Throughput's check minutes and busy time read slightly low for repaired jobs, because round two's checks replace round one's in the stored Verification.",
+      "mitigation": "D189 and the CHANGELOG say so; the landing test pins first_pass == 0 and both rounds' producer and verifier minutes."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "judge's `format!` finding strings and the verify.rs `//!` header",
+      "dependent": "crates/athena-core/src/verify.rs `drift_haystack` (3881-3920), `rule_sources_appear_in_the_header_or_judge_format_strings` (3923-3937), `the_drift_haystack_leaves_out_the_table` (3939-), `VERDICT_RULES` (1380-1421)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core rule_sources_appear_in_the_header_or_judge_format_strings and cargo test --locked -p athena-core the_drift_haystack_leaves_out_the_table. The haystack takes only `//!` header lines and `format!(` literals between `\\npub fn judge(` and the next `\\n}\\n`. No `format!` literal in `judge` is edited or moved (D43 at 602, not-assessed at 552), only two non-`format!` literals (544, 631) become consts, and no `//!` line is added, so both tests pass. New code goes before `judge`'s signature or after its closing brace.",
+      "reason": null
+    },
+    {
+      "name": "verdict computation and the Athena finding texts",
+      "dependent": "crates/athena-core/src/verify.rs `judge` (409-672) and its tests (2294, 2320, 2401-2435, 2650, 2655)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core verify. Verdict and every finding text are unchanged; `NOT_ASSESSED_EVIDENCE` and `MISREAD_SUMMARY` hold the same text as the literals they replace; `repair_recognisers_match_what_judge_writes` pins the recognisers to `judge`'s real output.",
+      "reason": null
+    },
+    {
+      "name": "verify.rs source text read by an admission test",
+      "dependent": "crates/athena-core/src/admission.rs:1647-1661 (reads verify.rs source and expects `c.reused && c.{needle}.is_none()`)",
+      "kind": "code",
+      "test": null,
+      "reason": "The test searches verify.rs for one filter expression in the check-reuse code, which this plan does not touch; the new code adds no match for the needle it searches."
+    },
+    {
+      "name": "producer send-back counters",
+      "dependent": "crates/athena-core/src/run/producer.rs `producer_loop` send-back loop (317-322, 635-680), `PRODUCER_SEND_BACKS` (mod.rs:1681), `SCOPE_SEND_BACKS` (mod.rs:1734)",
+      "kind": "code",
+      "test": null,
+      "reason": "Not changed. `send_backs` and `scope_send_backs` are locals of `producer_loop` (producer.rs:320, 322), so round two gets its own. One round can run the producer up to 3 times (first run, shared send-back, scope send-back), so a repaired job can run it up to 6 times; each verification can rerun the verifier once after a snapshot fault (verification.rs:351-356), so up to 4 verifier runs. These bounds are read from the loop code, labelled an estimate in D189 and the CHANGELOG, not measured. Every invocation is still capped by `check_budget` against `job_usd` (reading.rs:480-497)."
+    },
+    {
+      "name": "`producer_snapshot` gains `seed: Option<&str>`; `producer_loop` gains `repair: Option<&RepairView>`",
+      "dependent": "crates/athena-core/src/run/producer.rs `producer_snapshot` (133-174; only call site mod.rs:1895) and `producer_loop` (298; only call site mod.rs:1906)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core governed_edit_is_sent_back_once_and_the_second_candidate_reaches_the_verifier (round one passes None and is unchanged); the criterion 2 test shows the seeded round (BaseThenTree, snapshot.rs:97-101) by reading README.md in round two's workdir.",
+      "reason": null
+    },
+    {
+      "name": "callers of check_and_verify and the nested-run guard",
+      "dependent": "crates/athena-core/src/run/mod.rs `resume_candidate` (661, 843-844) and the stale-merge and retry paths that call `check_and_verify` (1957) directly; nested-run guards `self.nested.is_none()` at mod.rs:1980, 2006, 2028 (the grep for `is_some()` finds only 1800 and 2534, other uses)",
+      "kind": "code",
+      "test": null,
+      "reason": "The repair loop is in `produce_and_verify` only. A resumed candidate has no producer snapshot or `JobWorktree` guard, so it keeps its single verdict; D189 and the CHANGELOG say so. `check_and_verify` and `verification_stage` return the same `Closing`, which gains no field. A nested run (`self.nested.is_some()`) is not repaired, the same condition the three `is_none()` guards above use to leave a nested run's checks and decision gate to the outer job."
+    },
+    {
+      "name": "Closing contents after two rounds (files, invocations, candidate, verification, reason, state)",
+      "dependent": "crates/athena-core/src/run/close.rs `close_dispatched`, `push_closing_records` (607-637), `commit_hold` (216-241), `hold_for_disk` (177-189), `hold_for_slot_wait` (200-212)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core repair_events (a, c). `close_dispatched` reads state and reason from `closing.happened` first (close.rs:42-55), so the repair note rides the existing reason path and the restored Rejected state needs no new branch. `push_closing_records` writes one Invocation file per invocation (unique seq paths), one Candidate and one Verification; `put_file` keeps `brief-verifier.md` and the replay record to one copy each. A round-two hold goes through `commit_hold` with round one's files and invocations and no Verification, as a hold after earlier invocations does; `cargo test --locked -p athena-core hold` is unchanged because a first-round hold never reaches the loop.",
+      "reason": null
+    },
+    {
+      "name": "the closing's file list across two rounds",
+      "dependent": "crates/athena-core/src/run/mod.rs `Closing.files` writers: `keep_unfinished_work` progress note (1008), replay record push (2264-2268), `brief-verifier.md` (verification.rs:201); readers close.rs:135, 272, 636",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core repair_events_first_round_restore_puts_back_files and repair_events_round_two_stop_keeps_first_verdict_and_candidate. These three are the only pushes to `closing.files` before close; the restore sets `files` back to the clone.",
+      "reason": null
+    },
+    {
+      "name": "round two's deadline and expired-login stops and the kept work they leave",
+      "dependent": "crates/athena-core/src/run/mod.rs `timeout_seed` (897-948), `keep_unfinished_work` (959-1028); crates/athena-core/src/disk.rs `resumable_stop` (537-543), `keeps_unfinished_work` (549-557), `is_environment_reason` (528); crates/athena-core/src/state.rs `kept_work_dir` (109), `remove_kept_work` (115)",
+      "kind": "code",
+      "test": "repair_events_round_two_stop_keeps_first_verdict_and_candidate cases c2 and c3: state is Rejected, the reason is not an environment reason, no progress note, no kept-work directory. `timeout_seed` reads the note only for TimedOut or a Failed expired-login job, so a restored Rejected job is not resumed from round two's work. The existing tests at tests.rs:7456-7560 and 7665 run a first-round stop that never reaches the loop and are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "the stored Verification and Candidate a retry reads",
+      "dependent": "crates/athena-core/src/reading/retry.rs `qualifies_for_tree_retry` (330-370), `tree_retry_seed` (392-443), `retry_findings` (476-); run/mod.rs:527 (caller); reading.rs:3532-3782 tests",
+      "kind": "code",
+      "test": "repair_events_round_two_stop_keeps_first_verdict_and_candidate asserts `tree_retry_seed` is Some with the first candidate commit and the blocking finding; after a repair that reaches a verdict a retry reads round two's Verification and candidate, which name the same commit. Also cargo test --locked -p athena-core retry.",
+      "reason": null
+    },
+    {
+      "name": "progress, cost and the introspection event `what` read from the stored job",
+      "dependent": "crates/athena-core/src/introspect.rs `event_of_job` (1538-1579) and `failure_details` (1048-1117); crates/athena-cli/tests/introspection.rs:421-471",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core repair_events_rejected_job_names_first_check_in_reason_and_introspection. `failure_details` reads the final Verification; the reader never reads `Invocation.detail`, so first-round items reach `what` through the closing reason, uncapped. The existing introspect.rs tests (2789-2829) keep passing: a fixed failing verdict still gives 'Unmet acceptance criteria (1):' from the final verification and one prompt.",
+      "reason": null
+    },
+    {
+      "name": "scope guard thrash signals T1 to T5 and the line pause",
+      "dependent": "crates/athena-core/src/scope_guard.rs watcher: `attempt_of` (677-718), `progress_of` and `gaps_only` (721-780), `verdict_of` (658-670), `t1_retries` (329), `t3_cost` (408), `t3_by_spend` (418), `targeted_retry` (314), `near_complete` (300), `t4_match` (435), `t5_wall_time` (470), `evaluate_before_attempt` (512); `Athena::watch_line`, `line_pause`, `line_flag`, `line_holds` and the `go`/`retry` pause refusal",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core scope_guard, including the new `a_rejected_attempt_after_a_repair_counts_both_rounds_toward_t3` and `a_repaired_attempt_that_passes_is_accepted_and_no_signal_fires`. Choice (decision 6): a repaired job is one attempt; its cost (`cost_execution`, scoring.rs:116-119) and minutes (dispatch to final verdict, verification.rs:457) count in full, so a rejected repaired attempt reaches T3 flag or pause after fewer attempts and T5 minutes include both rounds; T1 and T4 do not change; an attempt that lands is `done` (scope_guard.rs:277, 419, 471) so T3 and T5 give None. A restored round has `verifier_invocation` of round one and `verdict_of` Rejected (not Environment), so it is counted as before. No threshold, signal or measure code changes.",
+      "reason": null
+    },
+    {
+      "name": "scope_guard tests: one verdict per Verifier call",
+      "dependent": "crates/athena-core/src/scope_guard.rs test rig: `Plan.verdicts` (1353), the Verifier arm that pops one entry per call (1511-1512), `rig`, `rig_with_space`, `rig_with_criteria`, `rig_counting`, `rig_build` (1362-1409) and the tests that call them (1627, 1660, 1705, 1748, 1789, 1831, 1852, 1883, 1892, 1912, 1933, 1976, 1990, 2002, 2029, 2039, 2068, 2078, 2117, 2139, 2148, 2170, 2182, 2199, 2492, 2534, 2569, 2584, 2597)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core scope_guard. Rule for the queue a repair now reads twice: one entry is one job's verdict; the producer arm notes a repair-round prompt (it contains `athena_context::briefs::REPAIR_LEAD`) and the next Verifier call repeats the failing entry (a stubborn verifier) instead of popping, unless `plan.repair_passes` is set; a pass entry never repairs. Costs: every call still charges `plan.cost`, so the tests that assert a 1.6 attempt (rig/rig_with_criteria with cost 0.8 at 2078, 2117, 2139, 2148, 2170, 2182, 2584) change to cost 0.4, so a rejected repaired attempt (four calls) still costs 1.6 and every assertion on 1.6 and 1.60 holds. Tests with cost 0.01 or 0.1 stay under every threshold. `[None]` rigs and `low_once_verifying` (2492) never repair.",
+      "reason": null
+    },
+    {
+      "name": "forecast scoring and calibration readers (cost, wall time, verification_passes)",
+      "dependent": "crates/athena-score/src/lib.rs `score_records` (392-503; `verification_passes` from the final verdict 447-452, cost from every non-reader invocation 453-457 and 485-487, time 490), `score_job` (220-363); crates/athena-core/src/scoring.rs `history` (14-50), `reference` (53-69, callers reading.rs:611 and 834), `totals` (112-130), `score` (156-); athena-score `reference_forecast` (140-170); crates/athena-core/src/status.rs `class_forecasts` (996-1010)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core repair_events_landing_passes_gate_and_is_not_first_pass asserts the stored score of a repaired landing: `cost_usd` actual is the sum of all four producer and verifier invocations, `verification_passes` outcome is Some(true), and the commit passed the gate that recomputes the score from the commit (scoring.rs:152-155, M27). No scoring code changes and the reader's forecast is not touched; the reference forecast learns from history that now holds repaired jobs' two-round cost and time, which D189 and the CHANGELOG state.",
+      "reason": null
+    },
+    {
+      "name": "the job's resume mark",
+      "dependent": "crates/athena-core/src/run/mod.rs `settle_resume_marks` (875-889) and `write_resume_mark` (849-870); crates/athena-core/src/state.rs `write_resume`, `read_resume` (309), `remove_resume` (315)",
+      "kind": "code",
+      "test": "repair_events_round_two_stop_keeps_first_verdict_and_candidate asserts the mark read from round two's producer call is None and none remains after close. A round-two hold keeps `commit_hold`'s behaviour; `cargo test --locked -p athena-core hold` is unchanged because a first-round hold never reaches the loop.",
+      "reason": null
+    },
+    {
+      "name": "landing and provenance rules over a job with two producer/verifier pairs",
+      "dependent": "crates/athena-gate/src/invariant.rs:706-736, jobs.rs `dispatch_order_problem` (535-585), invariant.rs `prediction_problem` (754), the commit-time `gate(...)` at commits.rs:202",
+      "kind": "rule",
+      "test": "repair_events_landing_passes_gate_and_is_not_first_pass in run/tests.rs. The repaired job lands through `go`, so the closing and landing commits pass `gate`; the test then loads `athena_gate::jobs::JobFiles::load(&git, &head, &job)` as land.rs:929 does and asserts `dispatch_order_problem` and `prediction_problem` give no problem. Commit shapes on the real branch: job landing with two rounds (tested; candidate and Verification are round two's, naming the same commit; the named verifier is round two's); a restored Rejected job (also through the commit-time gate in the criterion 4 test; `dispatch_order_problem` is not applied to a Rejected job, jobs.rs:526-534); records-only and owner-path commits (no job producer or verifier: unchanged, no classification function changes); intervention commit (unchanged); retry-after-block landing (reads round two's candidate after a verdict, the first's after a restore). No gate function, check name or classification is edited, so no other crate's tests are affected.",
+      "reason": null
+    },
+    {
+      "name": "first-pass measure",
+      "dependent": "crates/athena-core/src/status/planning.rs:394-454 `producer_settings` / `settings_of` (first_pass counts a pass with `verifier_runs <= 1`, line 437)",
+      "kind": "code",
+      "test": "The landing test calls `crate::status::producer_settings(&records)` (status.rs:21) and asserts verified 1, landed 1, first_pass 0. A repaired job has two verifier runs, so by the existing `<= 1` rule it is not first pass; no measure code changes.",
+      "reason": null
+    },
+    {
+      "name": "throughput stage minutes and busy intervals",
+      "dependent": "crates/athena-core/src/status/throughput.rs:376-387 `check_minutes`, 418-448 `busy_intervals`, 472-498 `landed_jobs`, `StageMinutes` (96-100)",
+      "kind": "code",
+      "test": "The landing test asserts `landed_jobs(&records)` holds the repaired job and the stage minutes are non-negative sums of both rounds' invocations. Producer and verifier minutes sum every invocation (`role_minutes`); check minutes are those of the stored final verification only (round two), so they read low by round one's check minutes; `busy_intervals` already calls its check interval an estimate (throughput.rs:415-417). D189 and the CHANGELOG say so. No measure code changes, so no real-records run is needed.",
+      "reason": null
+    },
+    {
+      "name": "`Invocation.detail` set on a successful verifier invocation",
+      "dependent": "`Invocation.detail` readers: crates/athena-core/src/auditor.rs:403, run/planning.rs:202 and 405, run/producer.rs:408 and 420, run/candidate.rs:216, run_pin_tests.rs:1792; athena-gate reconcile.rs `check_invocation`, `check_outcome`",
+      "kind": "code",
+      "test": null,
+      "reason": "Each reader reads the detail of an invocation it just made or of its own role, and only a non-Success outcome (auditor.rs:397-404, producer.rs:407-421). `check_invocation` and `check_outcome` check tokens, cost and totals, not `detail`. The field's documented use is the redacted free text of how an invocation ended (invocation.rs:152-157) and the producer already stores a self-check failure on a successful invocation (producer.rs:614-625). No other reader reads a verifier's detail."
+    },
+    {
+      "name": "second candidate pushed to the job's CI branch and pull request",
+      "dependent": "crates/athena-core/src/gh/early.rs `push_ci_branch` / `open_early_pr` (395-417, 442-480; publish 350-357; open 258-275)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core early_pr_pushes_the_candidate_and_opens_the_pull_request_before_verification_and_never_merges. Both already replace a branch left by an earlier push of the same job, pinned to the old head (`remote.replace`), and a failure is only a warning line. A passing job still shows exactly one push and one open (run_pin_tests.rs:485-506).",
+      "reason": null
+    },
+    {
+      "name": "stage order (Producer after Verifier)",
+      "dependent": "crates/athena-core/src/state.rs `StageSink` implementors: athena-cli drain.rs:948-960 (`TableSink`), tests/lifecycle.rs:1583",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli --test drain. The sink only records the latest stage for the in-flight row, and send-backs already enter Producer repeatedly (producer.rs:349). Only the drain test that counts stage entries (drain.rs:5204-5253, `phased` switches on reader count, 5081-5094) depends on the count, and it is updated.",
+      "reason": null
+    },
+    {
+      "name": "tests that assumed one round for a failing verifier",
+      "dependent": "Existing tests with a failing verifier: crates/athena-core/src/run/tests.rs, run_pin_tests.rs, scope_guard.rs rig (above) and athena-cli tests with a fixed failing verdict (lifecycle.rs 519, 570, 641, 738, 3744; retry.rs:661; drain.rs:5061, 5204-5280, 6026-6160, 8219, 8296, 9972, 9999; introspection.rs:429; common/mod.rs:661)",
+      "kind": "code",
+      "test": "cargo test --locked (step 11 runs it right after the core change and fixes by counts, costs or a second-call script answer, never by weakening). The default fake turns cost 0.01 and the live job cap is 50.00, so `preflight(Run)` passes and these tests do see a repair. Rejections from a failed check, admission, gate or scope stop trigger no repair and are unchanged. Always-failing scenarios keep Rejected and the same findings, so the retry and introspection assertions on reasons hold.",
+      "reason": null
+    },
+    {
+      "name": "shared findings block, producer brief text and the new `REPAIR_LEAD` const",
+      "dependent": "crates/athena-context/src/briefs.rs `must_address_block` (616-629; used at 557, 601, 690) and `checks_before_verifier_section` (884-899), the producer-brief tests",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-context (existing retry-brief tests pin the text byte for byte; new `the_producer_brief_says_the_verifier_can_send_the_work_back_once` pins the one added sentence, which must not contain `REPAIR_LEAD`). The producer brief sits outside the budgeted prompt sets (system facts, 'Prompt sets and budgets'), so `system_facts_budgets_match_computed` is unaffected. `must_address_block` calls a shared helper with its own lead sentence, so retry output stays byte-identical.",
+      "reason": null
+    },
+    {
+      "name": "retry formatting reused by the repair brief",
+      "dependent": "crates/athena-core/src/reading/retry.rs `finding_text` (446) and its callers (423, 505, 720); the glob re-export `pub use retry::*;` at reading.rs:70",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core retry; new pin `repair_send_back_formats_findings_as_the_retry_brief_does`. Only the visibility widens, `pub(super)` to `pub(crate)`; text and callers are unchanged. Outcome-reason prefixes the retry readers act on (`GATE_REASON_PREFIX`, `SCOPE_REASON_PREFIX`, retry.rs:464) stay at the start of a reason because the repair note is appended.",
+      "reason": null
+    },
+    {
+      "name": "job budget",
+      "dependent": "athena.toml `[budget] job_usd = 50.00`, `producer_usd = 10.00`, `verifier_usd = 5.00` (lines 44-47); `preflight(ReserveStage::Run)` (reading.rs:502-515); `budget_reserve` (reading.rs:128-150)",
+      "kind": "host_setting",
+      "test": "cargo test --locked -p athena-core repair_is_skipped_when_the_budget_cannot_pay_for_it (job_usd 17.00 = reader 2.00 + Run 15.00; the fake producer and verifier turns each cost 1.5, so the remainder is below 15.00 when the repair is considered; counts (1,1), the `repair     skipped` line, Rejected). No key changes and no governance file is edited. With the live values the repair starts only when the remaining `job_usd` covers the 15.00 Run reserve.",
+      "reason": null
+    },
+    {
+      "name": "parallel jobs and the build-folder slot",
+      "dependent": "athena.toml `[parallel] max_concurrency` and the build-folder slot (`BuildFolder`, mod.rs:1395-1399; D188)",
+      "kind": "host_setting",
+      "test": "cargo test --locked -p athena-core build_folder. The repair runs inside one `go` call, inside the build-folder hold that already spans the whole `produce_and_verify`. It takes no second slot, so two parallel jobs are ordered as before; a repaired job holds the slot one round longer, which the CHANGELOG states.",
+      "reason": null
+    },
+    {
+      "name": "decision log, links and governed paths",
+      "dependent": "docs/decision-links.toml and `mirrors` / `decision_gate` (D187; `[[governs]]` tables for `crates/athena-git/src/snapshot.rs` and `crates/athena-core/src/run/candidate.rs`)",
+      "kind": "rule",
+      "test": "cargo test --locked -p athena-core mirrors; cargo test --locked -p athena-cli --test backtest. This plan edits neither governed path (snapshot.rs and candidate.rs are only read). The D182 `[[link]]` is added so the 'Amends D182' prose resolves.",
+      "reason": null
+    },
+    {
+      "name": "reading refusal and matching rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and the reading rules",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not changed: no parser, stem list, stop list or reading check is added or edited, so no input form needs a corpus case. The brief quotes `CriterionResult.criterion`, which is the accepted criterion's own text (verify.rs:538, 607). The repair gives the producer more information and refuses no work: 0% of past accepted readings are newly refused. `cargo test -p athena-core --test refusal_corpus` is unaffected."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff, then run the two tests that parse the decision log and its links: `cargo test --locked -p athena-core mirrors` and `cargo test --locked -p athena-cli --test backtest`. Each is run on its own.",
+      "command": "git diff -- docs/decisions.md docs/decision-links.toml CHANGELOG.md",
+      "observes": "D189 is appended after D188 and no earlier line of docs/decisions.md changes. D189 has Case, Decision, Alternatives, Tradeoff, Reversal cost and a Provenance bullet, and says `Amends D182 in prose only`; decision-links.toml gains `[[link]] older = \"D182\" newer = \"D189\" status = \"amended\"`. D189 and the `[Unreleased]` CHANGELOG entry state the root cause in the same words: criteria are checked independently only after the producer ends, so an unmet criterion found by the verifier cannot trigger a repair. Both texts also state: the worst-case run counts (6 producer runs, up to 4 verifier runs, labelled an estimate); the limits (resumed candidates and nested runs get no repair; budget and disk skip; a failing check repairs only through the verifier's unmet criterion or serious finding; D43 items repair only when the verifier's verdict is Fail; second-round checks replace the first's in the stored Verification; the resume mark is removed before round two); how round two's stops are classed (a stop with no verdict, environment stops and deadlines included, closes Rejected as the first verdict stood, with round two's note, kept work and resume mark removed); that a repaired job that passes keeps the first verdict only as text in the first verifier invocation's detail, with a typed first-round record as possible follow-up; the scope-guard choice (one attempt, both rounds' spend and time in full toward T3 and T5, thresholds not retuned); that a repaired job's actual cost and time in the forecast scores include both rounds, `verification_passes` resolves on the final verdict and the forecasts are unchanged; and that jobs 20261014-170031-2r9b, -172342-rqgb and -174937-hrzn are dropped. Both test commands pass.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Production entry `Athena::go` (via `athena.ask` and `go`, the pattern of `governed_job_with`, run/tests.rs:3356-3377), planning off, preflight and the disk gate passing (`plenty_of_space`, default job budget), one content criterion CRITERION (tests.rs:88). Seam: wrapper `scripted_verdicts(counts, prompts, verdicts)` returns the n-th verdict on the n-th Verifier call (the last repeated) and delegates every other role to `base_script` (tests.rs:225); injected through `athena_with(repo, state, PASSES, plenty_of_space, script)` (tests.rs:192) and `FakeAgentDriver::new(script)` (tests.rs:201). verdicts = [fail with {criterion: CRITERION, met: false} and one major finding with a canary summary and evidence, base pass]. The wrapper records every producer `user_prompt` and, on the second producer call, reads `README.md` from `spec.workdir`. All repair logic is production code (`produce_and_verify`, `repair_view`, `send_back_text_repaired`, `producer_snapshot`); the double returns canned verdict JSON only. Test name: `repair_sends_unmet_criterion_back_and_second_verdict_lands`.",
+      "command": "cargo test --locked -p athena-core repair_sends_unmet_criterion_back",
+      "observes": "Counts producer 2, verifier 2. prompts[0] has no `## Sent back`. prompts[1] has exactly one `## Sent back`, the exact CRITERION text, the finding's summary and evidence as `finding_text` writes them, the four repair statements (fresh snapshot already holding the first candidate; found by the verifier; an unchanged run keeps the first candidate; the verdict after this round is final), `REPAIR_LEAD`, and none of 'This is the only send-back' or 'A run that leaves no change fails'. README.md read in round two's workdir is the round-one edit (\"# Demo\\n\\nA demo.\\n\"), which shows the seeded snapshot. The second verdict is pass, the state is Landed and the stored Verification has final_verdict Pass.",
+      "fails_without": "Without the loop in `produce_and_verify` the fake verifier is called once, the producer once, and the job closes Rejected, so counts (2,2), the second producer prompt assertions, the seeded-workdir assertion and the Landed state all fail.",
+      "seam": "Production entry `Athena::go`. Fixture `athena_with` (tests.rs:192), `base_script` (tests.rs:225), `counting` (tests.rs:3245), `editing` (tests.rs:3327) and the `Counts` struct (tests.rs:3212) exist (read). `scripted_verdicts` is added by plan step 9."
+    },
+    {
+      "criterion": 3,
+      "method": "Same entry, fixture and wrapper as criterion 2. Tests `repair_is_bounded_*`: Case A verdicts = [fail with an unmet criterion and a major finding] repeated; Case B verdicts = [base pass]; Case C a verdict whose only blocking item is a request misread (`request_misread: true`) with criteria met; Case D a verdict whose criteria list is empty (criterion unassessed) with no other finding. `Counts` and the `Lines` sink are read after `go`. Also run `cargo test --locked -p athena-core repair_view` (unit tests over the real `judge_with_tree` built from `VerdictInputs`, verify.rs:409: unmet criterion; major finding; blocker from a held replay; failing check plus the verifier's unmet check criterion (Some); failing check with criterion marked met and no finding (None); D43-only with the verifier's verdict Pass (None); D43-only with verdict Fail (Some, listing the D43 criterion and finding); D43 plus a verifier major finding with verdict Pass (Some with only the finding); unassessed-only (None); misread-only (None); misread plus an unmet criterion (Some with only the criterion); timeout and incomplete verifier (None); minor-only (None); pass (None)), `cargo test --locked -p athena-core repair_recognisers_match_what_judge_writes` (runs the real `judge` for the not-assessed, D43 and misread cases and asserts each Athena finding is recognised by the consts and the not-assessed evidence equals `NOT_ASSESSED_EVIDENCE`), and the drift tests `rule_sources_appear_in_the_header_or_judge_format_strings` and `the_drift_haystack_leaves_out_the_table`.",
+      "command": "cargo test --locked -p athena-core repair_is_bounded",
+      "observes": "Case A: counts producer 2, verifier 2, state Rejected, reason starts `the final verdict is fail:`, no third producer prompt, exactly one `repair     ` line. Case B: counts (1,1), Landed, no prompt has `## Sent back`, no `repair     ` line. Cases C and D: counts (1,1), Rejected, no `repair     ` line. The `repair_view_*` unit tests return the values listed, including Some for a D43-only item when the verifier's verdict is Fail and None when it is Pass. The drift tests still pass.",
+      "fails_without": "Without the `VERIFIER_REPAIRS` bound an always-failing verifier gives a third producer run or a loop, and counts (2,2) fail. Without the `repair_view` gate, the misread-only and unassessed-only verdicts would start a second producer run and counts (1,1) fail; case B guards that nothing extra runs when nothing is unmet. If `judge` changes a text a recogniser relies on, `repair_recognisers_match_what_judge_writes` fails.",
+      "seam": "Production entry `Athena::go`; fixture `athena_with`, `Counts` (tests.rs:3212) and `Lines` exist (read); `scripted_verdicts` is added by plan step 9. `repair_view` is called on a `Verification` the real `judge_with_tree` built; nothing under test is inside a double."
+    },
+    {
+      "criterion": 4,
+      "method": "Same entry and wrapper as criterion 2, run through `go` and `Records::load(&athena.git, &athena.head()?)` (tests.rs:2597-2599). Tests `repair_events_*`. (a) `repair_events_show_unmet_criterion_repair_and_second_verification_in_order`: verdicts = [fail with CRITERION unmet and a major finding FIRST-CANARY, pass]. (b) `repair_events_rejected_job_names_first_check_in_reason_and_introspection`: verdicts = [that fail, fail with CRITERION met and a different major finding SECOND-CANARY]; the wrapper intercepts the introspection call (system prompt starts `You write one introspection`, as athena-cli tests/introspection.rs:31 and 52-72 do), keeps `event.what` from the user prompt JSON and returns an error turn; `go_with_stages` runs `introspect_job` on a Rejected job (mod.rs:430-436); a second check with four first-round items asserts all four are in the reason. (c) `repair_events_round_two_stop_keeps_first_verdict_and_candidate`: verdicts = [that fail] and the second Producer call is overridden in three cases, the way `producer_ending` (tests.rs:7424-7445) overrides a turn: (c1) `FakeTurn::output(json!(\"not a report\"))`, which fails `ProducerOutput` parsing (producer.rs:448-457); (c2) `outcome = InvocationOutcome::TimedOut` with an edit (producer.rs:407; the pattern at tests.rs:7343); (c3) an error turn whose detail is `expired_login()` (tests.rs:7449). The second producer call also reads the job's resume mark from a `StateDir` over the same state path (`read_resume`, state.rs:309). (d) `repair_events_first_round_restore_puts_back_files`: builds a `Closing` through the constructor at mod.rs:294-309, pushes round one's replay and brief files, takes `FirstRound`, replaces them with `put_file`, adds a progress note, restores, and asserts `files` equals round one's. (e) `repair_events_landing_passes_gate_and_is_not_first_pass`: see dependents (landing gate, first-pass, throughput, scoring). Nothing is faked except the agent turns and the mark read.",
+      "command": "cargo test --locked -p athena-core repair_events",
+      "observes": "(a) Invocation roles by seq are Reader, Producer, Verifier, Producer, Verifier. The first Verifier's `detail` holds the CRITERION text, FIRST-CANARY and `sent back to the producer for one repair pass`; the second has no detail and `verification.verifier_invocation` is its seq. In the UI lines the first `verifier   ... fail` line comes before the `repair     ` line, then a second `producer   ` line, then the final `verifier   ... pass` line, all before the closing line. Final verdict Pass. (b) The outcome reason starts `the final verdict is fail:` and holds FIRST-CANARY, the CRITERION text, `one repair pass`, the first candidate's short commit and the invocation numbers; `event.what` holds the reason, FIRST-CANARY (first round only) and SECOND-CANARY (second verification). (c1, c2, c3) State Rejected, not Failed or TimedOut; `!is_environment_reason(&done.reason)`; the stored Verification is round one's (`verifier_invocation` is the first verifier's seq; `candidate_commit` equals `candidate.json`'s commit); `tree_retry_seed(&records, \"try again on <job>\", &redactor)` is Some with that commit and FIRST-CANARY in `must_address`; the reason holds the round-two stop reason, `the repair pass stopped before a verdict` and the note; the mark seen from round two is None and none remains after close; `job.briefs` has no `progress-note`; `kept_work_dir(&id)` does not exist; the stored `brief-verifier.md` and replay record are round one's. (d) files equal round one's. (e) first_pass 0, landed 1, a `cost_usd` actual equal to the sum of all four producer and verifier invocations, `verification_passes` outcome Some(true). The jobs close through `go`, so each closing commit passed `gate`.",
+      "fails_without": "With the repair step removed (the pre-change tree), the stored job has one verifier invocation with no detail and no second producer or verifier, so the ordered-roles, detail, UI-order and introspector-prompt assertions fail and `cargo test -p athena-core` on the pre-change tree fails on these tests. Without the restore, test (c) closes Failed or TimedOut with no Verification and `tree_retry_seed` returns None; without restoring `files` the progress note stays and (d) fails; without the resume-mark removal the mark seen from round two is Some.",
+      "seam": "Production entry `Athena::go` plus `Records::load`. `Lines`, `Records::load`, `athena_with`, `producer_ending`, `expired_login` and `StateDir::read_resume` exist (read: tests.rs:192, 2597, 3369, 7424, 7449; state.rs:309). The introspector intercept, the second-call producer override and the mark read are added in the `scripted_verdicts` wrapper by plan step 9; the restore unit test is added by step 9."
+    },
+    {
+      "criterion": 5,
+      "method": "Read `git diff -- crates/athena-core/src/run/send_back.rs crates/athena-core/src/run/mod.rs crates/athena-core/src/run/producer.rs`, then run the pins added in run_pin_tests.rs beside the send-back pins (1135-1431): `repair_send_back_none_equals_send_back_text_scoped`, `repair_send_back_section_says_what_the_new_situation_is`, `repair_send_back_in_round_two_has_one_heading_and_both_lists`, `repair_send_back_formats_findings_as_the_retry_brief_does` (all match the filter), and the briefs.rs tests with `cargo test --locked -p athena-context`.",
+      "command": "cargo test --locked -p athena-core repair_send_back",
+      "observes": "No second builder function: `send_back_text_scoped` calls `send_back_text_repaired`, the new last link of the same chain, and `producer_loop` calls it directly with the view. `const VERIFIER_REPAIRS: u32 = 1;` is declared directly under `PRODUCER_SEND_BACKS` (mod.rs:1681) with a doc comment. `send_back_text_repaired(.., None)` equals `send_back_text_scoped(..)` for the same inputs (the existing pins at 1398-1431 stay as they are). With Some(view) the text has the exact criterion text, each blocking finding as `crate::reading::finding_text` writes it, the four statements, and exactly one `## Sent back` heading, also when the producer's own report left a criterion unmet in the same round.",
+      "fails_without": "Without `send_back_text_repaired` the pins do not compile; with a parallel builder the None-equals-scoped pin and the one-heading pin fail.",
+      "seam": "Pure text builders called directly by the pins (`send_back_text_repaired`, `repair_send_back_section`); no double. The pins live beside the existing send-back pins in run_pin_tests.rs (exists, read 1135-1431); the functions are added by plan steps 4, 5."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three recorded checks on the final tree, each as its own command: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. Each existing test that counted one round for a failing verdict has its counts, costs or fake-verifier script updated, never weakened: core run tests, run_pin_tests.rs, the scope_guard.rs rig and its cost-0.8 tests (decision 6), and drain.rs:5204. Also run `cargo test --locked -p athena-core scope_guard`.",
+      "command": "cargo test --locked",
+      "observes": "All three exit 0. The scope_guard tests keep their meaning: `t4_pause_via_go_and_ask` still gets two rejections, the T3 tests still see a 1.6 attempt, and the two new scope pins pass (`a_rejected_attempt_after_a_repair_counts_both_rounds_toward_t3`, `a_repaired_attempt_that_passes_is_accepted_and_no_signal_fires`).",
+      "fails_without": "Without updating the existing tests that assume one producer and one verifier run for a failing verdict, `cargo test --locked` fails in athena-core's run tests, in the scope_guard tests (the second job would pass because the repair consumed its queued verdict) and in athena-cli's drain test at drain.rs:5204; the same command finds any other.",
+      "seam": "The recorded checks themselves, which Athena and the verifier run; no double."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "bdb5cbaee6240a44f3a77c53714dc3745c7423fe66b2d62fbf4b901ffc5ea0c2"
+}

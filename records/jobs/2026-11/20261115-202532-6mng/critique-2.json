@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261115-202532-6mng",
+  "round": 2,
+  "at": "2026-11-16T00:14:25.77674586Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading/retry.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading/retry.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "If round two stops before a verdict, round one's verdict and candidate are lost, and the job ends Failed with nothing a retry can use",
+      "evidence": "Step 8 takes `closing.verification` and `closing.verified` before round two. `candidate_stage` then sets `closing.candidate` to round two's candidate on every path (candidate.rs:178, 220, 227). Every stop before a verdict replaces `closing.happened` through `self.failure(..)` (producer.rs:395-537, candidate.rs:179/222, mod.rs:1994/2014/2046). So a repaired job whose second producer gives up, or whose second candidate is refused at admission, the decision gate or the scope check, closes with no Verification record and round two's candidate (or none). Today the same job closes Rejected with the first verdict stored. `tree_retry_seed` returns None without a stored verification (retry.rs:410-412), so a retry loses both the first candidate as its seed and the verifier's blocking findings. scope_guard's `attempt_of` progress and introspect's `failure_details` also see no verification. Risk 3's only mitigation is text appended to the reason, which no retry reader parses. Fix: Keep round one's `candidate`, `verification`, `verified` and `happened.state` until round two produces a new Verification. If round two ends without one (a Flow::Stop or an early stop in `check_and_verify`), restore round one's candidate and Verification, keep the outcome Rejected, and append round two's stop reason and the repair note. Add a test that drives `go`, makes the round-two producer return a gave_up/blocked no-change report, and asserts: state Rejected, the stored Verification is round one's (`candidate_commit` equals the first candidate), and `tree_retry_seed` yields the first candidate. Name `tree_retry_seed`, scope_guard `attempt_of` and `failure_details` in the dependents list for this path.",
+      "location": "Plan step 8 / decision 3 / risk 3; crates/athena-core/src/run/candidate.rs:178-227; crates/athena-core/src/reading/retry.rs:403-412",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The resume mark from round one can outlive a round-two environment stop or hold",
+      "evidence": "Round one calls `write_resume_mark` for the first candidate (mod.rs:1948). Round two writes a new mark only once its own candidate is admitted. A round-two producer that ends Failed for an environment reason keeps the job's mark (`settle_resume_marks`, mod.rs:886), and a slot-wait hold commits a hold with no new mark. `athena retry` would then resume the first candidate, which has already been rejected, and spend another verifier on it with no repair. Decision 2 cites this effect for disk holds only. Fix: Remove the job's resume mark (`self.state.remove_resume(id)`) before round two starts, or rewrite it to point at round two. State the chosen behaviour in D189.",
+      "location": "Plan step 8 / decision 2; crates/athena-core/src/run/mod.rs:849-870, 875-890; close.rs:200-212",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The claim that a failing check alone triggers no repair is wrong in practice",
+      "evidence": "`repair_view` triggers on any unmet criterion that is not an unassessed one. Most readings carry a criterion like 'fmt, clippy and test pass' (criterion 6 here). When a check fails, the verifier marks that criterion unmet and usually adds a major finding, so a failing check does trigger a repair. D189 and the CHANGELOG would then document a limit that does not hold. Fix: Either state that a failing check repairs through the unmet check criterion (and add a test case for it), or exclude criteria that `is_athena_check_criterion` matches when the only blocking items are check failures. Make the D189/CHANGELOG text match whichever you choose.",
+      "location": "Decision 5 / risk 'A job whose only problem is a failing check'; crates/athena-core/src/verify.rs:649-664",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The D43 'cited but not seen running' items are kept as triggers, although they are the same kind of verifier omission the plan excludes for unassessed criteria",
+      "evidence": "`judge` sets met=false and adds an Athena major when the verifier's own cited commands were not seen running (verify.rs:586-605). That describes what the verifier ran, as 'not assessed' does (verify.rs:549-555), which the plan excludes because 'a round would only add cost'. Keeping D43 items in contradicts that reasoning, and the repair brief would tell the producer to fix something it cannot change. Fix: Exclude D43-only unmet criteria, and their Athena findings, from the trigger the same way as unassessed ones, or give code evidence that a producer pass can change them. Add the D43-only case to the no-repair tests.",
+      "location": "Decision 5; crates/athena-core/src/verify.rs:586-605",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Round one's Verification is replaced, and the introspector sees at most 3 of its items",
+      "evidence": "The reading says 'store a typed event for each check'. The plan keeps round one only as free text: the first verifier's `detail` (which the introspector never reads, introspect.rs:1557-1572) and a reason note capped at 3 items. A first round with 4 or more unmet criteria or findings would again leave some unmet criterion out of the stored event, which is the failure class this request fixes. Fix: Do not cap the item list in the reason, or clip only the length of each item. Alternatively, have `event_of_job` include a successful verifier's `detail` when the job has more than one verifier invocation, and pin that in the test for criterion 4(b).",
+      "location": "Decision 3 / step 2 `repair_note` (cap at 3)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A round-two self-send-back nests a second '## Sent back' section under the repair section",
+      "evidence": "`producer_loop` builds its own send-back from the `brief` it was given (producer.rs:685). In round two that brief is the repair text, so the result holds two '## Sent back' headings, and the inner intro says 'This is the only send-back' and 'A run that leaves no change fails', which the repair intro contradicts. Fix: Pin the combined text in a test, or make the round-two send-back intro aware of a repair (for example by passing the RepairView through).",
+      "location": "Decision 4; crates/athena-core/src/run/producer.rs:685",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly and puts the fix where the gap starts: `produce_and_verify` (run/mod.rs:1871-1950) runs one producer round and one verifier, and only the producer's own report is ever sent back (send_back.rs:19). I checked the files, functions and test seams it names in the snapshot and they exist: `PRODUCER_SEND_BACKS` at mod.rs:1681, the `send_back_text_*` chain at send_back.rs:93-200, `producer_snapshot` with `BaseThenTree` at producer.rs:144-153, the `judge` lines at verify.rs:544/551/631/639-664, `Closing` at mod.rs:132, `close_dispatched`'s reason fallback at close.rs:46-55, `event_of_job` at introspect.rs:1538-1579, and the test helpers `counting`, `editing`, `athena_with`, `Counts` and `CRITERION`. Each demonstration drives the production entry point `Athena::go`, with only the agent turns faked, and would fail without the repair loop. The dependents list is thorough. I found one major design gap. When round two stops before reaching a verdict (producer gives up, admission refusal, decision gate, scope stop), the plan has already dropped round one's Verification, and `candidate_stage` overwrites the candidate. A job that today ends Rejected, with a full verdict and a candidate a retry can start from, would end Failed with no Verification. That breaks the retry seed (`tree_retry_seed` needs both records, retry.rs:403-412), scope_guard's progress measure and the introspector's `failure_details`. Smaller issues: the resume mark round one wrote can outlive a round-two environment stop; the stated limit that a failing check alone never triggers a repair is inaccurate; the D43 trigger rule is inconsistent with the rule that excludes unassessed criteria; and the reason note caps first-round items at 3. Verdict: revise."
+}
