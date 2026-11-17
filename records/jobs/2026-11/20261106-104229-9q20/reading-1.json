@@ -1,0 +1,183 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-104229-9q20",
+  "n": 1,
+  "at": "2026-11-17T00:00:32.444222217Z",
+  "invocation_seq": 1,
+  "base_commit": "3d831f695e6ac900da70d3a238eb9e8c0749a3e9",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add reconcile deliverables for decision-governed plan files",
+  "summary": "When a plan or reading names a file a [[governs]] entry covers (e.g. crates/athena-git/src/snapshot.rs under D08), the plan's deliverables gain docs/decisions.md and docs/decision-links.toml plus a reconcile criterion, and the producer gets the same list and is told to run the decisions check locally. Tests cover a governed plan (gets the deliverables) and an ungoverned plan (gets none); CHANGELOG records it.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "The change adds two tests, and cargo test, clippy and fmt are criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The tests check that deliverables are added for a governed plan and not for an ungoverned one, not just that wiring exists."
+    },
+    {
+      "id": "mechanism",
+      "how": "The reconcile mapping runs in the run pipeline and reuses the gate's matcher."
+    },
+    {
+      "id": "small",
+      "how": "One focused change that extends the existing governing path."
+    },
+    {
+      "id": "strangers",
+      "how": "The new decision entry and the CHANGELOG entry are written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: Athena's own pipeline and the maintainers who judge jobs. A job that edits a governed file should add its reconcile deliverables on the first attempt, not at the decisions check or the final verifier.",
+    "Code survey: crates/athena-data/src/decision_links.rs holds `governing(base_links, planned)`, which uses `Governs::covers` (an exact file, or a directory prefix ending in `/`), and `unreconciled`, which is the decisions check. crates/athena-core/src/run/checks.rs:816 `governing_decisions` calls it with the base list. crates/athena-core/src/run/mod.rs:1387 passes `planned_paths(plan, accepted)` (plan files plus reading deliverables) to `producer_prompt_with_governing`. crates/athena-context/src/briefs.rs:1605 `governing_decisions_section` already lists the governed paths and the reconcile rule in the producer prompt. The entry point is the run pipeline after plan_round. Order: reading accepted, plan round, planned_paths, governing, producer prompt. Not yet present: adding docs/decisions.md and docs/decision-links.toml to the deliverables and criteria, and telling the producer to run the decisions check locally before reporting. No record or data file is added under crates/, so check_record_file and AnyRecord are not touched. The property is measured directly: the governing list is computed from the real list text and the plan paths, not through a stand-in.",
+    "Existing code: reuse `athena_data::decision_links::governing`, `Governing` and `Governs::covers` (crates/athena-data/src/decision_links.rs), `Athena::governing_decisions` (crates/athena-core/src/run/checks.rs), `planned_paths` (crates/athena-core/src/run/mod.rs) and `governing_decisions_section` (crates/athena-context/src/briefs.rs). Extend them; do not write a second matcher, so the mapping uses the same rule as the decisions check.",
+    "docs/decisions.md and docs/decision-links.toml are in the user's Files list, so the job appends one new decision with a Provenance bullet. It says \"Amends D08 in prose only\" (D08 governs crates/athena-git/src/snapshot.rs) or amends another decision. It adds a matching `amended` [[link]]. No existing entry is edited. The new entry's id is the next unused D<n>; the producer reads the log tail for it.",
+    "The user's Files list names crates/athena-git/src/snapshot.rs, but nothing in the request changes snapshot behavior. I read it as the example governed path, and it changes only if the producer needs a test fixture there. If it is touched, D08 reconciliation applies to this very job.",
+    "The test lives next to the code it imports: unit tests in crates/athena-core/src/run (checks.rs or tests.rs) or crates/athena-context/src/briefs.rs, built on a literal list text like the one in decision_links.rs tests. It must not read the live docs/decision-links.toml in a way that breaks when entries change.",
+    "Environment: none. No CI workflow, push, PR, or records read is needed. athena.toml, defaults.toml and .github/workflows are not changed, and no config consumers are involved.",
+    "No refusal rule is added or tightened. The decisions gate's refusals stay as they are, so no refusal-rate figure applies. The change moves the reconcile work earlier."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A unit test builds a reading or plan whose planned paths include crates/athena-git/src/snapshot.rs, using a list text with D08 governing it. It asserts the resulting deliverables include docs/decisions.md and docs/decision-links.toml and the criteria include a reconcile criterion naming D08. Check by running `cargo test` (athena-core or athena-context) and finding the test by name in the diff.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second unit test uses a plan whose paths are covered by no [[governs]] entry (for example README.md). It asserts that no reconcile deliverable and no reconcile criterion is added and that the deliverables are unchanged. The first test fails if the addition is removed. Check by running `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The mapping reuses `athena_data::decision_links::governing` (and `Governs::covers`) via the same base-list text. Grep the diff: no new path-matching function exists, and the diff calls `governing(` or `governing_decisions`.",
+      "kind": "content"
+    },
+    {
+      "text": "The producer prompt carries the same list of governed decisions, deliverables and criteria. It tells the producer to run the decisions check locally before it reports. Check the new prompt text in crates/athena-context/src/briefs.rs (or the producer prompt file), and the `governing_decisions_section` test updated to assert that sentence.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md gains one new appended entry with a Provenance bullet that amends, supersedes or confirms the decision(s) for this change, with no existing entry edited. Check with `git diff` on docs/decisions.md: only additions at the end.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decision-links.toml gains the matching [[link]] whose `older` is the governed decision and whose `newer` is the new entry's id, with status amended or superseded. Check with `git diff` on docs/decision-links.toml: additions only, and every existing [[link]] and [[governs]] entry is unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry under [Unreleased] describing that plans touching decision-governed files now get reconcile deliverables and criteria. Check with `git diff` on CHANGELOG.md.",
+      "kind": "content"
+    },
+    {
+      "text": "No unrelated behavior changes. Run `cargo test` and confirm the existing tests pass, including those in crates/athena-data/src/decision_links.rs and `governing_decisions_add_nothing_when_no_planned_file_is_governed`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check` and `cargo clippy`. Both are clean, or the passing record on the same tree is cited, and `cargo test` passes.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Changing the decisions gate's refusal logic or the [[governs]] entries themselves.",
+    "Changing snapshot behavior in crates/athena-git/src/snapshot.rs.",
+    "Editing any existing entry of docs/decisions.md or anything under records/.",
+    "Changing athena.toml, defaults.toml or CI workflows.",
+    "Prompt files under crates/*/prompts/, which have almost no token headroom."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.62,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.6,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2300.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6858552631578947,
+      "p_user_intervenes": 0.06017699115044248,
+      "cost_usd": {
+        "p10": 0.5540958486904357,
+        "p50": 1.5358,
+        "p90": 6.46785557175874
+      },
+      "wall_time_s": {
+        "p10": 608.8643803587555,
+        "p50": 2206.9206192650086,
+        "p90": 4579.061116825767
+      }
+    }
+  },
+  "departures": "Hard pipeline change across crates, with the decisions gate and append-only log rules. The producer must pick the right insertion point, so pass probability is a little below the reference.",
+  "urgent_reason": "Jobs that touch governed files are held at the decisions check or caught only at the final verdict, which costs failed attempts and retries. Reconciling the decision in the first attempt removes that redo-work.",
+  "hard_reason": "It changes the run pipeline (how a plan's deliverables and criteria are built before the producer starts) and touches the decisions gate that holds jobs before the verifier.",
+  "producer_effort": "high"
+}
