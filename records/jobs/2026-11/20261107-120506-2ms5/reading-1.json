@@ -1,0 +1,177 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261107-120506-2ms5",
+  "n": 1,
+  "at": "2026-11-17T02:42:28.225666227Z",
+  "invocation_seq": 2,
+  "base_commit": "b49ab5ca8f78d1f3f7c286b275d843ea32986ee5",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Fix the flaky main-CI shard 1 test and record red main CI baselines",
+  "summary": "Find the test failing in main CI 'test (shard 1)' after landings 20261107-031902-ttnw, 20261107-031925-mrpk and the 2026-11-06 mirror-check landing. Name it and its cause from the logs, say whether it is intermittent, fix the root cause, and make Athena record a red main CI result after a landing so the next job's baseline notes it.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "The criteria check that the shard 1 test passes on repeat runs and that the baseline notes a red main CI, not that code exists."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix removes the cause found in the log, and the criteria require it to be named."
+    },
+    {
+      "id": "tested",
+      "how": "fmt, clippy and test pass, and a regression test covers the cause."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The criteria run the test and status commands and check the output."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: Athena maintainers and the next job's producer and verifier. They need a green main CI shard 1 and a baseline that shows a red main run after a landing.",
+    "Environment: the CI site is GitHub Actions on main. The workflow 'test (shard 1)' logs are read with `gh run view --log-failed` (read-only) for the push runs after the three named landings. The verifier cannot run gh, so the test name and panic message are quoted in the CHANGELOG entry and the code comment. Real records and history are reached read-only through `athena status --snapshot` and `git log`.",
+    "Code survey: I did not read the code in this reading. The producer must read the failing test's crate under crates/, the baseline and records code in crates/athena-core/src/ (hestia.rs, status.rs, snapshot.rs) and crates/athena-data/src/records.rs. It must also read the records validation allow-list. A new record kind must be covered by check_record_file, AnyRecord and the round-trip test.",
+    "Existing code: extend crates/athena-core/src/status.rs, crates/athena-core/src/snapshot.rs and crates/athena-data/src/records.rs. They already hold the baseline and records notes. Do not add a parallel recording path.",
+    "Intermittency is a claim to settle from the logs: compare the failing runs with their passing PR runs (shard assignment, ordering, shared state, time, ports, environment). The cause is recorded with its evidence. The fix targets that cause, not a retry or a skip.",
+    "Prior jobs: 20261107-031902-ttnw (drain improvement turn: plan.rs, drain.rs, display.rs, hestia.rs, steward.rs, tests/drain.rs, main.rs) and 20261107-031925-mrpk (throughput waste measures: hestia.rs, status.rs, records.rs, display.rs, status_snapshot.rs, docs/design/hestia.md) landed with verdict pass. Their landed work is kept. Their findings (person-filed requests counted by content, the slowdown request without a turn, a coarse noise bar, window cut mismatch, retries counted only by the 'try again on' text) are not addressed here and stay open. A file of theirs is touched only if the root cause lies in it (hestia.rs, status.rs, plan.rs, drain.rs and tests/drain.rs are listed with low probability for that case).",
+    "The 2026-11-06 landing 'Check hand-kept mirrors against their sources before handover' is also kept. It is touched only if the log shows the failing test or its cause lies there.",
+    "Governance files (athena.toml, defaults.toml, workflows) are not expected to change; the fix is code or test only.",
+    "Records under records/ are never edited by hand. The new red-CI note is produced by code that Athena runs and appended as a new record; existing entries stay unchanged."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "CHANGELOG.md has an entry that names the failing test and its panic message as read from the 'test (shard 1)' logs of the push runs after 20261107-031902-ttnw, 20261107-031925-mrpk and the 2026-11-06 mirror-check landing. It states whether the failure is intermittent and gives the root cause, and it states only what the diff does.",
+      "kind": "content"
+    },
+    {
+      "text": "The diff changes the cause of the failure in the test or the code it covers (for example shared state, ordering or timing), not a retry, ignore or skip attribute. A regression test in the diff fails on the old code and passes on the new.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test --locked` on the changed tree and check the named test passes on the candidate. Run the named test a second time by name with `cargo test <test name>` to show a repeat pass. Athena's recorded test check on the same final tree also counts.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Red main CI recording: a test in the diff feeds sample records holding a failed main CI result after a landing and checks the baseline notes it. Run it with `cargo test -p athena-core` or `cargo test -p athena-data`. The test fails when the new recording code is reverted.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Real records check: run `cargo run -p athena-cli -- status --snapshot <evidence directory>` on the real records. The landing time it prints must stay within the expected range from the commit times of landings in history.json and `git log`, which are not computed by this change. Landings take a few minutes each, so a figure of 0.1 or hundreds of minutes is a failure. The other throughput figures (attempts per landed change, wasted spend, first-attempt share) must equal their output before the change, since this change must not move them.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked`; all pass, or the recorded fmt, clippy and test checks on the same final tree show them passed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No unrelated behavior changes: the diff lists no change to athena.toml, defaults.toml or .github/workflows, and no edit to existing entries under records/ or docs/decisions.md.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.55
+    },
+    {
+      "path": "crates/athena-core/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/tests/status_snapshot.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Rewriting or annotating existing records under records/ or docs/decisions.md.",
+    "Editing athena.toml, defaults.toml, .gitattributes, workflows or prompt files.",
+    "Reverting or redoing jobs 20261107-031902-ttnw and 20261107-031925-mrpk; their landed work is kept, and their listed findings are not addressed here.",
+    "Changing the throughput review measures, the improvement-turn ordering or the 25% slowdown rule.",
+    "Marking the test ignored or adding CI retries to hide the failure."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.7,
+        "p50": 1.8,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2400.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6858552631578947,
+      "p_user_intervenes": 0.06017699115044248,
+      "cost_usd": {
+        "p10": 0.5540958486904357,
+        "p50": 1.5358,
+        "p90": 6.46785557175874
+      },
+      "wall_time_s": {
+        "p10": 608.8643803587555,
+        "p50": 2206.9206192650086,
+        "p90": 4579.061116825767
+      }
+    }
+  },
+  "departures": "Higher than the reference: the root cause must be found from CI logs and a new record path added, with several candidate crates.",
+  "urgent_reason": "It cuts wasted time: a main CI shard that fails after landings that passed their PR runs wastes failed baselines and repeated checks on every following job.",
+  "hard_reason": "It adds a record and baseline rule for red main CI after a landing, which touches records and the landing and baseline pipeline, so a mistake is costly to see.",
+  "producer_effort": "high"
+}
