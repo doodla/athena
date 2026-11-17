@@ -1,0 +1,167 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-185246-gpma",
+  "n": 1,
+  "at": "2026-11-17T00:03:17.53286143Z",
+  "invocation_seq": 2,
+  "base_commit": "c09b2fb3eda7d294c5f85a188e82ab4159e73a03",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Record main's CI test failures and attach them to flaky-test requests",
+  "summary": "When the CI test check fails on main, Athena would store the failing test names and their panic or assertion text in a typed record it can read. Any request that diagnoses or fixes that flaky test would get the record attached, so the job starts from the recorded failure. The goal is that the person running Athena no longer has to paste CI text by hand. A test feeds a log with a panic in the middle and cleanup at the end.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New unit test plus fmt, clippy and test criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the test name and panic text in both the record and the attached request."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuses existing log-parsing code instead of a new parser."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the person running Athena, and the jobs that diagnose or fix flaky tests, should not have to paste main's CI failure text by hand. The verifier judges from the diff and the test.",
+    "Code survey: read crates/athena-core/src/ci_result.rs (CiSource::failure_detail, FailureDetail with failed_tests and output_tail), crates/athena-core/src/gh/client.rs (detail_from_job_logs, failing_test_name), crates/athena-core/src/checks.rs (failed_test_names, failure_section, FAILED_TAIL_LINES) and crates/athena-core/src/steward.rs and hestia.rs (StewardRequest, the request builder). Existing code cuts cleanup text and keeps a log tail, but nothing reads main's own CI failure or attaches it to a request. The entry point to add is where a request is built or queued. The records validation allow-list lives in crates/athena-data/src/records.rs. A new record kind there would need `check_record_file` or `AnyRecord` and its round-trip test. Whether the record can instead reuse an existing kind is the producer's call.",
+    "Existing code: crates/athena-core/src/ci_result.rs, crates/athena-core/src/checks.rs, crates/athena-core/src/gh/client.rs and crates/athena-core/src/steward.rs are extended or reused, not recreated.",
+    "Environment: main's CI is read through the existing injected CiSource over GitHub's API, read-only. The record is written to Athena's own records area, and no workflow file or push is needed. The test uses a fake source and a string log, with no network access.",
+    "Field meaning: no existing field is reused; the record's fields are new.",
+    "The request names records/introspections/2026-11/20261106-145054-040d.json as its source. That is the evidence for the problem and is not changed, because records are append-only. It was not readable in the copy.",
+    "Whether a request 'diagnoses or fixes' a flaky test is decided by matching the failing test name in the request text, or the request's cause. This keeps the match mechanical and testable. The producer states the rule it chose."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new unit test feeds a CI log with a test panic in the middle (`thread 'x' panicked at ... assertion `left == right` failed`) and runner cleanup lines at the end. It asserts that the stored main-CI failure record contains the failing test name and the panic or assertion text, and that the request text built for a flaky-test job contains both too. Run with `cargo test -p athena-core main_ci_failure`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The test fails without the change: with the attach step removed or the log tail used instead of the panic text, the request assertion fails, because the cleanup lines at the end of the log would displace the panic. Checked by `cargo test -p athena-core main_ci_failure`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The record stores failing test names plus panic or assertion text as typed fields. It does not store a raw log tail. Redaction and clipping, as the existing `FailureDetail` path does, are applied before storing. Diff of `crates/athena-core/src/main_ci_failure.rs`.",
+      "kind": "content"
+    },
+    {
+      "text": "The new code reuses `crate::checks::failed_test_names` and `crate::ci_result::FailureDetail`/`CiSource::failure_detail` where they fit, and does not duplicate them. A diff line shows the call.",
+      "kind": "content"
+    },
+    {
+      "text": "The attach step applies only to requests that diagnose or fix the flaky test named in the record, and leaves other requests unchanged. A test asserts an unrelated request text is unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "Any new record or data file is covered by the records validation allow-list and its round-trip test (`check_record_file` or `AnyRecord`). CHANGELOG.md records the change; records/ is untouched.",
+      "kind": "content"
+    },
+    {
+      "text": "No unrelated behavior changes: `cargo test`, `cargo clippy` and `cargo fmt --check` pass, citing Athena's recorded checks on the final tree or the commands run.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/main_ci_failure.rs",
+      "action": "create",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.55
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Rerunning or retrying flaky tests",
+    "Changing workflow files or athena.toml",
+    "Editing existing records or docs/decisions.md entries",
+    "Changing how a job's own candidate checks are resolved"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.2,
+        "p90": 6.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2600.0,
+        "p90": 5500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6858552631578947,
+      "p_user_intervenes": 0.06017699115044248,
+      "cost_usd": {
+        "p10": 0.5540958486904357,
+        "p50": 1.5358,
+        "p90": 6.46785557175874
+      },
+      "wall_time_s": {
+        "p10": 608.8643803587555,
+        "p50": 2206.9206192650086,
+        "p90": 4579.061116825767
+      }
+    }
+  },
+  "departures": "The deliverable set is uncertain because no existing reader of main's CI failure exists, so the producer must pick where it attaches. Cost and time are above the reference."
+}
