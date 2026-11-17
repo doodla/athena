@@ -1,0 +1,368 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-120506-2ms5",
+  "round": 1,
+  "at": "2026-11-17T03:01:55.491265375Z",
+  "invocation_seq": 5,
+  "approach": "The request has two parts. Part 1, the flaky shard 1 test. No Athena role can run `gh`, and HISTORY.txt holds no log text, so the test is named by inference and the plan says so. The cause is already removed in the base, so Part 1 needs no code change. `d6f8678c` (2026-11-07, HISTORY.txt:809) is the first commit after the three landings (HISTORY.txt:883, 890, 940). Its entry at CHANGELOG.md:1174-1177 says the test `status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain` (drain.rs:5524, an `athena-cli --lib` test) raced. The stand-in drain exited at the stop file, so on a busy runner it could be gone before the waiting `stop_and_wait` looked. The stand-in now also waits for a release file made after the first lookup (drain.rs:5460, 5477), and a test pins the old shape (drain.rs:5496). The failure is intermittent: it needs a busy runner, and each change passed its pull request run first. `6922fbe9` (2026-11-14, HISTORY.txt:192) fixed a different flaky test, `a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn` (tests/drain.rs:8650). Which shard held which unit in the failing runs cannot be rebuilt: `xtask/shard-timings.txt` changed in many commits after those runs (HISTORY.txt:205-1388), so the shard number is not claimed. No retry, ignore or skip is added.\n\nPart 2, recording a red main CI result, is still missing. `take_baseline` (run/checks.rs:867) returns at checks.rs:1136 as soon as the landed job's own CI branch run is green and never reads main's push run. When step 2 does read main and finds it red (checks.rs:1266-1269), the red result is only a `ci         baseline runs locally` line (checks.rs:896-898). The failing test names are not read either: `WaitsWhileRunning` has no `failure_detail` (checks.rs:569-579, default `None` at ci_result.rs:111), and `RefuseExec::redact` bails (checks.rs:542-544), so `with_failure_detail` returns the run unchanged (crates/athena-core/src/checks.rs:519-525).\n\nThe fix adds an optional `Baseline.main_red` (records/plan.rs), written only when set, so existing baseline.json files parse and stay unchanged. The baseline lookup reads main's tip run once with no wait on the landed-green path and keeps the red result of the existing step-2 read. For main's runs only, it reads the red run's job log through the redactor. `take_baseline` stores the note on the job's own baseline record and prints one `ci         main's CI run ...` line. It still never fails and no verdict reads the note. Criterion 5 is shown by one concrete `cargo run` command with no placeholder or redirection, in answer to finding 1.",
+  "decisions": [
+    {
+      "choice": "Record the red main result in a new optional field `Baseline.main_red: Option<String>`, declared after `reused_from` with `#[serde(default, skip_serializing_if = \"Option::is_none\")]`. Text form: `<run address> for <tip> on <branch> did not pass: <failed check names>; failing tests: <names, or 'none named in its log'>`, capped at 400 characters at a character boundary.",
+      "reason": "Documented meanings, quoted from the code. `Baseline.note` is 'Why the baseline is empty or partial, if it is.' (records/plan.rs:216), and the record is 'which checks already fail before the producer touches anything' (plan.rs:198-205). A red main run is neither, so a new field is planned, not a reuse. `failed_before` and `failed_tests_before` return nothing for a baseline with a `note` (plan.rs:233-248), so a note would stop the baseline excusing already-failing checks and change verdicts. An optional field leaves old files and unchanged baselines byte-identical, as `reused_from` did (plan.rs:218-223; CHANGELOG.md:1326), and `deny_unknown_fields` (plan.rs:207) still refuses typos (records.rs:3589). No docs change is needed: docs/records.md:37 and docs/design/athena-v0.md:609 did not list `reused_from` either.",
+      "rejected": [
+        {
+          "option": "Put the text in `Baseline.note`",
+          "why": "It disables pre-existing-failure excusing for every check (plan.rs:234, 241). Tests assert `note == None` on the local-run paths (run/tests.rs:8903, 8954, 9299)."
+        },
+        {
+          "option": "A new record kind with its own AnyRecord variant, check_record_file arm and schema",
+          "why": "Larger than needed. The baseline is taken at every job's start (producer.rs:99-128) and written at close.rs:627-628, so one optional field reaches the record of the job that starts after a landing. A new kind touches AnyRecord, the gate and the schema list."
+        },
+        {
+          "option": "Show it only in `athena status` or the throughput measures (status.rs, snapshot.rs, hestia.rs)",
+          "why": "Those files read no job baseline: their `baseline` hits are code-health baselines (status.rs:4199) and keep-rule shares. It would also risk moving the landing-time and throughput figures criterion 5 says must not move."
+        }
+      ]
+    },
+    {
+      "choice": "Read main's run in two places. (a) On the step-1 path (landed candidate green, checks.rs:1132-1136), before returning, make one `green_run` read with `wait_s` 0 of the tip of `origin/<default branch>`, only when `origin/HEAD` is set and the tip's governed fingerprint equals the base's. (b) On the step-2 path keep the red result of the existing waiting read (checks.rs:1147-1158). The tip lookup (`local_default_branch`, `rev_parse` of `refs/remotes/origin/<branch>`, fingerprint check, checks.rs:1147-1170) becomes one helper used by both. `reused_baseline` gains a `&mut Option<String>` out-parameter for the red note; its only callers are `take_baseline` (checks.rs:886) and the tests through `Athena::go`.",
+      "reason": "Step 1 returns at checks.rs:1136, so main's run was never read there; that is the gap that left three red main runs unrecorded. One no-wait read (`with_ci_source_on` gives `ci_polls(0)` = 1 poll, run/mod.rs:1831-1834, routing.rs:124-126) adds no wait. A wait would bring back the stall that `ci_wait_s` bounds (checks.rs:1155). A run still in progress, missing, unreachable or for other content gives no note, and the limit is stated in the risks and the CHANGELOG. Step 2 keeps its waiting reads, so the read-count asserts at run/tests.rs:9102, 9130, 9157, 9187 hold.",
+      "rejected": [
+        {
+          "option": "Wait for main's run on the step-1 path up to `ci_wait_s`",
+          "why": "It adds up to the bound to every job started right after a landing."
+        },
+        {
+          "option": "Read the last N push runs on main",
+          "why": "New host paging code and a new `CiSource` call, beyond recording the run at the base."
+        }
+      ]
+    },
+    {
+      "choice": "The failing test names come from the red run's job log, read only for main's runs. `WaitsWhileRunning` (checks.rs:554) gets a flag, set by a second constructor, that makes its `failure_detail` forward to the inner source. `RefuseExec` (checks.rs:535) becomes a struct holding an optional `&Redactor` so its `redact` calls `redactor.redact` (as `SnapExec` does, checks.rs:233-234); `exec` still bails. The landed candidate's read keeps both as today. `green_run` returns, with its miss reason, an optional red note built from the record (run address, tip, branch) and the returned runs (failed check names, and the `test` run's `failed_tests`).",
+      "reason": "Without this the note could not name a test: `failure_detail` defaults to `None` (ci_result.rs:111-113), `WaitsWhileRunning` never forwarded it (checks.rs:569-579), and `RefuseExec::redact` bails (checks.rs:542-544), which makes `with_failure_detail` return the run unchanged with no `failed_tests` (crates/athena-core/src/checks.rs:519-525, 522-525). `run_routed_with_record` asks `ci.failure_detail` for a red record and redacts through `exec.redact` (routing.rs:279-293), and `Paced` forwards `failure_detail` (routing.rs:166-169) to `GhClient::failure_detail` (gh/client.rs:1203-1230), so a forward at `WaitsWhileRunning` reaches the host. Log text passes the same redactor as check output (`Redactor::redact`, athena-gate/src/redact.rs:47), so no raw log reaches a record. Only main's reads pay the extra jobs and log reads, and only when the run is red.",
+      "rejected": [
+        {
+          "option": "Leave `RefuseExec` and `WaitsWhileRunning` as they are",
+          "why": "The note would say a run failed but never name a test, so 'name the failing test from the log' would not carry into the record."
+        },
+        {
+          "option": "Forward `failure_detail` for every red read, the landed candidate's included",
+          "why": "Extra host reads for a result that is only used as a reason string."
+        }
+      ]
+    },
+    {
+      "choice": "Make no edit to the drain tests or drain code for the shard 1 flake. The CHANGELOG names the test as inferred, says the failure is intermittent, names the root cause, says `d6f8678c` removed it and not this diff, and names `6922fbe9` and the ETXTBSY fixes (CHANGELOG.md:1182-1199) as other known flakes of that suite. A step has the producer Grep the evidence snapshot's `records/` for `status_and_stop_find_the_drain` and `a_group_of_urgent_items` in failed checks and cite job ids only if found.",
+      "reason": "The queued fix's problem no longer exists in code: the release file and `ReleaseAfterFirstLookup` (drain.rs:5460-5493, 5524-5575) are in the base, and the first lookup writes the release file only after it has read the process, so the stand-in cannot exit before the wait has seen it running. A second edit would be the symptom-only change the request rules out. The shard number is not claimed: shard-timings.txt changed after the failing runs (HISTORY.txt:205-1388), so today's assignment (athena-cli --lib 40 s in xtask/shard-timings.txt:14, assigned by shard.rs:155-182) is not the one of those runs.",
+      "rejected": [
+        {
+          "option": "Add a retry, `#[ignore]` or a longer wait to the test",
+          "why": "A symptom fix, and the request rules it out."
+        },
+        {
+          "option": "Rewrite the stop test again as a precaution",
+          "why": "No evidence of a remaining race in it; it would be a guess."
+        }
+      ]
+    },
+    {
+      "choice": "Answer to findings 2-6 (files outside the reading's deliverable list): keep exactly these five extra files, each for one reason. (2) crates/athena-data/src/records/plan.rs: `Baseline` is defined only at plan.rs:208 (a grep of crates/athena-data/src finds no other `pub struct Baseline`), so the field cannot go into the listed records.rs; records.rs gets the tests and the `sample_baseline` literal (records.rs:3508). (3) crates/athena-core/src/run/checks.rs: `take_baseline` (867), `reused_baseline` (1103), `green_run` (1237), `RefuseExec` (535) and `WaitsWhileRunning` (554) are defined only there, and the main run can be read only from there. (4) crates/athena-core/src/run/tests.rs: the fake host `CiReplies` (8484), `ci_reuse_run_with` (8702), `commit_landed_squash` (8824), `main_tip_beside_head` (8972) and every baseline-reuse test (8887-9328) are private to that test module, so a test of `take_baseline` can live nowhere else. (5) crates/athena-core/src/verify.rs:2161-2167 and (6) crates/athena-core/src/checks.rs:1699-1705 are test helpers that build `Baseline` with a full literal (no `..`, no `Default`), so each gains one line `main_red: None` to compile; no logic changes there. The listed status.rs, snapshot.rs, hestia.rs, plan.rs, drain.rs, tests/drain.rs, status_snapshot.rs and display.rs are not edited.",
+      "reason": "The reading says its deliverable list was written before any code was read (its 'Code survey' assumption). Its own rule 'do not add a parallel recording path' points at the existing baseline code, which is in these files. All five are ordinary source or test files: no governance file (athena.toml, defaults.toml, .github/workflows), no records/ entry and no docs/decisions.md is touched, and criterion 7 limits only those. No criterion limits the changed-file list, and `Baseline` literals are all found by a grep of `Baseline {` over every .rs file (only these five sites build the struct).",
+      "rejected": [
+        {
+          "option": "Keep to the listed files and put the recording in status.rs or snapshot.rs",
+          "why": "They read no CI run and no baseline record (status.rs:4199 is a code-health baseline), so a note there would be read by no job and no job's baseline would carry it."
+        },
+        {
+          "option": "Avoid verify.rs and core checks.rs by giving `Baseline` a `Default` or a constructor",
+          "why": "The literals would still need editing to use it, and it widens the record type's API for two test helpers."
+        }
+      ]
+    },
+    {
+      "choice": "Test seam: extend the fake host `CiReplies` (run/tests.rs:8484-8627) with `also_for(sha, branch, reply)`, stored in a list checked before `only`, which gives one commit and branch its own `CiReply` and sets `current` so the jobs and log reads that follow match (`runs` at 8521, `jobs` at 8551, log at 8612). `only_for` and the in-progress counter are unchanged. The tests drive the production `Athena::go` through `ci_reuse_run_with` (8702) with `commit_landed_squash` (8824) and `main_tip_beside_head` (8972).",
+      "reason": "A realistic case needs a green run on the landed job's CI branch and a red run on main for the next commit. The fake only answers what the host would answer (runs by `head_sha` and `branch`, a jobs list, a shard log, as the existing `CiReply::RedTest` and `SHARD_LOG` at 8470-8480 do); `take_baseline`, `green_run`, `resolve`, `with_failure_detail` and the redactor run for real.",
+      "rejected": [
+        {
+          "option": "Stub `reused_baseline` or `green_run` in the test",
+          "why": "It would put the logic under test inside the double."
+        }
+      ]
+    },
+    {
+      "choice": "Exit table for `take_baseline` and `reused_baseline` after the change, one line per exit. | Success, landed candidate green, main's tip run finished red (new): `Ok(hit)` at run/checks.rs:1136 after the new read; `main_red` Some set in take_baseline (887-895 region), stored at producer.rs:127, written at close.rs:627-628; read next by nothing that decides (`baseline_for` checks.rs:341, run/mod.rs:2221 and verify.rs:788 read `checks`, `note` and `reused_from` only), so the only reader is a person or a later tool reading baseline.json and the `ci         main's CI run` line. | Success, landed green and main green, in progress, missing, unreachable, tip with other content, `origin/HEAD` unset (`local_default_branch`) or tip unknown: `main_red` None, record as before. | Success, nested run: returns at checks.rs:881-885 before any read, `note` set, `main_red` None. | Fail (no reuse), step 1 not usable and step 2 red: `Err(Some(reason))` at checks.rs:1171, `main_red` Some, the local baseline runs as at checks.rs:901-908 and the `ci         baseline runs locally` line still prints. | Fail, step 2 green: reused through `Ok(hit)` at checks.rs:1157, `main_red` None; step 2 in progress to the `ci_wait_s` bound or missing: `Err(Some)`, `main_red` None. | Error, a `gh` read fails (the fake's `Unreachable`) or the redactor refuses a test name (`with_failure_detail`, core checks.rs:522-525): `green_run` returns a miss with a note that names no test ('none named in its log') or no note; nothing fails. | Error, `baseline_checks` fails (checks.rs:904-907): `note` is set as before and `main_red` is kept; `failed_before` reads `note` (plan.rs:234), so excusing is unchanged. | Hold: no hold path exists in `take_baseline` (disk hold comes after `baseline_stage`, mod.rs:1861-1862). | Interrupt: no handler here; a killed process writes no baseline (written only at close.rs:627), so no partial state. | Every exit passes through `baseline_stage` (producer.rs:99-128).",
+      "reason": "The brief requires every exit of a changed stage tabulated. The exits are enumerated from checks.rs:867-909 and 1103-1172, and the new state is read by no verdict code.",
+      "rejected": [
+        {
+          "option": "Make a red main run fail or hold the job",
+          "why": "The baseline is 'recorded only and never stops the job' (producer.rs:106-107; doc at checks.rs:861)."
+        }
+      ]
+    },
+    {
+      "choice": "Commit shapes the lookup sees, and the outcome for each. | Job landing squash (verification.json added, one parent): `landed_job` returns it (checks.rs:1198-1227), step 1 runs, then the new main read; tested by the step-1 test. | Records-only commits above the landing (the job's base): `content_commit` steps over them (checks.rs:1179-1193); `ci_reuse_run_with` leaves a records commit as the base, so every test starts from this shape. | Intervention or any other commit that adds no single `verification.json`: `landed_job` returns None (1209-1211), step 1 is skipped (`why` gets 'the base is not the landing of one job', 1144), step 2 reads main; tested by the step-2 test. | Landing of two jobs: `landed_job` None, same as above (case at run/tests.rs:9273-9288). | Retry-after-block landing: a landing like any other, same as the first row. | A landing that edited a workflow: step 1 refuses its run (checks.rs:1270-1275); the new main read is a separate read of main's own tip, taken only when the tip has the base's fingerprint, and does not trust the candidate's run.",
+      "reason": "The change adds a read after the landing shapes are classified and changes none of `landed_job`, `content_commit` or `fingerprint`. The realistic-branch fixture is the existing `commit_landed_squash` squash on a repository whose head is a records commit, plus `main_tip_beside_head`. It differs from the real repository in that the squash is a local commit and the tip is a local ref; real hosts supply them through `origin/HEAD` and a fetch.",
+      "rejected": []
+    },
+    {
+      "choice": "Answer to finding 1: criterion 5 is shown by one whole simple command with a concrete path, no placeholder and no redirection: `cargo run -p athena-cli -- status --snapshot <job>/evidence`. The path is `evidence_dir` (snapshot.rs:34-36) under `job_dir` (state.rs:94-96), taken from this planner's own working directory `<state root>/jobs/20261107-120506-2ms5/plan-1`. The earlier text `<job>/evidence` held angle brackets, which read as shell redirection, and asked the producer to keep a file. Now the producer only quotes the pre-change lines in its report; the verifier cannot run the old tree, so it compares with that report, with `git log` commit times and with `history.json` in the evidence directory (Read tool), and `git diff --stat` shows the code that computes the figures is unchanged.",
+      "reason": "The verifier may run `cargo run` and `git log` (the command list) but writes no files. Athena also runs a behavior criterion that holds `status --snapshot` and `real records` itself on the producer's tree and passes the output to the verifier (records_criteria.rs:9-27), replacing `<evidence directory>` in the criterion text (records_criteria.rs:13-16). The verifier brief gives the evidence path too (briefs.rs:655-671).",
+      "rejected": [
+        {
+          "option": "Keep the `<job>/evidence` placeholder and a redirected pre-change file",
+          "why": "The placeholder cannot run as written and the verifier writes no files."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One Unreleased entry: the inferred failing test and why it is inferred, the intermittency statement and root cause, that d6f8678c (and 6922fbe9, the ETXTBSY fixes) removed it and not this diff, and the red-main recording with its limits (one read, no wait, only when the tip has the base's content).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records/plan.rs",
+      "action": "modify",
+      "purpose": "Add `Baseline.main_red: Option<String>` with a doc comment saying it is not `note` and does not change `failed_before`. `Baseline` is defined here (plan.rs:208), not in the listed records.rs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `main_red: None` to `sample_baseline` (3508) and the tests: round trip with `main_red`, no key when None, an old file parses with None, `check_record_file` accepts both, an unknown key is still refused.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "The baseline lookup: `RefuseExec` carries the redactor, `WaitsWhileRunning` can forward `failure_detail`, `green_run` returns a miss that carries a red note, a shared main-tip helper, one no-wait read on the landed-green path, `reused_baseline` out-parameter, `take_baseline` sets `main_red` and prints one line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add `CiReplies::also_for`, the three `baseline_main_red_` tests, and `main_red: None` in the literal at 5395.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Test helper `baseline_with` (2160-2167) gains `main_red: None`; nothing else.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Test helper `baseline_failing` (1698-1705) gains `main_red: None`; nothing else.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Step 1 (before any edit): run `cargo run -p athena-cli -- status --snapshot <job>/evidence` (or the evidence path in the brief if it differs) on the unmodified tree and copy the landing-time lines and the three waste lines into the report as the pre-change text; write no file. Grep the evidence snapshot's `records/` (read-only) for `status_and_stop_find_the_drain` and `a_group_of_urgent_items`; note any job id whose failed check names them, and report any other failing test name found.",
+    "Step 2: in crates/athena-data/src/records/plan.rs add `pub main_red: Option<String>` to `Baseline` after `reused_from`, with `#[serde(default, skip_serializing_if = \"Option::is_none\")]` and a doc comment: the default branch's own finished red CI run for content equal to the base's, as `<run address> for <tip> on <branch> did not pass: ...`; it is not a `note` and does not change `failed_before`.",
+    "Step 3: add `main_red: None` to the other Baseline literals: records.rs:3508, run/checks.rs:873, verify.rs:2161, run/tests.rs:5395, core checks.rs:1699. In records.rs add the tests: a baseline with `main_red` round-trips and passes `check_record_file`; the key is absent from the JSON when None; an old file parses with None; the unknown-key test still refuses a typo.",
+    "Step 4: in run/checks.rs make `RefuseExec` carry an optional `&Redactor` and make its `redact` call it when set (`exec` still bails; the landed candidate's read keeps `None`). Give `WaitsWhileRunning` a flag, set by a second constructor, that forwards `failure_detail` to its inner source. Change `green_run` to take the redactor choice and return a miss that holds the reason string and an optional red note. The note is built from a record of source Ci that is not all_passed: run address, sha, branch, the failed check names from the returned runs, and the `test` run's `failed_tests`, capped at 400 characters at a character boundary, or 'none named in its log'.",
+    "Step 5: in run/checks.rs extract the main-tip lookup (`local_default_branch`, `rev_parse` of `refs/remotes/origin/<branch>`, fingerprint equals the base's; checks.rs:1147-1170) into a helper. In `reused_baseline` take `&mut Option<String>`: on the step-1 `Ok(hit)` path make one `green_run(.., wait_s = 0)` read of main's tip through the helper and record a red note, then return `Ok(hit)`; on the step-2 `Err` path record the red note from the waiting read. A green, in-progress, missing, unreachable, other-content or no-`origin/HEAD` result leaves it None. In `take_baseline` pass the out-parameter, set `baseline.main_red` on every path after the nested-run return, and print `ci         main's CI run <note>` when it is Some. Update the doc comments of `take_baseline` and `reused_baseline`.",
+    "Step 6: in run/tests.rs add `CiReplies::also_for(sha, branch, reply)` (a list of per-commit replies checked before `only`; it sets `current`; `only_for` and the in-progress count are unchanged). Add the three `baseline_main_red_` tests of demonstration 4, using `commit_landed_squash`, `main_tip_beside_head`, `CiReply::RedTest` and `SHARD_LOG`. Run `cargo test -p athena-core baseline_` to confirm the existing reuse tests still pass unchanged.",
+    "Step 7: add the CHANGELOG entry under Unreleased as demonstration 1 describes: the inferred test and its inferred panic form, intermittent, the root cause, fixed by d6f8678c and not by this change, the shard number not claimed, the other known flakes (6922fbe9 and the ETXTBSY fixes), then the red-main recording and its limits. Do not edit any existing record, docs/decisions.md or governance file.",
+    "Step 8: run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, `cargo test -p athena-core baseline_`, `cargo test -p athena-data main_red`, `cargo test -p athena-cli --test status_snapshot`, and the named drain test twice by name. Run the status snapshot command of step 1 again and compare its lines with the step 1 text in the report. Cite each command and any failing test name in the report."
+  ],
+  "risks": [
+    {
+      "risk": "The flake diagnosis is inferred, not read from logs, and the shard number cannot be rebuilt (shard-timings.txt changed after the failing runs). If the failing test is another one (for example `a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn`, whose second half still asserts `started[..3]` under three workers at tests/drain.rs:8672-8680), criteria 1 and 2 are not fully met.",
+      "mitigation": "The CHANGELOG says the name and panic text are inferred; the producer must not invent a panic message. The producer Greps the evidence snapshot's records for failed checks naming the candidate tests and reports what it finds. A test found there with no fix goes in the report as an open issue and is not patched by guess."
+    },
+    {
+      "risk": "Criterion 2's regression test cannot be in the diff for the flake, because the fix is not in the diff.",
+      "mitigation": "Stated in the CHANGELOG and in the open question for the user. The existing pin test at drain.rs:5496 and the `baseline_main_red_` tests are the regression tests."
+    },
+    {
+      "risk": "A red main run is rarely visible to the next job. Right after a landing main's push run is usually still in progress, and the next landing changes main's tip and fingerprint, so the red run no longer matches a later base.",
+      "mitigation": "A wait would bring back the stall `ci_wait_s` bounds. The one no-wait read is the smallest change that stops a finished red run being dropped. The limit is in the CHANGELOG and the open question; widening the read to the last runs is a separate change."
+    },
+    {
+      "risk": "The plan edits files outside the reading's deliverable list (records/plan.rs, run/checks.rs, run/tests.rs, verify.rs, core checks.rs).",
+      "mitigation": "The scope decision gives the reason for each (the type, the stage and its seam live there; two files only gain one test-helper line). No criterion limits changed files, and no governance, decision or record file is touched."
+    },
+    {
+      "risk": "Log text from a CI run goes into a stored record; it could be long or hold a secret.",
+      "mitigation": "The note uses only check names and `failed_tests` names that pass through the redactor (`RefuseExec` now holds the real one, `with_failure_detail` redacts each name), is capped at 400 characters, and is built only for a red run of main. If the redactor refuses, the note names no test and nothing fails."
+    },
+    {
+      "risk": "A binary from before this change reading a baseline.json that holds `main_red` fails on `deny_unknown_fields`.",
+      "mitigation": "The key is written only when a red main run was found, so records without it are unchanged. The same binary writes and reads the records; no other tool parses them (lifecycle.rs:46 uses the same type)."
+    },
+    {
+      "risk": "Extra host reads at baseline time: one runs read on the landed-green path, plus a jobs and log read when main's run is red.",
+      "mitigation": "Only with a GitHub origin and `origin/HEAD` set; a failed read yields no note and never fails the job; the reads are read-only and the step-2 wait bound is unchanged."
+    },
+    {
+      "risk": "Criterion 5's pre-change comparison rests on the producer's quoted lines, since the verifier cannot run the old tree.",
+      "mitigation": "The throughput code is unchanged (`git diff --stat`), the landing time is checked against `history.json` and `git log` independently, and `cargo test -p athena-cli --test status_snapshot` runs."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Baseline gains optional `main_red`",
+      "dependent": "Readers of the baseline record (athena.baseline/1): crates/athena-core/src/run/checks.rs:341 `baseline_for`, run/mod.rs:2221, run/producer.rs:525, run/verification.rs:52, run/close.rs:627-628 (writes it), crates/athena-cli/tests/lifecycle.rs:46 (`baseline_of` parses baseline.json)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test lifecycle; cargo test -p athena-core baseline_main_red_ (an additive optional field; none of these read it, and baseline_stage's own `baseline   ...` line reads only `checks` and `note`, producer.rs:109-126)",
+      "reason": null
+    },
+    {
+      "name": "Baseline `note` and the pre-existing failure rule",
+      "dependent": "crates/athena-data/src/records/plan.rs:233-248 `failed_before` and `failed_tests_before`; crates/athena-core/src/verify.rs:448, 454, 788, 855 (pre-existing-failure rule and the `reused_from` check); crates/athena-core/src/checks.rs:1698 test helper",
+      "kind": "rule",
+      "test": "cargo test -p athena-core verify:: (the rule reads `note`, `checks` and `reused_from` only; `main_red` is a separate field, so a baseline with `main_red` and no `note` excuses exactly what it excused before)",
+      "reason": null
+    },
+    {
+      "name": "Baseline struct literal sites",
+      "dependent": "Literals that must add `main_red: None`: crates/athena-core/src/run/checks.rs:873, run/tests.rs:5395, verify.rs:2161, core checks.rs:1699, crates/athena-data/src/records.rs:3508 (found by a grep of `Baseline {` over every .rs file)",
+      "kind": "code",
+      "test": "cargo test --locked (the compiler names any missed site; clippy --all-targets compiles the test helpers too)",
+      "reason": null
+    },
+    {
+      "name": "`deny_unknown_fields` on Baseline and record validation",
+      "dependent": "crates/athena-data/src/records.rs `check_record_file` (callers crates/athena-gate/src/records.rs:40, 88, crates/athena-gate/src/content.rs:81, xtask/src/decisions.rs:289), `Baseline::validate` (records/plan.rs:251) and the tests at records.rs:3544-3595",
+      "kind": "rule",
+      "test": "cargo test -p athena-data main_red; existing `a_baseline_with_an_unknown_key_is_still_refused` (records.rs:3589) and `a_baseline_written_before_reuse_existed_still_parses_with_no_source` (records.rs:3544). The new key is a declared field so it is accepted, a typo is still refused, and files written before the field parse with None.",
+      "reason": null
+    },
+    {
+      "name": "Wording and number of baseline reads and `ci` lines",
+      "dependent": "Baseline reuse tests and UI line filters: crates/athena-core/src/run/tests.rs:8887-9328 (read counts at 8917, 9102, 9130, 9157, 9187; `ci         baseline ` filters at 9042, 9080, 9305; `note == None` at 8903, 8954, 9299)",
+      "kind": "code",
+      "test": "cargo test -p athena-core baseline_ . The extra step-1 read happens only when `origin/HEAD` is set (`local_default_branch`, reconcile.rs:370, returns None otherwise), and the step-1 tests set none, so their one read stays one. The step-2 tests do not take step 1. The new line begins `ci         main's CI run`, so the `ci         baseline ` filters still match one line each. `reads_off` and `reads` count only `/actions/runs?` paths (tests.rs:8581-8598), so the added jobs and log reads are not counted.",
+      "reason": null
+    },
+    {
+      "name": "Changed internal call paths of the baseline lookup",
+      "dependent": "`green_run` (run/checks.rs:1237) and `reused_baseline` (1103) are called only from `reused_baseline` and `take_baseline` (checks.rs:886, 1135, 1156); `RefuseExec` (535) and `WaitsWhileRunning` (554) are used only in `green_run`. `take_baseline` has one caller, `baseline_stage` (producer.rs:108), reached from the job run for every request job, nested runs excluded (checks.rs:881-885). No parallel or max_concurrency path calls them separately.",
+      "kind": "code",
+      "test": null,
+      "reason": "Found by searching the crates for the four names; no other caller or mode reaches them. The state they read is the repository's `origin` remote and refs, the base commit's history and the CI source; no job state or record is read."
+    },
+    {
+      "name": "Failure-detail path used for main's red run",
+      "dependent": "crates/athena-core/src/checks.rs:514-542 `with_failure_detail` (tests checks.rs:797-830, 1166-1219), crates/athena-core/src/routing.rs:166-169 `Paced::failure_detail` and 256-293 `run_routed_with_record` (tests routing.rs:668-755), crates/athena-core/src/gh/client.rs:1203 `GhClient::failure_detail`; also the candidate's own checks at run/checks.rs:500-526 and verification",
+      "kind": "code",
+      "test": null,
+      "reason": "None of these functions is edited. The plan only passes a real redactor and a forwarding flag at the baseline lookup (`RefuseExec`, `WaitsWhileRunning`), which is used by no other caller, so the candidate's and the verifier's reads of CI results behave as before."
+    },
+    {
+      "name": "Reading main's push run",
+      "dependent": "GitHub Actions push runs on main and their job logs (.github/workflows/ci.yml, job `test (shard N)`), read through `with_ci_source_on` (run/mod.rs:1817) and `GhClient::failure_detail` (gh/client.rs:1203)",
+      "kind": "host_setting",
+      "test": "cargo test -p athena-core baseline_main_red_ (the unreachable case leaves `main_red` None)",
+      "reason": "Read-only requests; extra jobs and log reads happen only for a red main run. `ci_wait_s` (athena.toml [budget], read at checks.rs:1155) still bounds only step 2; the new step-1 read uses `wait_s` 0 and reads no config key. A failed read gives no note and fails nothing."
+    },
+    {
+      "name": "Records-computed throughput figures",
+      "dependent": "Throughput measures and `athena status --snapshot`: crates/athena-core/src/status.rs, status/throughput.rs, snapshot.rs, hestia.rs, crates/athena-cli/src/display.rs and tests/status_snapshot.rs (landing time, attempts per landed change, wasted spend, first-attempt share)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test status_snapshot, plus the real-records run of criterion 5",
+      "reason": "These files are not edited and read no Baseline field (their `baseline` hits are code-health baselines, status.rs:4199 and records/work.rs:286, and keep-rule shares), and real baseline.json files lack the new key, so they parse with None."
+    },
+    {
+      "name": "Real-records criterion runner",
+      "dependent": "crates/athena-core/src/run/records_criteria.rs:9-27, 735-767 (runs a criterion's `status --snapshot` command on the producer's tree and passes the output to the verifier)",
+      "kind": "code",
+      "test": null,
+      "reason": "It reads the criterion text and the evidence directory, not any Baseline field, and this plan does not edit it. Criterion 5's text keeps the phrases it selects on (`status --snapshot`, `real records`)."
+    },
+    {
+      "name": "The shard 1 flake's tests",
+      "dependent": "Drain stop test and urgent-group test: crates/athena-cli/src/drain.rs:5458-5575 and crates/athena-cli/tests/drain.rs:8650-8695",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --lib status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain (run twice)",
+      "reason": "Not edited; the release-file fix from d6f8678c and the assertions from 6922fbe9 are already in the base."
+    },
+    {
+      "name": "Test unit list and the shard map",
+      "dependent": "xtask/shard-timings.txt, xtask/src/shard.rs:155-182, xtask/tests/ci_shards.rs (every test unit has a timings line), athena-core mirrors::REGISTRY",
+      "kind": "rule",
+      "test": null,
+      "reason": "No test target is added or removed (the new tests are unit tests in existing `athena-core --lib` and `athena-data --lib` units), so the unit list and the shard map are unchanged. mirrors.rs has no `baseline` entry (grep found none), and docs/records.md:37 and docs/design/athena-v0.md:609 do not list `reused_from`, so an added optional key contradicts neither."
+    },
+    {
+      "name": "Governed-code reconcile check",
+      "dependent": "docs/decision-links.toml [[governs]] (D08: crates/athena-git/src/snapshot.rs, crates/athena-core/src/run/candidate.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "None of the planned files is a governed path (decision-links.toml:196-201 lists only two), so no decision entry or link is required and docs/decisions.md stays unedited."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of CHANGELOG.md. The new Unreleased entry names `status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain` (athena-cli --lib) and says the name and panic text are inferred from history and code because no role can read the push-run logs. It gives the inferred panic form (`assert_eq!(waited, StopOutcome::Exited(record))` failing with `NotRunning(Dead(pid))`, drain.rs:5565) as an inference, not a quote. It says the failure is intermittent, names the root cause (the stand-in exited at the stop file before the waiting call looked), says `d6f8678c` removed it and not this diff, and that the shard number of the failing runs cannot be rebuilt. It then describes only what the diff does: `Baseline.main_red`, the one no-wait read of main's tip on the landed-green path, the kept red result of the waiting read, the job-log read for main's red runs, and the stated limits.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "An Unreleased entry holding the test name, the intermittency statement, the root cause, and a description of the red-main recording that matches the diff and claims no fix for the flake.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "The cause is removed in the base, so this diff holds no flake edit; `git diff --stat` (criterion 7) shows no change to drain.rs or tests/drain.rs and no `#[ignore]`, retry or sleep added. The existing test at drain.rs:5496 is the regression test: it recreates the old shape (stand-in gone before the waiting call) and asserts `NotRunning(Dead)`, the outcome that broke the old stop test. The diff's own regression tests for the part it does change are the `baseline_main_red_` tests of criterion 4, which fail on the old code. The producer also quotes any job ids found in the evidence snapshot's records.",
+      "command": "cargo test -p athena-cli --lib a_stand_in_drain_that_exited_before_the_waiting_stop_reads_as_dead_not_exited",
+      "observes": "The pin test passes; the diff adds no retry, ignore or skip attribute and does not touch the drain files.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Run this command twice in a row (the repeat run), then run `cargo test --locked` once for the whole workspace. Athena's recorded test check on the same final tree also counts.",
+      "command": "cargo test -p athena-cli --lib status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain",
+      "observes": "The named test passes on both runs and the workspace test run passes.",
+      "fails_without": "Without the release file and `ReleaseAfterFirstLookup` (the shape drain.rs:5496 pins), the stand-in can exit at the stop file before the waiting `stop_and_wait` looks. The call then returns `NotRunning(Dead(pid))` and the `assert_eq!(waited, StopOutcome::Exited(record))` at drain.rs:5565 panics.",
+      "seam": "Production entry `stop_and_wait` (crates/athena-cli/src/drain.rs:4029), called with a pid file written by `write_record` and a stop file present. Fixture: `stand_in_drain` (drain.rs:5460) as a real child process, with `ReleaseAfterFirstLookup` (drain.rs:5477) injected as the `&dyn Procs` argument. Exists today (read in the code); no plan step adds it."
+    },
+    {
+      "criterion": 4,
+      "method": "Three tests in crates/athena-core/src/run/tests.rs share the prefix `baseline_main_red_`. (1) `baseline_main_red_is_noted_after_a_green_landed_candidate`: `ci_reuse_run_with(Some(GITHUB), MARKS_BASELINE_OUTSIDE, ..)` builds a landing with `commit_landed_squash` and a main tip with `main_tip_beside_head`; `CiReplies::new(Green).only_for(PREVIOUS_CANDIDATE, <its CI branch>).also_for(tip, \"main\", RedTest)`. Asserts `baseline.reused_from == Some(CI_RUN_ADDRESS)` and `main_red` is Some and holds `CI_RUN_ADDRESS`, the tip, `main` and `reads_the_lockfile` from `SHARD_LOG`; asserts `note == None`, that the line `ci         main's CI run` was printed, and that main was read once with no pause. (2) `baseline_main_red_is_noted_when_the_landed_candidate_has_no_run`: the landed job has no run, main's tip is red, the baseline runs locally and `main_red` is Some. (3) `baseline_main_red_is_empty_unless_a_finished_red_run_is_read`: main green, in progress to the bound, missing, unreachable, a tip with other content and no `origin/HEAD` each leave `main_red` None. Also run `cargo test -p athena-data main_red`: the key is absent when None, the value round-trips and passes `check_record_file`, an old file parses with None, and an unknown key is still refused.",
+      "command": "cargo test -p athena-core baseline_main_red_",
+      "observes": "The named tests pass on the candidate; the red-main assertions fail when the recording code in take_baseline and reused_baseline is reverted.",
+      "fails_without": "With the recording reverted, `baseline.main_red` stays None, so the asserts that it is Some and names the run address, the tip and the failing test fail. Test (1) fails specifically because the landed-green return at checks.rs:1136 happens before main is read. Athena's own revert run (checks.rs:911-924) re-runs this plain `cargo test` demonstration with the non-test files at their base versions.",
+      "seam": "Production entry `Athena::go` into `take_baseline` (crates/athena-core/src/run/checks.rs:867) through `baseline_stage` (run/producer.rs:99). Guards: a GitHub origin (`has_github_origin`, run/mod.rs:1811), `origin/HEAD` set, the tip's fingerprint equal to the base's. Fixture: `ci_reuse_run_with` (run/tests.rs:8702), `commit_landed_squash` (8824) and `main_tip_beside_head` (8972), with the fake host `CiReplies` (8484) installed through `ci_seam` (run/mod.rs:1837). All exist today; plan step 6 adds `CiReplies::also_for`."
+    },
+    {
+      "criterion": 5,
+      "method": "Before any edit the producer runs this on the unmodified tree and quotes the landing-time lines and the three waste lines in its report (it writes no file). After the change the verifier runs the same command. The landing figures (the landing stage minutes and `median per landed job over the last N measured: X min`) must be a few minutes per landing, matching the gaps between consecutive landing commits in `history.json` `committed_at` (Read tool) and in `git log --format=%cI`; an estimate of 1 to 60 minutes is plausible, and 0.1 or hundreds of minutes is a failure. The `attempts per landed change`, `spent on attempts that did not land` and `landed on the first attempt` lines must equal the producer's quoted pre-change lines. `git diff --stat` must show none of status.rs, status/throughput.rs, snapshot.rs, hestia.rs, display.rs as changed. No `invalid     N file(s)` line may appear. Also run `cargo test -p athena-cli --test status_snapshot`.",
+      "command": "cargo run -p athena-cli -- status --snapshot <job>/evidence",
+      "observes": "A landing time in a plausible minutes range, the three waste figures equal to the pre-change lines, and no `invalid` line, so every real baseline.json parses under the new record type.",
+      "fails_without": "A Baseline change that made `main_red` required or renamed an existing field would make every real baseline.json fail `AnyRecord::parse`, so the command would print `invalid     N file(s) under records/ are not acceptable records` (display.rs:1237-1243) and `a_baseline_written_before_reuse_existed_still_parses_with_no_source` (records.rs:3544) would fail. A change to the throughput code would move the figures from the pre-change lines. The code that computes them (status/throughput.rs, status.rs) reads no baseline field and is not edited.",
+      "seam": "Production entry `athena status --snapshot` (commands.rs:472-477) into `snapshot::status` (crates/athena-core/src/snapshot.rs:251), which prints through `display::snapshot_status` (crates/athena-cli/src/display.rs:1196). Fixture: the job's real evidence snapshot written at dispatch by `snapshot::write` (snapshot.rs:59), passed as the command argument. Exists today (read in the code); no plan step adds it."
+    },
+    {
+      "criterion": 6,
+      "method": "On the final tree run, one command at a time and in this order, `cargo fmt --all --check`, then `cargo clippy --all-targets --locked -- -D warnings`, then this command. Athena's recorded fmt, clippy and test checks on the same final tree also count.",
+      "command": "cargo test --locked",
+      "observes": "All three exit 0, including the new `baseline_main_red_` and `main_red` tests and every existing baseline test (`cargo test -p athena-core baseline_`).",
+      "fails_without": "If a `Baseline` literal lacked `main_red: None` (run/checks.rs:873, verify.rs:2161, run/tests.rs:5395, core checks.rs:1699, records.rs:3508) the build fails; a formatting slip fails fmt; a lint failure in the new code fails clippy; and with the recording reverted the new tests fail.",
+      "seam": "The repository's own cargo fmt, clippy and test commands, the same three Athena's check stage runs on the candidate (the checks named in this brief). No fake or fixture; the command is the production check. Exists today."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the list of changed paths. It must not list athena.toml, defaults.toml, .github/workflows/*, anything under records/, or docs/decisions.md. Existing entries under records/ are not rewritten: the new note is produced by `take_baseline` when a job runs and written as part of that job's own new baseline record.",
+      "command": "git diff --stat",
+      "observes": "Only CHANGELOG.md, crates/athena-data/src/records/plan.rs, crates/athena-data/src/records.rs, crates/athena-core/src/run/checks.rs, crates/athena-core/src/run/tests.rs, crates/athena-core/src/verify.rs and crates/athena-core/src/checks.rs appear.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Host: the test name and panic message in the `test (shard 1)` logs of the push runs after 69057b9d, 9a97e246 and ad7e260c (`gh run view --log-failed`) are not readable by this planner or by Athena's roles. The plan names `status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain` by inference from history and code. If the logs name another test, the CHANGELOG must name that one and it needs its own cause fix.",
+    "Host: whether main's push run has finished by the time the next job's baseline is taken, and whether main's tip still has the base's governed content then. The code can only note a red run that has finished and whose commit has the base's content.",
+    "User: criterion 2 asks for a regression test in the diff that fails on the old code. The cause of the flake was already fixed by d6f8678c, so this diff holds no flake fix and no new flake test. Is the existing pin test at drain.rs:5496 (`a_stand_in_drain_that_exited_before_the_waiting_stop_reads_as_dead_not_exited`) accepted as that regression test, with this diff's own tests covering the red-main recording?"
+  ],
+  "producer_section_sha256": "d802deb85990bd14f01025cdfec3beb2fc72c269069566ca490d64c7c72f203a"
+}
