@@ -5270,6 +5270,177 @@ mod tests {
         assert!(system.text.contains("unless the request says otherwise"));
     }
 
+    /// The modes the shipped every-mode statement names: the text after "Modes of drain: " up to the
+    /// next ". ", split on ", ".
+    fn every_mode_modes(statement: &str) -> Vec<String> {
+        let rest = statement
+            .split_once("Modes of drain: ")
+            .expect("the every-mode statement names the modes of drain")
+            .1;
+        let list = rest.split_once(". ").map_or(rest, |(list, _)| list);
+        list.split(", ").map(str::to_string).collect()
+    }
+
+    /// The modes no criterion demonstrates. A mode is covered only by a behavior criterion that names
+    /// that mode and no other, and that states "expected" values holding a digit of their own.
+    fn modes_without_demonstration(criteria: &[Criterion], modes: &[String]) -> Vec<String> {
+        modes
+            .iter()
+            .filter(|mode| {
+                !criteria.iter().any(|c| {
+                    if c.kind != CriterionKind::Behavior || !c.text.contains(mode.as_str()) {
+                        return false;
+                    }
+                    if modes
+                        .iter()
+                        .any(|other| other != *mode && c.text.contains(other.as_str()))
+                    {
+                        return false;
+                    }
+                    // Strip every mode name first: two of them hold a digit that is not a value.
+                    let mut rest = c.text.clone();
+                    for m in modes {
+                        rest = rest.replace(m.as_str(), "");
+                    }
+                    rest.contains("expected") && rest.chars().any(|ch| ch.is_ascii_digit())
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn behavior(text: &str) -> Criterion {
+        Criterion {
+            text: text.into(),
+            kind: CriterionKind::Behavior,
+        }
+    }
+
+    #[test]
+    fn every_mode_default_reaches_the_reader_producer_and_verifier() {
+        let defaults = defaults();
+        let line = "- every-mode [code, tests, config, build]: Every behavior criterion for a multi-mode flow needs one demonstration per shipped mode, with expected values.\n";
+        // The reader: the rendered defaults sit in its system prompt, and its frame says to record each one.
+        let system = crate::compose(&[
+            crate::CONTRACT.into(),
+            crate::READER_FRAME.into(),
+            crate::Component::new("defaults", defaults.version, defaults.render()),
+        ]);
+        assert!(system.text.contains(line));
+        assert!(
+            system
+                .text
+                .contains("record each applicable one as an acceptance criterion")
+        );
+        // The producer and the verifier read the full statement, with the three modes.
+        let mut r = reading();
+        r.class_of_work = "code".into();
+        r.defaults_applied = vec![DefaultApplied {
+            id: "every-mode".into(),
+            how: "one criterion per drain mode".into(),
+        }];
+        let accepted = AcceptedReading::new(&r, &defaults, |_| false);
+        let producer = producer_brief(&ProducerInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "record the drain results".into(),
+            reading: accepted.clone(),
+            checks: vec![],
+            commands: vec![],
+            pin: None,
+            retry_from: None,
+            retry_findings: None,
+            failure_classes: Vec::new(),
+        });
+        let verifier = verifier_brief(
+            &VerifierInputs {
+                job: "20261010-153012-k7q2".into(),
+                request: "record the drain results".into(),
+                reading: accepted,
+                candidate: CandidateView {
+                    base: "1".repeat(40),
+                    candidate: "2".repeat(40),
+                    stat: String::new(),
+                    diff: String::new(),
+                },
+                checks: vec![],
+                commands: vec![],
+                tool_config_from_base: vec![],
+                pin: None,
+                replay: None,
+                soundness: false,
+            },
+            true,
+        );
+        for brief in [&producer, &verifier] {
+            assert!(brief.contains("every-mode: Every behavior criterion"));
+            for mode in [
+                "serial drain()",
+                "max_concurrency = 1",
+                "max_concurrency > 1",
+            ] {
+                assert!(brief.contains(mode), "a brief lacks the mode {mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_mode_reading_for_a_drain_recording_request_lists_one_demonstration_per_mode() {
+        let defaults = defaults();
+        let statement = &defaults
+            .get("every-mode")
+            .expect("defaults.toml has the every-mode default")
+            .statement;
+        let modes = every_mode_modes(statement);
+        assert_eq!(
+            modes,
+            [
+                "serial drain()",
+                "max_concurrency = 1",
+                "max_concurrency > 1"
+            ]
+        );
+        // The values are an example for the fixture, not measured.
+        let per_mode: Vec<Criterion> = modes
+            .iter()
+            .map(|m| {
+                behavior(&format!(
+                    "With {m}, record the drain run: the recorded count is expected to be 3 and the order expected to be a, b, c"
+                ))
+            })
+            .collect();
+        assert!(modes_without_demonstration(&per_mode, &modes).is_empty());
+
+        // A parallel-only reading: the two modes the incident skipped are reported.
+        let parallel_only = vec![behavior(
+            "With max_concurrency > 1, record the drain run: the recorded count is expected to be 3",
+        )];
+        assert_eq!(
+            modes_without_demonstration(&parallel_only, &modes),
+            ["serial drain()", "max_concurrency = 1"]
+        );
+
+        // One catch-all criterion that names every mode demonstrates none of them.
+        let catch_all = vec![behavior(&format!(
+            "Recording works in {}: the count is expected to be 3",
+            modes.join(", ")
+        ))];
+        assert_eq!(modes_without_demonstration(&catch_all, &modes), modes);
+
+        // A mode named without expected values, or in a content criterion, is not demonstrated.
+        let mut no_values = per_mode.clone();
+        no_values[0] = behavior("With serial drain(), record the drain run");
+        assert_eq!(
+            modes_without_demonstration(&no_values, &modes),
+            ["serial drain()"]
+        );
+        let mut content = per_mode;
+        content[1].kind = CriterionKind::Content;
+        assert_eq!(
+            modes_without_demonstration(&content, &modes),
+            ["max_concurrency = 1"]
+        );
+    }
+
     #[test]
     fn reader_briefs_carry_an_earlier_attempt_only_when_set() {
         let mut inputs = reader_inputs(&reading());

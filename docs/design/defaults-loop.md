@@ -253,6 +253,33 @@ root-cause request; `read_records` leaves it out of the cases that default propo
 from it; and the producer's list of recurring failure classes does not count it. A producer is not invited to
 weaken the check it is judged by.
 
+### 3.9 Worked example for the `every-mode` default
+
+Some flows can run in more than one way. `drain` has three: the plain serial `drain()`, the parallel runner with
+`max_concurrency = 1`, and the parallel runner with `max_concurrency > 1`. A criterion that is shown in only one
+of them says nothing about the others. When recording was added to drain, it was built and tested for the
+parallel path only, and the default serial path recorded wrong values twice (introspection
+`20261106-022422-jkfa`). The `every-mode` default says: when a job changes or records values in a flow with more
+than one mode, each behavior criterion needs one demonstration per shipped mode, with the expected values stated.
+
+**"Record each drained job's result."** A reading with one criterion per mode, as an example (the values are made
+up for the example, not measured):
+
+1. With serial `drain()`, drain three queued jobs a, b, c; the record lists three results, expected to be 3, in
+   the order a, b, c.
+2. With `max_concurrency = 1`, drain the same three jobs; the record lists three results, expected to be 3, in
+   the order a, b, c.
+3. With `max_concurrency > 1`, drain the same three jobs; the record lists three results, expected to be 3, in
+   any order, each with its own job id.
+
+**What a parallel-only reading looks like.** One criterion, "with `max_concurrency > 1`, the record lists three
+results", covers the mode the author had in mind and leaves out the other two. A single criterion that names all
+three modes ("recording works in every mode") is no better: it has no expected values for any one of them.
+`every_mode_reading_for_a_drain_recording_request_lists_one_demonstration_per_mode` in
+`crates/athena-context/src/briefs.rs` runs these shapes through a test-local check on fixture readings. It is a
+check on fixtures, not on what a live reader writes; the default is prose-only, and the user judging a reading is
+the live check.
+
 ## 4. The loop in one view
 
 ```
